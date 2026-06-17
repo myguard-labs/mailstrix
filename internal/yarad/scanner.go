@@ -59,6 +59,12 @@ type Scanner struct {
 	// Rule-reload observability (see ReloadMetrics).
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
 	reloadLastUnix, reloadLastMillis     atomic.Int64
+	// rulesModUnix is the mtime (unix seconds) of the loaded ruleset on disk:
+	// the .yac bundle, or the newest source file in the rules dir. A daily image
+	// rebuild refreshes it; if the rebuild silently breaks (fetch failed, image
+	// not redeployed), this stops advancing and the rules-age metric/staleness
+	// check catches it. 0 if the mtime could not be stat'd.
+	rulesModUnix atomic.Int64
 
 	// Optional abuse.ch URLhaus malware-URL lookup (nil when no Auth-Key set).
 	urlhaus    *urlhaus.Checker
@@ -138,6 +144,7 @@ type ReloadMetrics struct {
 	LastUnix   int64 // unix seconds of the last successful reload
 	LastMillis int64 // wall-clock duration of the last reload attempt
 	Rules      int64 // rule count after the last successful reload
+	ModUnix    int64 // mtime (unix seconds) of the loaded ruleset on disk; 0 if unknown
 }
 
 // ReloadMetrics returns the current reload counters.
@@ -149,6 +156,7 @@ func (s *Scanner) ReloadMetrics() ReloadMetrics {
 		LastUnix:   s.reloadLastUnix.Load(),
 		LastMillis: s.reloadLastMillis.Load(),
 		Rules:      s.count.Load(),
+		ModUnix:    s.rulesModUnix.Load(),
 	}
 }
 
@@ -185,6 +193,9 @@ func (s *Scanner) Reload() error {
 	s.fp.Store(&fp)
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())
+	// Record the on-disk mtime of what we just loaded so staleness (a silently
+	// broken daily rebuild) is observable. Best-effort: 0 if it can't be stat'd.
+	s.rulesModUnix.Store(rulesetModUnix(s.srcFile, s.srcDir))
 	// The previous *yara.Rules is intentionally NOT Destroy()ed here: an in-flight
 	// scan may still hold the pointer it loaded before the swap, and freeing the
 	// native rules under it would crash. go-yara registers a runtime finalizer on
@@ -227,6 +238,43 @@ func fingerprint(rules []yara.Rule) string {
 	sort.Strings(ids)
 	h := sha256.Sum256([]byte(strings.Join(ids, "\n")))
 	return hex.EncodeToString(h[:8]) // 16 hex chars is plenty to distinguish rule sets
+}
+
+// rulesetModUnix returns the mtime (unix seconds) of the loaded ruleset: the
+// precompiled bundle file when one is set, otherwise the NEWEST *.yar/*.yara
+// source file in the rules dir (the freshest rule is what matters for staleness;
+// an unchanged old file alongside a fresh one shouldn't make the set look old).
+// Best-effort — returns 0 if nothing can be stat'd, so callers treat 0 as
+// "age unknown" and never falsely report a stale set.
+func rulesetModUnix(srcFile, srcDir string) int64 {
+	if srcFile != "" {
+		if fi, err := os.Stat(srcFile); err == nil {
+			return fi.ModTime().Unix()
+		}
+		return 0
+	}
+	var newest int64
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := strings.ToLower(e.Name())
+		if !strings.HasSuffix(name, ".yar") && !strings.HasSuffix(name, ".yara") {
+			continue
+		}
+		fi, err := os.Stat(filepath.Join(srcDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if m := fi.ModTime().Unix(); m > newest {
+			newest = m
+		}
+	}
+	return newest
 }
 
 // compileDir compiles every *.yar / *.yara file under dir into one rule set.

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // eicar reconstructs the standard EICAR antivirus test string from fragments so
@@ -362,6 +363,47 @@ func TestReloadMetricsFailure(t *testing.T) {
 	}
 	if s.ReloadMetrics().Failures != failBefore+1 {
 		t.Error("failed reload not counted")
+	}
+}
+
+// ModUnix must reflect the on-disk mtime of the loaded rules so staleness of a
+// silently-broken daily rebuild is observable.
+func TestReloadMetricsModUnix(t *testing.T) {
+	dir := writeRules(t, eicarRule)
+	s := newScanner(t, dir)
+	if mu := s.ReloadMetrics().ModUnix; mu <= 0 {
+		t.Fatalf("ModUnix not set after load: %d", mu)
+	}
+	// Newest source file wins: a freshly-touched second file moves the mtime up.
+	old := s.ReloadMetrics().ModUnix
+	fresh := filepath.Join(dir, "newer.yar")
+	if err := os.WriteFile(fresh, []byte(eicarRule), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(fresh, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if mu := s.ReloadMetrics().ModUnix; mu <= old {
+		t.Errorf("ModUnix did not track the newest file: got %d want > %d", mu, old)
+	}
+}
+
+// A precompiled .yac bundle path reports that file's mtime; a missing/empty
+// source reports 0 (unknown) rather than a bogus age.
+func TestRulesetModUnix(t *testing.T) {
+	dir := writeRules(t, eicarRule)
+	if got := rulesetModUnix("", dir); got <= 0 {
+		t.Errorf("dir mtime should be >0, got %d", got)
+	}
+	if got := rulesetModUnix("/nonexistent/file.yac", ""); got != 0 {
+		t.Errorf("missing bundle should be 0, got %d", got)
+	}
+	if got := rulesetModUnix("", "/nonexistent/dir"); got != 0 {
+		t.Errorf("missing dir should be 0, got %d", got)
 	}
 }
 

@@ -35,6 +35,15 @@ type Config struct {
 	RulesDir  string // YARAD_RULES_DIR  (default /rules)
 	RulesPath string // YARAD_RULES      (optional precompiled bundle)
 
+	// RulesMaxAge flags the loaded ruleset as STALE once its on-disk mtime is
+	// older than this. The image bakes rules and a daily rebuild refreshes them;
+	// if that rebuild silently breaks (fetch failed, image not redeployed) the
+	// running container keeps serving old rules with no error. When set (>0) and
+	// exceeded, /ready reports "stale" (503) so an orchestrator/alert notices —
+	// but /health stays OK and scanning continues (fail-open: old rules still
+	// catch most malware; a hard-down scanner is worse). 0 disables the check.
+	RulesMaxAge time.Duration // YARAD_RULES_MAX_AGE (seconds; default 0 = off)
+
 	// ScanTimeout bounds a single libyara scan so a pathological rule/input
 	// cannot stall a worker (YARA's own internal timeout, seconds).
 	ScanTimeout time.Duration // YARAD_SCAN_TIMEOUT (default 8s)
@@ -87,6 +96,7 @@ func LoadConfig() *Config {
 		Token:          envOrFile("YARAD_TOKEN"),
 		RulesDir:       envStr("YARAD_RULES_DIR", "/rules"),
 		RulesPath:      strings.TrimSpace(os.Getenv("YARAD_RULES")),
+		RulesMaxAge:    envDur("YARAD_RULES_MAX_AGE", 0),
 		ScanTimeout:    envDur("YARAD_SCAN_TIMEOUT", 8),
 		CacheTTL:       envDur("YARAD_CACHE_TTL", 600),
 		CacheSize:      envInt("YARAD_CACHE_SIZE", 65536),
@@ -143,6 +153,9 @@ func (c *Config) sanitize() {
 	}
 	if c.CacheTTL < 0 {
 		c.CacheTTL = 0 // negative is nonsensical; 0 disables the cache
+	}
+	if c.RulesMaxAge < 0 {
+		c.RulesMaxAge = 0 // negative is nonsensical; 0 disables the staleness check
 	}
 }
 

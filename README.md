@@ -89,7 +89,10 @@ yesterday's exact file — rules catch tomorrow's. yarad compiles all of this
   `extract_streams_total`, `extract_failed_total`, `extract_panicked_total`,
   `extract_encrypted_total`), and rule-reload activity (`reload_attempts_total`,
   `reload_success_total`, `reload_failure_total`, `reload_last_timestamp_seconds`,
-  `reload_last_duration_ms`). When the abuse.ch feeds are enabled, their
+  `reload_last_duration_ms`), and rule **staleness** (`yarad_rules_mtime_seconds`,
+  `yarad_rules_age_seconds`, and `yarad_rules_stale` = 1 once the loaded ruleset
+  is older than `YARAD_RULES_MAX_AGE` — catches a silently-broken daily rebuild).
+  When the abuse.ch feeds are enabled, their
   lookup/hit/refresh counters and feed-size gauges appear too
   (`yarad_urlhaus_*`, `yarad_malwarebazaar_*`).
 
@@ -164,6 +167,7 @@ over env, env wins over the default.
 | `YARAD_HOST` / `YARAD_PORT` | `0.0.0.0` / `8079` | HTTP bind address |
 | `YARAD_TOKEN[_FILE]` | — | shared secret for `/scan`; unset ⇒ every POST is `503` |
 | `YARAD_RULES_DIR` | `/rules` | directory of `*.yar`/`*.yara` compiled at boot and on SIGHUP |
+| `YARAD_RULES_MAX_AGE` | `0` (off) | seconds; flag rules `stale` (metric + `/ready` body) once the loaded ruleset's mtime is older than this. Fail-open: never fails readiness |
 | `YARAD_RULES` | — | a precompiled `.yac` bundle; loaded instead of `RULES_DIR` (faster start) |
 | `YARAD_SCAN_TIMEOUT` | `8` (s) | per-scan libyara budget |
 | `YARAD_BACKEND_TIMEOUT` | `1` (s) | queue budget / how long to wait for an admission or scan slot |
@@ -433,8 +437,8 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 **Quick wins (low effort, high value):**
 - [x] Pass filename/extension to yarad → set YARA `filename`/`extension` external vars (activates many existing rules) — `X-YARAD-Filename` (base64) header, plugin sends the MIME part name
 - [x] MalwareBazaar attachment-hash lookup (SHA256 → known malware; cached full-dump feed, fail-open, own symbol)
-- [ ] Use `meta.score` in classification (finer tiering, no new parsers)
-- [ ] Rule-staleness healthcheck/metric (catch a silently-broken daily rebuild)
+- [x] Use `meta.score` in classification (finer tiering, no new parsers) — plugin scales the symbol weight by the rule's `meta.score` onto a `[score_weight_min, score_weight_max]` band
+- [x] Rule-staleness healthcheck/metric (catch a silently-broken daily rebuild) — `yarad_rules_age_seconds`/`yarad_rules_stale` metrics + `YARAD_RULES_MAX_AGE`; `/ready` notes "stale rules" (fail-open, never pulls the scanner out of rotation)
 - [ ] MSI extraction (OLE2, reuse the macro `fromOLE` path)
 - [ ] VBE/JSE decode + WSF/HTA cleartext surfacing
 - [ ] Rule allowlist (force-log-only without patching the source)

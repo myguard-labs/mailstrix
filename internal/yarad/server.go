@@ -230,6 +230,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeText(w, http.StatusServiceUnavailable, "draining")
 			return
 		}
+		// Stale rules do NOT fail readiness: old rules still catch most malware,
+		// and pulling the scanner out of rotation (or killing it) is strictly worse
+		// than scanning with a slightly-old set (fail-open). Surface it in the body
+		// for a human/curl; alerting keys off the yarad_rules_stale metric instead.
+		if s.rulesStale() {
+			writeText(w, http.StatusOK, "ready (stale rules)")
+			return
+		}
 		writeText(w, http.StatusOK, "ready")
 	case r.Method == http.MethodGet && r.URL.Path == "/version":
 		if !s.metricsAuthed(r) {
@@ -250,6 +258,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// rulesStale reports whether the loaded ruleset is older than the configured
+// YARAD_RULES_MAX_AGE. False when the check is disabled (max age 0) or the
+// on-disk mtime is unknown — staleness must never be a false alarm.
+func (s *Server) rulesStale() bool {
+	if s.cfg.RulesMaxAge <= 0 {
+		return false
+	}
+	mod := s.engine.ReloadMetrics().ModUnix
+	if mod <= 0 {
+		return false
+	}
+	return time.Now().Unix()-mod > int64(s.cfg.RulesMaxAge.Seconds())
+}
+
 // serveVersion reports build + ruleset identity so a live FP/perf change can be
 // correlated with a specific image and rule bundle. Unauthenticated like
 // /health: it reveals version/rule-count/fingerprint, not message content.
@@ -261,6 +283,8 @@ func (s *Server) serveVersion(w http.ResponseWriter) {
 		"rules":             s.engine.RuleCount(),
 		"fingerprint":       s.engine.Fingerprint(),
 		"last_reload_unix":  rl.LastUnix,
+		"rules_mtime_unix":  rl.ModUnix,
+		"rules_stale":       s.rulesStale(),
 		"repo":              RepoURL,
 	})
 }
@@ -517,6 +541,24 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	}
 	gauge("reload_last_timestamp_seconds", "unix time of the last successful reload", rl.LastUnix)
 	gauge("reload_last_duration_ms", "wall-clock duration of the last reload attempt", rl.LastMillis)
+
+	// Rule staleness — catch a silently-broken daily image rebuild (the running
+	// container keeps serving old baked rules with no error). Age is derived from
+	// the loaded ruleset's on-disk mtime; rules_stale is 1 only when a max age is
+	// configured (YARAD_RULES_MAX_AGE) and exceeded. Both are 0/absent-safe: a
+	// mtime of 0 (couldn't stat) reports age 0 and never flags stale.
+	gauge("rules_mtime_seconds", "mtime (unix seconds) of the loaded ruleset on disk; 0 if unknown", rl.ModUnix)
+	var ageSecs, stale int64
+	if rl.ModUnix > 0 {
+		if a := time.Now().Unix() - rl.ModUnix; a > 0 {
+			ageSecs = a
+		}
+		if s.cfg.RulesMaxAge > 0 && ageSecs > int64(s.cfg.RulesMaxAge.Seconds()) {
+			stale = 1
+		}
+	}
+	gauge("rules_age_seconds", "age of the loaded ruleset (now - mtime); 0 if mtime unknown", ageSecs)
+	gauge("rules_stale", "1 if rules_age_seconds exceeds YARAD_RULES_MAX_AGE (0 when unset or fresh)", stale)
 
 	// URLhaus malware-URL lookup (only meaningful when enabled).
 	uh := s.engine.URLhausMetrics()

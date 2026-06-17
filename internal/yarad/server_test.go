@@ -47,6 +47,44 @@ func TestReadyNoRules(t *testing.T) {
 	}
 }
 
+// Stale rules must NOT fail /ready (fail-open: old rules still scan), only flag
+// it in the body and the yarad_rules_stale metric. Fresh rules / disabled check
+// stay clean.
+func TestRulesStaleness(t *testing.T) {
+	old := time.Now().Add(-48 * time.Hour).Unix()
+	fresh := time.Now().Add(-1 * time.Minute).Unix()
+
+	// max-age disabled (0): never stale even with an ancient mtime.
+	s := newTestServer(&fakeEngine{count: 1, modUnix: old}, "tok")
+	if w := get(s, "/ready"); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "stale") {
+		t.Errorf("disabled check should not flag stale: %d %q", w.Code, w.Body.String())
+	}
+
+	// max-age 24h + 48h-old rules => stale, but still 200 (fail-open).
+	s = newTestServer(&fakeEngine{count: 1, modUnix: old}, "tok")
+	s.cfg.RulesMaxAge = 24 * time.Hour
+	w := get(s, "/ready")
+	if w.Code != http.StatusOK {
+		t.Errorf("stale rules must stay ready (fail-open): got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "stale") {
+		t.Errorf("stale rules should be flagged in body, got %q", w.Body.String())
+	}
+	if mw := get(s, "/metrics"); !strings.Contains(mw.Body.String(), "yarad_rules_stale 1") {
+		t.Errorf("yarad_rules_stale 1 missing from metrics:\n%s", mw.Body.String())
+	}
+
+	// Fresh rules under the same max-age: not stale.
+	s = newTestServer(&fakeEngine{count: 1, modUnix: fresh}, "tok")
+	s.cfg.RulesMaxAge = 24 * time.Hour
+	if w := get(s, "/ready"); strings.Contains(w.Body.String(), "stale") {
+		t.Errorf("fresh rules flagged stale: %q", w.Body.String())
+	}
+	if mw := get(s, "/metrics"); !strings.Contains(mw.Body.String(), "yarad_rules_stale 0") {
+		t.Errorf("yarad_rules_stale 0 missing for fresh rules:\n%s", mw.Body.String())
+	}
+}
+
 func TestVersionEndpoint(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 5, fp: "abc"}, "tok")
 	s.cfg.Version = "1.2.3"
@@ -200,6 +238,7 @@ type fakeEngine struct {
 	scans    atomic.Int64 // how many times Scan actually ran
 	lastMeta atomic.Pointer[ScanMeta]
 	mb       mbazaar.Metrics // returned by MBazaarMetrics (zero = disabled)
+	modUnix  int64           // returned as ReloadMetrics.ModUnix (rules mtime)
 }
 
 func (f *fakeEngine) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
@@ -214,7 +253,7 @@ func (f *fakeEngine) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 func (f *fakeEngine) RuleCount() int64                { return f.count }
 func (f *fakeEngine) Fingerprint() string             { return f.fp }
 func (f *fakeEngine) ExtractMetrics() ExtractMetrics  { return ExtractMetrics{} }
-func (f *fakeEngine) ReloadMetrics() ReloadMetrics    { return ReloadMetrics{} }
+func (f *fakeEngine) ReloadMetrics() ReloadMetrics    { return ReloadMetrics{ModUnix: f.modUnix} }
 func (f *fakeEngine) URLhausMetrics() urlhaus.Metrics { return urlhaus.Metrics{} }
 func (f *fakeEngine) MBazaarMetrics() mbazaar.Metrics { return f.mb }
 
