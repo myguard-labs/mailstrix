@@ -10,11 +10,11 @@
 a separate little HTTP service and lets rspamd ask it questions:
 
 ```
-                POST /scan (raw bytes)
-   rspamd  ───────────────────────────▶  yarad  ──▶  libyara
- (yara.lua plugin)                      (Go service)   compiled .yar rules
-           ◀───────────────────────────         (public rulesets, baked in)
-                {"matches":[ ... ]}
+ ┌───────────────────┐        POST /scan (raw bytes)        ┌──────────────┐
+ │      rspamd       │    ─────────────────────────────▶    │    yarad     │ ──▶ libyara
+ │ (yara.lua plugin) │                                      │ (Go service) │      compiled .yar rules
+ │                   │    ◀─────────────────────────────    │              │      (public rulesets, baked in)
+ └───────────────────┘         {"matches":[ ... ]}          └──────────────┘
 ```
 
 Why a separate service instead of a plugin? libyara is a C library (CGO). Calling
