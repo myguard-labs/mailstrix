@@ -4,7 +4,7 @@
 # with CGO against it (go-yara, yara_static tag), so the final image is a
 # distroless nonroot container that needs no libyara at runtime. Public YARA
 # rulesets are baked in at build time; a daily rebuild (CACHEBUST) re-pulls the
-# latest. Override YARAFORGE_URL / SIGBASE_REF to pin.
+# latest. Override YARAFORGE_SET/YARAFORGE_URL / SIGBASE_REF to pin.
 
 ARG GO_VERSION=1.25
 ARG YARA_VERSION=4.5.2
@@ -76,6 +76,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh
 ARG CACHEBUST=unset
+ARG YARAFORGE_SET=core
 ARG YARAFORGE_URL=
 ARG SIGBASE_REF=master
 ARG ANYRUN_REF=main
@@ -84,10 +85,13 @@ ARG DIDIER_REF=master
 ARG DIDIER=1
 ARG BARTBLAZE_REF=master
 ARG BARTBLAZE=1
-RUN YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
+ARG INQUEST_REF=main
+ARG INQUEST=1
+RUN YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
         ANYRUN="${ANYRUN}" ANYRUN_REF="${ANYRUN_REF}" \
         DIDIER="${DIDIER}" DIDIER_REF="${DIDIER_REF}" \
         BARTBLAZE="${BARTBLAZE}" BARTBLAZE_REF="${BARTBLAZE_REF}" \
+        INQUEST="${INQUEST}" INQUEST_REF="${INQUEST_REF}" \
         /usr/local/bin/fetch-rules.sh /rules/src \
     && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
     && rm -rf /rules/src

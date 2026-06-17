@@ -283,28 +283,44 @@ func TestScanExtensionExternalVariable(t *testing.T) {
 	}
 }
 
+// InQuest's Outlook-message rule uses `file_type contains "outlook"` rather
+// than THOR/Loki's `filetype`. Only .msg/.oft names get that narrow hint.
+func TestScanFileTypeExternalVariable(t *testing.T) {
+	s := newScanner(t, writeRules(t, `rule Outlook_Type { condition: file_type contains "outlook" }`))
+	clean := []byte("a perfectly innocent email body")
+	if m, err := s.Scan(clean, NewScanMeta("invoice.txt")); err != nil || len(m) != 0 {
+		t.Fatalf(".txt must not set outlook file_type: %+v err=%v", m, err)
+	}
+	if m, err := s.Scan(clean, NewScanMeta("message.MSG")); err != nil || len(m) != 1 {
+		t.Fatalf(".MSG must set file_type=outlook and match: %+v err=%v", m, err)
+	}
+}
+
 func TestNewScanMeta(t *testing.T) {
 	cases := []struct {
-		in       string
-		wantName string
-		wantExt  string
+		in           string
+		wantName     string
+		wantExt      string
+		wantFileType string
 	}{
-		{"", "", ""},
-		{"invoice.exe", "invoice.exe", ".exe"},
-		{"Invoice.EXE", "Invoice.EXE", ".exe"},              // name case kept, ext lowered
-		{`C:\Users\bob\payload.scr`, "payload.scr", ".scr"}, // windows path stripped
-		{"/var/mail/report.PDF", "report.PDF", ".pdf"},      // unix path stripped
-		{"archive.tar.gz", "archive.tar.gz", ".gz"},         // last extension only
-		{".bashrc", ".bashrc", ""},                          // leading-dot = no extension
-		{"trailingdot.", "trailingdot.", ""},                // trailing dot = no extension
-		{"noext", "noext", ""},                              // no dot
-		{"bad\r\nname.exe", "badname.exe", ".exe"},          // control chars stripped
-		{"  spaced.doc  ", "spaced.doc", ".doc"},            // trimmed
+		{"", "", "", ""},
+		{"invoice.exe", "invoice.exe", ".exe", ""},
+		{"Invoice.EXE", "Invoice.EXE", ".exe", ""},              // name case kept, ext lowered
+		{`C:\Users\bob\payload.scr`, "payload.scr", ".scr", ""}, // windows path stripped
+		{"/var/mail/report.PDF", "report.PDF", ".pdf", ""},      // unix path stripped
+		{"archive.tar.gz", "archive.tar.gz", ".gz", ""},         // last extension only
+		{"message.MSG", "message.MSG", ".msg", "outlook"},       // InQuest file_type hint
+		{"template.oft", "template.oft", ".oft", "outlook"},     // Outlook template
+		{".bashrc", ".bashrc", "", ""},                          // leading-dot = no extension
+		{"trailingdot.", "trailingdot.", "", ""},                // trailing dot = no extension
+		{"noext", "noext", "", ""},                              // no dot
+		{"bad\r\nname.exe", "badname.exe", ".exe", ""},          // control chars stripped
+		{"  spaced.doc  ", "spaced.doc", ".doc", ""},            // trimmed
 	}
 	for _, c := range cases {
 		got := NewScanMeta(c.in)
-		if got.Filename != c.wantName || got.Extension != c.wantExt {
-			t.Errorf("NewScanMeta(%q) = {%q,%q}, want {%q,%q}", c.in, got.Filename, got.Extension, c.wantName, c.wantExt)
+		if got.Filename != c.wantName || got.Extension != c.wantExt || got.FileType != c.wantFileType {
+			t.Errorf("NewScanMeta(%q) = {%q,%q,%q}, want {%q,%q,%q}", c.in, got.Filename, got.Extension, got.FileType, c.wantName, c.wantExt, c.wantFileType)
 		}
 	}
 	// Over-length name is capped to maxFilenameLen.

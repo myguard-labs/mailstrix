@@ -190,23 +190,39 @@ and flushes the verdict cache. A reload that fails to compile keeps the previous
 
 ## Rules
 
-The image bakes five public rulesets at build time. A daily rebuild
+The image bakes six public rulesets at build time. A daily rebuild
 (`--build-arg CACHEBUST=$(date +%s)`) re-pulls the latest. **Full credit to the
 authors — yarad only packages their work; the rules are theirs.** Each set keeps
 its own license:
 
 | Ruleset | Author / source | License | Notes |
 |---------|-----------------|---------|-------|
-| **YARA-Forge "core"** | [YARAHQ/yara-forge](https://github.com/YARAHQ/yara-forge) | aggregator (tooling GPL-3.0; **each bundled rule retains its upstream author's license**) | ingests dozens of public repos, dedupes, drops the broken/dangerous, ships one vetted bundle in quality tiers |
+| **YARA-Forge package** | [YARAHQ/yara-forge](https://github.com/YARAHQ/yara-forge) | aggregator (tooling GPL-3.0; **each bundled rule retains its upstream author's license**) | ingests dozens of public repos, dedupes, drops the broken/dangerous, ships one vetted bundle in quality tiers; default is `core`, opt into `extended`/`full` with `YARAFORGE_SET` |
 | **signature-base** | [Neo23x0/signature-base](https://github.com/Neo23x0/signature-base) (Florian Roth) | [Detection Rule License (DRL) 1.1](https://github.com/Neo23x0/signature-base/blob/master/LICENSE) (permissive) | the broad community malware/phishing set behind THOR/Loki |
 | **ANY.RUN** | [anyrun/YARA](https://github.com/anyrun/YARA) | published as public detection rules (no separate LICENSE file) | actively maintained malware-family + phishing (`ANYRUN=0` to skip) |
-| **Didier Stevens Suite** | [DidierStevens/DidierStevensSuite](https://github.com/DidierStevens/DidierStevensSuite) | **public domain** ("no Copyright, use at your own risk") | OLE/RTF/maldoc rules — incl. the `vba.yara` macro-keyword set that fires on extracted VBA (see below); curated subset, the multi-thousand-rule PEiD packer DB is excluded (`DIDIER=0` to skip) |
+| **Didier Stevens Suite** | [DidierStevens/DidierStevensSuite](https://github.com/DidierStevens/DidierStevensSuite) | **public domain** ("no Copyright, use at your own risk") | OLE/RTF/maldoc rules — incl. the `vba.yara` macro-keyword set that fires on extracted VBA (see below), plus a tiny PDF/ActiveMime maldoc rule; curated subset, the multi-thousand-rule PEiD packer DB is excluded (`DIDIER=0` to skip) |
 | **bartblaze/Yara-rules** | [bartblaze/Yara-rules](https://github.com/bartblaze/Yara-rules) | **MIT** | maldoc/RTF (RoyalRoad, OLE-in-CAD) + phishing-doc rules not aggregated by YARA-Forge (`BARTBLAZE=0` to skip) |
+| **InQuest yara-rules-vt** | [InQuest/yara-rules-vt](https://github.com/InQuest/yara-rules-vt) | **MIT** | curated mail-carrier subset: PDF launch/JS, LNK command refs, OneNote, Outlook `.msg`, RTF exploit/obfuscation rules (`INQUEST=0` to skip) |
 
-Together that's roughly 10,000 rules. Pin or toggle any source with a build arg:
+Together that's roughly 10,000+ rules. Pin or toggle any source with a build arg:
+`--build-arg YARAFORGE_SET=extended` (or `core`/`full`),
 `--build-arg YARAFORGE_URL=…`, `--build-arg SIGBASE_REF=<tag>`,
 `--build-arg ANYRUN_REF=<ref>`, `--build-arg DIDIER_REF=<ref>`,
-`--build-arg BARTBLAZE_REF=<ref>` (and `DIDIER=0` / `BARTBLAZE=0` / `ANYRUN=0`).
+`--build-arg BARTBLAZE_REF=<ref>`, `--build-arg INQUEST_REF=<ref>`
+(and `DIDIER=0` / `BARTBLAZE=0` / `ANYRUN=0` / `INQUEST=0`).
+
+The default bundle is intentionally mail-oriented: YARA-Forge `core` plus
+signature-base, ANY.RUN, Didier's curated Office/RTF/maldoc rules, bartblaze
+maldoc/phishing-doc rules, and a curated InQuest subset. InQuest is not imported
+wholesale; yarad currently copies the PDF launch/JS rules, LNK command-reference
+rules, OneNote suspicious-string rule, Outlook `.msg` phishing rule, and selected
+RTF exploit/obfuscation rules. The InQuest PDF rule that `yarac` flags as slow
+(`PDF_with_Embedded_RTF_OLE_Newlines.yar`) is deliberately excluded.
+
+The Didier addition beyond the upstream `vba`/`rtf`/`maldoc` files is
+`didier-pdf-activemime.yara`, a small PDF/ActiveMime polyglot detector based on
+Didier Stevens' public write-up. It avoids broad regexes so it does not add new
+slow-rule warnings.
 
 Public rulesets are messy by nature, so two things keep them from breaking the
 build:
@@ -241,13 +257,14 @@ public rulesets (THOR/Loki signature-base) keys on the file *name*, not just its
 bytes: `filename matches /\.(exe|scr|js)$/`, `extension == ".lnk"`. The rspamd
 plugin sends each MIME part's filename to yarad (base64, in `X-YARAD-Filename`),
 which sets the YARA `filename` and `extension` external variables for that scan —
-on both the raw bytes and any decompressed macro stream. With no name (the
-whole-message scan, or an unnamed part) the variables keep their empty default
-and those conditions stay inert, exactly as before. Because the verdict now
-depends on the name, the filename is folded into the verdict cache key: the same
-bytes carried as `invoice.pdf` and `invoice.exe` are scanned and cached
-separately. `filepath`/`filetype`/`owner` stay empty — yarad has no real path,
-magic-type, or owner for a mail attachment.
+on both the raw bytes and any decompressed macro stream. For InQuest's Outlook
+message rule, `.msg`/`.oft` names also set `file_type = "outlook"`; otherwise
+`file_type` stays empty. With no name (the whole-message scan, or an unnamed
+part) the variables keep their empty default and those conditions stay inert,
+exactly as before. Because the verdict now depends on the name, the filename is
+folded into the verdict cache key: the same bytes carried as `invoice.pdf` and
+`invoice.exe` are scanned and cached separately. `filepath`/`filetype`/`owner`
+stay empty — yarad has no real path, magic-type, or owner for a mail attachment.
 
 **RTF exploits — matched on raw bytes (no extraction needed).** RTF maldocs (the
 classic CVE-2017-11882 Equation-Editor drop, embedded-OLE `objdata` hex) carry
@@ -356,6 +373,11 @@ docker build --target test -f docker/Dockerfile -t yarad-test .
 # ~25 MB distroless base/libs + ~8 MB Go/libyara binary):
 docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
     --build-arg CACHEBUST=$(date +%s) .
+
+# broader YARA-Forge coverage, still with the same curated extra mail sources:
+docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
+    --build-arg CACHEBUST=$(date +%s) \
+    --build-arg YARAFORGE_SET=extended .
 ```
 
 ## Wiring it into rspamd
@@ -390,7 +412,7 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 ### Already in
 
 - [x] Out-of-process Go scanner over HTTP (`/scan`); rspamd never blocks on libyara
-- [x] ~10k public rules baked in (YARA-Forge, signature-base, ANY.RUN, Didier, bartblaze), daily refresh, precompiled `.yac`
+- [x] ~10k+ public rules baked in (YARA-Forge, signature-base, ANY.RUN, Didier, bartblaze, InQuest), daily refresh, precompiled `.yac`
 - [x] libyara modules `pe`/`elf`/`macho`/`dotnet`/`hash`/`math`/`dex` (no magic/cuckoo)
 - [x] `/health`, `/ready`, `/version`, `/metrics` (Prometheus); graceful drain on SIGTERM
 - [x] Verdict cache (LRU+TTL) + request coalescing (singleflight); optional Redis/Valkey L2 with circuit breaker
@@ -451,7 +473,7 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 
 yarad itself is [MIT](LICENSE). The baked rule sets are **not** yarad's work and
 **keep their own licenses** — see the [Rules](#rules) table for per-source credit:
-signature-base = DRL 1.1, bartblaze = MIT, Didier Stevens = public domain,
-ANY.RUN = public detection rules, and YARA-Forge core is an aggregate where each
-rule retains its upstream author's license. Dependencies are permissive
+signature-base = DRL 1.1, bartblaze = MIT, InQuest = MIT, Didier Stevens =
+public domain, ANY.RUN = public detection rules, and the YARA-Forge package is an
+aggregate where each rule retains its upstream author's license. Dependencies are permissive
 (`go-yara` BSD-2, `oleparse` MIT, redis client BSD/Apache).
