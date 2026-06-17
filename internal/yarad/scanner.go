@@ -63,6 +63,7 @@ type Scanner struct {
 	exLNK                                                             atomic.Uint64 // Windows shell links (.lnk) with StringData surfaced
 	exPDF                                                             atomic.Uint64 // PDFs with FlateDecode object streams inflated
 	exRTF                                                             atomic.Uint64 // RTF docs with \objdata embedded objects carved
+	exISO                                                             atomic.Uint64 // ISO9660 disc images (.iso) with member files carved
 	exEncodedScript                                                   atomic.Uint64 // buffers with >=1 decoded MS-Script-Encoder block
 	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
 
@@ -113,6 +114,7 @@ type ExtractMetrics struct {
 	LNK        uint64 // Windows shell links (.lnk) with StringData surfaced
 	PDF        uint64 // PDFs with FlateDecode object streams inflated
 	RTF        uint64 // RTF docs with \objdata embedded objects carved
+	ISO        uint64 // ISO9660 disc images (.iso) with member files carved
 	EncScript  uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
 	// StreamMatches counts rule hits attributable ONLY to an extracted stream
 	// (macro/MSI/VBE), i.e. rules that did NOT already fire on the raw bytes —
@@ -137,6 +139,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		LNK:           s.exLNK.Load(),
 		PDF:           s.exPDF.Load(),
 		RTF:           s.exRTF.Load(),
+		ISO:           s.exISO.Load(),
 		EncScript:     s.exEncodedScript.Load(),
 		StreamMatches: s.exStreamMatches.Load(),
 	}
@@ -611,6 +614,9 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	}
 	if res.IsRTF {
 		s.exRTF.Add(1)
+	}
+	if res.IsISO {
+		s.exISO.Add(1)
 	}
 	if res.EncodedScript {
 		s.exEncodedScript.Add(1)

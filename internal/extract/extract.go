@@ -33,7 +33,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+iso"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -147,6 +147,9 @@ type Result struct {
 	// IsRTF is true when buf was recognised as an RTF document whose \objdata
 	// embedded-object groups were hex-decoded and carved for scanning.
 	IsRTF bool
+	// IsISO is true when buf was recognised as an ISO9660 disc image (.iso) and
+	// its member files were walked out of the directory tree for scanning.
+	IsISO bool
 	// IsOneNote is true when buf was recognised as a OneNote section/TOC
 	// (.one/.onetoc2) and its embedded FileDataStoreObject payloads were carved
 	// out for scanning.
@@ -178,6 +181,17 @@ func Extract(buf []byte, deadline time.Time) (res Result) {
 	}()
 
 	switch {
+	case isISO(buf):
+		// An ISO9660 disc image (.iso) — a MOTW-bypass dropper container. Checked
+		// FIRST: its "CD001" recogniser sits at a fixed offset inside sector 16,
+		// far more specific than a 2–4 byte prefix. The image's 16-sector system
+		// area is arbitrary, so a valid ISO can legally begin with PK / gzip /
+		// %PDF / LNK magic; routing ISO before those prefix checks stops a crafted
+		// (or merely ordinary) ISO being misrouted to the wrong extractor. Walk its
+		// directory tree and surface each member file so a dropped .lnk/.exe/.js is
+		// scanned as its own buffer, not buried in the on-disk filesystem layout.
+		res.IsDoc = true
+		fromISO(buf, &res, deadline)
 	case bytes.HasPrefix(buf, oleMagic):
 		res.IsDoc = true
 		fromOLE(buf, &res, deadline)

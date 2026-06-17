@@ -87,7 +87,7 @@ yesterday's exact file — rules catch tomorrow's. yarad compiles all of this
   rejections, cache hits/misses/coalesced, the loaded rule count, the document
   pre-extraction counters (`yarad_extract_docs_total`, `extract_macro_docs_total`,
   `extract_streams_total`, `extract_failed_total`, `extract_panicked_total`,
-  `extract_encrypted_total`, `extract_msi_total`, `extract_msg_total`, `extract_onenote_total`, `extract_archive_total`, `extract_ole_package_total`, `extract_lnk_total`, `extract_pdf_total`, `extract_rtf_total`, `extract_encoded_script_total`, `extract_stream_matches_total`), and rule-reload activity (`reload_attempts_total`,
+  `extract_encrypted_total`, `extract_msi_total`, `extract_msg_total`, `extract_onenote_total`, `extract_archive_total`, `extract_ole_package_total`, `extract_lnk_total`, `extract_pdf_total`, `extract_rtf_total`, `extract_iso_total`, `extract_encoded_script_total`, `extract_stream_matches_total`), and rule-reload activity (`reload_attempts_total`,
   `reload_success_total`, `reload_failure_total`, `reload_last_timestamp_seconds`,
   `reload_last_duration_ms`), and rule **staleness** (`yarad_rules_mtime_seconds`,
   `yarad_rules_age_seconds`, and `yarad_rules_stale` = 1 once the loaded ruleset
@@ -461,7 +461,8 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 - [x] PDF pre-extraction — carve every `stream … endstream` object body and inflate it (FlateDecode: zlib then raw-deflate), surfacing the decompressed bytes so hidden JS / `/OpenAction` / `/Launch` / embedded files are matched; bounded inflate attempts + per-stream/total caps (decompression-bomb guard), token-boundary check so a stray `stream` can't hide the real object; `extract_pdf_total` metric
 - [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
 - [ ] File-level fuzzy hashing (TLSH/ssdeep)
-- [ ] ISO/IMG/VHD(X) container extraction
+- [x] ISO9660 disc-image (`.iso`) member extraction — walk the directory tree (plain ECMA-119 + the Joliet supplementary descriptor for Unicode names) and surface every regular file's bytes, so a dropper mailed inside an `.iso` (the mark-of-the-web bypass) is scanned as its own buffer rather than buried in the on-disk filesystem layout; bounded file-count / directory-walk / per-file / total-byte caps, cycle-guarded; `extract_iso_total` metric. UDF / `.img` (FAT) / VHD(X) images not yet handled (separate items)
+- [ ] UDF / `.img` (FAT) / VHD(X) container extraction
 - [ ] CHM / CAB / MSIX extraction
 - [ ] Extractor sandbox hardening (seccomp/rlimits) — after more parsers land
 - [ ] Batch `/scan` endpoint (collapse N part round-trips)

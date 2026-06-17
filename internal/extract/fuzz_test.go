@@ -51,6 +51,15 @@ func FuzzExtract(f *testing.F) {
 	// RTF with an \objdata group of odd-length/garbage hex — fuzz the hex decoder
 	// and the fromRTF group-scan bounds (must terminate, never over-read).
 	f.Add([]byte("{\\rtf1{\\object{\\*\\objdata d0cf11e0 a1b11ae1 zz}}}"))
+	// A valid minimal ISO9660 image plus a truncated one (header only) — fuzz the
+	// directory-extent walk's bounds/cycle guards on hostile LBAs.
+	f.Add(buildISO("DROP.EXE;1", []byte("MZ iso member"), false))
+	{
+		iso := make([]byte, (isoSystemArea+1)*isoSectorSize)
+		iso[isoSystemArea*isoSectorSize] = isoVDPrimary
+		copy(iso[isoSystemArea*isoSectorSize+1:], isoMagic)
+		f.Add(iso)
+	}
 	f.Add([]byte{})
 	f.Add([]byte("plain text"))
 
