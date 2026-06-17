@@ -33,7 +33,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -144,6 +144,9 @@ type Result struct {
 	// IsArchive is true when buf (or a nested member) was a recognised archive
 	// (zip/gz/7z/rar/tar) whose members were unpacked and surfaced for scanning.
 	IsArchive bool
+	// IsRTF is true when buf was recognised as an RTF document whose \objdata
+	// embedded-object groups were hex-decoded and carved for scanning.
+	IsRTF bool
 	// IsOneNote is true when buf was recognised as a OneNote section/TOC
 	// (.one/.onetoc2) and its embedded FileDataStoreObject payloads were carved
 	// out for scanning.
@@ -199,6 +202,12 @@ func Extract(buf []byte, deadline time.Time) (res Result) {
 		// embedded files are scanned, not buried in compressed objects.
 		res.IsDoc = true
 		fromPDF(buf, &res)
+	case isRTF(buf):
+		// An RTF document: hex-decode its \objdata embedded-object groups so a
+		// dropped OLE2 doc / package / OLENativeStream payload (CVE-2017-0199 /
+		// -11882, OLE2Link) is scanned, not buried in the RTF hex.
+		res.IsDoc = true
+		fromRTF(buf, &res)
 	case isLNK(buf):
 		// A Windows shell link (.lnk): surface its StringData (command-line
 		// arguments / paths) so the dropper command is matched, not buried in the

@@ -87,7 +87,7 @@ yesterday's exact file — rules catch tomorrow's. yarad compiles all of this
   rejections, cache hits/misses/coalesced, the loaded rule count, the document
   pre-extraction counters (`yarad_extract_docs_total`, `extract_macro_docs_total`,
   `extract_streams_total`, `extract_failed_total`, `extract_panicked_total`,
-  `extract_encrypted_total`, `extract_msi_total`, `extract_msg_total`, `extract_onenote_total`, `extract_archive_total`, `extract_ole_package_total`, `extract_lnk_total`, `extract_pdf_total`, `extract_encoded_script_total`, `extract_stream_matches_total`), and rule-reload activity (`reload_attempts_total`,
+  `extract_encrypted_total`, `extract_msi_total`, `extract_msg_total`, `extract_onenote_total`, `extract_archive_total`, `extract_ole_package_total`, `extract_lnk_total`, `extract_pdf_total`, `extract_rtf_total`, `extract_encoded_script_total`, `extract_stream_matches_total`), and rule-reload activity (`reload_attempts_total`,
   `reload_success_total`, `reload_failure_total`, `reload_last_timestamp_seconds`,
   `reload_last_duration_ms`), and rule **staleness** (`yarad_rules_mtime_seconds`,
   `yarad_rules_age_seconds`, and `yarad_rules_stale` = 1 once the loaded ruleset
@@ -272,10 +272,14 @@ folded into the verdict cache key: the same bytes carried as `invoice.pdf` and
 `invoice.exe` are scanned and cached separately. `filepath`/`filetype`/`owner`
 stay empty — yarad has no real path, magic-type, or owner for a mail attachment.
 
-**RTF exploits — matched on raw bytes (no extraction needed).** RTF maldocs (the
-classic CVE-2017-11882 Equation-Editor drop, embedded-OLE `objdata` hex) carry
-their payload as hex in the raw `.rtf`, so the signature-base / Didier `rtf.yara`
-exploit rules already match the raw bytes directly — no decompression step.
+**RTF exploits — raw-byte rules plus `\objdata` carve.** RTF maldocs (the classic
+CVE-2017-11882 Equation-Editor drop, CVE-2017-0199 / OLE2Link) carry their payload
+as hex in the raw `.rtf`, so the signature-base / Didier `rtf.yara` exploit rules
+already match the raw bytes directly. yarad *additionally* hex-decodes every
+`{\*\objdata …}` group and surfaces the decoded object — a full OLE2 (CFB) blob is
+re-run through the macro/package/MSI/`.msg` extraction, a bare `Ole10Native` is
+carved directly — so the dropped binary itself is scanned, not only the RTF
+wrapper (`extract_rtf_total`).
 
 **Deobfuscation.** Two passes. (1) The MS-OVBA decompression above *is* the first
 deobfuscation — it turns the on-disk compressed stream into the source the author
@@ -453,6 +457,7 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 - [x] `.lnk` shortcut parsing — parse the Windows ShellLink header and surface the StringData fields (name / relative-path / working-dir / **command-line arguments** / icon) so a `powershell -enc …` / `cmd /c …` payload hidden in a shortcut is matched; bounds-checked section walk, UTF-16→UTF-8; `extract_lnk_total` metric
 
 **Bigger / niche (lower ratio):**
+- [x] RTF embedded-object (`\objdata`) carve — hex-decode every `{\*\objdata …}` group in an RTF document (the CVE-2017-0199 / CVE-2017-11882 / OLE2Link delivery path) and surface the decoded object: a full OLE2 (CFB) blob runs the same macro / package / MSI / `.msg` extraction, a bare `Ole10Native`/OLENativeStream is carved directly. Sibling of the OLE Package carve, which only covered the OLE2-storage case. BOM-tolerant recogniser, bounded object-count / per-object / total-byte caps, skips whitespace-broken hex; `extract_rtf_total` metric
 - [x] PDF pre-extraction — carve every `stream … endstream` object body and inflate it (FlateDecode: zlib then raw-deflate), surfacing the decompressed bytes so hidden JS / `/OpenAction` / `/Launch` / embedded files are matched; bounded inflate attempts + per-stream/total caps (decompression-bomb guard), token-boundary check so a stray `stream` can't hide the real object; `extract_pdf_total` metric
 - [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
 - [ ] File-level fuzzy hashing (TLSH/ssdeep)

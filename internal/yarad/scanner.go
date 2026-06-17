@@ -62,6 +62,7 @@ type Scanner struct {
 	exOLEPackage                                                      atomic.Uint64 // OLE2 docs with an embedded OLE Package object (Ole10Native carved)
 	exLNK                                                             atomic.Uint64 // Windows shell links (.lnk) with StringData surfaced
 	exPDF                                                             atomic.Uint64 // PDFs with FlateDecode object streams inflated
+	exRTF                                                             atomic.Uint64 // RTF docs with \objdata embedded objects carved
 	exEncodedScript                                                   atomic.Uint64 // buffers with >=1 decoded MS-Script-Encoder block
 	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
 
@@ -111,6 +112,7 @@ type ExtractMetrics struct {
 	OLEPackage uint64 // OLE2 docs with an embedded OLE Package object (Ole10Native carved)
 	LNK        uint64 // Windows shell links (.lnk) with StringData surfaced
 	PDF        uint64 // PDFs with FlateDecode object streams inflated
+	RTF        uint64 // RTF docs with \objdata embedded objects carved
 	EncScript  uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
 	// StreamMatches counts rule hits attributable ONLY to an extracted stream
 	// (macro/MSI/VBE), i.e. rules that did NOT already fire on the raw bytes —
@@ -134,6 +136,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		OLEPackage:    s.exOLEPackage.Load(),
 		LNK:           s.exLNK.Load(),
 		PDF:           s.exPDF.Load(),
+		RTF:           s.exRTF.Load(),
 		EncScript:     s.exEncodedScript.Load(),
 		StreamMatches: s.exStreamMatches.Load(),
 	}
@@ -605,6 +608,9 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	}
 	if res.IsPDF {
 		s.exPDF.Add(1)
+	}
+	if res.IsRTF {
+		s.exRTF.Add(1)
 	}
 	if res.EncodedScript {
 		s.exEncodedScript.Add(1)

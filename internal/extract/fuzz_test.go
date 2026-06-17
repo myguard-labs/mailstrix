@@ -48,6 +48,9 @@ func FuzzExtract(f *testing.F) {
 	}
 	// PDF magic + a stream keyword without endstream — fuzz the carve/inflate loop.
 	f.Add([]byte("%PDF-1.7\nobj\nstream\n\x78\x9c\x00\x00 garbage no endstream"))
+	// RTF with an \objdata group of odd-length/garbage hex — fuzz the hex decoder
+	// and the fromRTF group-scan bounds (must terminate, never over-read).
+	f.Add([]byte("{\\rtf1{\\object{\\*\\objdata d0cf11e0 a1b11ae1 zz}}}"))
 	f.Add([]byte{})
 	f.Add([]byte("plain text"))
 
