@@ -55,6 +55,7 @@ type Scanner struct {
 	// Without these the document-extraction code is invisible in /metrics.
 	// Uint64 (monotonic counters) so /metrics needs no signed→unsigned cast.
 	exDocs, exStreams, exMacroDocs, exFailed, exPanicked, exEncrypted atomic.Uint64
+	exMSI                                                             atomic.Uint64 // OLE2 buffers recognised as MSI installers
 
 	// Rule-reload observability (see ReloadMetrics).
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
@@ -90,6 +91,7 @@ type ExtractMetrics struct {
 	Failed    uint64 // container parse attempts that errored
 	Panicked  uint64 // parser panics recovered (subset of Failed)
 	Encrypted uint64 // ECMA-376 encrypted OOXML (not decrypted)
+	MSI       uint64 // OLE2 buffers recognised as MSI installers (streams dumped)
 }
 
 // ExtractMetrics returns the current pre-extraction counters.
@@ -101,6 +103,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		Failed:    s.exFailed.Load(),
 		Panicked:  s.exPanicked.Load(),
 		Encrypted: s.exEncrypted.Load(),
+		MSI:       s.exMSI.Load(),
 	}
 }
 
@@ -548,6 +551,9 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	}
 	if res.Panicked {
 		s.exPanicked.Add(1)
+	}
+	if res.IsMSI {
+		s.exMSI.Add(1)
 	}
 	if n := len(res.Streams); n > 0 {
 		s.exMacroDocs.Add(1)

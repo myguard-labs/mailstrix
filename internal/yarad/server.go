@@ -527,6 +527,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_failed_total", "container parse attempts that errored", ex.Failed)
 	fm("extract_panicked_total", "parser panics recovered (subset of failed)", ex.Panicked)
 	fm("extract_encrypted_total", "ECMA-376 encrypted OOXML seen (not decrypted)", ex.Encrypted)
+	fm("extract_msi_total", "OLE2 buffers recognised as MSI installers (streams dumped)", ex.MSI)
 
 	// Rule-reload activity — so a SIGHUP that silently fails to compile is visible
 	// to alerting, not just buried in logs.

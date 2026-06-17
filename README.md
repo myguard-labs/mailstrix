@@ -87,7 +87,7 @@ yesterday's exact file — rules catch tomorrow's. yarad compiles all of this
   rejections, cache hits/misses/coalesced, the loaded rule count, the document
   pre-extraction counters (`yarad_extract_docs_total`, `extract_macro_docs_total`,
   `extract_streams_total`, `extract_failed_total`, `extract_panicked_total`,
-  `extract_encrypted_total`), and rule-reload activity (`reload_attempts_total`,
+  `extract_encrypted_total`, `extract_msi_total`), and rule-reload activity (`reload_attempts_total`,
   `reload_success_total`, `reload_failure_total`, `reload_last_timestamp_seconds`,
   `reload_last_duration_ms`), and rule **staleness** (`yarad_rules_mtime_seconds`,
   `yarad_rules_age_seconds`, and `yarad_rules_stale` = 1 once the loaded ruleset
@@ -439,7 +439,7 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 - [x] MalwareBazaar attachment-hash lookup (SHA256 → known malware; cached full-dump feed, fail-open, own symbol)
 - [x] Use `meta.score` in classification (finer tiering, no new parsers) — plugin scales the symbol weight by the rule's `meta.score` onto a `[score_weight_min, score_weight_max]` band
 - [x] Rule-staleness healthcheck/metric (catch a silently-broken daily rebuild) — `yarad_rules_age_seconds`/`yarad_rules_stale` metrics + `YARAD_RULES_MAX_AGE`; `/ready` notes "stale rules" (fail-open, never pulls the scanner out of rotation)
-- [ ] MSI extraction (OLE2, reuse the macro `fromOLE` path)
+- [x] MSI extraction (OLE2, reuse the macro `fromOLE` path) — recognise a Windows Installer database by its root CLSID and dump its streams (CustomAction script bodies, embedded DLL/EXE names) for the keyword rules; `extract_msi_total` metric
 - [ ] VBE/JSE decode + WSF/HTA cleartext surfacing
 - [ ] Rule allowlist (force-log-only without patching the source)
 - [ ] Outlook `.msg` nested-attachment extraction (OLE2)

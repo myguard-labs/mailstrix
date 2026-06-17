@@ -33,7 +33,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2"
+const Version = "ole2+msi"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -63,7 +63,32 @@ const (
 	// maxTotalBin caps the cumulative decompressed bytes READ across all *.bin
 	// members — the per-member cap alone doesn't bound the sum.
 	maxTotalBin = 64 << 20
+
+	// --- MSI (Windows Installer) stream extraction caps ---
+	// An MSI is an OLE2 database; the interesting cleartext (CustomAction
+	// VBScript/JScript/PowerShell bodies, embedded DLL/EXE names in the string
+	// pool) lives in its streams. These bound a hostile MSI with thousands of
+	// tiny streams or one giant stream.
+	//
+	// maxMSIStreams bounds how many streams we emit from one MSI.
+	maxMSIStreams = 256
+	// maxBytesPerMSIStream caps one emitted stream (a single CustomAction script
+	// is small; a multi-MiB "stream" is an embedded blob we don't want to scan
+	// whole — the raw-bytes scan still covers it).
+	maxBytesPerMSIStream = 4 << 20
+	// maxTotalMSI caps the cumulative bytes emitted across all MSI streams.
+	maxTotalMSI = 32 << 20
 )
+
+// msiRootCLSID is the OLE2 root-storage CLSID for a Windows Installer database
+// ({000C1084-0000-0000-C000-000000000046}) in on-disk little-endian byte order.
+// Used to recognise an MSI so its streams are dumped only for real installers,
+// not for every macro-less legacy OLE document (that would scan body text and
+// invite false positives).
+var msiRootCLSID = [16]byte{
+	0x84, 0x10, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+}
 
 // Result reports what Extract found in one buffer. Streams is the only field the
 // scanner needs to match rules; the booleans are for /metrics so the new code
@@ -87,6 +112,9 @@ type Result struct {
 	// Panicked is true when oleparse panicked on hostile input and was recovered.
 	// Worth a separate counter: a spike points at a parser bug or a new evasion.
 	Panicked bool
+	// IsMSI is true when buf was recognised as a Windows Installer database (an
+	// OLE2 with the MSI root CLSID) and its streams were dumped for scanning.
+	IsMSI bool
 }
 
 // Extract reports the plaintext hidden inside an OLE2/OOXML container — the
@@ -152,10 +180,73 @@ func fromOLE(buf []byte, res *Result, deadline time.Time) {
 	}
 	mods, err := oleparse.ExtractMacros(ole)
 	if err != nil {
-		res.Failed = true
+		// A macro-extraction error on a real MSI is expected (it has no VBA
+		// project), so don't fail outright — fall through to the MSI path, which
+		// decides whether this OLE2 is an installer worth dumping.
+		if !fromMSI(ole, res) {
+			res.Failed = true
+		}
 		return
 	}
 	res.Streams = codes(mods, nil)
+	// No VBA found: the OLE2 may instead be an MSI whose payload (CustomAction
+	// scripts, embedded EXE/DLL names) lives in plain streams. Dump those so the
+	// keyword rules can match. fromMSI is a no-op for a non-MSI OLE2.
+	if len(res.Streams) == 0 {
+		fromMSI(ole, res)
+	}
+}
+
+// fromMSI recognises a Windows Installer database (OLE2 root CLSID == MSI) and
+// appends the bytes of its streams to res.Streams so YARA rules can match the
+// CustomAction script bodies and the DLL/EXE/path strings MSI keeps in its
+// string pool. It is deliberately gated on the MSI CLSID: dumping every stream
+// of an arbitrary macro-less OLE2 would scan ordinary document body text and
+// invite false positives. Returns true if buf was an MSI (whether or not any
+// stream was emitted). Bounded by the maxMSI* caps; best-effort, never panics
+// out (the caller's recover still covers it).
+func fromMSI(ole *oleparse.OLEFile, res *Result) bool {
+	if !isMSI(ole) {
+		return false
+	}
+	res.IsMSI = true
+	var total int
+	for _, d := range ole.Directory {
+		if d == nil {
+			continue
+		}
+		// Mse: 2 = stream (stg/root are 1/5); only streams carry payload bytes.
+		if d.Header.Mse != 2 || d.Header.Size == 0 {
+			continue
+		}
+		if len(res.Streams) >= maxMSIStreams || total >= maxTotalMSI {
+			break
+		}
+		b := ole.GetStream(d.Index)
+		if len(b) == 0 {
+			continue
+		}
+		if len(b) > maxBytesPerMSIStream {
+			b = b[:maxBytesPerMSIStream]
+		}
+		res.Streams = append(res.Streams, b)
+		total += len(b)
+	}
+	return true
+}
+
+// isMSI reports whether the OLE2 root storage carries the MSI CLSID. The root
+// directory entry is index 0 (Mse==5); guard the slice and the type before
+// comparing the CLSID bytes.
+func isMSI(ole *oleparse.OLEFile) bool {
+	if ole == nil || len(ole.Directory) == 0 {
+		return false
+	}
+	root := ole.Directory[0]
+	if root == nil || root.Header.Mse != 5 {
+		return false
+	}
+	return root.Header.ClsId == msiRootCLSID
 }
 
 // fromOOXML handles a modern Office document: a ZIP whose vbaProject.bin entries
