@@ -323,33 +323,37 @@ func fileCompiles(path string) error {
 //   - filepath/filetype/owner — also THOR/Loki; kept as empty defaults (yarad has
 //     no real path / magic-type / file owner for a mail attachment), so their
 //     conditions stay inert.
+//   - file_type — InQuest uses this name for coarse file-type context. It stays
+//     empty except for extension-derived types where we have a tight mail use
+//     case (currently `.msg`/`.oft` => "outlook").
 //   - VBA — Didier's vba.yara (`VBA and any of (...)`); default false so the rule
 //     is inert on raw bytes, and Scan flips it true ONLY for decompressed macro
 //     streams (see scanOne). This must mirror compile-rules.sh's yarac `-d` flags
 //     so the precompiled .yac and this in-process path behave identically.
 func defineExternals(c *yara.Compiler) {
 	_ = c.DefineVariable("VBA", false)
-	for _, v := range []string{"filename", "filepath", "extension", "filetype", "owner"} {
+	for _, v := range []string{"filename", "filepath", "extension", "filetype", "file_type", "owner"} {
 		_ = c.DefineVariable(v, "")
 	}
 }
 
 // ScanMeta carries the per-message context the rspamd plugin knows but the raw
-// bytes don't — the attachment filename — mapped onto the YARA external variables
-// (`filename`/`extension`) so THOR/Loki-style rules that key on the name fire
-// (e.g. `filename matches /\.exe$/`, `extension == ".scr"`). The zero value (all
-// fields empty) leaves the externals at their empty compile-time default, so a
-// whole-rfc822 scan or a part with no name behaves exactly as before.
+// bytes don't — the attachment filename — mapped onto YARA external variables
+// (`filename`/`extension`, plus a narrow `file_type` hint for .msg/.oft) so
+// name/type-keyed rules fire. The zero value leaves externals at their
+// compile-time defaults, so a whole-rfc822 scan or unnamed part behaves as
+// before.
 type ScanMeta struct {
 	Filename  string // sanitized basename, e.g. "invoice.exe" ("" if none)
 	Extension string // lowercased extension WITH the leading dot, e.g. ".exe" (Loki/THOR convention); "" if none
+	FileType  string // coarse optional type context for rules that use file_type, e.g. "outlook" for .msg/.oft
 }
 
 // cacheKey renders the metadata for the verdict cache key. The verdict depends on
 // these externals, so two scans of the same bytes with different metadata must
 // land on different keys. Extension derives from Filename but is included so the
 // key is explicit. NUL separator can't occur in either (NewScanMeta strips it).
-func (m ScanMeta) cacheKey() string { return m.Filename + "\x00" + m.Extension }
+func (m ScanMeta) cacheKey() string { return m.Filename + "\x00" + m.Extension + "\x00" + m.FileType }
 
 // maxFilenameLen caps the attacker-controlled attachment name fed to libyara —
 // a hostile multi-kilobyte name must not bloat the cache key or the per-scan
@@ -388,29 +392,39 @@ func NewScanMeta(name string) ScanMeta {
 	if i := strings.LastIndexByte(name, '.'); i > 0 && i < len(name)-1 {
 		ext = strings.ToLower(name[i:])
 	}
-	return ScanMeta{Filename: name, Extension: ext}
+	return ScanMeta{Filename: name, Extension: ext, FileType: fileTypeFromExtension(ext)}
+}
+
+func fileTypeFromExtension(ext string) string {
+	switch ext {
+	case ".msg", ".oft":
+		return "outlook"
+	default:
+		return ""
+	}
 }
 
 // scanVars is the set of external-variable overrides applied on top of the
-// compile-time defaults for one scanOne call. filename/extension come from the
-// attachment (ScanMeta); vba is flipped true only for a decompressed macro
-// stream. When all fields are zero the cheap rules.ScanMem path is used.
+// compile-time defaults for one scanOne call. filename/extension/file_type come
+// from the attachment (ScanMeta); vba is flipped true only for a decompressed
+// macro stream. When all fields are zero the cheap rules.ScanMem path is used.
 type scanVars struct {
 	vba       bool
 	filename  string
 	extension string
+	fileType  string
 }
 
 // needsScanner reports whether any external variable must be overridden — i.e.
 // whether the per-scan yara.Scanner (which can DefineVariable) is required
 // instead of the cheaper rules.ScanMem that uses only compile-time defaults.
 func (v scanVars) needsScanner() bool {
-	return v.vba || v.filename != "" || v.extension != ""
+	return v.vba || v.filename != "" || v.extension != "" || v.fileType != ""
 }
 
 // define applies the overrides to a scanner. VBA is always set (to the desired
-// value, false by default); filename/extension only when non-empty so an absent
-// name leaves the empty compile-time default rather than overriding it to "".
+// value, false by default); string externals are set only when non-empty so an
+// absent name/type leaves the empty compile-time default.
 func (v scanVars) define(sc *yara.Scanner) error {
 	if err := sc.DefineVariable("VBA", v.vba); err != nil {
 		return err
@@ -425,6 +439,11 @@ func (v scanVars) define(sc *yara.Scanner) error {
 			return err
 		}
 	}
+	if v.fileType != "" {
+		if err := sc.DefineVariable("file_type", v.fileType); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -434,9 +453,9 @@ func (v scanVars) define(sc *yara.Scanner) error {
 // never blocks mail (fail-open, matching the gozer contract).
 //
 // meta carries the attachment filename (if the plugin sent one): it is mapped to
-// the `filename`/`extension` external variables for BOTH the raw scan and every
-// extracted macro-stream scan, so name-keyed rules fire consistently on a
-// document and its decompressed macros.
+// the `filename`/`extension`/`file_type` external variables for BOTH the raw scan
+// and every extracted macro-stream scan, so name/type-keyed rules fire
+// consistently on a document and its decompressed macros.
 //
 // Beyond the raw bytes, Scan also matches against any plaintext hidden inside an
 // OLE2/OOXML container — the decompressed VBA macro source — which the keyword
@@ -462,7 +481,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 
 	// Raw bytes first. A failure here is the scanner's verdict (propagated,
 	// fail-open at the server) — unchanged behaviour for non-documents.
-	out, err := s.scanOne(rules, buf, scanVars{filename: meta.Filename, extension: meta.Extension}, s.scanTimeout)
+	out, err := s.scanOne(rules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, s.scanTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +520,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		// (...)`) fire on this decompressed source — they are inert on raw bytes.
 		// filename/extension carry through so a name-keyed rule fires the same on
 		// the container's decompressed macros as on its raw bytes.
-		m, serr := s.scanOne(rules, stream, scanVars{vba: true, filename: meta.Filename, extension: meta.Extension}, budget)
+		m, serr := s.scanOne(rules, stream, scanVars{vba: true, filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, budget)
 		if serr != nil {
 			s.logf("scan of extracted macro stream failed (raw verdict kept): %v", serr)
 			continue

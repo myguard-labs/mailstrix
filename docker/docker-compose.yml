@@ -57,7 +57,7 @@ services:
     secrets:
       - yarad_token
 
-    # Rules are baked into the image (YARA-Forge + signature-base); no volume.
+    # Rules are baked into the image (public curated bundle); no volume.
 
     # --- Hardening ---------------------------------------------------------
     read_only: true                    # immutable rootfs (distroless, nonroot)

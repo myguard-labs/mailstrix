@@ -6,7 +6,8 @@
 #
 # Two things make this robust against real public rulesets:
 #   * external variables — THOR/Loki-style rules reference filepath/filename/
-#     extension/filetype/owner; define them (empty defaults) so those rules both
+#     extension/filetype/owner, and InQuest uses file_type; define them (empty
+#     defaults) so those rules both
 #     COMPILE and SCAN. The path conditions just never match raw mail bytes,
 #     which is the right behaviour for a mail scanner. VBA=0 is declared the same
 #     way for Didier's vba.yara (`VBA and any of (...)`): it must exist at compile
@@ -22,7 +23,7 @@ set -eu
 
 SRC="${1:-/rules/src}"
 OUT="${2:-/rules/compiled.yac}"
-EXT="-d filepath= -d filename= -d extension= -d filetype= -d owner= -d VBA=0"
+EXT="-d filepath= -d filename= -d extension= -d filetype= -d file_type= -d owner= -d VBA=0"
 
 good="$(mktemp)"
 tmpout="$(mktemp)"

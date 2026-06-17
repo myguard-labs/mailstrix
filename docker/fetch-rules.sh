@@ -8,7 +8,8 @@
 # silently ship fewer rules), unless YARAD_RULES_OPTIONAL=1.
 #
 # Sources (override with env to pin a tag/commit):
-#   YARAFORGE_URL  — YARA-Forge "core" packaged ruleset (single .yar bundle)
+#   YARAFORGE_SET  — YARA-Forge package: core (default), extended, or full
+#   YARAFORGE_URL  — explicit YARA-Forge package URL (wins over YARAFORGE_SET)
 #   SIGBASE_REF    — Neo23x0/signature-base git ref (default master)
 #   ANYRUN_REF     — anyrun/YARA git ref (default main); ANYRUN=0 to skip
 #   DIDIER_REF     — DidierStevens/DidierStevensSuite git ref (default master);
@@ -17,6 +18,8 @@
 #                    to skip. MIT; maldoc/RTF/phishing + malware families. NOT in
 #                    YARA-Forge (ReversingLabs/Trellix-ATR already are — don't add
 #                    those raw, they'd duplicate Forge core under prefixed names).
+#   INQUEST_REF    — InQuest/yara-rules-vt git ref (default main); INQUEST=0 to
+#                    skip. MIT; curated mail-carrier rules (PDF/LNK/OneNote/RTF).
 set -eu
 
 OUT="${1:-/rules}"
@@ -26,9 +29,17 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "fetch-rules: $*" >&2; [ "${YARAD_RULES_OPTIONAL:-0}" = "1" ] || exit 1; }
 
-# 1) YARA-Forge core bundle — one curated .yar of vetted public rules.
-YARAFORGE_URL="${YARAFORGE_URL:-https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-core.zip}"
-echo "fetch-rules: YARA-Forge core <- $YARAFORGE_URL"
+# 1) YARA-Forge bundle — one curated .yar of vetted public rules. Core stays the
+#    default for production stability; extended/full are opt-in build profiles.
+YARAFORGE_SET="${YARAFORGE_SET:-core}"
+case "$YARAFORGE_SET" in
+    core|extended|full) ;;
+    *) fail "invalid YARAFORGE_SET=$YARAFORGE_SET (want core, extended, or full)" ;;
+esac
+if [ -z "${YARAFORGE_URL:-}" ]; then
+    YARAFORGE_URL="https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-${YARAFORGE_SET}.zip"
+fi
+echo "fetch-rules: YARA-Forge $YARAFORGE_SET <- $YARAFORGE_URL"
 if curl -fsSL "$YARAFORGE_URL" -o "$TMP/forge.zip"; then
     unzip -o -q "$TMP/forge.zip" -d "$TMP/forge" || fail "unzip yara-forge failed"
     find "$TMP/forge" \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
@@ -87,6 +98,33 @@ if [ "${DIDIER:-1}" = "1" ]; then
                 echo "fetch-rules: didier ${r}.yara not found (upstream layout changed?)" >&2
             fi
         done
+        cat > "$OUT/didier-pdf-activemime.yara" <<'YARA'
+/*
+  PDF/ActiveMime polyglot maldoc detector, based on Didier Stevens' public
+  PDF/ActiveMime write-up. Kept tiny and mail-focused: a PDF header plus the
+  ActiveMime base64 marker. The chunk markers catch simple whitespace-split
+  base64 without adding broad regexes that yarac flags as slow.
+  Reference: https://blog.didierstevens.com/2023/08/29/quickpost-pdf-activemime-maldocs-yara-rule/
+*/
+rule Didier_PDF_ActiveMime_Maldoc : pdf maldoc activemime
+{
+    meta:
+        author = "Didier Stevens concept, yarad curated packaging"
+        description = "Detects PDF/ActiveMime polyglot maldocs"
+        reference = "https://blog.didierstevens.com/2023/08/29/quickpost-pdf-activemime-maldocs-yara-rule/"
+        license = "public domain"
+    strings:
+        $pdf = "%PDF-"
+        $activemime_b64 = "ActiveMime" base64 ascii
+        $am_chunk1 = "QWN0"
+        $am_chunk2 = "aXZl"
+        $am_chunk3 = "TWlt"
+    condition:
+        filesize < 25MB and
+        $pdf at 0 and
+        ($activemime_b64 or all of ($am_chunk*))
+}
+YARA
     else
         fail "download didier suite failed"
     fi
@@ -106,6 +144,46 @@ if [ "${BARTBLAZE:-1}" = "1" ]; then
         done
     else
         fail "download bartblaze failed"
+    fi
+fi
+
+# 6) InQuest/yara-rules-vt — MIT, small, and particularly useful once yarad can
+#    surface Windows/mail carriers. Curated instead of whole-repo: skip pure file
+#    identifiers, broad informational rules, and rules yarac flags as slow (e.g.
+#    PDF_with_Embedded_RTF_OLE_Newlines.yar).
+if [ "${INQUEST:-1}" = "1" ]; then
+    INQUEST_REF="${INQUEST_REF:-main}"
+    echo "fetch-rules: inquest <- InQuest/yara-rules-vt@$INQUEST_REF (curated)"
+    if curl -fsSL "https://github.com/InQuest/yara-rules-vt/archive/${INQUEST_REF}.tar.gz" -o "$TMP/inquest.tgz"; then
+        tar -xzf "$TMP/inquest.tgz" -C "$TMP"
+        for r in \
+            CVE_2014_1761.yar \
+            Hex_Encoded_Link_in_RTF.yar \
+            JS_PDF_Data_Submission.yar \
+            Microsoft_LNK_with_CMD_EXE_Reference.yar \
+            Microsoft_LNK_with_PowerShell_Shortcut_References.yar \
+            Microsoft_LNK_with_Windows_Management_Instrumentation_Reference.yar \
+            Microsoft_OneNote_with_Suspicious_String.yar \
+            Microsoft_Outlook_Phish.yar \
+            PDF_Launch_Action_EXE.yar \
+            PDF_Launch_Function.yar \
+            PDF_with_Launch_Action_Function.yar \
+            Powershell_Command_Fileless_August_Malware.yar \
+            RTF_Composite_Moniker.yar \
+            RTF_Embedded_OLE_Header_Obfuscated.yar \
+            RTF_Memory_Corruption_Vulnerability.yar \
+            RTF_with_Suspicious_File_Extension.yar \
+            Suspicious_CLSID_RTF.yar
+        do
+            f="$(find "$TMP"/yara-rules-vt-* -name "$r" 2>/dev/null | head -1)"
+            if [ -n "$f" ]; then
+                cp "$f" "$OUT/inquest-$r"
+            else
+                echo "fetch-rules: inquest $r not found (upstream layout changed?)" >&2
+            fi
+        done
+    else
+        fail "download inquest yara-rules-vt failed"
     fi
 fi
 
