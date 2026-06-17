@@ -80,6 +80,14 @@ type Config struct {
 	// comma-separated list, or set the var empty to disable filtering entirely.
 	RuleDenylist map[string]struct{} // YARAD_RULE_DENYLIST (comma-sep, default "http")
 
+	// RuleAllowlist names rules whose matches are KEPT but tagged log-only
+	// (case-insensitive): yarad still reports them (so they show in the mail
+	// history) but adds meta `yarad_allow=1`, and the rspamd plugin routes those
+	// to a 0-weight symbol. This force-demotes a known-FP rule without dropping
+	// its visibility (denylist) and without patching the upstream source. Empty
+	// by default. A name in BOTH lists is denied (drop wins over demote).
+	RuleAllowlist map[string]struct{} // YARAD_RULE_ALLOWLIST (comma-sep, default empty)
+
 	Version string // build version string, set by main (not from env); for /version
 }
 
@@ -112,6 +120,7 @@ func LoadConfig() *Config {
 		MBazaarRefresh: envDur("YARAD_MBAZAAR_REFRESH", 86400),
 		MBazaarFeed:    strings.TrimSpace(os.Getenv("YARAD_MBAZAAR_FEED")),
 		RuleDenylist:   envSet("YARAD_RULE_DENYLIST", "http"),
+		RuleAllowlist:  envSet("YARAD_RULE_ALLOWLIST", ""),
 	}
 	c.sanitize()
 	return c

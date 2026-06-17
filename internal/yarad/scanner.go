@@ -79,6 +79,11 @@ type Scanner struct {
 	// result — public-ruleset demo/noise rules (e.g. Didier's `http`) that are
 	// pure false positives for mail. nil/empty means no filtering.
 	denylist map[string]struct{}
+	// allowlist holds rule names (lowercase) whose matches are KEPT but tagged
+	// `yarad_allow=1` so the plugin scores them log-only (0 weight). Lets an
+	// operator demote a known-FP rule without dropping its visibility or patching
+	// the source. nil/empty means no tagging. Denylist wins if a name is in both.
+	allowlist map[string]struct{}
 }
 
 // ExtractMetrics is a snapshot of the document pre-extraction counters, surfaced
@@ -124,6 +129,7 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 		urlhausMax:  cfg.URLhausMaxURLs,
 		mbazaar:     mbazaar.New(cfg.MBazaarKey, cfg.MBazaarRefresh, cfg.MBazaarFeed, logf), // nil if no key
 		denylist:    cfg.RuleDenylist,
+		allowlist:   cfg.RuleAllowlist,
 	}
 	if s.urlhaus != nil {
 		logf("URLhaus malware-URL lookup enabled (refresh=%s, max_urls/msg=%d)", cfg.URLhausRefresh, cfg.URLhausMaxURLs)
@@ -623,17 +629,29 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	return out, nil
 }
 
-// filterDenied removes matches whose rule name is in the denylist (public-ruleset
-// demo/noise rules that are pure false positives for mail). Order is preserved
-// and the input's backing array is reused; a no-op when the denylist is empty.
+// filterDenied applies the rule deny/allow lists to a match set. Denylisted rule
+// names (public-ruleset demo/noise that are pure FPs for mail) are dropped;
+// allowlisted names are KEPT but tagged `yarad_allow=1` so the plugin can score
+// them log-only without losing their visibility in the history. Order is
+// preserved; a no-op when both lists are empty. Deny wins if a name is in both.
 func (s *Scanner) filterDenied(in []Match) []Match {
-	if len(s.denylist) == 0 || len(in) == 0 {
+	if len(s.denylist) == 0 && len(s.allowlist) == 0 {
+		return in
+	}
+	if len(in) == 0 {
 		return in
 	}
 	out := in[:0]
 	for _, m := range in {
-		if _, denied := s.denylist[strings.ToLower(m.Rule)]; denied {
+		name := strings.ToLower(m.Rule)
+		if _, denied := s.denylist[name]; denied {
 			continue
+		}
+		if _, allow := s.allowlist[name]; allow {
+			if m.Meta == nil {
+				m.Meta = map[string]string{}
+			}
+			m.Meta["yarad_allow"] = "1"
 		}
 		out = append(out, m)
 	}

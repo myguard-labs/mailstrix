@@ -59,6 +59,11 @@ local settings = {
   -- "MALWAREBAZAAR_MALWARE"): an exact SHA256 match of the attachment against a
   -- known malware sample — a strong, standalone verdict.
   mbazaar_symbol = "MALWAREBAZAAR_MALWARE",
+  -- Log-only symbol for rules yarad has allowlisted (meta.yarad_allow="1", set
+  -- by YARAD_RULE_ALLOWLIST): the match is still surfaced (visible in history)
+  -- but routed here so groups.conf can score it 0 — a known-FP rule demoted
+  -- without dropping it or patching the source.
+  allow_symbol = "YARA_ALLOWLISTED",
   -- What to scan. At least one must be true or the plugin does nothing.
   scan_message = true,         -- the whole rfc822 message in one scan
   scan_parts = true,          -- each MIME part (attachment) separately
@@ -286,13 +291,18 @@ local function check_cb(task)
             -- Classify into a scoring tier, and show "rule (source-file)" so a
             -- generic rule name (e.g. "http") is traceable to the ruleset that
             -- shipped it. m.namespace is the compiled rule file.
-            local sym = classify(m)
             local opt = m.rule
             if m.namespace and m.namespace ~= "" then
               opt = m.rule .. " (" .. m.namespace .. ")"
             end
-            -- Modulate within the tier by the rule's meta.score (1.0 if absent).
-            add(sym, opt, "y:" .. m.rule, score_weight(m))
+            -- yarad allowlist: a known-FP rule demoted to log-only. Keep it
+            -- visible but route to the 0-weight symbol instead of a scoring tier.
+            if type(m.meta) == "table" and m.meta.yarad_allow == "1" then
+              add(settings.allow_symbol, opt, "y:" .. m.rule, 1.0)
+            else
+              -- Modulate within the tier by the rule's meta.score (1.0 if absent).
+              add(classify(m), opt, "y:" .. m.rule, score_weight(m))
+            end
           end
         end
       end
@@ -349,6 +359,7 @@ for _, s in ipairs({
   settings.symbol_suspicious,
   settings.urlhaus_symbol,
   settings.mbazaar_symbol,
+  settings.allow_symbol,
 }) do
   rspamd_config:register_symbol({ name = s, type = "virtual", parent = id })
 end

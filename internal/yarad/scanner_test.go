@@ -99,6 +99,50 @@ func TestScannerRuleDenylist(t *testing.T) {
 	}
 }
 
+func TestScannerRuleAllowlist(t *testing.T) {
+	// An allowlisted rule name (case-insensitive) must be KEPT but tagged
+	// meta.yarad_allow="1" so the plugin can score it log-only — visibility
+	// preserved, unlike the denylist which drops the match entirely.
+	dir := writeRules(t, eicarRule)
+	cfg := &Config{RulesDir: dir, ScanTimeout: 0,
+		RuleAllowlist: map[string]struct{}{"eicar_test_file": {}}}
+	cfg.sanitize()
+	s, err := NewScanner(cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("NewScanner: %v", err)
+	}
+	m, err := s.Scan(eicar(), ScanMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 1 {
+		t.Fatalf("allowlisted rule must still be reported: %+v", m)
+	}
+	if m[0].Meta["yarad_allow"] != "1" {
+		t.Errorf("allowlisted match not tagged yarad_allow=1: %+v", m[0])
+	}
+}
+
+// A name in BOTH lists is denied (drop wins over demote).
+func TestScannerDenyWinsOverAllow(t *testing.T) {
+	dir := writeRules(t, eicarRule)
+	cfg := &Config{RulesDir: dir, ScanTimeout: 0,
+		RuleDenylist:  map[string]struct{}{"eicar_test_file": {}},
+		RuleAllowlist: map[string]struct{}{"eicar_test_file": {}}}
+	cfg.sanitize()
+	s, err := NewScanner(cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("NewScanner: %v", err)
+	}
+	m, err := s.Scan(eicar(), ScanMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 0 {
+		t.Errorf("deny must win over allow: %+v", m)
+	}
+}
+
 func TestScannerNoMatch(t *testing.T) {
 	s := newScanner(t, writeRules(t, eicarRule))
 	m, err := s.Scan([]byte("a perfectly innocent email body"), ScanMeta{})

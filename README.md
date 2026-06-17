@@ -186,6 +186,7 @@ over env, env wins over the default.
 | `YARAD_MBAZAAR_REFRESH` | `86400` (s, = 24 h) | MalwareBazaar feed refresh interval (floor 5 min) |
 | `YARAD_MBAZAAR_FEED` | full dump | override the feed URL (e.g. the lighter "recent" export) |
 | `YARAD_RULE_DENYLIST` | `http` | comma-sep rule names to suppress (case-insensitive); public sets ship demo/noise rules (e.g. Didier's `http` = `"http" nocase`) that FP on nearly every mail. Set empty to disable. |
+| `YARAD_RULE_ALLOWLIST` | — | comma-sep rule names to force **log-only** (case-insensitive): the match is kept and tagged `yarad_allow`, and the plugin scores it via the 0-weight `YARA_ALLOWLISTED` symbol — demote a known-FP rule without dropping its visibility or patching the source. Deny wins if a name is in both lists. |
 | `YARAD_VERBOSE` | off | log one line per request |
 | `YARAD_LOG_STDOUT` | off | info/access logs to stdout (errors always go to stderr) |
 
@@ -441,7 +442,7 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 - [x] Rule-staleness healthcheck/metric (catch a silently-broken daily rebuild) — `yarad_rules_age_seconds`/`yarad_rules_stale` metrics + `YARAD_RULES_MAX_AGE`; `/ready` notes "stale rules" (fail-open, never pulls the scanner out of rotation)
 - [x] MSI extraction (OLE2, reuse the macro `fromOLE` path) — recognise a Windows Installer database by its root CLSID and dump its streams (CustomAction script bodies, embedded DLL/EXE names) for the keyword rules; `extract_msi_total` metric
 - [x] VBE/JSE decode + WSF/HTA cleartext surfacing — decode MS-Script-Encoder (`#@~^…^#~@`) blocks to cleartext so keyword rules match the real script (covers `.vbe`/`.jse` and encoded blocks embedded in `.wsf`/`.hta`/`.html`/`.sct`); `extract_encoded_script_total` metric
-- [ ] Rule allowlist (force-log-only without patching the source)
+- [x] Rule allowlist (force-log-only without patching the source) — `YARAD_RULE_ALLOWLIST` keeps a known-FP rule's match visible but tags it `yarad_allow`; the plugin routes it to the 0-weight `YARA_ALLOWLISTED` symbol
 - [ ] Outlook `.msg` nested-attachment extraction (OLE2)
 - [ ] Per-tier / per-extractor `/metrics`
 
