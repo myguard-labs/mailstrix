@@ -327,6 +327,58 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 * [`local.d/groups.conf`](rspamd/local.d/groups.conf) — the per-tier weights
   (above). Set any tier to `0.0` for a cautious log-only first run.
 
+## Status & roadmap
+
+### Already in
+
+- [x] Out-of-process Go scanner over HTTP (`/scan`); rspamd never blocks on libyara
+- [x] ~10k public rules baked in (YARA-Forge, signature-base, ANY.RUN, Didier, bartblaze), daily refresh, precompiled `.yac`
+- [x] libyara modules `pe`/`elf`/`macho`/`dotnet`/`hash`/`math`/`dex` (no magic/cuckoo)
+- [x] `/health`, `/ready`, `/version`, `/metrics` (Prometheus); graceful drain on SIGTERM
+- [x] Verdict cache (LRU+TTL) + request coalescing (singleflight); optional Redis/Valkey L2 with circuit breaker
+- [x] Fail-open everywhere; concurrency gate, admission gate, per-scan timeout, body cap
+- [x] OLE2/OOXML macro **decompression** (MS-OVBA) → scans raw **and** decompressed VBA, `VBA` external var
+- [x] RTF / embedded-OLE exploit detection (raw-byte rules)
+- [x] URL **defang** + **URLhaus** malware-URL/host lookup (cached feed, fail-open)
+- [x] Rule **source-file** surfaced in matches (`rule (source-file.yar)`)
+- [x] `YARAD_RULE_DENYLIST` — drop public demo/noise rules (default `http`)
+- [x] **Tiered scoring** — `YARA_MALWARE`/`YARA_EXPLOIT`/`YARA_PHISHING`/`YARA`/`YARA_SUSPICIOUS` + `URLHAUS_MALWARE_URL`
+- [x] rspamd plugin fan-out bounded (`max_jobs` cap + per-part dedup)
+- [x] SIGHUP rule reload (atomic swap, keeps old rules on a bad edit)
+- [x] Distroless, non-root, read-only rootfs (~74 MB)
+
+### Planned (sorted low-investment → high-return)
+
+**Quick wins (low effort, high value):**
+- [ ] Pass filename/extension to yarad → set YARA `filename`/`extension` external vars (activates many existing rules)
+- [ ] MalwareBazaar attachment-hash lookup (SHA256 → known malware; reuse URLhaus feed-cache infra)
+- [ ] Use `meta.score` in classification (finer tiering, no new parsers)
+- [ ] Rule-staleness healthcheck/metric (catch a silently-broken daily rebuild)
+- [ ] MSI extraction (OLE2, reuse the macro `fromOLE` path)
+- [ ] VBE/JSE decode + WSF/HTA cleartext surfacing
+- [ ] Rule allowlist (force-log-only without patching the source)
+- [ ] Outlook `.msg` nested-attachment extraction (OLE2)
+- [ ] Per-tier / per-extractor `/metrics`
+
+**Worth it (more effort, high value):**
+- [ ] OneNote `.one` embedded-object extraction (top post-macro vector)
+- [ ] Nested-archive unpacking (`.zip`/`.7z`/`.rar`/`.gz`)
+- [ ] OLE Package-object / embedded-EXE carve
+- [ ] `.lnk` shortcut parsing
+
+**Bigger / niche (lower ratio):**
+- [ ] PDF pre-extraction (decompress object streams, surface JS/`/OpenAction`)
+- [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
+- [ ] File-level fuzzy hashing (TLSH/ssdeep)
+- [ ] ISO/IMG/VHD(X) container extraction
+- [ ] CHM / CAB / MSIX extraction
+- [ ] Extractor sandbox hardening (seccomp/rlimits) — after more parsers land
+- [ ] Batch `/scan` endpoint (collapse N part round-trips)
+- [ ] macOS `.dmg`/`.pkg`/`.mpkg` → Mach-O; Android `.apk` → dex/manifest
+- [ ] PE-overlay bytes; `.url`/`.settingcontent-ms` launcher fields
+
+> iOS/iPhone is intentionally out of scope — no executable email vector.
+
 ## See also
 
 * **[gozer](https://github.com/eilandert/gozer)** — the DCC/Razor/Pyzor sibling
