@@ -33,7 +33,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+iso"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+iso+udf"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -150,6 +150,9 @@ type Result struct {
 	// IsISO is true when buf was recognised as an ISO9660 disc image (.iso) and
 	// its member files were walked out of the directory tree for scanning.
 	IsISO bool
+	// IsUDF is true when buf was recognised as a UDF disc image (.udf/.iso) and
+	// its member files were walked out of the filesystem tree for scanning.
+	IsUDF bool
 	// IsOneNote is true when buf was recognised as a OneNote section/TOC
 	// (.one/.onetoc2) and its embedded FileDataStoreObject payloads were carved
 	// out for scanning.
@@ -181,6 +184,16 @@ func Extract(buf []byte, deadline time.Time) (res Result) {
 	}()
 
 	switch {
+	case isUDF(buf):
+		// A UDF disc image (.udf, or an ISO/UDF hybrid .iso) — another MOTW-bypass
+		// dropper container. Checked BEFORE ISO9660: a UDF-bridge image carries
+		// BOTH the "CD001" identifier (for legacy readers) and the UDF "NSR0x"
+		// recogniser, but the real file tree lives in the UDF structures, so route
+		// it to the UDF walker first. A pure ISO9660 image has no NSR and falls
+		// through to the isISO case. Walk the UDF directory tree and surface each
+		// member file so a dropped .lnk/.exe/.js is scanned as its own buffer.
+		res.IsDoc = true
+		fromUDF(buf, &res, deadline)
 	case isISO(buf):
 		// An ISO9660 disc image (.iso) — a MOTW-bypass dropper container. Checked
 		// FIRST: its "CD001" recogniser sits at a fixed offset inside sector 16,

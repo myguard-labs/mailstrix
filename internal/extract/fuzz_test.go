@@ -60,6 +60,16 @@ func FuzzExtract(f *testing.F) {
 		copy(iso[isoSystemArea*isoSectorSize+1:], isoMagic)
 		f.Add(iso)
 	}
+	// A valid minimal UDF image (embedded + short_ad data) plus a truncated one —
+	// fuzz the anchor/descriptor resolve and the FID/allocation-descriptor walk's
+	// bounds guards on hostile logical blocks and extent lengths.
+	f.Add(buildUDF("DROP.EXE", []byte("MZ udf member"), false))
+	f.Add(buildUDF("RUN.JS", []byte("udf extent member"), true))
+	{
+		udf := make([]byte, 20*udfSectorSize)
+		copy(udf[16*udfSectorSize+1:], "NSR02")
+		f.Add(udf)
+	}
 	f.Add([]byte{})
 	f.Add([]byte("plain text"))
 

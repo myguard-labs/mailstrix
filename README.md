@@ -462,7 +462,8 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 - [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
 - [ ] File-level fuzzy hashing (TLSH/ssdeep)
 - [x] ISO9660 disc-image (`.iso`) member extraction — walk the directory tree (plain ECMA-119 + the Joliet supplementary descriptor for Unicode names) and surface every regular file's bytes, so a dropper mailed inside an `.iso` (the mark-of-the-web bypass) is scanned as its own buffer rather than buried in the on-disk filesystem layout; bounded file-count / directory-walk / per-file / total-byte caps, cycle-guarded; `extract_iso_total` metric. UDF / `.img` (FAT) / VHD(X) images not yet handled (separate items)
-- [ ] UDF / `.img` (FAT) / VHD(X) container extraction
+- [x] UDF disc-image (`.udf`, ISO/UDF hybrid `.iso`) member extraction — resolve the UDF volume structure (Anchor Volume Descriptor Pointer → Main Volume Descriptor Sequence → Partition + Logical Volume descriptors → File Set Descriptor → root File Entry) and walk the filesystem tree, surfacing every regular file's bytes so a dropper mailed inside a UDF image (another mark-of-the-web bypass) is scanned as its own buffer; reads the embedded (in-ICB), short_ad and long_ad data layouts, handles File Entry + Extended File Entry; routed before the ISO9660 case so an ISO/UDF hybrid follows its real (UDF) file tree; bounded file-count / directory-walk / record / per-file / total-byte caps, cycle-guarded, fail-open; `extract_udf_total` metric. `.img` (FAT) / VHD(X) images not yet handled (separate item)
+- [ ] `.img` (FAT) / VHD(X) container extraction
 - [ ] CHM / CAB / MSIX extraction
 - [ ] Extractor sandbox hardening (seccomp/rlimits) — after more parsers land
 - [ ] Batch `/scan` endpoint (collapse N part round-trips)

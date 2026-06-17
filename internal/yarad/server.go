@@ -536,6 +536,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_pdf_total", "PDFs with FlateDecode object streams inflated for scanning", ex.PDF)
 	fm("extract_rtf_total", "RTF docs with \\objdata embedded objects hex-decoded and carved", ex.RTF)
 	fm("extract_iso_total", "ISO9660 disc images (.iso) with member files walked out of the directory tree", ex.ISO)
+	fm("extract_udf_total", "UDF disc images (.udf/.iso, incl. ISO/UDF hybrids) with member files walked out of the filesystem tree", ex.UDF)
 	fm("extract_encoded_script_total", "buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block", ex.EncScript)
 	fm("extract_stream_matches_total", "rule hits attributable only to an extracted stream (not raw bytes)", ex.StreamMatches)
 
