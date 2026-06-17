@@ -143,6 +143,33 @@ func TestScannerDenyWinsOverAllow(t *testing.T) {
 	}
 }
 
+// A rule that fires only on decompressed macro cleartext (never on the raw,
+// still-compressed .xlsm bytes) must register in extract_stream_matches_total —
+// the metric that measures what pre-extraction adds over a raw-only scan.
+func TestExtractStreamMatchesMetric(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "extract", "testdata", "xlswithmacro.xlsm"))
+	if err != nil {
+		t.Skipf("fixture unavailable: %v", err)
+	}
+	// "Attribute VB_Name" exists in every decompressed VBA module but not in the
+	// raw (zip-compressed) container bytes.
+	rule := `rule MacroAttr { strings: $a = "Attribute VB_Name" condition: $a }`
+	s := newScanner(t, writeRules(t, rule))
+	if s.ExtractMetrics().StreamMatches != 0 {
+		t.Fatalf("precondition: StreamMatches should start at 0")
+	}
+	m, err := s.Scan(doc, ScanMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) == 0 {
+		t.Fatal("expected a match from the decompressed macro")
+	}
+	if s.ExtractMetrics().StreamMatches == 0 {
+		t.Errorf("stream-only match not counted in StreamMatches: %+v", m)
+	}
+}
+
 func TestScannerNoMatch(t *testing.T) {
 	s := newScanner(t, writeRules(t, eicarRule))
 	m, err := s.Scan([]byte("a perfectly innocent email body"), ScanMeta{})

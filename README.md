@@ -87,7 +87,7 @@ yesterday's exact file — rules catch tomorrow's. yarad compiles all of this
   rejections, cache hits/misses/coalesced, the loaded rule count, the document
   pre-extraction counters (`yarad_extract_docs_total`, `extract_macro_docs_total`,
   `extract_streams_total`, `extract_failed_total`, `extract_panicked_total`,
-  `extract_encrypted_total`, `extract_msi_total`, `extract_encoded_script_total`), and rule-reload activity (`reload_attempts_total`,
+  `extract_encrypted_total`, `extract_msi_total`, `extract_encoded_script_total`, `extract_stream_matches_total`), and rule-reload activity (`reload_attempts_total`,
   `reload_success_total`, `reload_failure_total`, `reload_last_timestamp_seconds`,
   `reload_last_duration_ms`), and rule **staleness** (`yarad_rules_mtime_seconds`,
   `yarad_rules_age_seconds`, and `yarad_rules_stale` = 1 once the loaded ruleset
@@ -444,7 +444,7 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 - [x] VBE/JSE decode + WSF/HTA cleartext surfacing — decode MS-Script-Encoder (`#@~^…^#~@`) blocks to cleartext so keyword rules match the real script (covers `.vbe`/`.jse` and encoded blocks embedded in `.wsf`/`.hta`/`.html`/`.sct`); `extract_encoded_script_total` metric
 - [x] Rule allowlist (force-log-only without patching the source) — `YARAD_RULE_ALLOWLIST` keeps a known-FP rule's match visible but tags it `yarad_allow`; the plugin routes it to the 0-weight `YARA_ALLOWLISTED` symbol
 - [ ] Outlook `.msg` nested-attachment extraction (OLE2)
-- [ ] Per-tier / per-extractor `/metrics`
+- [x] Per-tier / per-extractor `/metrics` — per-extractor counters (`extract_*` incl. `extract_msi_total`, `extract_encoded_script_total`) plus `extract_stream_matches_total` (hits attributable only to an extracted stream — what pre-extraction adds over a raw scan). Per-**tier** counts come from rspamd's native per-symbol stats (`YARA_MALWARE`/`YARA_EXPLOIT`/… are real symbols), so no duplicate counter in yarad.
 
 **Worth it (more effort, high value):**
 - [ ] OneNote `.one` embedded-object extraction (top post-macro vector)

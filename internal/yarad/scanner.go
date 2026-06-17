@@ -57,6 +57,7 @@ type Scanner struct {
 	exDocs, exStreams, exMacroDocs, exFailed, exPanicked, exEncrypted atomic.Uint64
 	exMSI                                                             atomic.Uint64 // OLE2 buffers recognised as MSI installers
 	exEncodedScript                                                   atomic.Uint64 // buffers with >=1 decoded MS-Script-Encoder block
+	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
 
 	// Rule-reload observability (see ReloadMetrics).
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
@@ -99,19 +100,24 @@ type ExtractMetrics struct {
 	Encrypted uint64 // ECMA-376 encrypted OOXML (not decrypted)
 	MSI       uint64 // OLE2 buffers recognised as MSI installers (streams dumped)
 	EncScript uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
+	// StreamMatches counts rule hits attributable ONLY to an extracted stream
+	// (macro/MSI/VBE), i.e. rules that did NOT already fire on the raw bytes —
+	// the direct measure of what pre-extraction adds over a raw-only scan.
+	StreamMatches uint64
 }
 
 // ExtractMetrics returns the current pre-extraction counters.
 func (s *Scanner) ExtractMetrics() ExtractMetrics {
 	return ExtractMetrics{
-		Docs:      s.exDocs.Load(),
-		Streams:   s.exStreams.Load(),
-		MacroDocs: s.exMacroDocs.Load(),
-		Failed:    s.exFailed.Load(),
-		Panicked:  s.exPanicked.Load(),
-		Encrypted: s.exEncrypted.Load(),
-		MSI:       s.exMSI.Load(),
-		EncScript: s.exEncodedScript.Load(),
+		Docs:          s.exDocs.Load(),
+		Streams:       s.exStreams.Load(),
+		MacroDocs:     s.exMacroDocs.Load(),
+		Failed:        s.exFailed.Load(),
+		Panicked:      s.exPanicked.Load(),
+		Encrypted:     s.exEncrypted.Load(),
+		MSI:           s.exMSI.Load(),
+		EncScript:     s.exEncodedScript.Load(),
+		StreamMatches: s.exStreamMatches.Load(),
 	}
 }
 
@@ -591,7 +597,13 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 			s.logf("scan of extracted macro stream failed (raw verdict kept): %v", serr)
 			continue
 		}
+		before := len(out)
 		out = mergeMatches(out, m)
+		// Anything mergeMatches appended is a rule that fired on the extracted
+		// stream but NOT on the raw bytes — count it as pre-extraction's payoff.
+		if added := len(out) - before; added > 0 {
+			s.exStreamMatches.Add(uint64(added))
+		}
 	}
 	// Drop denylisted rule names (public-ruleset demo/noise rules) before the
 	// synthetic feed matches are added, so MALWAREBAZAAR_*/URLHAUS_* are never

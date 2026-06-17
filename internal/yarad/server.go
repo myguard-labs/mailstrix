@@ -529,6 +529,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_encrypted_total", "ECMA-376 encrypted OOXML seen (not decrypted)", ex.Encrypted)
 	fm("extract_msi_total", "OLE2 buffers recognised as MSI installers (streams dumped)", ex.MSI)
 	fm("extract_encoded_script_total", "buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block", ex.EncScript)
+	fm("extract_stream_matches_total", "rule hits attributable only to an extracted stream (not raw bytes)", ex.StreamMatches)
 
 	// Rule-reload activity — so a SIGHUP that silently fails to compile is visible
 	// to alerting, not just buried in logs.
