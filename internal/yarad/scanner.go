@@ -59,6 +59,7 @@ type Scanner struct {
 	exMSG                                                             atomic.Uint64 // OLE2 buffers recognised as Outlook .msg (attachments extracted)
 	exOneNote                                                         atomic.Uint64 // buffers recognised as OneNote .one (embedded files carved)
 	exArchive                                                         atomic.Uint64 // buffers recognised as an archive (zip/gz/7z/rar/tar; members unpacked)
+	exOLEPackage                                                      atomic.Uint64 // OLE2 docs with an embedded OLE Package object (Ole10Native carved)
 	exEncodedScript                                                   atomic.Uint64 // buffers with >=1 decoded MS-Script-Encoder block
 	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
 
@@ -95,17 +96,18 @@ type Scanner struct {
 // OLE/OOXML, how many carried macros, how often the parser failed/panicked, and
 // how many were encrypted (and thus not decryptable here).
 type ExtractMetrics struct {
-	Docs      uint64 // buffers recognised as an OLE2/OOXML container
-	Streams   uint64 // decompressed macro blobs scanned (sum across docs)
-	MacroDocs uint64 // documents that yielded >=1 macro stream
-	Failed    uint64 // container parse attempts that errored
-	Panicked  uint64 // parser panics recovered (subset of Failed)
-	Encrypted uint64 // ECMA-376 encrypted OOXML (not decrypted)
-	MSI       uint64 // OLE2 buffers recognised as MSI installers (streams dumped)
-	MSG       uint64 // OLE2 buffers recognised as Outlook .msg (attachments extracted)
-	OneNote   uint64 // buffers recognised as OneNote .one (embedded files carved)
-	Archive   uint64 // buffers recognised as an archive (zip/gz/7z/rar/tar; members unpacked)
-	EncScript uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
+	Docs       uint64 // buffers recognised as an OLE2/OOXML container
+	Streams    uint64 // decompressed macro blobs scanned (sum across docs)
+	MacroDocs  uint64 // documents that yielded >=1 macro stream
+	Failed     uint64 // container parse attempts that errored
+	Panicked   uint64 // parser panics recovered (subset of Failed)
+	Encrypted  uint64 // ECMA-376 encrypted OOXML (not decrypted)
+	MSI        uint64 // OLE2 buffers recognised as MSI installers (streams dumped)
+	MSG        uint64 // OLE2 buffers recognised as Outlook .msg (attachments extracted)
+	OneNote    uint64 // buffers recognised as OneNote .one (embedded files carved)
+	Archive    uint64 // buffers recognised as an archive (zip/gz/7z/rar/tar; members unpacked)
+	OLEPackage uint64 // OLE2 docs with an embedded OLE Package object (Ole10Native carved)
+	EncScript  uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
 	// StreamMatches counts rule hits attributable ONLY to an extracted stream
 	// (macro/MSI/VBE), i.e. rules that did NOT already fire on the raw bytes —
 	// the direct measure of what pre-extraction adds over a raw-only scan.
@@ -125,6 +127,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		MSG:           s.exMSG.Load(),
 		OneNote:       s.exOneNote.Load(),
 		Archive:       s.exArchive.Load(),
+		OLEPackage:    s.exOLEPackage.Load(),
 		EncScript:     s.exEncodedScript.Load(),
 		StreamMatches: s.exStreamMatches.Load(),
 	}
@@ -587,6 +590,9 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	}
 	if res.IsArchive {
 		s.exArchive.Add(1)
+	}
+	if res.IsOLEPackage {
+		s.exOLEPackage.Add(1)
 	}
 	if res.EncodedScript {
 		s.exEncodedScript.Add(1)

@@ -87,7 +87,7 @@ yesterday's exact file — rules catch tomorrow's. yarad compiles all of this
   rejections, cache hits/misses/coalesced, the loaded rule count, the document
   pre-extraction counters (`yarad_extract_docs_total`, `extract_macro_docs_total`,
   `extract_streams_total`, `extract_failed_total`, `extract_panicked_total`,
-  `extract_encrypted_total`, `extract_msi_total`, `extract_msg_total`, `extract_onenote_total`, `extract_archive_total`, `extract_encoded_script_total`, `extract_stream_matches_total`), and rule-reload activity (`reload_attempts_total`,
+  `extract_encrypted_total`, `extract_msi_total`, `extract_msg_total`, `extract_onenote_total`, `extract_archive_total`, `extract_ole_package_total`, `extract_encoded_script_total`, `extract_stream_matches_total`), and rule-reload activity (`reload_attempts_total`,
   `reload_success_total`, `reload_failure_total`, `reload_last_timestamp_seconds`,
   `reload_last_duration_ms`), and rule **staleness** (`yarad_rules_mtime_seconds`,
   `yarad_rules_age_seconds`, and `yarad_rules_stale` = 1 once the loaded ruleset
@@ -449,7 +449,7 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 **Worth it (more effort, high value):**
 - [x] OneNote `.one` embedded-object extraction (top post-macro vector) — recognise a OneNote section/TOC by its file-type GUID and carve every embedded `FileDataStoreObject` (the dropped `.exe`/`.hta`/`.cmd`/`.lnk` payload) for the keyword/PE rules; `extract_onenote_total` metric
 - [x] Nested-archive unpacking (`.zip`/`.7z`/`.rar`/`.gz`/`.tar.gz`) — unpack each member and recurse into nested archives/containers up to a bounded depth, surfacing the inner dropper for scanning; bounded by shared depth/member-count/total-byte budget (decompression-bomb + archive-quine guard). Office docs (OOXML/ODF zips) stay on the macro path only (no part-dumping — FP guard). `extract_archive_total` metric
-- [ ] OLE Package-object / embedded-EXE carve
+- [x] OLE Package-object / embedded-EXE carve — carve the dropped file (`.exe`/`.bat`/`.scr`) out of an `\x01Ole10Native` Packager stream embedded in an OLE2 document (the "double-click the icon to run" maldoc trick); bounds-checked field walk, clamps a hostile NativeDataSize; `extract_ole_package_total` metric
 - [ ] `.lnk` shortcut parsing
 
 **Bigger / niche (lower ratio):**

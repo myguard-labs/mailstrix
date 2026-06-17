@@ -531,6 +531,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_msg_total", "OLE2 buffers recognised as Outlook .msg (nested attachments extracted)", ex.MSG)
 	fm("extract_onenote_total", "buffers recognised as OneNote .one sections (embedded files carved)", ex.OneNote)
 	fm("extract_archive_total", "buffers recognised as an archive (zip/gz/7z/rar/tar; members unpacked)", ex.Archive)
+	fm("extract_ole_package_total", "OLE2 docs with an embedded OLE Package object (Ole10Native carved)", ex.OLEPackage)
 	fm("extract_encoded_script_total", "buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block", ex.EncScript)
 	fm("extract_stream_matches_total", "rule hits attributable only to an extracted stream (not raw bytes)", ex.StreamMatches)
 

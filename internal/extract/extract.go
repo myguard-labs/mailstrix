@@ -33,7 +33,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -132,6 +132,9 @@ type Result struct {
 	// message store) and its nested attachment data streams were pulled out for
 	// scanning.
 	IsMSG bool
+	// IsOLEPackage is true when an OLE2 document carried an embedded OLE Package
+	// object (Ole10Native stream) whose native file data was carved out.
+	IsOLEPackage bool
 	// IsArchive is true when buf (or a nested member) was a recognised archive
 	// (zip/gz/7z/rar/tar) whose members were unpacked and surfaced for scanning.
 	IsArchive bool
@@ -236,12 +239,16 @@ func fromOLE(buf []byte, res *Result, deadline time.Time) {
 		// A macro-extraction error on a real MSI/.msg is expected (no VBA project),
 		// so don't fail outright — fall through to the MSG (Outlook) and MSI paths,
 		// which decide whether this OLE2 is one of those worth dumping.
-		if !fromMSG(ole, res) && !fromMSI(ole, res) {
+		if !fromMSG(ole, res) && !fromMSI(ole, res) && !fromOLEPackage(ole, res) {
 			res.Failed = true
 		}
 		return
 	}
 	res.Streams = codes(mods, nil)
+	// An embedded OLE Package object (dropped .exe/.bat in an Ole10Native stream)
+	// can ride alongside macros, so always carve it regardless of whether VBA was
+	// found — it's a no-op when the doc has no package stream.
+	fromOLEPackage(ole, res)
 	// No VBA found: the OLE2 may instead be an Outlook .msg (pull its nested
 	// attachment files out and scan them) or an MSI (dump its payload streams).
 	// Both helpers are no-ops for an OLE2 that isn't theirs. Try MSG first — a

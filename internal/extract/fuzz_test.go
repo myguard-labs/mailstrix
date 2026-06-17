@@ -34,6 +34,10 @@ func FuzzExtract(f *testing.F) {
 	f.Add(append(append([]byte{}, gzipMagic...), bytes.Repeat([]byte{0xFF}, 64)...))
 	f.Add(append(append([]byte{}, sevenZMagic...), bytes.Repeat([]byte{0xAA}, 128)...))
 	f.Add(append(append([]byte{}, rarMagic...), bytes.Repeat([]byte{0x55}, 128)...))
+	// OLE2 magic + a truncated Ole10Native-shaped tail — fuzz the package field
+	// walk's bounds checks on hostile/short input.
+	f.Add(append(append([]byte{}, oleMagic...),
+		[]byte{0x10, 0, 0, 0, 0x02, 0, 'a', 0, 'b', 0, 0, 0, 0, 0}...))
 	f.Add([]byte{})
 	f.Add([]byte("plain text"))
 
