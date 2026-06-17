@@ -8,7 +8,10 @@
 #   * external variables — THOR/Loki-style rules reference filepath/filename/
 #     extension/filetype/owner; define them (empty defaults) so those rules both
 #     COMPILE and SCAN. The path conditions just never match raw mail bytes,
-#     which is the right behaviour for a mail scanner.
+#     which is the right behaviour for a mail scanner. VBA=0 is declared the same
+#     way for Didier's vba.yara (`VBA and any of (...)`): it must exist at compile
+#     so the file isn't skipped, defaults to 0 (off) for raw bytes, and yarad
+#     flips it to 1 at scan time ONLY for decompressed macro streams.
 #   * per-file validation — a single file importing a module we didn't build in
 #     (cuckoo/magic) or with bad syntax would fail the whole yarac run, so each
 #     file is test-compiled alone first and only the good ones go in the bundle.
@@ -19,7 +22,7 @@ set -eu
 
 SRC="${1:-/rules/src}"
 OUT="${2:-/rules/compiled.yac}"
-EXT="-d filepath= -d filename= -d extension= -d filetype= -d owner="
+EXT="-d filepath= -d filename= -d extension= -d filetype= -d owner= -d VBA=0"
 
 good="$(mktemp)"
 tmpout="$(mktemp)"

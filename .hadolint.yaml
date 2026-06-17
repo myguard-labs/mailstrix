@@ -1,0 +1,10 @@
+# hadolint config for the yarad image.
+ignored:
+  # DL3008 (pin apt versions): deliberately NOT pinned. The image is rebuilt
+  # daily for the latest security updates; pinning would freeze CVEs in place.
+  - DL3008
+  # DL4006 (SHELL -o pipefail before a pipe): the only piped RUN is
+  # `curl -fsSL ... | tar -xz`, where curl -f already fails on HTTP error and an
+  # empty/short stream makes tar fail the build anyway. Not worth a SHELL change
+  # in a multi-stage build that mixes shells.
+  - DL4006

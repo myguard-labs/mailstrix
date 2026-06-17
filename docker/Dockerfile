@@ -79,7 +79,15 @@ ARG CACHEBUST=unset
 ARG YARAFORGE_URL=
 ARG SIGBASE_REF=master
 ARG ANYRUN_REF=main
-RUN YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" ANYRUN_REF="${ANYRUN_REF}" \
+ARG ANYRUN=1
+ARG DIDIER_REF=master
+ARG DIDIER=1
+ARG BARTBLAZE_REF=master
+ARG BARTBLAZE=1
+RUN YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
+        ANYRUN="${ANYRUN}" ANYRUN_REF="${ANYRUN_REF}" \
+        DIDIER="${DIDIER}" DIDIER_REF="${DIDIER_REF}" \
+        BARTBLAZE="${BARTBLAZE}" BARTBLAZE_REF="${BARTBLAZE_REF}" \
         /usr/local/bin/fetch-rules.sh /rules/src \
     && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
     && rm -rf /rules/src

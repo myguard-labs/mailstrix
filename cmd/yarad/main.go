@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -91,6 +92,7 @@ func cmdHealth() int {
 // serves until the process is signalled.
 func cmdServe(args []string) int {
 	cfg := yarad.LoadConfig()
+	cfg.Version = version // build identity, surfaced on /version
 
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.StringVar(&cfg.Host, "host", cfg.Host, "HTTP bind host (YARAD_HOST); serves /scan,/metrics,/health")
@@ -134,9 +136,33 @@ func cmdServe(args []string) int {
 		}
 	}()
 
-	if err := srv.ListenAndServe(); err != nil {
-		log.Printf("[yarad] server error: %v", err)
-		return 1
+	// Graceful shutdown on SIGTERM/SIGINT: stop accepting new scans (/ready 503s)
+	// and drain in-flight scans for a bounded window before exiting — important
+	// during rolling image/rule updates so a scan in progress isn't dropped. The
+	// drain budget covers the longest a single scan can run (ScanTimeout) plus a
+	// little slack.
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.ListenAndServe() }()
+
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, syscall.SIGTERM, syscall.SIGINT)
+
+	select {
+	case err := <-srvErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("[yarad] server error: %v", err)
+			return 1
+		}
+		return 0
+	case sig := <-term:
+		logf("%s: draining (graceful shutdown)", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ScanTimeout+5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[yarad] shutdown error: %v", err)
+			return 1
+		}
+		<-srvErr // ListenAndServe returns http.ErrServerClosed once drained
+		return 0
 	}
-	return 0
 }

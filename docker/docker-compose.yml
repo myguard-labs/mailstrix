@@ -27,7 +27,7 @@ services:
       # YARAD_REDIS_PREFIX: "yara:scan:"
 
       # --- Limits -----------------------------------------------------------
-      # YARAD_MAX_CONCURRENT: "8"      # in-flight scan cap (size to cores)
+      # YARAD_MAX_CONCURRENT: "auto"   # in-flight scan cap; "auto"=CPU count, or a number
       # YARAD_SCAN_TIMEOUT: "10"       # per-scan libyara budget (s)
 
       # --- Auth (required) --------------------------------------------------

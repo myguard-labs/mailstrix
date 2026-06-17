@@ -13,6 +13,8 @@ import (
 	"time"
 
 	yara "github.com/hillu/go-yara/v4"
+
+	"github.com/eilandert/rspamd-yarad/internal/extract"
 )
 
 // Match is one matched YARA rule, reported back to the rspamd plugin. Tags and
@@ -39,6 +41,40 @@ type Scanner struct {
 	srcFile string // precompiled bundle; wins over srcDir when set
 	count   atomic.Int64
 	fp      atomic.Pointer[string] // ruleset fingerprint, changes on reload
+
+	// Observability for the OLE/OOXML pre-extract path (see ExtractMetrics).
+	// Without these the document-extraction code is invisible in /metrics.
+	// Uint64 (monotonic counters) so /metrics needs no signed→unsigned cast.
+	exDocs, exStreams, exMacroDocs, exFailed, exPanicked, exEncrypted atomic.Uint64
+
+	// Rule-reload observability (see ReloadMetrics).
+	reloadAttempts, reloadOK, reloadFail atomic.Uint64
+	reloadLastUnix, reloadLastMillis     atomic.Int64
+}
+
+// ExtractMetrics is a snapshot of the document pre-extraction counters, surfaced
+// on /metrics so the new code path is observable: how many attachments were
+// OLE/OOXML, how many carried macros, how often the parser failed/panicked, and
+// how many were encrypted (and thus not decryptable here).
+type ExtractMetrics struct {
+	Docs      uint64 // buffers recognised as an OLE2/OOXML container
+	Streams   uint64 // decompressed macro blobs scanned (sum across docs)
+	MacroDocs uint64 // documents that yielded >=1 macro stream
+	Failed    uint64 // container parse attempts that errored
+	Panicked  uint64 // parser panics recovered (subset of Failed)
+	Encrypted uint64 // ECMA-376 encrypted OOXML (not decrypted)
+}
+
+// ExtractMetrics returns the current pre-extraction counters.
+func (s *Scanner) ExtractMetrics() ExtractMetrics {
+	return ExtractMetrics{
+		Docs:      s.exDocs.Load(),
+		Streams:   s.exStreams.Load(),
+		MacroDocs: s.exMacroDocs.Load(),
+		Failed:    s.exFailed.Load(),
+		Panicked:  s.exPanicked.Load(),
+		Encrypted: s.exEncrypted.Load(),
+	}
 }
 
 // NewScanner builds a scanner and performs the initial compile/load. It returns
@@ -61,12 +97,40 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 // RuleCount reports how many rules are in the active set (for /health and logs).
 func (s *Scanner) RuleCount() int64 { return s.count.Load() }
 
+// ReloadMetrics is a snapshot of rule-reload activity, surfaced on /metrics so a
+// SIGHUP that silently fails (e.g. a bad rule edit) is visible to alerting
+// instead of only appearing in logs.
+type ReloadMetrics struct {
+	Attempts   uint64 // Reload() calls (includes the initial boot load)
+	Successes  uint64
+	Failures   uint64
+	LastUnix   int64 // unix seconds of the last successful reload
+	LastMillis int64 // wall-clock duration of the last reload attempt
+	Rules      int64 // rule count after the last successful reload
+}
+
+// ReloadMetrics returns the current reload counters.
+func (s *Scanner) ReloadMetrics() ReloadMetrics {
+	return ReloadMetrics{
+		Attempts:   s.reloadAttempts.Load(),
+		Successes:  s.reloadOK.Load(),
+		Failures:   s.reloadFail.Load(),
+		LastUnix:   s.reloadLastUnix.Load(),
+		LastMillis: s.reloadLastMillis.Load(),
+		Rules:      s.count.Load(),
+	}
+}
+
 // Reload (re)compiles the rule set and atomically swaps it in. A failure leaves
 // the previous set active — a broken edit to the rules dir must never disarm a
 // running scanner. Safe to call from a SIGHUP handler concurrently with scans.
 func (s *Scanner) Reload() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.reloadAttempts.Add(1)
+	start := time.Now()
+	defer func() { s.reloadLastMillis.Store(time.Since(start).Milliseconds()) }()
 
 	var (
 		rules *yara.Rules
@@ -78,6 +142,7 @@ func (s *Scanner) Reload() error {
 		rules, err = compileDir(s.srcDir, s.logf)
 	}
 	if err != nil {
+		s.reloadFail.Add(1)
 		s.logf("ERROR reload failed, keeping previous rules: %v", err)
 		return err
 	}
@@ -87,6 +152,8 @@ func (s *Scanner) Reload() error {
 	s.count.Store(int64(len(list)))
 	fp := fingerprint(list)
 	s.fp.Store(&fp)
+	s.reloadOK.Add(1)
+	s.reloadLastUnix.Store(time.Now().Unix())
 	// The previous *yara.Rules is intentionally NOT Destroy()ed here: an in-flight
 	// scan may still hold the pointer it loaded before the swap, and freeing the
 	// native rules under it would crash. go-yara registers a runtime finalizer on
@@ -101,15 +168,21 @@ func (s *Scanner) Reload() error {
 	return nil
 }
 
-// Fingerprint returns a short hash identifying the active rule set. It is part
-// of the verdict cache key, so a reload that changes the rules changes the
-// fingerprint and old cached verdicts (in-process L1 and shared Redis L2) are no
-// longer hit — they orphan and TTL-expire instead of serving a stale "clean".
+// Fingerprint returns a short hash identifying the active rule set, prefixed
+// with the extractor version. It is part of the verdict cache key, so a reload
+// that changes the rules changes the fingerprint and old cached verdicts
+// (in-process L1 and shared Redis L2) are no longer hit — they orphan and
+// TTL-expire instead of serving a stale "clean". The extract.Version prefix
+// folds the pre-extraction logic into that same invalidation: a verdict is now
+// a function of BOTH the rules and how macros were decompressed, so an extractor
+// bump must invalidate the cache (especially the Redis L2 that survives an image
+// rebuild) exactly like a rule change does.
 func (s *Scanner) Fingerprint() string {
+	fp := ""
 	if p := s.fp.Load(); p != nil {
-		return *p
+		fp = *p
 	}
-	return ""
+	return extract.Version + ":" + fp
 }
 
 // fingerprint hashes the sorted rule identities (namespace + identifier) so the
@@ -151,6 +224,7 @@ func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new compiler: %w", err)
 	}
+	defineExternals(c)
 	added, skipped := 0, 0
 	for _, f := range files {
 		if compileErr := fileCompiles(f); compileErr != nil {
@@ -196,6 +270,7 @@ func fileCompiles(path string) error {
 		return err
 	}
 	defer c.Destroy()
+	defineExternals(c)
 	fh, err := os.Open(path) // #nosec G304 -- operator rules dir, not attacker input
 	if err != nil {
 		return err
@@ -208,20 +283,127 @@ func fileCompiles(path string) error {
 	return err
 }
 
+// defineExternals declares the external variables that common public rulesets
+// reference, so files using them COMPILE instead of being skipped:
+//   - filename/filepath/extension/filetype/owner — THOR/Loki (signature-base);
+//     empty defaults, their path conditions simply never match raw mail bytes.
+//   - VBA — Didier's vba.yara (`VBA and any of (...)`); default false so the rule
+//     is inert on raw bytes, and Scan flips it true ONLY for decompressed macro
+//     streams (see scanOne). This must mirror compile-rules.sh's yarac `-d` flags
+//     so the precompiled .yac and this in-process path behave identically.
+func defineExternals(c *yara.Compiler) {
+	_ = c.DefineVariable("VBA", false)
+	for _, v := range []string{"filename", "filepath", "extension", "filetype", "owner"} {
+		_ = c.DefineVariable(v, "")
+	}
+}
+
 // Scan runs the active rule set over buf and returns the matched rules. It is
 // safe for concurrent use. A scan failure (timeout, libyara error) returns the
 // error; the server treats that as "no match" but logs it, so a scanner problem
 // never blocks mail (fail-open, matching the gozer contract).
+//
+// Beyond the raw bytes, Scan also matches against any plaintext hidden inside an
+// OLE2/OOXML container — the decompressed VBA macro source — which the keyword
+// rules cannot see in the compressed original. The raw bytes are scanned first
+// (file-format/structural rules need them); each extracted macro stream is then
+// scanned and its matches merged in. Extraction is best-effort and fail-open:
+// for a non-document, or on any extract/sub-scan failure, the raw verdict stands
+// and nothing is lost.
 func (s *Scanner) Scan(buf []byte) ([]Match, error) {
 	rules := s.rules.Load()
 	if rules == nil {
 		return nil, fmt.Errorf("no rules loaded")
 	}
-	var mr yara.MatchRules
-	// ScanMem takes a per-scan wall-clock budget; yara.MatchRules implements
-	// ScanCallback and collects the matched rules. flags=0 = default scan.
-	if err := rules.ScanMem(buf, 0, s.scanTimeout, &mr); err != nil {
+	// One wall-clock budget for the WHOLE request (raw + every extracted stream),
+	// not per-scan: a hostile document with up to maxStreams macro modules must
+	// not be able to spend scanTimeout × N and monopolize a worker far past the
+	// rspamd/backend timeout. A zero/negative scanTimeout means "no limit" (yara
+	// convention), so the deadline is disabled then.
+	var deadline time.Time
+	if s.scanTimeout > 0 {
+		deadline = time.Now().Add(s.scanTimeout)
+	}
+
+	// Raw bytes first. A failure here is the scanner's verdict (propagated,
+	// fail-open at the server) — unchanged behaviour for non-documents.
+	out, err := s.scanOne(rules, buf, false, s.scanTimeout)
+	if err != nil {
 		return nil, err
+	}
+	// Pre-extract any OLE2/OOXML macro source and account for it. The flags feed
+	// /metrics so this path is observable; the streams are scanned below. The
+	// same overall deadline bounds extraction time, not just the libyara scans.
+	res := extract.Extract(buf, deadline)
+	if res.IsDoc {
+		s.exDocs.Add(1)
+	}
+	if res.Encrypted {
+		s.exEncrypted.Add(1)
+	}
+	if res.Failed {
+		s.exFailed.Add(1)
+	}
+	if res.Panicked {
+		s.exPanicked.Add(1)
+	}
+	if n := len(res.Streams); n > 0 {
+		s.exMacroDocs.Add(1)
+		s.exStreams.Add(uint64(n))
+	}
+	// Enrich with the decompressed macro source. A sub-scan error must NOT
+	// discard the matches already found on the raw bytes, so it is logged and
+	// skipped rather than failing the whole scan.
+	for _, stream := range res.Streams {
+		budget := s.scanTimeout
+		if !deadline.IsZero() {
+			if budget = time.Until(deadline); budget <= 0 {
+				s.logf("scan budget exhausted; %d macro streams left unscanned", len(res.Streams))
+				break
+			}
+		}
+		// VBA=true so the macro-keyword rules (Didier vba.yara: `VBA and any of
+		// (...)`) fire on this decompressed source — they are inert on raw bytes.
+		m, serr := s.scanOne(rules, stream, true, budget)
+		if serr != nil {
+			s.logf("scan of extracted macro stream failed (raw verdict kept): %v", serr)
+			continue
+		}
+		out = mergeMatches(out, m)
+	}
+	return out, nil
+}
+
+// scanOne runs the rule set over a single buffer and maps libyara's matches to
+// our Match type. It is the format-blind primitive: it knows nothing about
+// documents, so the scanner core stays generic and all container handling lives
+// in Scan (and the extract package).
+//
+// vba selects the value of the external `VBA` variable for this scan: false for
+// raw bytes, true for a decompressed macro stream. Overriding a per-scan
+// external variable requires a yara.Scanner (rules.ScanMem uses only the
+// compile-time default), so the raw path keeps the cheaper rules.ScanMem and
+// only the macro-stream path allocates a Scanner.
+func (s *Scanner) scanOne(rules *yara.Rules, buf []byte, vba bool, timeout time.Duration) ([]Match, error) {
+	var mr yara.MatchRules
+	if vba {
+		sc, err := yara.NewScanner(rules)
+		if err != nil {
+			return nil, err
+		}
+		defer sc.Destroy()
+		if err := sc.DefineVariable("VBA", true); err != nil {
+			return nil, err
+		}
+		sc.SetTimeout(timeout).SetCallback(&mr)
+		if err := sc.ScanMem(buf); err != nil {
+			return nil, err
+		}
+	} else {
+		// flags=0 = default scan; VBA keeps its compile-time default (false).
+		if err := rules.ScanMem(buf, 0, timeout, &mr); err != nil {
+			return nil, err
+		}
 	}
 	out := make([]Match, 0, len(mr))
 	for _, m := range mr {
@@ -235,4 +417,26 @@ func (s *Scanner) Scan(buf []byte) ([]Match, error) {
 		out = append(out, Match{Rule: m.Rule, Tags: m.Tags, Meta: meta})
 	}
 	return out, nil
+}
+
+// mergeMatches appends matches found in an extracted macro stream to the
+// raw-scan matches, skipping any rule already reported so a rule that fires on
+// both the container and its decompressed macro is listed once. Raw matches
+// keep their position; new ones are appended in stream order.
+func mergeMatches(into, more []Match) []Match {
+	if len(more) == 0 {
+		return into
+	}
+	seen := make(map[string]struct{}, len(into)+len(more))
+	for i := range into {
+		seen[into[i].Rule] = struct{}{}
+	}
+	for _, m := range more {
+		if _, dup := seen[m.Rule]; dup {
+			continue
+		}
+		seen[m.Rule] = struct{}{}
+		into = append(into, m)
+	}
+	return into
 }

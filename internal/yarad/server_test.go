@@ -2,6 +2,7 @@ package yarad
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,84 @@ import (
 	"testing"
 	"time"
 )
+
+func get(s *Server, path string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+	return w
+}
+
+// /ready is readiness (rules loaded AND not draining); /health is liveness and
+// must stay 200 through a drain so the container isn't killed mid-shutdown.
+func TestReadyVsHealth(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1}, "tok")
+	if w := get(s, "/ready"); w.Code != http.StatusOK {
+		t.Errorf("ready (loaded): %d want 200", w.Code)
+	}
+	s.draining.Store(true)
+	if w := get(s, "/ready"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("ready (draining): %d want 503", w.Code)
+	}
+	if w := get(s, "/health"); w.Code != http.StatusOK {
+		t.Errorf("health (draining): %d want 200 (liveness stays up while draining)", w.Code)
+	}
+}
+
+func TestReadyNoRules(t *testing.T) {
+	if w := get(newTestServer(&fakeEngine{count: 0}, "tok"), "/ready"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("ready (no rules): %d want 503", w.Code)
+	}
+}
+
+func TestVersionEndpoint(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 5, fp: "abc"}, "tok")
+	s.cfg.Version = "1.2.3"
+	w := get(s, "/version")
+	if w.Code != http.StatusOK {
+		t.Fatalf("version: %d", w.Code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["version"] != "1.2.3" {
+		t.Errorf("version = %v want 1.2.3", m["version"])
+	}
+	if m["extractor_version"] == "" || m["extractor_version"] == nil {
+		t.Error("extractor_version missing")
+	}
+}
+
+// A client that has already disconnected/timed out must not consume a scan: the
+// request is counted as canceled and the engine is never called.
+func TestScanClientCanceled(t *testing.T) {
+	eng := &fakeEngine{count: 1}
+	s := newTestServer(eng, "tok")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := httptest.NewRequest(http.MethodPost, "/scan", bytes.NewReader([]byte("body"))).WithContext(ctx)
+	r.Header.Set("Content-Length", "4")
+	r.Header.Set("X-YARAD-Token", "tok")
+	s.ServeHTTP(httptest.NewRecorder(), r)
+	if got := s.metrics.canceled.Load(); got != 1 {
+		t.Errorf("canceled=%d want 1", got)
+	}
+	if got := eng.scans.Load(); got != 0 {
+		t.Errorf("engine scanned for a canceled client: %d", got)
+	}
+}
+
+func TestShutdownSetsDraining(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1}, "tok")
+	// Shutdown before ListenAndServe has stored a server: returns nil, still
+	// flips draining so a subsequent /ready 503s.
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown before serve: %v", err)
+	}
+	if !s.draining.Load() {
+		t.Error("Shutdown did not set draining")
+	}
+}
 
 // fakeEngine exercises the HTTP layer without libyara: it returns canned
 // matches (or an error) for any input, and a fixed rule count.
@@ -30,8 +109,10 @@ func (f *fakeEngine) Scan(buf []byte) ([]Match, error) {
 	}
 	return f.matches, f.err
 }
-func (f *fakeEngine) RuleCount() int64    { return f.count }
-func (f *fakeEngine) Fingerprint() string { return f.fp }
+func (f *fakeEngine) RuleCount() int64               { return f.count }
+func (f *fakeEngine) Fingerprint() string            { return f.fp }
+func (f *fakeEngine) ExtractMetrics() ExtractMetrics { return ExtractMetrics{} }
+func (f *fakeEngine) ReloadMetrics() ReloadMetrics   { return ReloadMetrics{} }
 
 func newTestServer(eng ScanEngine, token string) *Server {
 	cfg := &Config{Token: token, MaxConcurrent: 4, MaxBody: 1 << 20, BackendTimeout: 0}

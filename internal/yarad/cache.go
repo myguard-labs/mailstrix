@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -141,6 +142,7 @@ func (c *lruCache) removeElement(el *list.Element) {
 type redisLayer struct {
 	rdb    *redis.Client
 	prefix string
+	br     redisBreaker
 }
 
 func newRedisLayer(cfg *Config) (*redisLayer, error) {
@@ -151,16 +153,34 @@ func newRedisLayer(cfg *Config) (*redisLayer, error) {
 	return &redisLayer{rdb: redis.NewClient(opt), prefix: cfg.RedisPrefix}, nil
 }
 
-// get/put fail open: any Redis error is logged-as-miss, never surfaced. The
-// budget is short so a slow/dead Redis cannot stall the hot path — a miss just
-// means we scan.
+// redisCallBudget bounds one Redis round-trip. It is deliberately short because
+// the L2 op currently runs while a scan slot is held; the breaker below makes a
+// genuinely dead Redis stop costing even this, after a few trips.
+const redisCallBudget = 150 * time.Millisecond
+
+// get/put fail open: any Redis error is treated as a miss, never surfaced. A
+// blackholed Redis used to collapse throughput because every GET/PUT blocked the
+// full budget while a scan slot was held; the circuit breaker trips after a run
+// of failures and then short-circuits all Redis ops for a cooldown, so a dead
+// Redis becomes an instant miss instead of a backpressure source.
 func (r *redisLayer) get(key string) ([]Match, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	if !r.br.allow() {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), redisCallBudget)
 	defer cancel()
 	b, err := r.rdb.Get(ctx, r.prefix+key).Bytes()
 	if err != nil {
+		// redis.Nil is a normal cache miss (Redis is healthy) — it must NOT count
+		// against the breaker; only real errors (timeout, refused) do.
+		if errors.Is(err, redis.Nil) {
+			r.br.ok()
+		} else {
+			r.br.fail()
+		}
 		return nil, false
 	}
+	r.br.ok()
 	var m []Match
 	if json.Unmarshal(b, &m) != nil {
 		return nil, false
@@ -169,11 +189,57 @@ func (r *redisLayer) get(key string) ([]Match, bool) {
 }
 
 func (r *redisLayer) put(key string, matches []Match, ttl time.Duration) {
+	if !r.br.allow() {
+		return
+	}
 	b, err := json.Marshal(matches)
 	if err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), redisCallBudget)
 	defer cancel()
-	_ = r.rdb.Set(ctx, r.prefix+key, b, ttl).Err()
+	if err := r.rdb.Set(ctx, r.prefix+key, b, ttl).Err(); err != nil {
+		r.br.fail()
+	} else {
+		r.br.ok()
+	}
+}
+
+// redisBreaker is a minimal circuit breaker: after breakerTrip consecutive
+// failures it opens for breakerCooldown, during which allow() returns false and
+// all Redis ops are skipped (instant miss). After the cooldown it half-opens —
+// allow() returns true again and the next op re-probes, re-opening on failure or
+// resetting on success.
+type redisBreaker struct {
+	mu        sync.Mutex
+	fails     int
+	openUntil time.Time
+}
+
+const (
+	breakerTrip     = 5
+	breakerCooldown = 5 * time.Second
+)
+
+func (b *redisBreaker) allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !time.Now().Before(b.openUntil)
+}
+
+func (b *redisBreaker) ok() {
+	b.mu.Lock()
+	b.fails = 0
+	b.openUntil = time.Time{}
+	b.mu.Unlock()
+}
+
+func (b *redisBreaker) fail() {
+	b.mu.Lock()
+	b.fails++
+	if b.fails >= breakerTrip {
+		b.openUntil = time.Now().Add(breakerCooldown)
+		b.fails = 0
+	}
+	b.mu.Unlock()
 }

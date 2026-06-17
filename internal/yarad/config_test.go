@@ -51,6 +51,37 @@ func TestLoadConfigEnvOverride(t *testing.T) {
 	}
 }
 
+// YARAD_MAX_CONCURRENT="auto" (any case) must resolve to the CPU count, the same
+// as leaving it unset, so operators can write the literal default explicitly.
+// The admission gate defaults to 2× scan concurrency, honours an explicit value,
+// and is bumped up if set below scan concurrency (which would cap scan slots).
+func TestMaxInflightDefault(t *testing.T) {
+	c := &Config{MaxConcurrent: 4}
+	c.sanitize()
+	if c.MaxInflight != 8 {
+		t.Errorf("default MaxInflight=%d want 8 (2×4)", c.MaxInflight)
+	}
+	c = &Config{MaxConcurrent: 4, MaxInflight: 20}
+	c.sanitize()
+	if c.MaxInflight != 20 {
+		t.Errorf("explicit MaxInflight=%d want 20", c.MaxInflight)
+	}
+	c = &Config{MaxConcurrent: 10, MaxInflight: 3}
+	c.sanitize()
+	if c.MaxInflight != 20 {
+		t.Errorf("MaxInflight below concurrency=%d want 20 (bumped)", c.MaxInflight)
+	}
+}
+
+func TestLoadConfigMaxConcurrentAuto(t *testing.T) {
+	for _, v := range []string{"auto", "AUTO", "Auto"} {
+		t.Setenv("YARAD_MAX_CONCURRENT", v)
+		if c := LoadConfig(); c.MaxConcurrent != runtime.NumCPU() {
+			t.Errorf("%q -> MaxConcurrent=%d, want %d", v, c.MaxConcurrent, runtime.NumCPU())
+		}
+	}
+}
+
 func TestEnvOrFile(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "tok")

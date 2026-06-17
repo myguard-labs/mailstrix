@@ -19,8 +19,15 @@ yara {
   # yarad endpoint — IPv4, not a docker name (rspamd's RBL-only resolver can't
   # resolve container names). Match the address yarad binds on the shared net.
   url = "http://172.30.0.43:8079/scan";
-  token = "change-me";          # must equal yarad's YARAD_TOKEN (set on host)
-  timeout = 5.0;
+  # Shared secret = yarad's YARAD_TOKEN. Prefer token_file (a mounted 0444 secret)
+  # over an inline token so it never lives in config; if both are set token_file
+  # wins. The plugin warns at startup if the token is empty or still "change-me".
+  # token = "change-me";
+  token_file = "/etc/rspamd/yarad.token";
+  # Must cover yarad's worst case = YARAD_BACKEND_TIMEOUT + YARAD_SCAN_TIMEOUT.
+  # Keep yarad's two timeouts summing to <= this (e.g. on yarad set
+  # BACKEND_TIMEOUT=2 + SCAN_TIMEOUT=8 = 10s) so scans aren't abandoned mid-run.
+  timeout = 10.0;
   max_size = 8388608;
   symbol = "YARA_MATCH";
   scan_message = true;

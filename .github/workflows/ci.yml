@@ -38,12 +38,13 @@ jobs:
           YAR
           docker run -d --name yc -e YARAD_TOKEN=ci -e YARAD_RULES= -e YARAD_RULES_DIR=/r \
             -v "$PWD/rules:/r:ro" -p 18079:8079 yarad:ci
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' yc)" = healthy ] && break; sleep 1
           done
           [ "$(docker inspect -f '{{.State.Health.Status}}' yc)" = healthy ] || { docker logs yc; exit 1; }
 
           # build the EICAR body at runtime (don't ship the literal signature)
+          # shellcheck disable=SC2016  # the $-segments are the literal EICAR token, must NOT expand
           EICAR='X5O!P%@AP[4\PZX54(P^)7CC)7}'"\$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"'$H+H*'
 
           match=$(printf '%s' "$EICAR" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18079/scan)
@@ -56,6 +57,8 @@ jobs:
           [ "$code" = 401 ]
 
           curl -s http://127.0.0.1:18079/metrics | grep -q 'yarad_rules 1'
+          curl -s http://127.0.0.1:18079/ready | grep -q ready
+          curl -s http://127.0.0.1:18079/version | grep -q extractor_version
           docker rm -f yc
 
   lint:
@@ -82,6 +85,26 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec ./...
+
+  # Non-Go static analysis (workflows, shell, Dockerfile, dependency CVEs). Run
+  # via pinned upstream images instead of marketplace actions to avoid pulling
+  # extra third-party Actions into the supply chain.
+  scanners:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: actionlint (workflow syntax + embedded shell)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+      - name: shellcheck (rule fetch/compile scripts)
+        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:stable docker/fetch-rules.sh docker/compile-rules.sh
+      - name: hadolint (Dockerfile; .hadolint.yaml ignores)
+        run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint hadolint docker/Dockerfile
+      - name: osv-scanner (go.mod/go.sum dependency CVEs)
+        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:latest --lockfile=go.mod
 
   fuzz:
     runs-on: ubuntu-latest
@@ -95,6 +118,31 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev
       - name: fuzz smoke (untrusted /scan body)
         run: go test -run=x -fuzz='^FuzzScanBody$' -fuzztime=30s ./internal/yarad/
+      - name: fuzz smoke (extract — hostile OLE2/OOXML attachment)
+        run: go test -run=x -fuzz='^FuzzExtract$' -fuzztime=60s ./internal/extract/
+
+  # AddressSanitizer over the CGO/libyara surface: catches heap errors in our
+  # go-yara usage (Scanner lifecycle, buffer passing) that -race can't. Valgrind
+  # is deliberately NOT used — on a Go binary its runtime/GC trips constant false
+  # positives; ASAN via the Go toolchain is the right tool for the cgo boundary.
+  # The pure-Go extract package is also exercised (harmless, no cgo there).
+  asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go.sum
+      - name: install libyara + clang
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev clang
+      - name: go test -asan
+        env:
+          CC: clang
+          # libyara is not ASAN-built (dynamic apt package), so suppress the
+          # cross-DSO false positives while keeping real heap-error detection.
+          ASAN_OPTIONS: detect_leaks=0:detect_odr_violation=0
+        run: go test -asan ./...
 
   codeql:
     runs-on: ubuntu-latest

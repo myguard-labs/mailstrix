@@ -13,6 +13,35 @@ func newLRU(t *testing.T, ttl time.Duration, size int) Cache {
 	return NewCache(cfg, func(string, ...any) {})
 }
 
+func TestRedisBreaker(t *testing.T) {
+	var b redisBreaker
+	if !b.allow() {
+		t.Fatal("a fresh breaker must allow")
+	}
+	// A run of real failures trips it.
+	for i := 0; i < breakerTrip; i++ {
+		b.fail()
+	}
+	if b.allow() {
+		t.Error("breaker should be open after breakerTrip consecutive failures")
+	}
+	// A success closes it again.
+	b.ok()
+	if !b.allow() {
+		t.Error("ok() must close the breaker")
+	}
+	// After the cooldown elapses it half-opens (allows a probe) even while open.
+	for i := 0; i < breakerTrip; i++ {
+		b.fail()
+	}
+	b.mu.Lock()
+	b.openUntil = time.Now().Add(-time.Second) // simulate cooldown elapsed
+	b.mu.Unlock()
+	if !b.allow() {
+		t.Error("breaker should half-open once the cooldown has passed")
+	}
+}
+
 func TestCacheDisabledWhenTTLZero(t *testing.T) {
 	c := newLRU(t, 0, 10)
 	c.Put("k", []Match{{Rule: "R"}})

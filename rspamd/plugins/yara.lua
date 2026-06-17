@@ -31,7 +31,14 @@ local N = "yara"
 local settings = {
   url = "http://127.0.0.1:8079/scan",
   token = "",                  -- shared secret; must equal yarad's YARAD_TOKEN
-  timeout = 5.0,
+  token_file = "",             -- path to a file holding the token (preferred over
+                               -- inline `token`; keeps the secret out of config)
+  -- This must cover yarad's worst-case response: the time to acquire a scan slot
+  -- (YARAD_BACKEND_TIMEOUT) PLUS the scan itself (YARAD_SCAN_TIMEOUT). With yarad
+  -- defaults (6s + 10s) that is up to 16s; for mail, lower yarad's two timeouts
+  -- so their sum fits THIS budget (e.g. BACKEND_TIMEOUT=2 + SCAN_TIMEOUT=8 = 10s).
+  -- A plugin timeout below that sum just abandons scans that are still running.
+  timeout = 10.0,
   max_size = 8 * 1024 * 1024,  -- don't ship bodies larger than this to yarad
   symbol = "YARA_MATCH",
   -- What to scan. At least one must be true or the plugin does nothing.
@@ -74,7 +81,11 @@ local function post(task, buf, what, cb)
     headers["X-YARAD-Token"] = settings.token
   end
 
-  rspamd_http.request({
+  -- rspamd_http.request returns false when it could not even schedule the
+  -- request (e.g. bad URL, no resolver). In that case http_cb will NEVER fire, so
+  -- without this the per-job callback never runs, `pending` never reaches 0, and
+  -- the whole message's collected matches are silently dropped. Fail open here.
+  local scheduled = rspamd_http.request({
     task = task,
     url = settings.url,
     body = buf,
@@ -83,6 +94,10 @@ local function post(task, buf, what, cb)
     method = "POST",
     headers = headers,
   })
+  if not scheduled then
+    rspamd_logger.errx(task, "yarad request could not be scheduled (%s)", what)
+    return cb({})
+  end
 end
 
 local function check_cb(task)
@@ -139,6 +154,25 @@ end
 local opts = rspamd_config:get_all_opt(N)
 if opts then
   settings = lua_util.override_defaults(settings, opts)
+end
+
+-- Resolve the shared secret. A token_file (Docker secret / 0444 file) wins over
+-- an inline token so the secret never has to live in the config. Read at config
+-- time only; trailing whitespace/newline is trimmed.
+if settings.token_file and settings.token_file ~= "" then
+  local f = io.open(settings.token_file, "r")
+  if f then
+    local t = f:read("*a") or ""
+    f:close()
+    settings.token = t:gsub("%s+$", "")
+  else
+    rspamd_logger.errx(rspamd_config, "%s: cannot read token_file %s", N, settings.token_file)
+  end
+end
+if settings.token == "" then
+  rspamd_logger.warnx(rspamd_config, "%s: no token set (token/token_file); yarad will refuse all scans", N)
+elseif settings.token == "change-me" then
+  rspamd_logger.warnx(rspamd_config, "%s: token is the placeholder 'change-me'; set a real shared secret", N)
 end
 
 if not settings.scan_message and not settings.scan_parts then

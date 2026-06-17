@@ -23,7 +23,8 @@ type Config struct {
 	Host           string        // YARAD_HOST            (default 0.0.0.0)
 	Port           int           // YARAD_PORT            (default 8079)
 	BackendTimeout time.Duration // YARAD_BACKEND_TIMEOUT (default 6s)
-	MaxConcurrent  int           // YARAD_MAX_CONCURRENT  (default = CPU count)
+	MaxConcurrent  int           // YARAD_MAX_CONCURRENT  (default "auto" = CPU count)
+	MaxInflight    int           // YARAD_MAX_INFLIGHT    (default 2×MaxConcurrent); admission gate
 	MaxBody        int64         // YARAD_MAX_BODY bytes  (default 8 MiB)
 	Token          string        // YARAD_TOKEN[_FILE]    (required for /scan)
 
@@ -49,6 +50,8 @@ type Config struct {
 
 	Verbose   bool // YARAD_VERBOSE
 	LogStdout bool // YARAD_LOG_STDOUT — info/access to stdout; errors stay stderr
+
+	Version string // build version string, set by main (not from env); for /version
 }
 
 // LoadConfig reads the environment into a Config, applying documented defaults,
@@ -58,7 +61,8 @@ func LoadConfig() *Config {
 		Host:           envStr("YARAD_HOST", "0.0.0.0"),
 		Port:           envInt("YARAD_PORT", 8079),
 		BackendTimeout: envDur("YARAD_BACKEND_TIMEOUT", 6),
-		MaxConcurrent:  envInt("YARAD_MAX_CONCURRENT", runtime.NumCPU()),
+		MaxConcurrent:  envIntAuto("YARAD_MAX_CONCURRENT", runtime.NumCPU()),
+		MaxInflight:    envIntAuto("YARAD_MAX_INFLIGHT", 0), // 0 -> sanitize sets 2×MaxConcurrent
 		MaxBody:        envInt64("YARAD_MAX_BODY", 8*1024*1024),
 		Token:          envOrFile("YARAD_TOKEN"),
 		RulesDir:       envStr("YARAD_RULES_DIR", "/rules"),
@@ -85,6 +89,12 @@ func (c *Config) sanitize() {
 	}
 	if c.MaxConcurrent < 1 {
 		c.MaxConcurrent = clamp("YARAD_MAX_CONCURRENT", c.MaxConcurrent, runtime.NumCPU())
+	}
+	// The admission gate bounds in-flight buffers and must be at least the scan
+	// concurrency (otherwise scan slots could never all be used). Default to 2×
+	// so a slow body read or slow Redis L2 lookup can't starve scan slots.
+	if c.MaxInflight < c.MaxConcurrent {
+		c.MaxInflight = c.MaxConcurrent * 2
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		c.Port = clamp("YARAD_PORT", c.Port, 8079)
@@ -115,7 +125,7 @@ func (c *Config) sanitize() {
 // file (Docker secrets / the 0444 token file pattern) instead of the env.
 func envOrFile(name string) string {
 	if f := os.Getenv(name + "_FILE"); f != "" {
-		if b, err := os.ReadFile(f); err == nil { // #nosec G304 -- operator-provided secret path (*_FILE env), not attacker input
+		if b, err := os.ReadFile(f); err == nil { // #nosec G304 G703 -- operator-provided secret path (*_FILE env), not attacker input
 			return strings.TrimSpace(string(b))
 		}
 	}
@@ -131,6 +141,22 @@ func envStr(name, def string) string {
 
 func envInt(name string, def int) int {
 	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name))); err == nil {
+		return n
+	}
+	return def
+}
+
+// envIntAuto is envInt that also accepts the literal "auto" (case-insensitive),
+// returning the caller's default. Used for YARAD_MAX_CONCURRENT so operators can
+// write "auto" to mean "size to the CPU count" — which sets the number of scans
+// run in parallel (and thus the effective scanning thread count) — instead of
+// hard-coding a number. Empty or invalid also falls back to the default.
+func envIntAuto(name string, def int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" || strings.EqualFold(v, "auto") {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil {
 		return n
 	}
 	return def
