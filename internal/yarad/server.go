@@ -374,8 +374,10 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte) ([]Ma
 			s.errf("/scan %dB no scan slot within budget (fail-open)", len(buf))
 			return nil
 		}
-		defer func() { <-s.sem }()
-		m, scanErr := s.dispatch(buf)
+		m, scanErr := func() ([]Match, error) {
+			defer func() { <-s.sem }()
+			return s.dispatch(buf)
+		}()
 		if scanErr != nil {
 			// Fail open: a scan error is "no match" to the plugin so a scanner
 			// problem never blocks mail. A failed scan is NOT cached (don't
@@ -384,6 +386,9 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte) ([]Ma
 			s.errf("/scan %dB scan error (fail-open): %v", len(buf), scanErr)
 			return nil
 		}
+		// Cache PUT, including optional Redis L2 SET, runs after the scan slot is
+		// released. A healthy-but-slow Redis may still delay this response a little
+		// but it no longer blocks unrelated libyara work.
 		s.cache.Put(key, m)
 		return m
 	})
