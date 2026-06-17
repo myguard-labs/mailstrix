@@ -294,7 +294,8 @@ detector). CI fails on a bad commit before an image is ever published:
 # unit tests + go vet, against the same statically-linked libyara as production:
 docker build --target test -f docker/Dockerfile -t yarad-test .
 
-# the production image (distroless, nonroot, ~74 MB):
+# the production image (distroless, nonroot, ~74 MB: ~37 MB compiled rules +
+# ~25 MB distroless base/libs + ~8 MB Go/libyara binary):
 docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
     --build-arg CACHEBUST=$(date +%s) .
 ```
