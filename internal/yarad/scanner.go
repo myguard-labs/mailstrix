@@ -56,6 +56,7 @@ type Scanner struct {
 	// Uint64 (monotonic counters) so /metrics needs no signed→unsigned cast.
 	exDocs, exStreams, exMacroDocs, exFailed, exPanicked, exEncrypted atomic.Uint64
 	exMSI                                                             atomic.Uint64 // OLE2 buffers recognised as MSI installers
+	exMSG                                                             atomic.Uint64 // OLE2 buffers recognised as Outlook .msg (attachments extracted)
 	exEncodedScript                                                   atomic.Uint64 // buffers with >=1 decoded MS-Script-Encoder block
 	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
 
@@ -99,6 +100,7 @@ type ExtractMetrics struct {
 	Panicked  uint64 // parser panics recovered (subset of Failed)
 	Encrypted uint64 // ECMA-376 encrypted OOXML (not decrypted)
 	MSI       uint64 // OLE2 buffers recognised as MSI installers (streams dumped)
+	MSG       uint64 // OLE2 buffers recognised as Outlook .msg (attachments extracted)
 	EncScript uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
 	// StreamMatches counts rule hits attributable ONLY to an extracted stream
 	// (macro/MSI/VBE), i.e. rules that did NOT already fire on the raw bytes —
@@ -116,6 +118,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		Panicked:      s.exPanicked.Load(),
 		Encrypted:     s.exEncrypted.Load(),
 		MSI:           s.exMSI.Load(),
+		MSG:           s.exMSG.Load(),
 		EncScript:     s.exEncodedScript.Load(),
 		StreamMatches: s.exStreamMatches.Load(),
 	}
@@ -569,6 +572,9 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	}
 	if res.IsMSI {
 		s.exMSI.Add(1)
+	}
+	if res.IsMSG {
+		s.exMSG.Add(1)
 	}
 	if res.EncodedScript {
 		s.exEncodedScript.Add(1)
