@@ -464,10 +464,12 @@ The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
 - [ ] CHM / CAB / MSIX extraction
 - [ ] Extractor sandbox hardening (seccomp/rlimits) — after more parsers land
 - [ ] Batch `/scan` endpoint (collapse N part round-trips)
-- [ ] macOS `.dmg`/`.pkg`/`.mpkg` → Mach-O; Android `.apk` → dex/manifest
 - [ ] PE-overlay bytes; `.url`/`.settingcontent-ms` launcher fields
 
-> iOS/iPhone is intentionally out of scope — no executable email vector.
+> iOS/iPhone is intentionally out of scope — no executable email vector. The
+> same reasoning drops macOS `.dmg`/`.pkg` (a disk-image/installer parse, like
+> the reverted ISO/UDF family) and Android `.apk` (a zip already covered by the
+> archive path; dex/manifest has no executable mail vector).
 
 ## See also
 
