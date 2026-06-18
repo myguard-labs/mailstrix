@@ -101,13 +101,28 @@ RUN YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_RE
         INQUEST="${INQUEST}" INQUEST_REF="${INQUEST_REF}" \
         /usr/local/bin/fetch-rules.sh /rules/src \
     && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
-    && rm -rf /rules/src
+    && rm -rf /rules/src \
+    && install -d -o 65532 -g 65532 /var/cache/yarad   # writable cache for nonroot (uid 65532)
 
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot AS final
 COPY --from=build /out/yarad /usr/local/bin/yarad
-COPY --from=rules --chown=nonroot:nonroot /rules/compiled.yac /rules/compiled.yac
-ENV YARAD_RULES=/rules/compiled.yac \
+# The compiled bundle ships as a READ-ONLY seed under /usr/share/yarad. At
+# startup yarad copies it into the writable cache dir (YARAD_CACHE_DIR) when that
+# is empty/unreadable and serves from there, so a wiped cache bindmount self-heals
+# to this tested ruleset and a later `--fetch-rules` can refresh the cache copy
+# without touching the image. Mount /var/cache/yarad writable (the rootfs stays
+# read-only); on a tmpfs mount it simply reseeds from /usr/share each boot.
+# Owned root on purpose: the seed is the trust anchor / immutable fallback, so the
+# nonroot service user must NOT be able to modify it even on a writable overlay
+# rootfs (only /var/cache/yarad is service-writable). No --chown = root:root; the
+# file stays world-readable (0644 from yarac) so nonroot can still read it to seed.
+COPY --from=rules /rules/compiled.yac /usr/share/yarad/compiled.yac
+# A writable cache dir owned by nonroot, so yarad can seed even with no bindmount
+# (a bindmount or tmpfs at /var/cache/yarad simply overlays it).
+COPY --from=rules --chown=nonroot:nonroot /var/cache/yarad /var/cache/yarad
+ENV YARAD_SEED_RULES=/usr/share/yarad/compiled.yac \
+    YARAD_CACHE_DIR=/var/cache/yarad \
     YARAD_HOST=0.0.0.0 \
     YARAD_PORT=8079
 EXPOSE 8079

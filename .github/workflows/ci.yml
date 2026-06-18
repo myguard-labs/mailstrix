@@ -36,7 +36,9 @@ jobs:
             condition: $e
           }
           YAR
-          docker run -d --name yc -e YARAD_TOKEN=ci -e YARAD_RULES= -e YARAD_RULES_DIR=/r \
+          # This case tests the compile-from-source-dir path; disable the rule
+          # cache (YARAD_CACHE_DIR=) so it loads /r directly.
+          docker run -d --name yc -e YARAD_TOKEN=ci -e YARAD_RULES= -e YARAD_RULES_DIR=/r -e YARAD_CACHE_DIR= \
             -v "$PWD/rules:/r:ro" -p 18079:8079 yarad:ci
           for _ in $(seq 1 30); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' yc)" = healthy ] && break; sleep 1
@@ -60,6 +62,36 @@ jobs:
           curl -s http://127.0.0.1:18079/ready | grep -q ready
           curl -s http://127.0.0.1:18079/version | grep -q extractor_version
           docker rm -f yc
+
+      - name: smoke (seed-on-startup — default cache config + wiped-cache self-heal)
+        run: |
+          set -euo pipefail
+          # A named volume for the cache so we can wipe it from the host side
+          # (the distroless image has no shell/rm to do it in-container).
+          docker volume create yc-cache >/dev/null
+          # Default config: no YARAD_RULES/_DIR overrides, so the image seeds
+          # /var/cache/yarad from the baked /usr/share/yarad seed and serves it.
+          docker run -d --name ys -e YARAD_TOKEN=ci -v yc-cache:/var/cache/yarad \
+            -p 18080:8079 yarad:ci
+          for _ in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' ys)" = healthy ] && break; sleep 1
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' ys)" = healthy ] || { docker logs ys; exit 1; }
+          docker logs ys 2>&1 | grep -q 'seeded rules cache'
+          rules=$(curl -s http://127.0.0.1:18080/metrics | grep '^yarad_rules ' | awk '{print $2}')
+          echo "seeded rules: $rules"; [ "${rules:-0}" -gt 0 ]
+
+          # Self-heal: wipe the cache volume from the host, restart; it must reseed.
+          docker stop ys >/dev/null
+          docker run --rm -v yc-cache:/c busybox sh -c 'rm -rf /c/*'
+          docker start ys >/dev/null
+          for _ in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' ys)" = healthy ] && break; sleep 1
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' ys)" = healthy ] || { docker logs ys; exit 1; }
+          docker logs ys 2>&1 | grep -c 'seeded rules cache' | grep -q 2  # seeded again after wipe
+          curl -s http://127.0.0.1:18080/ready | grep -q ready
+          docker rm -f ys; docker volume rm yc-cache
 
   lint:
     runs-on: ubuntu-latest

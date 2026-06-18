@@ -35,6 +35,17 @@ type Config struct {
 	RulesDir  string // YARAD_RULES_DIR  (default /rules)
 	RulesPath string // YARAD_RULES      (optional precompiled bundle)
 
+	// CacheDir is the writable directory yarad keeps its live, updatable rule
+	// bundle in (and later the abuse.ch feed snapshots). SeedRules is the baked,
+	// read-only compiled .yac shipped in the image. On startup, when SeedRules is
+	// set and CacheDir/compiled.yac is missing or unreadable, the seed is copied
+	// into the cache and loaded from there — so a fresh deploy (or a wiped
+	// bindmount) always self-heals to a known-good tested ruleset with no network.
+	// `--fetch-rules` (a later step) refreshes the cache copy. Both empty keeps the
+	// old behaviour (load RulesPath/RulesDir directly).
+	CacheDir  string // YARAD_CACHE_DIR  (e.g. /var/cache/yarad; empty = disabled)
+	SeedRules string // YARAD_SEED_RULES (baked read-only .yac to seed the cache from)
+
 	// RulesMaxAge flags the loaded ruleset as STALE once its on-disk mtime is
 	// older than this. The image bakes rules and a daily rebuild refreshes them;
 	// if that rebuild silently breaks (fetch failed, image not redeployed) the
@@ -104,6 +115,8 @@ func LoadConfig() *Config {
 		Token:          envOrFile("YARAD_TOKEN"),
 		RulesDir:       envStr("YARAD_RULES_DIR", "/rules"),
 		RulesPath:      strings.TrimSpace(os.Getenv("YARAD_RULES")),
+		CacheDir:       strings.TrimSpace(os.Getenv("YARAD_CACHE_DIR")),
+		SeedRules:      strings.TrimSpace(os.Getenv("YARAD_SEED_RULES")),
 		RulesMaxAge:    envDur("YARAD_RULES_MAX_AGE", 0),
 		ScanTimeout:    envDur("YARAD_SCAN_TIMEOUT", 8),
 		CacheTTL:       envDur("YARAD_CACHE_TTL", 600),

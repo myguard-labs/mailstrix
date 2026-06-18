@@ -121,6 +121,8 @@ func cmdServe(args []string) int {
 	fs.StringVar(&cfg.Token, "token", cfg.Token, "shared-secret for /scan (YARAD_TOKEN[_FILE])")
 	fs.StringVar(&cfg.RulesDir, "rules-dir", cfg.RulesDir, "dir of *.yar/*.yara to compile (YARAD_RULES_DIR)")
 	fs.StringVar(&cfg.RulesPath, "rules", cfg.RulesPath, "precompiled .yac bundle, wins over -rules-dir (YARAD_RULES)")
+	fs.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "writable dir for the live rule bundle; seeded from -seed-rules when empty/unreadable (YARAD_CACHE_DIR)")
+	fs.StringVar(&cfg.SeedRules, "seed-rules", cfg.SeedRules, "baked read-only .yac used to (re)seed the cache (YARAD_SEED_RULES)")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "per-request logging (YARAD_VERBOSE)")
 	fs.BoolVar(&cfg.LogStdout, "log-stdout", cfg.LogStdout, "info/access logs to stdout; errors stay stderr (YARAD_LOG_STDOUT)")
 	if err := fs.Parse(args); err != nil {
@@ -128,6 +130,17 @@ func cmdServe(args []string) int {
 	}
 
 	logf := func(format string, a ...any) { log.Printf("[yarad] "+format, a...) }
+
+	// Seed-on-startup / self-heal: when a writable cache dir is configured, serve
+	// rules from it and reseed from the baked read-only bundle when the cache is
+	// missing or unreadable (fresh deploy / wiped bindmount). No-op when no cache
+	// dir is set. A seeding failure is not fatal here — fall back to whatever
+	// RulesPath/RulesDir NewScanner can load, so a misconfigured cache never takes
+	// the scanner fully offline.
+	if err := yarad.EnsureCachedRules(cfg, logf); err != nil {
+		logf("rules cache unavailable, falling back to baked rules: %v", err)
+	}
+
 	scanner, err := yarad.NewScanner(cfg, logf)
 	if err != nil {
 		log.Printf("[yarad] FATAL: cannot load rules: %v", err)
