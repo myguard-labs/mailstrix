@@ -313,10 +313,25 @@ func TestAuth(t *testing.T) {
 	}
 }
 
-func TestAuthNotConfigured503(t *testing.T) {
+// With no token configured the scanner runs OPEN: /scan accepts requests with or
+// without an auth header (intended for a trusted private network). A stray header
+// is ignored, not an error.
+func TestScanOpenWhenNoToken(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1}, "")
-	if w := post(s, "x", map[string]string{"X-YARAD-Token": "anything"}); w.Code != 503 {
-		t.Errorf("no token configured = %d, want 503", w.Code)
+	if w := post(s, "x", nil); w.Code != 200 {
+		t.Errorf("open scanner, no header = %d, want 200", w.Code)
+	}
+	if w := post(s, "x", map[string]string{"X-YARAD-Token": "anything"}); w.Code != 200 {
+		t.Errorf("open scanner, stray header = %d, want 200", w.Code)
+	}
+}
+
+// MetricsAuth can't gate anything when there's no token; /metrics stays open.
+func TestMetricsAuthNoopWithoutToken(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1}, "")
+	s.cfg.MetricsAuth = true
+	if w := get(s, "/metrics"); w.Code != 200 {
+		t.Errorf("metrics with auth-on but no token = %d, want 200 (nothing to gate)", w.Code)
 	}
 }
 

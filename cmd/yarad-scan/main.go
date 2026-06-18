@@ -60,7 +60,7 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("yarad-scan", flag.ContinueOnError)
 	url := fs.String("url", envOr("YARAD_URL", ""), "base URL of the yarad service, e.g. http://127.0.0.1:8079 (YARAD_URL)")
 	tokenFile := fs.String("token-file", "", "file holding the shared secret (preferred; not visible in the process list). Falls back to YARAD_TOKEN")
-	token := fs.String("token", "", "shared secret (use -token-file or YARAD_TOKEN to avoid leaking it in the process list)")
+	token := fs.String("token", "", "shared secret, OPTIONAL — omit for a token-less yarad (use -token-file or YARAD_TOKEN, not -token, to keep it out of the process list)")
 	name := fs.String("filename", "", "attachment/message name sent as X-YARAD-Filename so name/extension-keyed rules fire")
 	timeout := fs.Duration("timeout", 10*time.Second, "HTTP request timeout")
 	maxBody := fs.Int64("max-body", 8<<20, "max bytes read from the input")
@@ -158,7 +158,12 @@ func postScan(base, token, name string, buf []byte, timeout time.Duration) ([]ma
 	if err != nil {
 		return nil, err
 	}
+	req.Close = true // one-shot CLI: close the connection, don't pool a keep-alive
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "yarad-scan/"+version)
+	// Token is optional: omit the header when empty so this works against an open
+	// (token-less) yarad too. When set, the server requires it.
 	if token != "" {
 		req.Header.Set("X-YARAD-Token", token)
 	}

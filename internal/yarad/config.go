@@ -143,6 +143,12 @@ func LoadConfig() *Config {
 // value cannot disable the service or crash it (negative concurrency panics
 // make(chan), an out-of-range port fails to bind). Each clamp is logged.
 func (c *Config) sanitize() {
+	// Auth is optional: the explicit sentinels normalise to an empty token so an
+	// operator can run an OPEN scanner on a trusted network (the server logs a
+	// loud warning). Done here so it covers both the env value and a -token flag
+	// (NewServer re-sanitizes after flags are applied).
+	c.Token = normalizeToken(c.Token)
+
 	clamp := func(name string, got, def int) int {
 		log.Printf("[yarad] WARNING: invalid %s=%d; using %d", name, got, def)
 		return def
@@ -179,6 +185,17 @@ func (c *Config) sanitize() {
 	if c.RulesMaxAge < 0 {
 		c.RulesMaxAge = 0 // negative is nonsensical; 0 disables the staleness check
 	}
+}
+
+// normalizeToken maps the explicit "no auth" sentinels (and an unset value) to
+// an empty token, so /scan runs OPEN. A real secret equal to one of these words
+// is not supported — use a longer, non-sentinel token.
+func normalizeToken(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "", "none", "off", "0", "disabled", "false":
+		return ""
+	}
+	return t
 }
 
 // --- env helpers (identical semantics to gozer) ---

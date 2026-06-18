@@ -24,9 +24,11 @@ YARAD_TIMEOUT="${YARAD_TIMEOUT:-10s}"
 
 # -fail-open (the default) makes a transport/HTTP error exit 0 so a scanner
 # outage never blocks or bounces mail. -quiet: rely on the exit code only.
-exec "$YARAD_SCAN_BIN" \
-    -url "$YARAD_URL" \
-    -token-file "$YARAD_TOKEN_FILE" \
-    -timeout "$YARAD_TIMEOUT" \
-    -fail-open \
-    -quiet
+# The token is OPTIONAL: only pass -token-file when it actually exists, so this
+# wrapper works against a token-less (open) yarad too — a missing token file
+# must not turn every delivery into an exit-2 "quarantine everything".
+set -- -url "$YARAD_URL" -timeout "$YARAD_TIMEOUT" -fail-open -quiet
+if [ -n "$YARAD_TOKEN_FILE" ] && [ -r "$YARAD_TOKEN_FILE" ]; then
+    set -- "$@" -token-file "$YARAD_TOKEN_FILE"
+fi
+exec "$YARAD_SCAN_BIN" "$@"

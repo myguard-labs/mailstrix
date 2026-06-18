@@ -142,9 +142,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) logStartup(addr string) {
-	if s.cfg.Token == "" {
-		s.errf("WARNING: no YARAD_TOKEN configured — /scan will refuse all requests (503). " +
-			"Set YARAD_TOKEN or YARAD_TOKEN_FILE.")
+	if !s.authRequired() {
+		s.errf("WARNING: no token set — /scan is OPEN (no authentication). Anyone who can "+
+			"reach %s can submit scans (CPU-costly). Intended only for a trusted private "+
+			"network; set YARAD_TOKEN or YARAD_TOKEN_FILE to require a shared secret.", addr)
 	}
 	cache := "off"
 	if s.cfg.CacheTTL > 0 {
@@ -155,7 +156,7 @@ func (s *Server) logStartup(addr string) {
 	}
 	s.logf("listening on %s (rules=%d, timeout=%s, scan_timeout=%s, max_concurrent=%d, max_inflight=%d, max_body=%dB, cache=%s ttl=%s size=%d, auth=%t)",
 		addr, s.engine.RuleCount(), s.cfg.BackendTimeout, s.cfg.ScanTimeout,
-		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, cache, s.cfg.CacheTTL, s.cfg.CacheSize, s.cfg.Token != "")
+		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, cache, s.cfg.CacheTTL, s.cfg.CacheSize, s.authRequired())
 
 	// Worst-case request-buffer memory: each in-flight scan can hold a full body
 	// plus its extracted macro streams, on top of the loaded-rules RSS. Surface
@@ -312,12 +313,10 @@ func (s *Server) serveVersion(w http.ResponseWriter) {
 const maxBodyHardLimit = 1 << 30 // 1 GiB
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
-	ok, configured := s.authed(r)
-	if !configured {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "yarad token not configured"})
-		return
-	}
-	if !ok {
+	// Auth is optional: with no token configured (YARAD_TOKEN unset / none / 0 /
+	// off), /scan is OPEN — intended only for a trusted private network, and
+	// flagged with a loud startup warning. With a token set, it is required.
+	if s.authRequired() && !s.authOK(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -495,27 +494,29 @@ func (s *Server) acquireOn(ctx context.Context, sem chan struct{}) bool {
 // /scan, so an accidentally-published 8079 doesn't leak rule count / fingerprint
 // / runtime behaviour. /health and /ready stay open either way (probes).
 func (s *Server) metricsAuthed(r *http.Request) bool {
-	if !s.cfg.MetricsAuth {
+	// Can't require a token that isn't set; an open scanner has nothing to gate.
+	if !s.cfg.MetricsAuth || !s.authRequired() {
 		return true
 	}
-	ok, configured := s.authed(r)
-	return ok && configured
+	return s.authOK(r)
 }
 
-// authed validates the shared secret. configured is false when no token is set
-// (caller returns 503); ok is the constant-time comparison result. Accepts the
-// token as a Bearer Authorization header or X-YARAD-Token.
-func (s *Server) authed(r *http.Request) (ok, configured bool) {
-	if s.cfg.Token == "" {
-		return false, false
-	}
+// authRequired reports whether a shared-secret gate is in force. False when no
+// token is configured (YARAD_TOKEN unset / none / 0 / off) — /scan is then OPEN
+// (a trusted-network deployment), flagged with a loud startup warning.
+func (s *Server) authRequired() bool { return s.cfg.Token != "" }
+
+// authOK validates the presented secret against the configured token in constant
+// time. Only meaningful when authRequired(). Accepts the token as a Bearer
+// Authorization header or X-YARAD-Token.
+func (s *Server) authOK(r *http.Request) bool {
 	presented := ""
 	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
 		presented = strings.TrimSpace(a[len("Bearer "):])
 	} else {
 		presented = strings.TrimSpace(r.Header.Get("X-YARAD-Token"))
 	}
-	return hmac.Equal([]byte(presented), []byte(s.cfg.Token)), true
+	return hmac.Equal([]byte(presented), []byte(s.cfg.Token))
 }
 
 func (s *Server) serveMetrics(w http.ResponseWriter) {

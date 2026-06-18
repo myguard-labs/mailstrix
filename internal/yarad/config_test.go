@@ -118,3 +118,24 @@ func TestEnvBool(t *testing.T) {
 		}
 	}
 }
+
+// TestTokenDisableSentinels: the explicit "no auth" sentinels (and unset)
+// normalise to an empty token so /scan runs open; a real secret is kept as-is.
+func TestTokenDisableSentinels(t *testing.T) {
+	for _, in := range []string{"", "none", "NONE", "off", "0", "disabled", "false", "  none  "} {
+		if got := normalizeToken(in); got != "" {
+			t.Errorf("normalizeToken(%q) = %q, want \"\" (auth disabled)", in, got)
+		}
+	}
+	for _, in := range []string{"s3cret", "hunter2", "none-but-longer"} {
+		if got := normalizeToken(in); got != in {
+			t.Errorf("normalizeToken(%q) = %q, want it kept", in, got)
+		}
+	}
+	// Round-trip through sanitize() (covers the flag path too).
+	c := &Config{Token: "none"}
+	c.sanitize()
+	if c.Token != "" {
+		t.Errorf("sanitize kept disable sentinel: %q", c.Token)
+	}
+}
