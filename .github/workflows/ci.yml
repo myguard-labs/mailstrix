@@ -125,6 +125,32 @@ jobs:
           echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
           docker rm -f yk
 
+      - name: smoke (OOXML remote-template-injection rule)
+        run: |
+          set -euo pipefail
+          # Load ONLY the new OOXML rule (isolated, cache off) so we test the
+          # rule itself, decoupled from the full baked bundle.
+          mkdir -p rules-ooxml
+          cp docker/local-rules/ooxml_template_injection.yara rules-ooxml/
+          docker run -d --name yo -e YARAD_TOKEN=ci -e YARAD_RULES= -e YARAD_RULES_DIR=/r -e YARAD_CACHE_DIR= \
+            -v "$PWD/rules-ooxml:/r:ro" -p 18083:8079 yarad:ci
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' yo)" = healthy ] && break; sleep 1
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' yo)" = healthy ] || { docker logs yo; exit 1; }
+
+          # Positive: synthetic body containing the OOXML-EXTERNAL-REL marker
+          # with an http:// target — must fire OOXML_Remote_Template.
+          # Built at runtime — no real maldoc shipped.
+          body=$(printf 'OOXML-EXTERNAL-REL attachedTemplate http://evil.example/t.dotm\n')
+          match=$(printf '%s' "$body" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18083/scan)
+          echo "match: $match"; grep -q OOXML_Remote_Template <<<"$match"
+
+          # Negative: plain body with no marker must NOT fire.
+          clean=$(printf 'just a plain document body\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18083/scan)
+          echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
+          docker rm -f yo
+
       - name: smoke (seed-on-startup — default cache config + wiped-cache self-heal)
         run: |
           set -euo pipefail

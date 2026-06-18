@@ -291,6 +291,14 @@ On top of the public sets, yarad bakes its own local heuristics from
   combined with a process-injection primitive (`VirtualAlloc`, `RtlMoveMemory`,
   `CreateThread`, a hook installer) — benign macros ~never allocate executable
   memory, so it scores higher.
+- `OOXML_Remote_Template` (`ooxml_template_injection.yara`) — **remote-template
+  injection** heuristic. The extractor reads every `*/_rels/*.rels` part inside
+  the OOXML zip and emits a synthetic `OOXML-EXTERNAL-REL <type> <target>` stream
+  for any relationship whose `TargetMode="External"` points to an `http://`,
+  `https://`, `smb://`, or UNC target. This rule matches that stream, covering
+  CVE-2017-0199-style attacks (Word fetches a remote `.dotm`/`.dotx` at open time
+  and executes its macros — no embedded macro in the original document). Score 50,
+  tagged `suspicious`, routes to `YARA_SUSPICIOUS`.
 
 All three are tagged `suspicious`, so they score in the `YARA_SUSPICIOUS` tier
 (tunable), run over the decompressed VBA cleartext, and are keyword heuristics —
@@ -413,6 +421,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] Container extraction: RTF `\objdata`, OLE Package, MSI, Outlook `.msg`, OneNote, PDF, `.lnk`, VBE/JSE, nested archives
 - [x] Local heuristic `Maldoc_AutoExec_Write_Execute` (mraptor-style autoexec∧write∧execute), baked from `docker/local-rules/`
 - [x] Local heuristics `Maldoc_Suspicious_VBA_Keywords` (olevba count heuristic) + `Maldoc_VBA_Shellcode_API` (Declare+injection-API)
+- [x] OOXML external-relationship scan (`*/_rels/*.rels`) → `OOXML_Remote_Template` rule (remote-template injection, T1221)
 - [x] Static single-layer decode pass (base64/hex/`StrReverse`) over raw + extracted streams, re-scanned (depth cap 1)
 - [x] Filename/extension externals (name-keyed rules) via `X-YARAD-Filename`
 - [x] URL defang + URLhaus URL/host lookup; MalwareBazaar attachment-hash lookup (cached feeds, fail-open)
@@ -424,6 +433,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 
 ### Planned
 
+- [x] OOXML remote-template injection (`*/_rels/*.rels` external-relationship scan + `OOXML_Remote_Template` rule)
 - [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
 - [ ] File-level fuzzy hashing (TLSH/ssdeep)
 - [ ] CHM / CAB / MSIX extraction

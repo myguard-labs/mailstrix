@@ -21,7 +21,9 @@ package extract
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/xml"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,7 +35,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -41,6 +43,12 @@ const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode"
 var (
 	oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
 	zipMagic = []byte{'P', 'K', 0x03, 0x04}
+
+	// relsPathRe matches OOXML relationship part paths: */_rels/*.rels or
+	// _rels/*.rels (root level). The anchored suffix avoids matching paths
+	// where "_rels/" appears only as a directory component somewhere other than
+	// the penultimate segment (e.g. foo/_rels_backup/x.rels would not match).
+	relsPathRe = regexp.MustCompile(`(^|/)_rels/[^/]+\.rels$`)
 )
 
 // Caps that bound the work a single hostile document can cause. VBA macro
@@ -63,6 +71,16 @@ const (
 	// maxTotalBin caps the cumulative decompressed bytes READ across all *.bin
 	// members — the per-member cap alone doesn't bound the sum.
 	maxTotalBin = 64 << 20
+
+	// --- OOXML relationship (.rels) extraction caps ---
+	// maxRelsFiles bounds how many */_rels/*.rels parts we parse per zip.
+	maxRelsFiles = 128
+	// maxBytesPerRels caps one .rels file read (a .rels with thousands of
+	// Relationship entries is anomalous; cap prevents a memory spike).
+	maxBytesPerRels = 512 << 10
+	// maxExternalRels bounds how many OOXML-EXTERNAL-REL synthetic streams we
+	// emit per document (one entry per suspicious external relationship).
+	maxExternalRels = 64
 
 	// --- MSI (Windows Installer) stream extraction caps ---
 	// An MSI is an OLE2 database; the interesting cleartext (CustomAction
@@ -493,6 +511,11 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time) {
 			break
 		}
 	}
+	// Scan every */_rels/*.rels part for external relationships (template
+	// injection, OLE object, frame, externalLink). Each hit appends a synthetic
+	// "OOXML-EXTERNAL-REL <Type> <Target>" stream so YARA rules can match it.
+	// Fail-open: malformed .rels parts are silently skipped.
+	fromOOXMLRels(zr, &out, deadline)
 	res.Streams = out
 	// Every .bin we tried failed to parse and nothing came out: a document that
 	// looks macro-bearing but yields no usable VBA (obfuscated/corrupt/hostile).
@@ -501,6 +524,120 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time) {
 	if attempted > 0 && len(out) == 0 && failedBins == attempted {
 		res.Failed = true
 	}
+}
+
+// externalRelSchemes lists the URI schemes that indicate an attacker-controlled
+// remote resource in an OOXML Relationship Target.
+//   - http://, https://: plain remote fetch (template injection, CVE-2017-0199)
+//   - smb://: explicit SMB (NTLM relay)
+//   - file://\\: UNC path encoded as file URI (file://\\server\share) — NTLM relay
+//   - \\\\: raw UNC path (\\server\share) — NTLM relay
+//
+// Local file:// paths (file:///C:/..., file:///tmp/...) are intentionally NOT
+// included: a local-path template is low-threat and high-FP.
+var externalRelSchemes = []string{"http://", "https://", "smb://", "file://\\\\", "\\\\"}
+
+// fromOOXMLRels reads every */_rels/*.rels part inside the already-opened zip,
+// parses the XML Relationship entries, and appends a synthetic
+// "OOXML-EXTERNAL-REL <Type> <Target>" []byte stream to *out for each entry
+// whose TargetMode is "External" and whose Target starts with a suspicious URI
+// scheme. The caller scans these streams alongside the VBA blobs so YARA rules
+// can detect remote-template injection and similar attacks.
+//
+// Fail-open contract: a .rels file that cannot be read or parsed is silently
+// skipped — it must never cause the whole extract to fail. Bounded by
+// maxRelsFiles + maxExternalRels + maxBytesPerRels.
+func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+	// xmlRel is the schema for a single <Relationship> element.
+	type xmlRel struct {
+		Type       string `xml:"Type,attr"`
+		Target     string `xml:"Target,attr"`
+		TargetMode string `xml:"TargetMode,attr"`
+	}
+	type xmlRels struct {
+		Rels []xmlRel `xml:"Relationship"`
+	}
+
+	relsSeen := 0
+	for _, f := range zr.File {
+		if expired(deadline) {
+			break
+		}
+		name := f.Name
+		// Match */_rels/*.rels or _rels/*.rels (root level).
+		if !relsPathRe.MatchString(name) {
+			continue
+		}
+		if relsSeen >= maxRelsFiles {
+			break
+		}
+		relsSeen++
+
+		if f.UncompressedSize64 > maxBytesPerRels {
+			continue // anomalously large .rels — skip
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesPerRels))
+		rc.Close() // #nosec G104 -- zip entry close; error is unrecoverable here
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+
+		var doc xmlRels
+		if err := xml.Unmarshal(raw, &doc); err != nil {
+			continue // malformed XML — fail-open
+		}
+
+		for _, rel := range doc.Rels {
+			if expired(deadline) {
+				break
+			}
+			if len(*out) >= maxStreams || countExternalRels(*out) >= maxExternalRels {
+				break
+			}
+			if !strings.EqualFold(rel.TargetMode, "External") {
+				continue
+			}
+			target := rel.Target
+			if !hasSuspiciousScheme(target) {
+				continue
+			}
+			// Build a short type label: use the last path segment of the Type URI.
+			typLabel := rel.Type
+			if idx := strings.LastIndex(typLabel, "/"); idx >= 0 {
+				typLabel = typLabel[idx+1:]
+			}
+			stream := []byte("OOXML-EXTERNAL-REL " + typLabel + " " + target)
+			*out = append(*out, stream)
+		}
+	}
+}
+
+// hasSuspiciousScheme reports whether target starts with one of the URI schemes
+// that can reach a remote or local-UNC resource in an OOXML document.
+func hasSuspiciousScheme(target string) bool {
+	lower := strings.ToLower(target)
+	for _, scheme := range externalRelSchemes {
+		if strings.HasPrefix(lower, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+// countExternalRels counts how many entries in streams start with the
+// OOXML-EXTERNAL-REL synthetic marker (used to enforce maxExternalRels).
+func countExternalRels(streams [][]byte) int {
+	n := 0
+	for _, s := range streams {
+		if bytes.HasPrefix(s, []byte("OOXML-EXTERNAL-REL ")) {
+			n++
+		}
+	}
+	return n
 }
 
 // readZipEntry reads one zip member fully, bounded by maxBytesPerBin so a member
