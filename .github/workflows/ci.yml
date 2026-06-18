@@ -227,6 +227,29 @@ jobs:
           echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
           docker rm -f yxlm
 
+      - name: smoke (VBA stomping rule)
+        run: |
+          set -euo pipefail
+          mkdir -p rules-stomp
+          cp docker/local-rules/vba_stomping.yara rules-stomp/
+          docker run -d --name ystomp -e YARAD_TOKEN=ci -e YARAD_RULES= -e YARAD_RULES_DIR=/r -e YARAD_CACHE_DIR= \
+            -v "$PWD/rules-stomp:/r:ro" -p 18088:8079 yarad:ci
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' ystomp)" = healthy ] && break; sleep 1
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' ystomp)" = healthy ] || { docker logs ystomp; exit 1; }
+
+          # Positive: synthetic body containing VBA-STOMPED marker — must fire VBA_Stomped.
+          # Built at runtime — no real maldoc shipped.
+          v=$(printf 'VBA-STOMPED Module1 pcode=512 src=0\n')
+          match=$(printf '%s' "$v" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18088/scan)
+          echo "match: $match"; grep -q VBA_Stomped <<<"$match"
+
+          # Negative: plain body with no marker must NOT fire.
+          clean=$(printf 'just a plain document body\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18088/scan)
+          echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
+          docker rm -f ystomp
+
       - name: smoke (intent rules — LOLBin/WMI/PowerShell/evasion)
         run: |
           set -euo pipefail
