@@ -267,12 +267,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-          cache-dependency-path: go.sum
-      - name: install libyara (CGO dep for build-based linters)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev
+      - uses: ./.github/actions/go-setup
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd internal)
@@ -320,12 +315,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-setup
         with:
-          go-version: "1.25"
-          cache-dependency-path: go.sum
-      - name: install libyara + clang
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev clang
+          packages: clang
       - name: go test -asan
         env:
           CC: clang
@@ -343,11 +335,6 @@ jobs:
       - uses: github/codeql-action/init@v3
         with:
           languages: go
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-          cache-dependency-path: go.sum
-      - name: install libyara
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev
+      - uses: ./.github/actions/go-setup
       - run: go build ./...
       - uses: github/codeql-action/analyze@v3

@@ -11,29 +11,60 @@ permissions:
   contents: write
 
 jobs:
+  # One runner per arch so the slow arm64 QEMU build runs in parallel with
+  # amd64 instead of after it (was a serial for-loop = sum of both).
   binaries:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v5
 
       - uses: docker/setup-qemu-action@v3   # arm64 emulation
       - uses: docker/setup-buildx-action@v3
 
-      - name: build binaries (amd64 + arm64)
+      - name: build binaries (${{ matrix.arch }})
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
-          for arch in amd64 arm64; do
-            docker buildx build \
-              --target bin \
-              --platform "linux/${arch}" \
-              --build-arg "VERSION=${VERSION}" \
-              --output "type=local,dest=dist/${arch}" \
-              -f docker/Dockerfile .
-            install -D "dist/${arch}/yarad" "out/yarad-linux-${arch}"
-            # yarad-scan: the lean, CGO-free Sieve/LDA client.
-            install -D "dist/${arch}/yarad-scan" "out/yarad-scan-linux-${arch}"
-          done
+          arch="${{ matrix.arch }}"
+          docker buildx build \
+            --target bin \
+            --platform "linux/${arch}" \
+            --build-arg "VERSION=${VERSION}" \
+            --output "type=local,dest=dist/${arch}" \
+            -f docker/Dockerfile .
+          install -D "dist/${arch}/yarad" "out/yarad-linux-${arch}"
+          # yarad-scan: the lean, CGO-free Sieve/LDA client.
+          install -D "dist/${arch}/yarad-scan" "out/yarad-scan-linux-${arch}"
+          ls -l out
+
+      - name: upload arch binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.arch }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5   # gh release needs repo context
+
+      - name: download arch binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: out/
+
+      - name: checksums
+        run: |
+          set -euo pipefail
           ( cd out && sha256sum yarad-linux-* yarad-scan-linux-* > SHA256SUMS )
           ls -l out
 

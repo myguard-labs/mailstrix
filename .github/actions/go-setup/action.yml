@@ -1,0 +1,22 @@
+name: Go + libyara setup
+description: >
+  Set up Go 1.25 (with go.sum module cache) and install libyara-dev — the CGO
+  dependency every build-based job needs. Optional extra apt packages via the
+  `packages` input (e.g. clang for the ASan job). Factored out so lint/asan/
+  codeql/fuzz share one definition instead of repeating setup-go + apt.
+
+inputs:
+  packages:
+    description: Extra apt packages to install alongside libyara-dev.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: "1.25"
+        cache-dependency-path: go.sum
+    - name: install libyara (CGO dep) ${{ inputs.packages }}
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev ${{ inputs.packages }}

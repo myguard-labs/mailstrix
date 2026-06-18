@@ -15,12 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-          cache-dependency-path: go.sum
-      - name: install libyara
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev
+      - uses: ./.github/actions/go-setup
       - name: fuzz (untrusted /scan body)
         run: go test -run=x -fuzz='^FuzzScanBody$' -fuzztime=5m ./internal/yarad/
       - name: fuzz (extract — hostile OLE2/OOXML attachment)
