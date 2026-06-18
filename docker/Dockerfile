@@ -84,6 +84,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates unzip \
     && rm -rf /var/lib/apt/lists/*
 COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/
+# Repo-tracked local rules (our own heuristics, e.g. the mraptor-style maldoc
+# rule) baked alongside the fetched public sets so they ship in the seed .yac.
+COPY docker/local-rules/ /usr/local/share/yarad-local-rules/
 RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh
 ARG CACHEBUST=unset
 ARG YARAFORGE_SET=core
@@ -103,6 +106,7 @@ RUN YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_RE
         BARTBLAZE="${BARTBLAZE}" BARTBLAZE_REF="${BARTBLAZE_REF}" \
         INQUEST="${INQUEST}" INQUEST_REF="${INQUEST_REF}" \
         /usr/local/bin/fetch-rules.sh /rules/src \
+    && cp /usr/local/share/yarad-local-rules/*.yara /rules/src/ \
     && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
     && rm -rf /rules/src \
     && install -d -o 65532 -g 65532 /var/cache/yarad \

@@ -272,6 +272,16 @@ authors — yarad only packages their work.** Each set keeps its own license:
 Roughly 10,000+ rules total. Pin or toggle any source with a build arg
 (`YARAFORGE_SET`, `*_REF`, `DIDIER=0`/`BARTBLAZE=0`/`ANYRUN=0`/`INQUEST=0`).
 
+On top of the public sets, yarad bakes its own local heuristics from
+`docker/local-rules/`. Currently that is `Maldoc_AutoExec_Write_Execute`, an
+[mraptor](https://github.com/decalage2/oletools/wiki/mraptor)-equivalent rule:
+it fires when one buffer combines an **auto-execution** trigger, a
+**file-write/drop** primitive, and an **execute/launch** primitive. The
+three-category `AND` is what keeps it low-FP (a benign document rarely does all
+three at once), and unlike Didier's `vba.yara` it has no `VBA` gate, so it
+also catches non-Office droppers (HTA/WSF/JS, script carriers) in the raw body.
+Tagged `suspicious`, so it scores in the `YARA_SUSPICIOUS` tier (tunable).
+
 Public rulesets are messy, so two things keep them from breaking the build:
 libyara is compiled **without** `magic`/`cuckoo` (unneeded for mail; rules
 importing them are skipped), and each file is test-compiled alone first — one
@@ -306,8 +316,9 @@ bytes, member/depth counts) bound the work, so one document can't monopolize a
 worker. Encrypted (ECMA-376) OOXML is counted but **not** decrypted.
 
 This covers ~80% of what Python [oletools](https://github.com/decalage2/oletools)
-does for mail (VBA extraction+decompression, macro/autoexec keyword detection,
-OLE/encryption indicators, RTF exploit + embedded-object carve, IOC→reputation),
+does for mail (VBA extraction+decompression, macro/autoexec keyword detection
+incl. an mraptor-style autoexec+write+execute heuristic, OLE/encryption
+indicators, RTF exploit + embedded-object carve, IOC→reputation),
 in-process and with no Python. The deep tail — full Base64/StrReverse/Dridex
 *decode* and XLM/Excel-4.0 emulation — still belongs to `olevba`, which is why
 [`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) stays as a parallel
@@ -380,6 +391,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] Fail-open everywhere; concurrency gate, admission gate, per-request scan deadline, body cap
 - [x] OLE2/OOXML macro decompression (MS-OVBA) → scans raw **and** decompressed VBA, `VBA` external var
 - [x] Container extraction: RTF `\objdata`, OLE Package, MSI, Outlook `.msg`, OneNote, PDF, `.lnk`, VBE/JSE, nested archives
+- [x] Local heuristic `Maldoc_AutoExec_Write_Execute` (mraptor-style autoexec∧write∧execute), baked from `docker/local-rules/`
 - [x] Filename/extension externals (name-keyed rules) via `X-YARAD-Filename`
 - [x] URL defang + URLhaus URL/host lookup; MalwareBazaar attachment-hash lookup (cached feeds, fail-open)
 - [x] `YARAD_RULE_DENYLIST` (drop) + `YARAD_RULE_ALLOWLIST` (log-only)
