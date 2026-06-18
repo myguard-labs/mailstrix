@@ -49,13 +49,13 @@ ENV CGO_ENABLED=1 \
     PKG_CONFIG="pkg-config --static"
 RUN go mod tidy
 ARG VERSION=dev
+# Two binaries: the CGO/libyara server (yarad), and the lean Sieve/LDA client
+# (yarad-scan) built CGO-free — pure Go, no libyara, a small static binary for a
+# mail-delivery host that only POSTs to a central yarad.
 RUN go build -tags yara_static \
         -ldflags "-s -w -X main.version=${VERSION}" \
-        -o /out/yarad ./cmd/yarad
-
-# yarad-scan: the lean Sieve/LDA client. Pure Go, no CGO/libyara — a small static
-# binary for a mail-delivery host that only POSTs to a central yarad.
-RUN CGO_ENABLED=0 go build \
+        -o /out/yarad ./cmd/yarad \
+    && CGO_ENABLED=0 go build \
         -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/yarad-scan ./cmd/yarad-scan
 
