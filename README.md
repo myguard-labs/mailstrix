@@ -273,14 +273,28 @@ Roughly 10,000+ rules total. Pin or toggle any source with a build arg
 (`YARAFORGE_SET`, `*_REF`, `DIDIER=0`/`BARTBLAZE=0`/`ANYRUN=0`/`INQUEST=0`).
 
 On top of the public sets, yarad bakes its own local heuristics from
-`docker/local-rules/`. Currently that is `Maldoc_AutoExec_Write_Execute`, an
-[mraptor](https://github.com/decalage2/oletools/wiki/mraptor)-equivalent rule:
-it fires when one buffer combines an **auto-execution** trigger, a
-**file-write/drop** primitive, and an **execute/launch** primitive. The
-three-category `AND` is what keeps it low-FP (a benign document rarely does all
-three at once), and unlike Didier's `vba.yara` it has no `VBA` gate, so it
-also catches non-Office droppers (HTA/WSF/JS, script carriers) in the raw body.
-Tagged `suspicious`, so it scores in the `YARA_SUSPICIOUS` tier (tunable).
+`docker/local-rules/`:
+
+- `Maldoc_AutoExec_Write_Execute` (`maldoc_autoexec.yara`) — an
+  [mraptor](https://github.com/decalage2/oletools/wiki/mraptor)-equivalent rule:
+  it fires when one buffer combines an **auto-execution** trigger, a
+  **file-write/drop** primitive, and an **execute/launch** primitive. The
+  three-category `AND` is what keeps it low-FP (a benign document rarely does all
+  three at once), and unlike Didier's `vba.yara` it has no `VBA` gate, so it
+  also catches non-Office droppers (HTA/WSF/JS, script carriers) in the raw body.
+- `Maldoc_Suspicious_VBA_Keywords` + `Maldoc_VBA_Shellcode_API`
+  (`maldoc_suspicious.yara`) — the olevba *suspicious-keyword* tier the strict
+  rule misses. The first is a **count** heuristic (fires on ≥6 distinct
+  exec/persist/network/evasion/obfuscation keywords in one buffer — one keyword
+  is noise, six together is a macro doing real work; low score, low tier). The
+  second is the specific **VBA shellcode** shape: a `Declare` of a Win32 API
+  combined with a process-injection primitive (`VirtualAlloc`, `RtlMoveMemory`,
+  `CreateThread`, a hook installer) — benign macros ~never allocate executable
+  memory, so it scores higher.
+
+All three are tagged `suspicious`, so they score in the `YARA_SUSPICIOUS` tier
+(tunable), run over the decompressed VBA cleartext, and are keyword heuristics —
+not emulation (Chr() chains / XLM execution stay with `olevba`).
 
 Public rulesets are messy, so two things keep them from breaking the build:
 libyara is compiled **without** `magic`/`cuckoo` (unneeded for mail; rules
@@ -398,6 +412,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] OLE2/OOXML macro decompression (MS-OVBA) → scans raw **and** decompressed VBA, `VBA` external var
 - [x] Container extraction: RTF `\objdata`, OLE Package, MSI, Outlook `.msg`, OneNote, PDF, `.lnk`, VBE/JSE, nested archives
 - [x] Local heuristic `Maldoc_AutoExec_Write_Execute` (mraptor-style autoexec∧write∧execute), baked from `docker/local-rules/`
+- [x] Local heuristics `Maldoc_Suspicious_VBA_Keywords` (olevba count heuristic) + `Maldoc_VBA_Shellcode_API` (Declare+injection-API)
 - [x] Static single-layer decode pass (base64/hex/`StrReverse`) over raw + extracted streams, re-scanned (depth cap 1)
 - [x] Filename/extension externals (name-keyed rules) via `X-YARAD-Filename`
 - [x] URL defang + URLhaus URL/host lookup; MalwareBazaar attachment-hash lookup (cached feeds, fail-open)

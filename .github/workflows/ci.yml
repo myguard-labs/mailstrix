@@ -94,6 +94,37 @@ jobs:
           echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
           docker rm -f ym
 
+      - name: smoke (maldoc suspicious-keyword tier — count heuristic + shellcode-API)
+        run: |
+          set -euo pipefail
+          # Load ONLY the tracked suspicious-keyword rules (isolated, cache off).
+          mkdir -p rules-susp
+          cp docker/local-rules/maldoc_suspicious.yara rules-susp/
+          docker run -d --name yk -e YARAD_TOKEN=ci -e YARAD_RULES= -e YARAD_RULES_DIR=/r -e YARAD_CACHE_DIR= \
+            -v "$PWD/rules-susp:/r:ro" -p 18082:8079 yarad:ci
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' yk)" = healthy ] && break; sleep 1
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' yk)" = healthy ] || { docker logs yk; exit 1; }
+
+          # Count heuristic: a keyword-soup macro (>=6 suspicious keywords) fires
+          # Maldoc_Suspicious_VBA_Keywords. Built at runtime — no real maldoc.
+          soup=$(printf 'CreateObject GetObject WScript.Shell ShellExecute Environ StrReverse ADODB.Stream SaveToFile MSXML2.XMLHTTP\n')
+          m1=$(printf '%s' "$soup" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18082/scan)
+          echo "soup: $m1"; grep -q Maldoc_Suspicious_VBA_Keywords <<<"$m1"
+
+          # Shellcode-API pattern: a Declare + a process-injection primitive fires
+          # Maldoc_VBA_Shellcode_API.
+          sc=$(printf 'Private Declare PtrSafe Function a Lib "kernel32" Alias "VirtualAlloc" (...)\n  RtlMoveMemory p, buf, n\n')
+          m2=$(printf '%s' "$sc" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18082/scan)
+          echo "shellcode: $m2"; grep -q Maldoc_VBA_Shellcode_API <<<"$m2"
+
+          # Negative: a couple of keywords below the count threshold and no
+          # Declare+API pair must NOT fire either rule.
+          clean=$(printf 'Set o = CreateObject("Scripting.Dictionary")\n  MsgBox "hello"\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18082/scan)
+          echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
+          docker rm -f yk
+
       - name: smoke (seed-on-startup — default cache config + wiped-cache self-heal)
         run: |
           set -euo pipefail
