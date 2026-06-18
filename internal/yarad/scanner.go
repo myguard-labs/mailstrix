@@ -64,6 +64,7 @@ type Scanner struct {
 	exPDF                                                             atomic.Uint64 // PDFs with FlateDecode object streams inflated
 	exRTF                                                             atomic.Uint64 // RTF docs with \objdata embedded objects carved
 	exEncodedScript                                                   atomic.Uint64 // buffers with >=1 decoded MS-Script-Encoder block
+	exDecoded                                                         atomic.Uint64 // buffers with >=1 base64/hex/reversed blob from the static decode pass
 	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
 
 	// Rule-reload observability (see ReloadMetrics).
@@ -114,6 +115,7 @@ type ExtractMetrics struct {
 	PDF        uint64 // PDFs with FlateDecode object streams inflated
 	RTF        uint64 // RTF docs with \objdata embedded objects carved
 	EncScript  uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
+	Decoded    uint64 // buffers with >=1 base64/hex/reversed blob from the static decode pass
 	// StreamMatches counts rule hits attributable ONLY to an extracted stream
 	// (macro/MSI/VBE), i.e. rules that did NOT already fire on the raw bytes —
 	// the direct measure of what pre-extraction adds over a raw-only scan.
@@ -138,6 +140,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		PDF:           s.exPDF.Load(),
 		RTF:           s.exRTF.Load(),
 		EncScript:     s.exEncodedScript.Load(),
+		Decoded:       s.exDecoded.Load(),
 		StreamMatches: s.exStreamMatches.Load(),
 	}
 }
@@ -615,7 +618,13 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	if res.EncodedScript {
 		s.exEncodedScript.Add(1)
 	}
-	if n := len(res.Streams); n > 0 {
+	if res.DecodedStreams > 0 {
+		s.exDecoded.Add(1)
+	}
+	// Macro/extracted-stream accounting excludes the static-decode blobs (the
+	// trailing DecodedStreams entries) so a plain script body carrying a base64
+	// run isn't miscounted as a macro document; decode is tracked by exDecoded.
+	if n := len(res.Streams) - res.DecodedStreams; n > 0 {
 		s.exMacroDocs.Add(1)
 		s.exStreams.Add(uint64(n))
 	}

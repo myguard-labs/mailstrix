@@ -303,6 +303,11 @@ rules), merging and de-duplicating matches:
 - **Other containers** — MSI streams, Outlook `.msg` attachments, OneNote
   embedded files, OLE Package (`Ole10Native`) EXEs, PDF FlateDecode streams,
   `.lnk` command lines, VBE/JSE decoded scripts, and nested archives.
+- **Static decode pass** — over the raw body and every extracted stream, the
+  long base64/hex runs are decoded and any whole-buffer reverse (VBA
+  `StrReverse`) is undone, then the decoded blobs are re-scanned. This is
+  **single-layer** only — a decoded blob is not decoded again (depth cap 1) and
+  no VBA/XLM is *executed*; multi-stage unpacking stays with `olevba`.
 - **Filename/extension externals** — name-keyed rules fire from the plugin's
   `X-YARAD-Filename`; the name is folded into the verdict cache key.
 - **URL defanging** — `hxxp`→`http`, `[.]`/`(dot)`→`.` on every buffer before
@@ -318,9 +323,10 @@ worker. Encrypted (ECMA-376) OOXML is counted but **not** decrypted.
 This covers ~80% of what Python [oletools](https://github.com/decalage2/oletools)
 does for mail (VBA extraction+decompression, macro/autoexec keyword detection
 incl. an mraptor-style autoexec+write+execute heuristic, OLE/encryption
-indicators, RTF exploit + embedded-object carve, IOC→reputation),
-in-process and with no Python. The deep tail — full Base64/StrReverse/Dridex
-*decode* and XLM/Excel-4.0 emulation — still belongs to `olevba`, which is why
+indicators, RTF exploit + embedded-object carve, single-layer base64/hex/StrReverse
+decode, IOC→reputation), in-process and with no Python. The deep tail —
+*multi-stage* deobfuscation (a payload encoded two-plus layers deep, Dridex-style)
+and XLM/Excel-4.0 *emulation* — still belongs to `olevba`, which is why
 [`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) stays as a parallel
 deep-scan scorer.
 
@@ -392,6 +398,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] OLE2/OOXML macro decompression (MS-OVBA) → scans raw **and** decompressed VBA, `VBA` external var
 - [x] Container extraction: RTF `\objdata`, OLE Package, MSI, Outlook `.msg`, OneNote, PDF, `.lnk`, VBE/JSE, nested archives
 - [x] Local heuristic `Maldoc_AutoExec_Write_Execute` (mraptor-style autoexec∧write∧execute), baked from `docker/local-rules/`
+- [x] Static single-layer decode pass (base64/hex/`StrReverse`) over raw + extracted streams, re-scanned (depth cap 1)
 - [x] Filename/extension externals (name-keyed rules) via `X-YARAD-Filename`
 - [x] URL defang + URLhaus URL/host lookup; MalwareBazaar attachment-hash lookup (cached feeds, fail-open)
 - [x] `YARAD_RULE_DENYLIST` (drop) + `YARAD_RULE_ALLOWLIST` (log-only)

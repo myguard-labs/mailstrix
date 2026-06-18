@@ -555,6 +555,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_pdf_total", "PDFs with FlateDecode object streams inflated for scanning", ex.PDF)
 	fm("extract_rtf_total", "RTF docs with \\objdata embedded objects hex-decoded and carved", ex.RTF)
 	fm("extract_encoded_script_total", "buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block", ex.EncScript)
+	fm("extract_decoded_total", "buffers with >=1 base64/hex/reversed blob from the static decode pass", ex.Decoded)
 	fm("extract_stream_matches_total", "rule hits attributable only to an extracted stream (not raw bytes)", ex.StreamMatches)
 
 	// Rule-reload activity — so a SIGHUP that silently fails to compile is visible

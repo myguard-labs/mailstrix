@@ -33,7 +33,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -155,6 +155,12 @@ type Result struct {
 	// i.e. an encoded VBScript/JScript, as in .vbe/.jse or embedded in a
 	// .wsf/.hta/.html/.sct) was found and decoded to cleartext for scanning.
 	EncodedScript bool
+	// DecodedStreams is how many blobs the single-layer static decode pass
+	// (base64/hex/whole-buffer reverse; see decode.go) appended to Streams. These
+	// are the trailing len-N entries of Streams; the caller subtracts them so the
+	// macro/extracted-stream metrics aren't inflated by decode output. >0 means
+	// the pass fired.
+	DecodedStreams int
 }
 
 // Extract reports the plaintext hidden inside an OLE2/OOXML container — the
@@ -228,6 +234,13 @@ func Extract(buf []byte, deadline time.Time) (res Result) {
 		// keyword rules match. Best-effort; non-script input yields nothing.
 		fromEncodedScript(buf, &res, deadline)
 	}
+
+	// After the format-specific extraction, run the single-layer static decode
+	// pass over the raw buffer AND every stream surfaced above, so a base64/hex/
+	// reversed payload hidden in a script body or a decompressed macro is decoded
+	// and re-scanned. Snapshotted internally so decoded blobs are not re-decoded
+	// (depth cap 1). Best-effort; binary container bytes are skipped.
+	fromEncoded(buf, &res, deadline)
 	return res
 }
 
