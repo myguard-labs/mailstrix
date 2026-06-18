@@ -31,8 +31,10 @@ jobs:
               --output "type=local,dest=dist/${arch}" \
               -f docker/Dockerfile .
             install -D "dist/${arch}/yarad" "out/yarad-linux-${arch}"
+            # yarad-scan: the lean, CGO-free Sieve/LDA client.
+            install -D "dist/${arch}/yarad-scan" "out/yarad-scan-linux-${arch}"
           done
-          ( cd out && sha256sum yarad-linux-* > SHA256SUMS )
+          ( cd out && sha256sum yarad-linux-* yarad-scan-linux-* > SHA256SUMS )
           ls -l out
 
       - name: create release
@@ -47,6 +49,8 @@ jobs:
             gh release upload "${GITHUB_REF_NAME}" --clobber \
               out/yarad-linux-amd64 \
               out/yarad-linux-arm64 \
+              out/yarad-scan-linux-amd64 \
+              out/yarad-scan-linux-arm64 \
               out/SHA256SUMS
           else
             gh release create "${GITHUB_REF_NAME}" \
@@ -54,5 +58,7 @@ jobs:
               --generate-notes \
               out/yarad-linux-amd64 \
               out/yarad-linux-arm64 \
+              out/yarad-scan-linux-amd64 \
+              out/yarad-scan-linux-arm64 \
               out/SHA256SUMS
           fi

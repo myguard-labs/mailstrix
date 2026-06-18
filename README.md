@@ -186,6 +186,31 @@ yarad extract suspicious.doc         # show what the extractor carves (container
 yarad extract -out /tmp/parts a.docm # …and write each carved member to a dir for inspection
 ```
 
+### `yarad-scan` — the lean Sieve / LDA client
+
+`yarad scan` above compiles the rules **in-process**, so it needs libyara and the
+rule set on the host running it. For a mail-delivery box (Dovecot LDA / Sieve)
+that should stay thin, there's a separate tiny client: **`yarad-scan`**. It links
+no CGO / libyara and embeds no rules — pure Go, a ~5 MB static binary — and just
+POSTs the message to a central `yarad serve` and exits on the verdict:
+
+```sh
+yarad-scan -url http://yarad.internal:8079 -token-file /etc/yarad.token - < message
+cat message | yarad-scan -url http://yarad.internal:8079   # stdin
+```
+
+Same wire format as the rspamd plugin (`X-YARAD-Token` + base64
+`X-YARAD-Filename`). Exit codes: **0** clean, **1** match, **2** usage/read error.
+Pass the secret with `-token-file` or `YARAD_TOKEN` (never `-token` on a shared
+host — it shows in `ps`). Redirects are never followed, so the token can't leak to
+a 3xx target.
+
+**It fails open by default**: any transport error, timeout, or non-200 is treated
+as *clean* (exit 0), so a scanner outage never blocks or bounces mail. Use
+`-fail-open=false` for interactive triage. A Sieve script
+(`vnd.dovecot.execute`/pipe) can branch on the exit code to quarantine a match —
+and because the client fails open, a delivery is never lost if the backend is down.
+
 ## Configuration
 
 Every setting is an environment variable, and also a `serve` CLI flag. Flags win

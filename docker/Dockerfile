@@ -49,9 +49,15 @@ ENV CGO_ENABLED=1 \
     PKG_CONFIG="pkg-config --static"
 RUN go mod tidy
 ARG VERSION=dev
+# Two binaries: the CGO/libyara server (yarad), and the lean Sieve/LDA client
+# (yarad-scan) built CGO-free — pure Go, no libyara, a small static binary for a
+# mail-delivery host that only POSTs to a central yarad.
 RUN go build -tags yara_static \
         -ldflags "-s -w -X main.version=${VERSION}" \
-        -o /out/yarad ./cmd/yarad
+        -o /out/yarad ./cmd/yarad \
+    && CGO_ENABLED=0 go build \
+        -ldflags "-s -w -X main.version=${VERSION}" \
+        -o /out/yarad-scan ./cmd/yarad-scan
 
 # ---- tests (built into the image build so CI fails on a bad commit) ---------
 FROM build AS test
@@ -63,6 +69,7 @@ RUN go vet ./... \
 #  --output type=local,dest=dist .` drops just the yarad binary per arch.
 FROM scratch AS bin
 COPY --from=build /out/yarad /yarad
+COPY --from=build /out/yarad-scan /yarad-scan
 
 # ---- rules ------------------------------------------------------------------
 # FROM the yara stage so we have `yarac` (the libyara compiler) from the exact
