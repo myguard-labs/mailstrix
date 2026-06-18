@@ -1,0 +1,60 @@
+# Monthly maintenance — the DEEP/slow checks pulled off the per-PR gate so PRs
+# stay fast: fuzzing, AddressSanitizer over the cgo/libyara surface, and CodeQL
+# semantic analysis. Low per-PR yield (fuzz found nothing per-PR after the first
+# pass; asan/codeql rarely flag once green), high value run periodically. Manual
+# run: Actions -> maintenance -> Run workflow.
+name: maintenance
+on:
+  schedule:
+    - cron: "0 4 1 * *" # 04:00 UTC on the 1st of each month
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/go-setup
+      - name: fuzz (untrusted /scan body)
+        run: go test -run=x -fuzz='^FuzzScanBody$' -fuzztime=5m ./internal/yarad/
+      - name: fuzz (extract — hostile OLE2/OOXML attachment)
+        run: go test -run=x -fuzz='^FuzzExtract$' -fuzztime=10m ./internal/extract/
+
+  # AddressSanitizer over the CGO/libyara surface: catches heap errors in our
+  # go-yara usage (Scanner lifecycle, buffer passing) that -race can't. Valgrind
+  # is deliberately NOT used — on a Go binary its runtime/GC trips constant false
+  # positives; ASAN via the Go toolchain is the right tool for the cgo boundary.
+  asan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/go-setup
+        with:
+          packages: clang
+      - name: go test -asan
+        env:
+          CC: clang
+          # libyara is not ASAN-built (dynamic apt package), so suppress the
+          # cross-DSO false positives while keeping real heap-error detection.
+          ASAN_OPTIONS: detect_leaks=0:detect_odr_violation=0
+        run: go test -asan ./...
+
+  codeql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: go
+      - uses: ./.github/actions/go-setup
+      - run: go build ./...
+      - uses: github/codeql-action/analyze@v3

@@ -11,9 +11,19 @@ permissions:
   contents: write
 
 jobs:
+  # Re-run the full per-PR gate (docker build+test+smoke, lint, scanners) on the
+  # tagged commit BEFORE publishing — a release must not ship code that wouldn't
+  # pass CI. Reuses ci.yml via workflow_call so there's one source of truth.
+  gate:
+    permissions:
+      contents: read
+      actions: write   # ci.yml's docker job uses the buildx GHA cache
+    uses: ./.github/workflows/ci.yml
+
   # One runner per arch so the slow arm64 QEMU build runs in parallel with
   # amd64 instead of after it (was a serial for-loop = sum of both).
   binaries:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

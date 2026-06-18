@@ -1,15 +1,23 @@
-# yarad CI. The `docker` job is the authoritative gate (self-contained libyara);
-# lint/fuzz/codeql use apt libyara-dev on the runner. Build with go 1.25 — the
-# 1.24 branch no longer gets stdlib security fixes that govulncheck enforces.
+# yarad CI — the per-PR/push gate. Authoritative job is `docker` (self-contained
+# libyara); `lint` + `scanners` run alongside. Deep/slow, low-per-PR-yield checks
+# (asan, codeql, fuzz) run MONTHLY in maintenance.yml, NOT on every PR. Exposed
+# via workflow_call so release.yml runs this same gate before publishing. Build
+# with go 1.25 — the 1.24 branch no longer gets the stdlib security fixes
+# govulncheck enforces.
 name: ci
 on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_call:
+
+# Cancel a superseded in-progress run when new commits land on the same PR/ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   # Authoritative gate: build + test exactly as the production image does (CGO
@@ -18,6 +26,10 @@ jobs:
   # run it against a local EICAR rule, and smoke the HTTP contract.
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write   # buildx GHA layer cache (--cache-to/from type=gha)
     steps:
       - uses: actions/checkout@v5
 
@@ -289,9 +301,26 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/go-setup
+      # Cache the compiled analysis-tool binaries in ~/go/bin so they aren't
+      # recompiled from source every run (was the ~7-8 min lint bottleneck —
+      # go-setup already caches modules + build, not these tool binaries). Bump
+      # the `-rev` suffix to force a refresh to newer @latest tool versions.
+      - name: cache go analysis tools
+        id: gotools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: gotools-${{ runner.os }}-go1.25-rev1
+      - name: install analysis tools (on cache miss)
+        if: steps.gotools.outputs.cache-hit != 'true'
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd internal)
@@ -299,66 +328,34 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: staticcheck
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          staticcheck ./...
+        run: staticcheck ./...
       - name: govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+        # binary cached; the vuln DB is fetched fresh at runtime regardless.
+        run: govulncheck ./...
       - name: gosec
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec ./...
+        run: gosec ./...
 
   # Non-Go static analysis (workflows, shell, Dockerfile, dependency CVEs). Run
   # via pinned upstream images instead of marketplace actions to avoid pulling
   # extra third-party Actions into the supply chain.
   scanners:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+      # Images pinned to explicit versions (not :latest/:stable) for reproducible,
+      # drift-free scans. Bump deliberately.
       - name: actionlint (workflow syntax + embedded shell)
-        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
       - name: shellcheck (rule fetch/compile/generate scripts)
-        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:stable docker/fetch-rules.sh docker/compile-rules.sh docker/generate-rules.sh
+        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 docker/fetch-rules.sh docker/compile-rules.sh docker/generate-rules.sh
       - name: hadolint (Dockerfile; .hadolint.yaml ignores)
-        run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint hadolint docker/Dockerfile
+        run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile
       - name: osv-scanner (go.mod/go.sum dependency CVEs)
-        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:latest --lockfile=go.mod
+        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v1.9.2 --lockfile=go.mod
 
-  # NOTE: fuzzing moved to its own monthly workflow (.github/workflows/fuzz.yml)
-  # — it found nothing per-PR after the initial pass and just slowed the gate.
-
-  # AddressSanitizer over the CGO/libyara surface: catches heap errors in our
-  # go-yara usage (Scanner lifecycle, buffer passing) that -race can't. Valgrind
-  # is deliberately NOT used — on a Go binary its runtime/GC trips constant false
-  # positives; ASAN via the Go toolchain is the right tool for the cgo boundary.
-  # The pure-Go extract package is also exercised (harmless, no cgo there).
-  asan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/go-setup
-        with:
-          packages: clang
-      - name: go test -asan
-        env:
-          CC: clang
-          # libyara is not ASAN-built (dynamic apt package), so suppress the
-          # cross-DSO false positives while keeping real heap-error detection.
-          ASAN_OPTIONS: detect_leaks=0:detect_odr_violation=0
-        run: go test -asan ./...
-
-  codeql:
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-    steps:
-      - uses: actions/checkout@v5
-      - uses: github/codeql-action/init@v3
-        with:
-          languages: go
-      - uses: ./.github/actions/go-setup
-      - run: go build ./...
-      - uses: github/codeql-action/analyze@v3
+  # NOTE: asan, codeql and fuzz are DEEP, slow, low-per-PR-yield checks — they
+  # run MONTHLY (+ on demand) in maintenance.yml, NOT on every PR. The per-PR
+  # gate (docker + lint + scanners) stays fast; release.yml reuses THIS workflow
+  # (workflow_call) so a tagged release re-runs docker+lint+scanners before
+  # publishing. asan/codeql/fuzz run on the monthly cadence, not per release.
