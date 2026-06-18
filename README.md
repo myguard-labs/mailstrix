@@ -307,10 +307,18 @@ On top of the public sets, yarad bakes its own local heuristics from
   instruction that begins with `DDE` or `DDEAUTO`. This rule matches that stream,
   covering macro-free command execution via DDE fields (T1559.002). Score 55,
   tagged `suspicious`, routes to `YARA_SUSPICIOUS`.
+- `LOLBins_Invocation` / `WMI_Process_Spawn` / `PowerShell_Abuse_Flags` /
+  `Maldoc_AntiAnalysis_Evasion` (`intent.yara`) — **behaviour/intent** heuristics.
+  Each pairs a tool or keyword with a *specific* abusive form so a bare mention
+  doesn't fire: a LOLBin with a download/execute arg (`regsvr32 /i:http…`,
+  `certutil -decode`, `mshta http…`), `winmgmts:`+`Win32_Process`+`.Create`,
+  `powershell` with an encoded/hidden/download flag, or two-or-more
+  sandbox-evasion primitives together. Scores 30–55, `YARA_SUSPICIOUS`.
 
-All three are tagged `suspicious`, so they score in the `YARA_SUSPICIOUS` tier
-(tunable), run over the decompressed VBA cleartext, and are keyword heuristics —
-not emulation (Chr() chains / XLM execution stay with `olevba`).
+These are all tagged `suspicious`, so they score in the `YARA_SUSPICIOUS` tier
+(tunable), run over the decompressed VBA cleartext (and body / decoded blobs),
+and are keyword/behaviour heuristics — not emulation (Chr() chains / XLM
+execution stay with `olevba`).
 
 Public rulesets are messy, so two things keep them from breaking the build:
 libyara is compiled **without** `magic`/`cuckoo` (unneeded for mail; rules
@@ -443,6 +451,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 
 - [x] OOXML remote-template injection (`*/_rels/*.rels` external-relationship scan + `OOXML_Remote_Template` rule)
 - [x] OOXML DDE/DDEAUTO field detection (`word/document.xml` field-instruction scan + `Maldoc_DDE_Field` rule)
+- [x] Intent rules (`intent.yara`): LOLBin invocation, WMI `Win32_Process.Create`, PowerShell abuse flags, anti-analysis/evasion
 - [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
 - [ ] File-level fuzzy hashing (TLSH/ssdeep)
 - [ ] CHM / CAB / MSIX extraction
