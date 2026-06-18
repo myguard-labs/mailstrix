@@ -26,6 +26,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"www.velocidex.com/golang/oleparse"
 )
@@ -35,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -516,6 +518,10 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time) {
 	// "OOXML-EXTERNAL-REL <Type> <Target>" stream so YARA rules can match it.
 	// Fail-open: malformed .rels parts are silently skipped.
 	fromOOXMLRels(zr, &out, deadline)
+	// Scan word/document.xml (and related parts) for DDE/DDEAUTO field
+	// instructions. Each hit appends a synthetic "OOXML-DDE-FIELD <instr>" stream.
+	// Fail-open: malformed XML is silently skipped.
+	fromOOXMLDDE(zr, &out, deadline)
 	res.Streams = out
 	// Every .bin we tried failed to parse and nothing came out: a document that
 	// looks macro-bearing but yields no usable VBA (obfuscated/corrupt/hostile).
@@ -634,6 +640,200 @@ func countExternalRels(streams [][]byte) int {
 	n := 0
 	for _, s := range streams {
 		if bytes.HasPrefix(s, []byte("OOXML-EXTERNAL-REL ")) {
+			n++
+		}
+	}
+	return n
+}
+
+// ddeDocParts lists the OOXML word-processing parts that may contain field
+// instructions. document.xml is the primary carrier; header/footer parts can
+// also carry DDE fields in booby-trapped documents.
+var ddeDocParts = []string{
+	"word/document.xml",
+	"word/document2.xml",
+	"word/header1.xml",
+	"word/footer1.xml",
+}
+
+// maxDDEFields caps how many OOXML-DDE-FIELD synthetic streams we emit per
+// document. A legitimate document with thousands of DDE fields is anomalous;
+// the cap prevents a crafted document from flooding Streams.
+const maxDDEFields = 64
+
+// maxBytesPerDocXML caps one word/document.xml read (zip-bomb guard). A real
+// Word document body is rarely > 4 MiB; beyond that we skip the part.
+const maxBytesPerDocXML = 4 << 20
+
+// fromOOXMLDDE reads the word-processing parts listed in ddeDocParts from the
+// already-opened zip, parses their XML, and appends a synthetic
+// "OOXML-DDE-FIELD <instr>" []byte stream to *out for each field instruction
+// that begins with (or contains) "DDE" or "DDEAUTO". Two field instruction
+// shapes are handled:
+//
+//   - w:fldSimple/@w:instr — the whole instruction is a single XML attribute.
+//   - w:instrText runs     — the instruction may be split across multiple
+//     consecutive <w:instrText> elements; the helper concatenates them before
+//     testing, which is how Word itself assembles the instruction (and how
+//     obfuscators split DDE tokens across runs).
+//
+// Fail-open contract: a part that cannot be read or parsed is silently skipped.
+// Bounded by maxDDEFields + maxBytesPerDocXML; respects expired(deadline).
+func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+	// Build a name→*zip.File index for O(1) lookup of the small fixed part list.
+	idx := make(map[string]*zip.File, len(zr.File))
+	for _, f := range zr.File {
+		idx[f.Name] = f
+	}
+
+	for _, part := range ddeDocParts {
+		if expired(deadline) {
+			break
+		}
+		if countDDEFields(*out) >= maxDDEFields || len(*out) >= maxStreams {
+			break
+		}
+		f, ok := idx[part]
+		if !ok {
+			continue
+		}
+		if f.UncompressedSize64 > maxBytesPerDocXML {
+			continue // anomalously large part — skip
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesPerDocXML))
+		rc.Close() // #nosec G104 -- zip entry close; error is unrecoverable here
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		parseDDEFields(raw, out, deadline)
+	}
+}
+
+// parseDDEFields walks the XML of one OOXML word-processing part and appends
+// OOXML-DDE-FIELD synthetic streams to *out for every DDE/DDEAUTO field it
+// finds. It handles both w:fldSimple/@w:instr (single-attribute instructions)
+// and concatenated w:instrText run text (split-run instructions). Malformed
+// XML is silently ignored (fail-open).
+func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time) {
+	// We stream-parse with encoding/xml to avoid loading the whole DOM.
+	// State machine: inside a w:fldChar complex field, we accumulate
+	// w:instrText content until w:fldChar w:fldCharType="end".
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	dec.Strict = false
+	dec.AutoClose = xml.HTMLAutoClose
+	dec.Entity = xml.HTMLEntity
+
+	var instrBuf strings.Builder // accumulates w:instrText for one complex field
+	inComplexField := false
+
+	emitIfDDE := func(instr string) {
+		// norm = collapse every run of Unicode whitespace to a single space
+		// (handles tabs/newlines between runs); noWS = fully whitespace-free, used
+		// to detect an inter-letter-spaced "D D E A U T O" directive.
+		norm := strings.Join(strings.Fields(instr), " ")
+		noWS := strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return -1
+			}
+			return r
+		}, norm)
+		upper := strings.ToUpper(noWS)
+		if !strings.HasPrefix(upper, "DDE") {
+			return
+		}
+		if countDDEFields(*out) >= maxDDEFields || len(*out) >= maxStreams {
+			return
+		}
+		// Emit `<directive> <tail>`: the directive token (DDE/DDEAUTO) is made
+		// contiguous so YARA `$ddeauto = "DDEAUTO "` fires even on the obfuscated
+		// inter-letter-spaced form, while the tail keeps its single-space args
+		// (legitimate field paths/commands have meaningful spaces — don't strip).
+		dirLen := 3 // "DDE"
+		if strings.HasPrefix(upper, "DDEAUTO") {
+			dirLen = 7 // "DDEAUTO"
+		}
+		// Walk norm to the byte offset just past the directive's dirLen non-space
+		// runes, so the readable tail starts after the (possibly spaced) directive.
+		seen, cut := 0, len(norm)
+		for i, r := range norm {
+			if !unicode.IsSpace(r) {
+				seen++
+				if seen == dirLen {
+					cut = i + utf8.RuneLen(r)
+					break
+				}
+			}
+		}
+		emit := noWS[:dirLen]
+		if tail := strings.TrimSpace(norm[cut:]); tail != "" {
+			emit += " " + tail
+		}
+		*out = append(*out, []byte("OOXML-DDE-FIELD "+emit))
+	}
+
+	for {
+		if expired(deadline) {
+			break
+		}
+		tok, err := dec.Token()
+		if err != nil {
+			break // EOF or malformed — fail-open
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			localName := t.Name.Local
+			switch localName {
+			case "fldSimple":
+				// w:fldSimple w:instr="..." — whole instruction in an attribute.
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "instr" {
+						emitIfDDE(attr.Value)
+						break
+					}
+				}
+			case "fldChar":
+				// w:fldChar w:fldCharType="begin|separate|end"
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "fldCharType" {
+						switch strings.ToLower(attr.Value) {
+						case "begin":
+							inComplexField = true
+							instrBuf.Reset()
+						case "end":
+							if inComplexField {
+								emitIfDDE(instrBuf.String())
+								inComplexField = false
+								instrBuf.Reset()
+							}
+						}
+						break
+					}
+				}
+			case "instrText":
+				// w:instrText — content is part of the field instruction.
+				// CharData comes in the next token(s).
+				if inComplexField {
+					if inner, ierr := dec.Token(); ierr == nil {
+						if cd, ok := inner.(xml.CharData); ok {
+							instrBuf.Write(cd)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// countDDEFields counts how many entries in streams start with the
+// OOXML-DDE-FIELD synthetic marker (used to enforce maxDDEFields).
+func countDDEFields(streams [][]byte) int {
+	n := 0
+	for _, s := range streams {
+		if bytes.HasPrefix(s, []byte("OOXML-DDE-FIELD ")) {
 			n++
 		}
 	}

@@ -299,6 +299,14 @@ On top of the public sets, yarad bakes its own local heuristics from
   CVE-2017-0199-style attacks (Word fetches a remote `.dotm`/`.dotx` at open time
   and executes its macros — no embedded macro in the original document). Score 50,
   tagged `suspicious`, routes to `YARA_SUSPICIOUS`.
+- `Maldoc_DDE_Field` (`ooxml_dde.yara`) — **DDE/DDEAUTO field injection**
+  heuristic. The extractor reads `word/document.xml` (and header/footer parts),
+  extracts field instructions from `w:fldSimple/@w:instr` attributes and from
+  concatenated `w:instrText` runs (so obfuscated split-token instructions are
+  caught), and emits a synthetic `OOXML-DDE-FIELD <instr>` stream for any
+  instruction that begins with `DDE` or `DDEAUTO`. This rule matches that stream,
+  covering macro-free command execution via DDE fields (T1559.002). Score 55,
+  tagged `suspicious`, routes to `YARA_SUSPICIOUS`.
 
 All three are tagged `suspicious`, so they score in the `YARA_SUSPICIOUS` tier
 (tunable), run over the decompressed VBA cleartext, and are keyword heuristics —
@@ -434,6 +442,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 ### Planned
 
 - [x] OOXML remote-template injection (`*/_rels/*.rels` external-relationship scan + `OOXML_Remote_Template` rule)
+- [x] OOXML DDE/DDEAUTO field detection (`word/document.xml` field-instruction scan + `Maldoc_DDE_Field` rule)
 - [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
 - [ ] File-level fuzzy hashing (TLSH/ssdeep)
 - [ ] CHM / CAB / MSIX extraction
