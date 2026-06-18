@@ -53,6 +53,10 @@ as *clean* (exit 0), so a scanner outage never blocks or bounces delivery.
    chown vmail:vmail /etc/dovecot/yarad.token && chmod 0440 /etc/dovecot/yarad.token
    ```
 
+   The token is **optional** — if your yarad runs open (no `YARAD_TOKEN`), skip
+   this step. The wrapper only passes `-token-file` when the file exists, so it
+   works either way.
+
 4. **Install the wrapper + config:**
 
    ```sh

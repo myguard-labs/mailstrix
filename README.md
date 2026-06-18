@@ -121,9 +121,11 @@ printf 'MZ...' | curl -s -H 'X-YARAD-Token: changeme' \
     --data-binary @- http://127.0.0.1:8079/scan
 ```
 
-> **A token is mandatory.** Until `YARAD_TOKEN` (or `YARAD_TOKEN_FILE`) is set,
-> every `/scan` returns `503`. The caller presents the same secret as a `Bearer`
-> header or `X-YARAD-Token`.
+> **Token is optional but recommended.** Set `YARAD_TOKEN` (or
+> `YARAD_TOKEN_FILE`) and the caller must present the same secret as a `Bearer`
+> header or `X-YARAD-Token`. Leave it unset (or `none`/`0`/`off`) to run an
+> **open** scanner for a trusted private network — yarad logs a loud warning,
+> since anyone who can reach the port can submit CPU-costly scans.
 
 The `/scan` reply names the rule **and** its source ruleset file:
 
@@ -222,7 +224,7 @@ Every setting is an env var and a `serve` CLI flag (flag > env > default).
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `YARAD_HOST` / `YARAD_PORT` | `0.0.0.0` / `8079` | HTTP bind address |
-| `YARAD_TOKEN[_FILE]` | — | shared secret for `/scan`; unset ⇒ every POST is `503` |
+| `YARAD_TOKEN[_FILE]` | — | shared secret for `/scan` (optional); unset / `none` / `0` / `off` ⇒ auth disabled, `/scan` runs **open** (warned at startup) |
 | `YARAD_RULES_DIR` | `/rules` | dir of `*.yar`/`*.yara` compiled at boot and on SIGHUP |
 | `YARAD_RULES` | — | a precompiled `.yac` bundle; loaded instead of `RULES_DIR` (faster start) |
 | `YARAD_RULES_MAX_AGE` | `0` (off) | seconds; flag rules `stale` (metric + `/ready` body) once older than this. Fail-open: never fails readiness |
