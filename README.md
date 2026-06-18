@@ -5,30 +5,48 @@
 [![Release](https://github.com/eilandert/rspamd-yarad/actions/workflows/release.yml/badge.svg)](https://github.com/eilandert/rspamd-yarad/actions/workflows/release.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/eilandert/rspamd-yarad.svg)](https://pkg.go.dev/github.com/eilandert/rspamd-yarad)
 
-**[rspamd](https://rspamd.com/) can't run YARA on its own** (no built-in module —
-still an [open feature request](https://github.com/rspamd/rspamd/discussions/3511)
-as of 4.1.0). yarad adds it: a small HTTP service that scans every message and
-attachment against ~10,000 curated public YARA rules and feeds the matches back
-into rspamd's score.
+**yarad is a small HTTP service that scans mail with [YARA](https://virustotal.github.io/yara/)** —
+the malware-detection rule engine — against ~10,000 curated public rules. Put a
+message (or one attachment) on `POST /scan`; get back the rules that matched.
 
-YARA is the rule engine malware analysts use to recognise *families* of malicious
+YARA is the engine malware analysts use to recognise *families* of malicious
 files — booby-trapped Office docs, packed executables, phishing kits, script
 droppers. A literal-string signature dies the moment the author edits a byte; a
 YARA rule matches the *shape* of a file (PE imports, section entropy, embedded
 magic) and survives the next variant. yarad compiles those rules — libyara
 modules and all — and runs them over your mail.
 
+Two ways to plug it in (both shipped here):
+
+- **rspamd** — an async `yara.lua` plugin ([`rspamd/`](rspamd/)) POSTs each
+  message/part to yarad at SMTP time and turns the hits into a spam-score symbol.
+- **Dovecot / Sieve** — the lean [`yarad-scan`](#thin-client-for-dovecot--sieve-yarad-scan)
+  client scans at *delivery* and a Sieve rule quarantines a match
+  ([`sieve/`](sieve/)).
+
 ```
- ┌─────────────────┐  POST /scan ┌────────────┐    ┌──────────────┐
- │     rspamd      │ ─────────▶ │   yarad    │ ─▶ │   libyara    │
- │(yara.lua plugin)│ ◀───────── │(Go service)│    │compiled rules│
- └─────────────────┘  {matches}  └────────────┘    └──────────────┘
+ ┌──────────────────────┐  POST /scan ┌────────────┐    ┌──────────────┐
+ │ rspamd  (yara.lua)   │ ─────────▶ │   yarad    │ ─▶ │   libyara    │
+ │   or  Dovecot/Sieve  │ ◀───────── │(Go service)│    │compiled rules│
+ │      (yarad-scan)    │  {matches}  └────────────┘    └──────────────┘
+ └──────────────────────┘
 ```
 
-It runs **out of process**, not as a plugin, because libyara is a C library
-(CGO): in an rspamd worker it would block the event loop and drag a heavy C
-dependency into the mail image. Separate, rspamd stays async and yarad can be
-scaled, restarted, or reload its rules on its own. Same shape as the
+> **Where should YARA scanning live — opinion.** YARA scanning is genuinely
+> CPU-intensive, and the MTA hot path is the most latency-sensitive place to spend
+> that CPU: every connection waits on it, and at SMTP time you scan a lot of mail
+> you will reject anyway. A defensible view is that it doesn't belong in the MTA at
+> all — scanning at **delivery** (Dovecot LDA / Sieve), *after* rspamd has already
+> dropped the obvious spam, scans far less and off the connection's critical path.
+> Which is right depends on your mailflow and goals: scan early at SMTP to *reject*
+> with rspamd's score, or scan late at delivery to *quarantine* a smaller, cleaner
+> stream. yarad supports both; see the [thin client](#thin-client-for-dovecot--sieve-yarad-scan)
+> and [`sieve/`](sieve/) for the delivery-time path.
+
+It runs **out of process**, never inside the MTA worker, because libyara is a C
+library (CGO): in an rspamd worker it would block the event loop and drag a heavy
+C dependency into the mail image. Separate, the caller stays async and yarad can
+be scaled, restarted, or reload its rules on its own. Same shape as the
 [gozer](https://github.com/eilandert/gozer) DCC/Razor/Pyzor backend.
 
 > 📋 Jump to **[Status & roadmap](#status--roadmap)** for what's done vs planned.
@@ -36,8 +54,9 @@ scaled, restarted, or reload its rules on its own. Same shape as the
 ## Exactly what it does
 
 - **Scans mail with YARA** — `POST /scan` raw message bytes (or one MIME part),
-  get back the matched rules as JSON; rspamd's `yara.lua` plugin wires the hits
-  into the spam score.
+  get back the matched rules as JSON; the rspamd `yara.lua` plugin
+  ([`rspamd/`](rspamd/)) wires the hits into the spam score, or the `yarad-scan`
+  client scans at delivery from Dovecot/Sieve ([`sieve/`](sieve/)).
 - **Ships ~10k public rules baked in** — YARA-Forge, signature-base, ANY.RUN,
   Didier Stevens, bartblaze, InQuest; precompiled `.yac`, daily refresh.
 - **Decompresses Office macros before matching** — MS-OVBA VBA out of
@@ -140,28 +159,6 @@ yarad fetch-rules            # update the cached rule bundle from the release
 yarad info                   # build / libyara / loaded-bundle identity
 ```
 
-### Remote scanning from Dovecot / Sieve (`yarad-scan`)
-
-`yarad scan` compiles the rules in-process, so it needs libyara and the rules on
-that host. A mail-delivery box (Dovecot LDA / Sieve) should stay thin — so
-**`yarad-scan`** is a separate, tiny client: no CGO, no rules, a ~5 MB static
-binary that just POSTs the message to a central `yarad serve` and exits on the
-verdict.
-
-```sh
-yarad-scan -url http://yarad.internal:8079 -token-file /etc/yarad.token - < message
-cat message | yarad-scan -url http://yarad.internal:8079   # stdin
-```
-
-Exit codes: **0** clean, **1** match, **2** usage/read error. **Fails open by
-default** — any transport error/timeout/non-200 is treated as clean (exit 0), so
-a scanner outage never blocks delivery. Pass the secret via `-token-file` or
-`YARAD_TOKEN` (never `-token` on a shared host — it shows in `ps`); redirects are
-never followed so the token can't leak.
-
-A ready-to-use Dovecot Sieve example (quarantine a match, fail-open on outage)
-lives in **[`sieve/`](sieve/)**.
-
 ### Updating rules without rebuilding (`fetch-rules`)
 
 Rules move faster than image rebuilds — and outside Docker you'd otherwise need
@@ -178,6 +175,45 @@ is newer; it **refuses** a bundle built against a different **libyara**,
 the current bundle is untouched. Then SIGHUP (or restart) yarad to load it. The
 bundle is published by `docker/generate-rules.sh` (run from cron); point `-url` /
 `YARAD_RULES_URL` at a mirror if not fetching from GitHub.
+
+## Thin client for Dovecot / Sieve (`yarad-scan`)
+
+`yarad scan` (above) compiles the rules **in-process**, so it needs libyara and
+the rule set on the host that runs it — fine on the scanner box, too heavy for a
+mail-delivery box that should stay thin. **`yarad-scan`** is the answer: a
+separate, tiny client that links **no CGO / libyara and embeds no rules** — pure
+Go, a ~5 MB static binary you can drop on any mail host. It just reads the
+message (stdin or a file), POSTs it to a central `yarad serve`, and exits on the
+verdict — so all the CPU-heavy scanning stays on the central service.
+
+```sh
+# stdin or a file; exit code carries the verdict:
+yarad-scan -url http://yarad.internal:8079 -token-file /etc/yarad.token - < message
+cat message | yarad-scan -url http://yarad.internal:8079
+```
+
+| | |
+|--|--|
+| **Exit 0** | clean — no rule matched (**also** on a fail-open scanner outage) |
+| **Exit 1** | at least one rule matched |
+| **Exit 2** | usage / read / (fail-closed) transport error |
+
+- **Fails open by default** — any transport error, timeout, or non-200 is treated
+  as *clean* (exit 0), so a scanner outage never blocks or bounces delivery. Pass
+  `-fail-open=false` for interactive triage where a silent miss is worse.
+- **Token** via `-token-file` or `YARAD_TOKEN` — never `-token` on a shared host
+  (it shows in `ps`). Redirects are never followed, so the token can't leak to a
+  3xx target.
+- **Same wire format** as the rspamd plugin: `X-YARAD-Token` for auth, base64
+  `X-YARAD-Filename` for the attachment name.
+
+This is the **delivery-time** path from the opinion in the intro: let rspamd drop
+the obvious spam at SMTP, then scan the smaller, cleaner stream with YARA at
+delivery and quarantine a hit — off the connection's critical path.
+
+A ready-to-use Dovecot Sieve example (the `execute` rule, an install wrapper, the
+dovecot config, and a setup/test walkthrough) lives in **[`sieve/`](sieve/)**.
+Because the client fails open, a delivery is never lost if the backend is down.
 
 ## Configuration
 
