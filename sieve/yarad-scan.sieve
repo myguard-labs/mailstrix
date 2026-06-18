@@ -1,5 +1,8 @@
 # yarad-scan.sieve — quarantine a message when yarad's YARA rules match it.
 #
+# Project:  https://github.com/eilandert/rspamd-yarad
+# Write-up: https://deb.myguard.nl/2026/06/yara-malware-scanning-rspamd-yarad/
+#
 # This runs at delivery (Dovecot LDA / LMTP) and pipes the message to the
 # `yarad-scan-wrapper` program (a thin shell wrapper around the CGO-free
 # `yarad-scan` client, which POSTs the message to a central `yarad serve`).

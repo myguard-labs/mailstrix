@@ -2,6 +2,9 @@
 yara.lua — rspamd plugin that scans a message (and optionally each MIME part)
 against a set of YARA rules through the yarad HTTP backend.
 
+Project:  https://github.com/eilandert/rspamd-yarad
+Write-up: https://deb.myguard.nl/2026/06/yara-malware-scanning-rspamd-yarad/
+
 Why a backend instead of a native module:
   * rspamd has no native YARA module (as of 4.1.0; upstream feature is still an
     open request). libyara is a CGO dependency that would block the worker event
