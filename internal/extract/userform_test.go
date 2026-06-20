@@ -3,6 +3,7 @@ package extract
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCarveStrings verifies that carveStrings returns runs of printable ASCII
@@ -162,5 +163,41 @@ func TestHasUserFormMarker(t *testing.T) {
 	}
 	if !hasUserFormMarker([][]byte{[]byte("USERFORM-STRINGS")}) {
 		t.Error("marker stream should return true")
+	}
+}
+
+// TestCarveInputClamp verifies the carve input clamp (STAB-8): a printable run
+// placed entirely past maxCarveInput is not carved, while content within the
+// window still is, and a multi-MiB stream terminates promptly.
+func TestCarveInputClamp(t *testing.T) {
+	// Run within the window is carved.
+	if got := carveStrings([]byte("WITHIN_WINDOW_PRINTABLE")); len(got) != 1 {
+		t.Fatalf("run within window: got %d runs, want 1", len(got))
+	}
+
+	// A non-printable filler exactly maxCarveInput long, then a printable run:
+	// the run sits past the clamp boundary and must be dropped.
+	big := make([]byte, maxCarveInput)
+	for i := range big {
+		big[i] = 0x00 // non-printable
+	}
+	big = append(big, []byte("PAST_THE_CLAMP_BOUNDARY")...)
+
+	done := make(chan [][]byte, 1)
+	go func() { done <- carveStrings(big) }()
+	select {
+	case got := <-done:
+		if len(got) != 0 {
+			t.Fatalf("run past clamp boundary was carved: %d runs", len(got))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("carveStrings did not terminate on a multi-MiB stream")
+	}
+
+	// extractFStreamValues is clamped the same way: a key=value past the boundary
+	// is dropped.
+	buf := append(append([]byte{}, big...), []byte("\nkey=PAST_BOUNDARY_VALUE")...)
+	if got := extractFStreamValues(buf); len(got) != 0 {
+		t.Fatalf("value past clamp boundary was extracted: %d", len(got))
 	}
 }

@@ -40,6 +40,14 @@ const minPrintRun = 8
 // thousands of tiny forms from flooding Streams.
 const maxUserFormStreams = 128
 
+// maxCarveInput bounds the per-stream bytes scanned by carveStrings /
+// extractFStreamValues. An OLE2 form or doc-property stream can be arbitrarily
+// large (GetStream returns the whole stream), so without this a single crafted
+// stream forces a full-length printable-run walk and per-line Split alloc. A
+// real UserForm/property stream is tiny; the prefix keeps the common case
+// identical. Mirrors maxFoldInput / maxReverseInput.
+const maxCarveInput = 1 << 20
+
 // isPrintable reports whether b is a printable ASCII byte (0x20–0x7E).
 func isPrintable(b byte) bool {
 	return b >= 0x20 && b <= 0x7E
@@ -48,6 +56,9 @@ func isPrintable(b byte) bool {
 // carveStrings walks src and returns all runs of printable ASCII bytes of
 // length >= minPrintRun. Each run is returned as a separate []byte.
 func carveStrings(src []byte) [][]byte {
+	if len(src) > maxCarveInput {
+		src = src[:maxCarveInput]
+	}
 	var out [][]byte
 	start := -1
 	for i, b := range src {
@@ -77,6 +88,9 @@ func carveStrings(src []byte) [][]byte {
 // (key=value lines) and returns the value portion after the first "=" on each
 // non-empty line. Only values of length >= minPrintRun are returned.
 func extractFStreamValues(src []byte) [][]byte {
+	if len(src) > maxCarveInput {
+		src = src[:maxCarveInput]
+	}
 	var out [][]byte
 	for _, line := range strings.Split(string(src), "\n") {
 		line = strings.TrimRight(line, "\r")
