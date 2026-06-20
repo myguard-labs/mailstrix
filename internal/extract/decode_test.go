@@ -186,6 +186,32 @@ func TestFoldReplace(t *testing.T) {
 	}
 }
 
+// TestFoldStrReverse verifies StrReverse("literal") is folded to cleartext, so a
+// keyword rule sees the un-reversed string (olevba parity, PT-VBADEOBF-1).
+func TestFoldStrReverse(t *testing.T) {
+	// "llehsrewop" reversed is "powershell".
+	buf := []byte(`cmd = StrReverse("llehsrewop")`)
+	res := Extract(buf, time.Time{})
+	if res.DecodedStreams == 0 {
+		t.Fatal("DecodedStreams = 0, want >0")
+	}
+	if !streamsContain(res, "powershell") {
+		t.Fatalf("folded StrReverse not found; streams: %v", streamsAsStrings(res))
+	}
+}
+
+// TestFoldStrReverseDoubledQuotes verifies the "" escape inside the literal.
+func TestFoldStrReverseDoubledQuotes(t *testing.T) {
+	// Folded result must clear the minDecodedLen emit floor, so use a >=8-char
+	// payload that carries a quote. Reversed `say "hi" now` is `won "ih" yas`;
+	// in source the inner quotes are doubled.
+	buf := []byte(`x = StrReverse("won ""ih"" yas")`)
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, `say "hi" now`) {
+		t.Fatalf("folded StrReverse with doubled quote not found; streams: %v", streamsAsStrings(res))
+	}
+}
+
 // TestFoldArrayXor verifies that Array(N,...) Xor K is decoded byte-by-byte.
 func TestFoldArrayXor(t *testing.T) {
 	// Encode "powershe" (8 bytes) with key=7:

@@ -78,6 +78,13 @@ var (
 	// VBA Array(N,N,...) Xor K — trivial single-byte XOR decoder.
 	reArrayXor = regexp.MustCompile(`(?i)Array\(([\d,\s]+)\)\s*Xor\s+(\d{1,3})`)
 
+	// VBA StrReverse("literal") — reverse a static string argument. olevba folds
+	// this; we reassemble the cleartext so keyword rules see e.g. the un-reversed
+	// "powershell". Only a single quoted literal argument (not an expression);
+	// runtime-reversed expressions are still caught by the whole-buffer reverse
+	// gated on reversedMarkers below.
+	reStrReverse = regexp.MustCompile(`(?i)StrReverse\(\s*"((?:[^"]|"")*)"\s*\)`)
+
 	// Tokens inside a Chr/ChrW concat chain: a string literal or a Chr(N) call.
 	reChrTok = regexp.MustCompile(`(?i)"((?:[^"]|"")*)"|Chr[W]?\((\d{1,5})\)`)
 
@@ -166,7 +173,29 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 		}
 	}
 
+	// StrReverse("literal") — emit the reversed cleartext.
+	revMatches := reStrReverse.FindAllSubmatch(src, maxMatches)
+	for _, m := range revMatches {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return false
+		}
+		lit := strings.ReplaceAll(string(m[1]), `""`, `"`)
+		if !emit([]byte(reverseString(lit))) {
+			return false
+		}
+	}
+
 	return true
+}
+
+// reverseString returns s with its runes in reverse order (so a multi-byte
+// rune is not split). VBA StrReverse is character-wise, matching this.
+func reverseString(s string) string {
+	r := []rune(s)
+	for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return string(r)
 }
 
 // fromEncoded runs the single-layer static decoders over buf and a snapshot of
