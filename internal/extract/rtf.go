@@ -2,6 +2,8 @@ package extract
 
 import (
 	"bytes"
+	"strconv"
+	"strings"
 	"time"
 
 	"www.velocidex.com/golang/oleparse"
@@ -35,6 +37,8 @@ const (
 	maxBytesPerRTFObject = 16 << 20
 	// maxTotalRTF caps cumulative carved/decoded bytes from one document.
 	maxTotalRTF = 48 << 20
+	// maxRTFDDEFields caps how many DDE field instructions we emit per document.
+	maxRTFDDEFields = 16
 )
 
 // utf8BOM is the UTF-8 byte-order mark some editors prepend to RTF.
@@ -59,8 +63,90 @@ func isRTF(buf []byte) bool {
 // .msg); for a bare OLENativeStream it carves the native file via
 // carveOle10Native. Sets res.IsRTF whenever the buffer is RTF (whether or not any
 // object decoded). Bounded by the maxRTF* caps.
+// detectRTFDDE scans buf for DDE/DDEAUTO field instructions inside RTF \fldinst
+// groups and for bare \ddeauto / \dde control words. Each match emits a synthetic
+// stream "RTF-DDE-FIELD <instruction>" so YARA rules can match the payload.
+// Bounded by maxRTFDDEFields.
+func detectRTFDDE(buf []byte, res *Result, deadline time.Time) {
+	count := 0
+	// Scan for \fldinst groups.
+	rest := buf
+	for count < maxRTFDDEFields && !expired(deadline) {
+		idx := bytes.Index(rest, []byte("\\fldinst"))
+		if idx < 0 {
+			break
+		}
+		rest = rest[idx+len("\\fldinst"):]
+		// Skip optional delimiter space / whitespace
+		i := 0
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t' || rest[i] == '\r' || rest[i] == '\n') {
+			i++
+		}
+		// Skip optional opening brace
+		if i < len(rest) && rest[i] == '{' {
+			i++
+		}
+		// Skip whitespace again
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t' || rest[i] == '\r' || rest[i] == '\n') {
+			i++
+		}
+		// Collect text until closing brace
+		start := i
+		for i < len(rest) && rest[i] != '}' {
+			i++
+		}
+		instr := strings.TrimSpace(string(rest[start:i]))
+		upper := strings.ToUpper(instr)
+		if strings.HasPrefix(upper, "DDEAUTO ") || strings.HasPrefix(upper, "DDE ") ||
+			upper == "DDEAUTO" || upper == "DDE" {
+			res.Streams = append(res.Streams, []byte("RTF-DDE-FIELD "+instr))
+			count++
+		}
+	}
+
+	// Scan for bare \ddeauto and \dde control words (outside field groups).
+	for _, kw := range []string{"\\ddeauto", "\\dde"} {
+		search := buf
+		for count < maxRTFDDEFields && !expired(deadline) {
+			idx := bytes.Index(search, []byte(kw))
+			if idx < 0 {
+				break
+			}
+			after := idx + len(kw)
+			// Control word must be followed by a non-alpha char (delimiter)
+			if after < len(search) {
+				next := search[after]
+				if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') {
+					search = search[after:]
+					continue
+				}
+			}
+			label := strings.ToUpper(kw[1:]) // "DDEAUTO" or "DDE"
+			res.Streams = append(res.Streams, []byte("RTF-DDE-FIELD "+label))
+			count++
+			search = search[after:]
+		}
+	}
+}
+
+// fromRTF scans an RTF document for `\objdata` groups, hex-decodes each one, and
+// surfaces the embedded object's payload to res.Streams. For a CFB blob it runs
+// the same OLE2 extraction as a standalone document (macros + package + MSI +
+// .msg); for a bare OLENativeStream it carves the native file via
+// carveOle10Native. Sets res.IsRTF whenever the buffer is RTF (whether or not any
+// object decoded). Bounded by the maxRTF* caps.
 func fromRTF(buf []byte, res *Result, deadline time.Time) {
 	res.IsRTF = true
+
+	// DDE field detection (runs before objdata scan).
+	detectRTFDDE(buf, res, deadline)
+
+	// \objupdate detection — Word auto-fetches the remote OLE link on open
+	// (CVE-2017-0199 vector). Emit a marker so YARA can match.
+	if bytes.Contains(buf, []byte("\\objupdate")) {
+		res.Streams = append(res.Streams, []byte("RTF-OBJUPDATE"))
+	}
+
 	var total, objs int
 	rest := buf
 	for {
@@ -92,39 +178,116 @@ func fromRTF(buf []byte, res *Result, deadline time.Time) {
 }
 
 // decodeRTFHex reads the ASCII-hex run that follows an `\objdata` control word
-// and returns the decoded bytes. It accepts hex digits, skips RTF whitespace
-// (space, CR, LF, tab) and the control-word leading space, and stops at the first
-// non-hex/non-whitespace byte (the group's closing `}` or a nested control word).
-// An odd trailing nibble is dropped. Bounded by maxBytesPerRTFObject so a hostile
-// multi-MiB hex run can't exhaust memory.
+// and returns the decoded bytes. It handles nested RTF groups (which obfuscators
+// inject to break naive hex decoders), \binN binary runs, and backslash control
+// words. An odd trailing nibble is dropped. Bounded by maxBytesPerRTFObject so a
+// hostile multi-MiB hex run can't exhaust memory.
 func decodeRTFHex(b []byte) []byte {
 	out := make([]byte, 0, 256)
 	var hi byte
 	var haveHi bool
-	for _, c := range b {
-		switch {
-		case c == ' ' || c == '\r' || c == '\n' || c == '\t':
-			continue
-		case c >= '0' && c <= '9':
-			c -= '0'
-		case c >= 'a' && c <= 'f':
-			c = c - 'a' + 10
-		case c >= 'A' && c <= 'F':
-			c = c - 'A' + 10
-		default:
-			// End of the hex run (closing brace, control word, etc.).
-			return out
-		}
-		if !haveHi {
-			hi = c
-			haveHi = true
+	depth := 0
+	i := 0
+	for i < len(b) {
+		c := b[i]
+
+		// Track nested groups — objdata can contain nested RTF groups
+		// that obfuscators insert to break hex decoders.
+		if c == '{' {
+			depth++
+			i++
 			continue
 		}
-		out = append(out, hi<<4|c)
-		haveHi = false
-		if len(out) >= maxBytesPerRTFObject {
+		if c == '}' {
+			if depth > 0 {
+				depth--
+				i++
+				continue
+			}
+			// depth 0 closing brace = end of objdata group
 			break
 		}
+		// Skip everything inside nested groups
+		if depth > 0 {
+			i++
+			continue
+		}
+
+		// Handle backslash-escaped control words at depth 0
+		if c == '\\' {
+			i++
+			if i >= len(b) {
+				break
+			}
+			// \binN — skip N binary bytes
+			if i+2 < len(b) && b[i] == 'b' && b[i+1] == 'i' && b[i+2] == 'n' {
+				j := i + 3
+				numStart := j
+				for j < len(b) && b[j] >= '0' && b[j] <= '9' {
+					j++
+				}
+				if j > numStart {
+					n, _ := strconv.Atoi(string(b[numStart:j]))
+					// Skip the delimiter (space) after the number if present
+					if j < len(b) && b[j] == ' ' {
+						j++
+					}
+					i = j + n
+					if i > len(b) {
+						i = len(b)
+					}
+					continue
+				}
+			}
+			// Skip any other control word: advance past alphabetic chars + optional numeric param + delimiter
+			for i < len(b) && b[i] >= 'a' && b[i] <= 'z' {
+				i++
+			}
+			// Skip optional numeric parameter (including negative)
+			if i < len(b) && (b[i] == '-' || (b[i] >= '0' && b[i] <= '9')) {
+				i++
+				for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+					i++
+				}
+			}
+			// Skip delimiter space
+			if i < len(b) && b[i] == ' ' {
+				i++
+			}
+			continue
+		}
+
+		// Whitespace — skip
+		if c == ' ' || c == '\r' || c == '\n' || c == '\t' {
+			i++
+			continue
+		}
+
+		// Hex digit
+		var nibble byte
+		switch {
+		case c >= '0' && c <= '9':
+			nibble = c - '0'
+		case c >= 'a' && c <= 'f':
+			nibble = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			nibble = c - 'A' + 10
+		default:
+			// Non-hex, non-control: stop
+			return out
+		}
+
+		if !haveHi {
+			hi = nibble
+			haveHi = true
+		} else {
+			out = append(out, hi<<4|nibble)
+			haveHi = false
+			if len(out) >= maxBytesPerRTFObject {
+				break
+			}
+		}
+		i++
 	}
 	return out
 }

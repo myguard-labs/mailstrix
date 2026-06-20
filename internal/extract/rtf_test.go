@@ -1,7 +1,9 @@
 package extract
 
 import (
+	"bytes"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +126,91 @@ func TestExtractRTFGarbageObjData(t *testing.T) {
 	}
 	// No valid payload — no crash is the assertion; streams may be empty.
 	_ = res.Streams
+}
+
+func TestExtractRTFDDE(t *testing.T) {
+	buf := []byte(`{\rtf1{\field{\*\fldinst DDEAUTO c:\\Windows\\System32\\cmd.exe /k calc}{\fldrslt }}}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if !bytes.Contains(joined, []byte("RTF-DDE-FIELD")) {
+		t.Fatalf("RTF DDE not detected; streams=%d joined=%q", len(res.Streams), joined)
+	}
+	if !bytes.Contains(joined, []byte("DDEAUTO")) {
+		t.Fatalf("DDEAUTO token not in emitted stream; got %q", joined)
+	}
+}
+
+func TestExtractRTFDDE_BareControlWord(t *testing.T) {
+	buf := []byte(`{\rtf1\ddeauto some text}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if !bytes.Contains(joined, []byte("RTF-DDE-FIELD")) {
+		t.Fatalf("bare \\ddeauto not detected; streams=%d joined=%q", len(res.Streams), joined)
+	}
+}
+
+func TestExtractRTFObjUpdate(t *testing.T) {
+	buf := []byte(`{\rtf1{\object\objupdate{\*\objdata d0cf11e0}}}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if !bytes.Contains(joined, []byte("RTF-OBJUPDATE")) {
+		t.Fatalf("\\objupdate not detected; streams=%d joined=%q", len(res.Streams), joined)
+	}
+}
+
+func TestExtractRTFObjUpdate_Absent(t *testing.T) {
+	buf := []byte(`{\rtf1{\object{\*\objdata d0cf11e0}}}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if bytes.Contains(joined, []byte("RTF-OBJUPDATE")) {
+		t.Fatalf("\\objupdate marker emitted when absent; got %q", joined)
+	}
+}
+
+func TestExtractRTFHexNestedGroups(t *testing.T) {
+	// Hex "d0cf11e0a1b11ae1" with a nested group injected to break naive decoders
+	buf := []byte(`{\rtf1{\object{\*\objdata d0cf11e0{\blipuid abcdef}a1b11ae1}}}`)
+	res := Extract(buf, time.Time{})
+	if !res.IsRTF {
+		t.Fatal("not flagged as RTF")
+	}
+	// The hex should decode despite the nested group
+	// d0cf11e0 + a1b11ae1 = OLE magic (first 8 bytes)
+	// Even though it won't be a valid OLE2, it should attempt the carve (and fail gracefully)
+}
+
+func TestExtractRTFHexControlWordSkip(t *testing.T) {
+	// Build a valid Ole10Native stream so the carved payload appears in res.Streams.
+	// The key assertion is that a \controlword injected in the middle of the hex run
+	// is skipped by decodeRTFHex and the blob is reassembled correctly.
+	payload := []byte("MZ\x90\x00 rtf-ctrl-word-obfuscated payload for test")
+	stream := buildOle10Native("x.exe", "C:\\x.exe", "C:\\Temp\\x.exe", payload, 0)
+	hexPayload := hexEncodeForRTF(stream)
+	// Insert a control word in the middle of the hex to exercise obfuscation skip
+	mid := len(hexPayload) / 2
+	obfuscated := string(hexPayload[:mid]) + "\\somecontrolword " + string(hexPayload[mid:])
+	buf := []byte(`{\rtf1{\object{\*\objdata ` + obfuscated + `}}}`)
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "rtf-ctrl-word-obfuscated payload") {
+		t.Fatalf("control-word obfuscation broke hex decode; streams=%d", len(res.Streams))
+	}
+}
+
+func TestExtractRTFNoDDE(t *testing.T) {
+	buf := []byte(`{\rtf1 plain text no dde}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if bytes.Contains(joined, []byte("RTF-DDE-FIELD")) || bytes.Contains(joined, []byte("RTF-OBJUPDATE")) {
+		t.Fatalf("benign RTF produced markers; got %q", joined)
+	}
+}
+
+func hexEncodeForRTF(b []byte) string {
+	var sb strings.Builder
+	for _, c := range b {
+		fmt.Fprintf(&sb, "%02x", c)
+	}
+	return sb.String()
 }
 
 // Multiple \objdata groups are each carved, bounded by maxRTFObjects.
