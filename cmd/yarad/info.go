@@ -40,8 +40,18 @@ func cmdInfo(args []string) int {
 			"count":     m.Rules,
 			"checksum":  m.Checksum,
 		}
+		srcs := m.Sources
+		if len(srcs) == 0 {
+			srcs = yarad.LoadSources("/usr/share/yarad")
+		}
+		if len(srcs) > 0 {
+			info["sources"] = srcs
+		}
 	} else {
 		info["rules"] = "no cached manifest (baked seed or uninitialised cache)"
+		if srcs := yarad.LoadSources("/usr/share/yarad"); len(srcs) > 0 {
+			info["sources"] = srcs
+		}
 	}
 
 	if *asJSON {
@@ -62,10 +72,30 @@ func cmdInfo(args []string) int {
 	if m, ok := yarad.LoadManifest(*cacheDir); ok {
 		fmt.Printf("  rules:      v%d, generated %s, libyara %s, %d rules\n",
 			m.Version, m.Generated, m.Libyara, m.Rules)
+		srcs := m.Sources
+		if len(srcs) == 0 {
+			srcs = yarad.LoadSources("/usr/share/yarad")
+		}
+		printSources(srcs)
 	} else {
 		fmt.Printf("  rules:      no cached manifest (baked seed or uninitialised cache at %s)\n", *cacheDir)
+		printSources(yarad.LoadSources("/usr/share/yarad"))
 	}
 	return 0
+}
+
+func printSources(srcs []yarad.RuleSource) {
+	if len(srcs) == 0 {
+		return
+	}
+	fmt.Printf("  sources:\n")
+	for _, s := range srcs {
+		set := ""
+		if s.Set != "" {
+			set = s.Set + "@"
+		}
+		fmt.Printf("    %-18s %s (%s, %s%s)\n", s.Name, s.Repo, s.License, set, s.Ref)
+	}
 }
 
 func orUnknown(s string) string {

@@ -190,3 +190,26 @@ fi
 COUNT="$(find "$OUT" -name '*.yar' -o -name '*.yara' | wc -l)"
 echo "fetch-rules: $COUNT rule files in $OUT"
 [ "$COUNT" -gt 0 ] || fail "no rule files fetched"
+
+# Write sources.json — per-ruleset provenance for `yarad info` / /version.
+# Only includes sources that were actually fetched (respects ANYRUN=0 etc).
+{
+    printf '[\n'
+    printf '  {"name":"yaraforge","repo":"https://github.com/YARAHQ/yara-forge","license":"mixed (see repo)","ref":"latest","set":"%s"}' "${YARAFORGE_SET}"
+    printf ',\n  {"name":"signature-base","repo":"https://github.com/Neo23x0/signature-base","license":"CC BY-NC 4.0","ref":"%s"}' "${SIGBASE_REF}"
+    if [ "${ANYRUN:-1}" = "1" ]; then
+        printf ',\n  {"name":"anyrun","repo":"https://github.com/anyrun/YARA","license":"MIT","ref":"%s"}' "${ANYRUN_REF:-main}"
+    fi
+    if [ "${DIDIER:-1}" = "1" ]; then
+        printf ',\n  {"name":"didier","repo":"https://github.com/DidierStevens/DidierStevensSuite","license":"public domain","ref":"%s"}' "${DIDIER_REF:-master}"
+    fi
+    if [ "${BARTBLAZE:-1}" = "1" ]; then
+        printf ',\n  {"name":"bartblaze","repo":"https://github.com/bartblaze/Yara-rules","license":"MIT","ref":"%s"}' "${BARTBLAZE_REF:-master}"
+    fi
+    if [ "${INQUEST:-1}" = "1" ]; then
+        printf ',\n  {"name":"inquest","repo":"https://github.com/InQuest/yara-rules-vt","license":"MIT","ref":"%s"}' "${INQUEST_REF:-main}"
+    fi
+    printf ',\n  {"name":"local","repo":"https://github.com/eilandert/rspamd-yarad","license":"MIT","ref":"baked"}'
+    printf '\n]\n'
+} > "$OUT/sources.json"
+echo "fetch-rules: wrote $OUT/sources.json"

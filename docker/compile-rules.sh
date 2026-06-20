@@ -50,3 +50,11 @@ rm -f "$tmpout"
 yarac $EXT $(cat "$good") "$OUT"
 rm -f "$good"
 echo "compile-rules: bundled $n files ($skip skipped) -> $OUT"
+
+# Carry sources.json (per-ruleset provenance) next to compiled.yac so the
+# rm -rf of the src dir does not erase it.
+OUTDIR="$(dirname "$OUT")"
+if [ -f "$SRC/sources.json" ] && [ "$OUTDIR" != "$SRC" ]; then
+    cp "$SRC/sources.json" "$OUTDIR/sources.json"
+    echo "compile-rules: copied sources.json -> $OUTDIR/sources.json"
+fi

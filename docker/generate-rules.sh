@@ -48,6 +48,8 @@ docker buildx build \
 
 YAC="${WORK}/compiled.yac"
 [ -s "$YAC" ] || die "no compiled.yac produced"
+SOURCES="${WORK}/sources.json"
+[ -f "$SOURCES" ] || note "no sources.json in export — provenance will be absent from manifest"
 LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
 [ -n "$LIBYARA" ] || die "could not determine libyara version"
 
@@ -82,15 +84,28 @@ RULES="${RULES_COUNT:-0}"
 GENERATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 MANIFEST="${WORK}/compiled.yac.manifest.json"
-jq -n \
-    --argjson version "$VERSION" \
-    --arg generated "$GENERATED" \
-    --arg checksum "sha256:${SUM}" \
-    --arg libyara "$LIBYARA" \
-    --argjson rules "$RULES" \
-    --argjson size "$SIZE" \
-    '{version:$version, generated:$generated, checksum:$checksum, libyara:$libyara, rules:$rules, size:$size}' \
-    > "$MANIFEST"
+if [ -f "$SOURCES" ]; then
+    jq -n \
+        --argjson version "$VERSION" \
+        --arg generated "$GENERATED" \
+        --arg checksum "sha256:${SUM}" \
+        --arg libyara "$LIBYARA" \
+        --argjson rules "$RULES" \
+        --argjson size "$SIZE" \
+        --slurpfile sources "$SOURCES" \
+        '{version:$version, generated:$generated, checksum:$checksum, libyara:$libyara, rules:$rules, size:$size, sources:$sources[0]}' \
+        > "$MANIFEST"
+else
+    jq -n \
+        --argjson version "$VERSION" \
+        --arg generated "$GENERATED" \
+        --arg checksum "sha256:${SUM}" \
+        --arg libyara "$LIBYARA" \
+        --argjson rules "$RULES" \
+        --argjson size "$SIZE" \
+        '{version:$version, generated:$generated, checksum:$checksum, libyara:$libyara, rules:$rules, size:$size}' \
+        > "$MANIFEST"
+fi
 
 note "version ${PREV} -> ${VERSION}, libyara ${LIBYARA}, size ${SIZE}, sha256 ${SUM:0:12}…"
 

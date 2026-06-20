@@ -21,16 +21,27 @@ const manifestName = "compiled.yac.manifest.json"
 // backupSuffix is appended to keep exactly one rollback copy of the cache bundle.
 const backupSuffix = ".bak"
 
+// RuleSource records where one ruleset came from: its repo URL, license, and
+// git ref, so `yarad info` and /version can show provenance at a glance.
+type RuleSource struct {
+	Name    string `json:"name"`
+	Repo    string `json:"repo"`
+	License string `json:"license"`
+	Ref     string `json:"ref"`
+	Set     string `json:"set,omitempty"` // only yaraforge (core/extended/full)
+}
+
 // RulesManifest is the small JSON file `fetch-rules` reads first to decide whether
 // to update. It is published next to compiled.yac on the rolling release and is
 // also stored alongside the cached bundle as the local record.
 type RulesManifest struct {
-	Version   int    `json:"version"`   // monotonic; an update exists iff remote > local
-	Generated string `json:"generated"` // RFC3339 UTC, display/audit
-	Checksum  string `json:"checksum"`  // "sha256:<hex>" of compiled.yac
-	Libyara   string `json:"libyara"`   // libyara version that compiled it (skew guard)
-	Rules     int    `json:"rules"`     // rule count (display)
-	Size      int64  `json:"size"`      // compiled.yac bytes (sanity)
+	Version   int          `json:"version"`           // monotonic; an update exists iff remote > local
+	Generated string       `json:"generated"`         // RFC3339 UTC, display/audit
+	Checksum  string       `json:"checksum"`          // "sha256:<hex>" of compiled.yac
+	Libyara   string       `json:"libyara"`           // libyara version that compiled it (skew guard)
+	Rules     int          `json:"rules"`             // rule count (display)
+	Size      int64        `json:"size"`              // compiled.yac bytes (sanity)
+	Sources   []RuleSource `json:"sources,omitempty"` // per-ruleset provenance
 }
 
 // FetchResult reports what FetchRules did, for logging and the CLI exit code.
@@ -129,6 +140,24 @@ func LoadManifest(cacheDir string) (RulesManifest, bool) {
 	}
 	m := readLocalManifest(filepath.Join(cacheDir, manifestName))
 	return m, m.Version > 0
+}
+
+// LoadSources reads the baked sources.json from dir (typically /usr/share/yarad).
+// Returns nil when none exists or it cannot be parsed — callers must treat nil as
+// "provenance unknown" rather than an error (the scanner still works fine).
+func LoadSources(dir string) []RuleSource {
+	if dir == "" {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "sources.json")) // #nosec G304 -- operator-configured path
+	if err != nil {
+		return nil
+	}
+	var srcs []RuleSource
+	if json.Unmarshal(b, &srcs) != nil {
+		return nil
+	}
+	return srcs
 }
 
 // readLocalManifest returns the cached manifest, or a zero-version manifest when

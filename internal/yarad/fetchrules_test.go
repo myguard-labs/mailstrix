@@ -158,3 +158,68 @@ func TestFetchRulesEmptyLibyaraSkipsSkewCheck(t *testing.T) {
 		t.Fatalf("expected update with skew check disabled: %+v", res)
 	}
 }
+
+// TestRulesManifestJSONRoundTrip verifies that RulesManifest with Sources
+// serialises and deserialises without loss.
+func TestRulesManifestJSONRoundTrip(t *testing.T) {
+	orig := RulesManifest{
+		Version:   3,
+		Generated: "2026-06-20T00:00:00Z",
+		Checksum:  "sha256:abc123",
+		Libyara:   "4.5.2",
+		Rules:     42,
+		Size:      1234,
+		Sources: []RuleSource{
+			{Name: "yaraforge", Repo: "https://github.com/YARAHQ/yara-forge", License: "mixed (see repo)", Ref: "latest", Set: "core"},
+			{Name: "signature-base", Repo: "https://github.com/Neo23x0/signature-base", License: "CC BY-NC 4.0", Ref: "master"},
+			{Name: "local", Repo: "https://github.com/eilandert/rspamd-yarad", License: "MIT", Ref: "baked"},
+		},
+	}
+	b, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got RulesManifest
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Version != orig.Version || len(got.Sources) != len(orig.Sources) {
+		t.Fatalf("round-trip mismatch: got %+v", got)
+	}
+	for i, s := range got.Sources {
+		os := orig.Sources[i]
+		if s.Name != os.Name || s.Repo != os.Repo || s.License != os.License || s.Ref != os.Ref || s.Set != os.Set {
+			t.Errorf("sources[%d] = %+v, want %+v", i, s, os)
+		}
+	}
+}
+
+// TestLoadSources verifies that LoadSources reads and parses sources.json from a dir.
+func TestLoadSources(t *testing.T) {
+	dir := t.TempDir()
+	srcs := []RuleSource{
+		{Name: "yaraforge", Repo: "https://github.com/YARAHQ/yara-forge", License: "mixed (see repo)", Ref: "latest", Set: "core"},
+		{Name: "local", Repo: "https://github.com/eilandert/rspamd-yarad", License: "MIT", Ref: "baked"},
+	}
+	b, _ := json.Marshal(srcs)
+	if err := os.WriteFile(filepath.Join(dir, "sources.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadSources(dir)
+	if len(got) != 2 {
+		t.Fatalf("got %d sources, want 2", len(got))
+	}
+	if got[0].Name != "yaraforge" || got[0].Set != "core" {
+		t.Errorf("sources[0] = %+v", got[0])
+	}
+	if got[1].Name != "local" || got[1].Ref != "baked" {
+		t.Errorf("sources[1] = %+v", got[1])
+	}
+}
+
+// TestLoadSourcesMissing returns nil for a missing file (no error).
+func TestLoadSourcesMissing(t *testing.T) {
+	if got := LoadSources(t.TempDir()); got != nil {
+		t.Fatalf("expected nil for missing sources.json, got %v", got)
+	}
+}

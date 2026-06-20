@@ -304,6 +304,17 @@ func (s *Server) serveVersion(w http.ResponseWriter) {
 			"libyara":   m.Libyara,
 			"count":     m.Rules,
 		}
+		srcs := m.Sources
+		if len(srcs) == 0 {
+			srcs = LoadSources("/usr/share/yarad")
+		}
+		if len(srcs) > 0 {
+			resp["sources"] = srcs
+		}
+	} else {
+		if srcs := LoadSources("/usr/share/yarad"); len(srcs) > 0 {
+			resp["sources"] = srcs
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -121,6 +121,7 @@ RUN YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_RE
 FROM scratch AS rules-export
 COPY --from=rules /rules/compiled.yac /compiled.yac
 COPY --from=rules /rules/libyara.version /libyara.version
+COPY --from=rules /rules/sources.json /sources.json
 
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot AS final
@@ -136,6 +137,7 @@ COPY --from=build /out/yarad /usr/local/bin/yarad
 # rootfs (only /var/cache/yarad is service-writable). No --chown = root:root; the
 # file stays world-readable (0644 from yarac) so nonroot can still read it to seed.
 COPY --from=rules /rules/compiled.yac /usr/share/yarad/compiled.yac
+COPY --from=rules /rules/sources.json /usr/share/yarad/sources.json
 # A writable cache dir owned by nonroot, so yarad can seed even with no bindmount
 # (a bindmount or tmpfs at /var/cache/yarad simply overlays it).
 COPY --from=rules --chown=nonroot:nonroot /var/cache/yarad /var/cache/yarad
