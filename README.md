@@ -519,8 +519,6 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] VBA stomping detection (p-code vs. source heuristic; `VBA_Stomped` rule via `vba_stomping.yara`)
 - [x] Equation Editor exploit detection (`equation_editor.yara`): OLE2 with Equation Native/CLSID + MTEF bytecode
 
-**oletools-parity track** (closing the gap with `olevba`/`oleid`; reference-verified against the actual oletools/pyxlsb2/olefile/ClamAV sources):
-
 - [x] VBA string folds at `olevba` parity: `Chr`/`Replace`/`Array Xor`/`StrReverse("lit")`/`Environ`→marker + **Dridex** `DridexUrlDecode`
 - [x] `oleid` structural indicators: embedded-OLE `ObjectPool` + Flash/SWF markers
 - [ ] **Multi-stage deobfuscation** — bounded recursive decode (depth ~4) so a 2+-layer payload (Dridex-style) is unwound, not just the first layer; the remaining `olevba` edge over yarad
