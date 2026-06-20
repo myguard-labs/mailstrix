@@ -552,3 +552,65 @@ func TestStreamDeduplication(t *testing.T) {
 		t.Errorf("Deduped = 0 after scanning doc with duplicate streams; want > 0. ExtractMetrics=%+v", em)
 	}
 }
+
+// TestScanPooledScannerNoExternalLeak guards PERF-2: yara.Scanner objects are
+// pooled across scans, so an external set on one scan must not leak into the
+// next. Scan a body with filename "x.exe" (matches, sets the filename external,
+// returns the scanner to the pool), then scan an IDENTICAL body with NO filename
+// on the same Scanner — it must NOT match, proving define() reset the external
+// rather than leaving the pooled scanner's stale value.
+func TestScanPooledScannerNoExternalLeak(t *testing.T) {
+	s := newScanner(t, writeRules(t, `rule Bad_Ext { condition: filename matches /\.exe$/ }`))
+	body := []byte("identical clean body bytes")
+
+	// Run several dirty scans first to seed the pool with a scanner whose
+	// filename external is "x.exe".
+	for i := 0; i < 5; i++ {
+		if m, err := scanT(s, body, NewScanMeta("x.exe")); err != nil || len(m) != 1 {
+			t.Fatalf(".exe scan %d: %+v err=%v", i, m, err)
+		}
+	}
+	// Now scan with no filename, reusing a pooled scanner. A leak would carry
+	// "x.exe" forward and wrongly match.
+	for i := 0; i < 5; i++ {
+		if m, err := scanT(s, body, ScanMeta{}); err != nil || len(m) != 0 {
+			t.Fatalf("no-filename scan %d leaked the pooled external (matched %+v) err=%v", i, m, err)
+		}
+	}
+}
+
+// TestScanPoolSurvivesReload guards the PERF-2 scanner-pool generation handling:
+// after a Reload swaps the rules, scans must use the NEW rules — a yara.Scanner
+// pooled against the OLD rules must never be reused (it is bound to freed rules).
+// Uses a filename-external rule so the pooled-scanner path is exercised.
+func TestScanPoolSurvivesReload(t *testing.T) {
+	dir := writeRules(t, `rule Old_Ext { condition: filename matches /\.exe$/ }`)
+	s := newScanner(t, dir)
+	body := []byte("clean body bytes for reload test")
+
+	// Populate the pool with scanners bound to the OLD ruleset.
+	for i := 0; i < 4; i++ {
+		if m, err := scanT(s, body, NewScanMeta("x.exe")); err != nil || len(m) != 1 {
+			t.Fatalf("pre-reload .exe scan: %+v err=%v", m, err)
+		}
+	}
+
+	// Swap in a DIFFERENT ruleset and reload.
+	if err := os.WriteFile(filepath.Join(dir, "eicar.yar"),
+		[]byte(`rule New_Scr { condition: extension == ".scr" }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The OLD rule must be gone; the NEW rule must fire — proving the post-reload
+	// scans built fresh scanners against the new rules rather than reusing pooled
+	// ones from the retired generation.
+	if m, err := scanT(s, body, NewScanMeta("x.exe")); err != nil || len(m) != 0 {
+		t.Fatalf("old rule still matched after reload: %+v err=%v", m, err)
+	}
+	if m, err := scanT(s, body, NewScanMeta("y.scr")); err != nil || len(m) != 1 || m[0].Rule != "New_Scr" {
+		t.Fatalf("new rule did not match after reload: %+v err=%v", m, err)
+	}
+}

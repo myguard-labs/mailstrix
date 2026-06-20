@@ -46,6 +46,13 @@ type Scanner struct {
 	scanTimeout time.Duration
 	logf        func(string, ...any)
 
+	// scanners pools yara.Scanner objects so a scan that overrides external
+	// variables (VBA/filename — every macro stream) doesn't allocate and
+	// Destroy a fresh Scanner each time. Keyed to the active *yara.Rules: when
+	// Reload swaps the rules, pooled scanners bound to the old rules are stale
+	// and are Destroyed on return rather than reused. See scannerGen.
+	scanners atomic.Pointer[scannerGen]
+
 	mu      sync.Mutex // serializes Reload so two SIGHUPs can't compile at once
 	srcDir  string
 	srcFile string // precompiled bundle; wins over srcDir when set
@@ -112,6 +119,104 @@ type Scanner struct {
 
 	// topMatches counts rule hits since the last reload for /version observability.
 	topMatches *matchCounter
+}
+
+// scannerGen is a bounded free-list of yara.Scanner objects bound to one
+// *yara.Rules. A yara.Scanner holds C memory that MUST be Destroy()ed and is
+// bound to the rules it was built from, so when Reload swaps the rules every
+// idle scanner becomes stale. We use an explicit mutex-guarded free-list (NOT a
+// sync.Pool) precisely so a generation can be DRAINED — sync.Pool drops its
+// contents to the GC without any finalizer, which would leak the C-allocated
+// scanners on every reload. getScanner installs a fresh generation when the
+// rules change and destroys the retired generation's idle scanners; putScanner
+// returns a scanner to its generation only if that generation is still live,
+// else destroys it.
+type scannerGen struct {
+	rules *yara.Rules
+	mu    sync.Mutex
+	free  []*yara.Scanner
+}
+
+// maxPooledScanners caps idle scanners kept per generation. Concurrency is
+// already bounded by the scan-CPU gate, so a handful covers steady state; extra
+// returns are destroyed rather than hoarded.
+const maxPooledScanners = 32
+
+// get pops an idle scanner or returns nil if the free-list is empty.
+func (g *scannerGen) get() *yara.Scanner {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if n := len(g.free); n > 0 {
+		sc := g.free[n-1]
+		g.free[n-1] = nil
+		g.free = g.free[:n-1]
+		return sc
+	}
+	return nil
+}
+
+// put returns a scanner to the free-list, or reports false if the list is full
+// (caller destroys it).
+func (g *scannerGen) put(sc *yara.Scanner) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.free) >= maxPooledScanners {
+		return false
+	}
+	g.free = append(g.free, sc)
+	return true
+}
+
+// drain removes and returns all idle scanners so the caller can Destroy them
+// when the generation is retired.
+func (g *scannerGen) drain() []*yara.Scanner {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := g.free
+	g.free = nil
+	return out
+}
+
+// getScanner returns a yara.Scanner bound to rules, reusing a pooled one when
+// possible. The caller MUST hand it back via putScanner. gen is returned so
+// putScanner can verify the scanner still belongs to the live generation.
+func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, error) {
+	gen := s.scanners.Load()
+	if gen == nil || gen.rules != rules {
+		// First use, or rules changed under us (post-Reload): retire the old
+		// generation (destroy its idle scanners so the C memory is freed, not
+		// leaked) and install a fresh one for the current rules. A benign race
+		// where two goroutines both install just means one extra empty gen.
+		old := gen
+		gen = &scannerGen{rules: rules}
+		s.scanners.Store(gen)
+		if old != nil {
+			for _, sc := range old.drain() {
+				sc.Destroy()
+			}
+		}
+	}
+	if sc := gen.get(); sc != nil {
+		return sc, gen, nil
+	}
+	sc, err := yara.NewScanner(rules)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sc, gen, nil
+}
+
+// putScanner returns sc to its generation's free-list, or Destroys it if the
+// generation is no longer current (a Reload happened) or the list is full, so a
+// scanner bound to stale rules is never reused and idle scanners stay bounded.
+func (s *Scanner) putScanner(sc *yara.Scanner, gen *scannerGen) {
+	if sc == nil || gen == nil {
+		return
+	}
+	if s.scanners.Load() == gen && gen.put(sc) {
+		return
+	}
+	sc.Destroy()
 }
 
 // ExtractMetrics is a snapshot of the document pre-extraction counters, surfaced
@@ -556,27 +661,22 @@ func (v scanVars) needsScanner() bool {
 	return v.vba || v.filename != "" || v.extension != "" || v.fileType != ""
 }
 
-// define applies the overrides to a scanner. VBA is always set (to the desired
-// value, false by default); string externals are set only when non-empty so an
-// absent name/type leaves the empty compile-time default.
+// define applies the overrides to a scanner. EVERY external is set on every
+// call (string ones to "" when absent), never conditionally: a pooled scanner
+// is reused across scans, so a value left undefined would leak the previous
+// scan's value. Setting "" reproduces the compile-time empty default.
 func (v scanVars) define(sc *yara.Scanner) error {
 	if err := sc.DefineVariable("VBA", v.vba); err != nil {
 		return err
 	}
-	if v.filename != "" {
-		if err := sc.DefineVariable("filename", v.filename); err != nil {
-			return err
-		}
+	if err := sc.DefineVariable("filename", v.filename); err != nil {
+		return err
 	}
-	if v.extension != "" {
-		if err := sc.DefineVariable("extension", v.extension); err != nil {
-			return err
-		}
+	if err := sc.DefineVariable("extension", v.extension); err != nil {
+		return err
 	}
-	if v.fileType != "" {
-		if err := sc.DefineVariable("file_type", v.fileType); err != nil {
-			return err
-		}
+	if err := sc.DefineVariable("file_type", v.fileType); err != nil {
+		return err
 	}
 	return nil
 }
@@ -886,11 +986,13 @@ func (s *Scanner) MBazaarMetrics() mbazaar.Metrics {
 func (s *Scanner) scanOne(rules *yara.Rules, buf []byte, vars scanVars, timeout time.Duration) ([]Match, error) {
 	var mr yara.MatchRules
 	if vars.needsScanner() {
-		sc, err := yara.NewScanner(rules)
+		sc, gen, err := s.getScanner(rules)
 		if err != nil {
 			return nil, err
 		}
-		defer sc.Destroy()
+		defer s.putScanner(sc, gen)
+		// Every external is (re)defined and the callback re-bound on each use, so
+		// a pooled scanner carries no state from its previous scan.
 		if err := vars.define(sc); err != nil {
 			return nil, err
 		}
