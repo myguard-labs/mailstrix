@@ -111,7 +111,10 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 				buf = append(buf, []byte(tok[1])...)
 			} else {
 				n, _ := strconv.Atoi(tok[2])
-				buf = append(buf, []byte(string(rune(n)))...)
+				if n < 0 || n > 0x10FFFF {
+					continue
+				}
+				buf = append(buf, []byte(string(rune(n)))...) // #nosec G115 -- clamped above
 			}
 		}
 		if !emit(buf) {
@@ -146,7 +149,7 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 				continue
 			}
 			n, _ := strconv.Atoi(p)
-			buf = append(buf, byte(n^key))
+			buf = append(buf, byte(n^key)) // #nosec G115 -- intentional truncation to byte
 		}
 		if !emit(buf) {
 			return false
