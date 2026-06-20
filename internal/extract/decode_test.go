@@ -78,22 +78,81 @@ func TestDecodeExpiredDeadlineYieldsNothing(t *testing.T) {
 
 // TestDecodeDepthCapOne proves the pass does not chain: a base64-of-base64 blob
 // decodes exactly one layer, so the inner plaintext is never surfaced.
-func TestDecodeDepthCapOne(t *testing.T) {
+// TestDecodeMultiLayer verifies the MSD-1 recursion: a base64-over-base64 payload
+// is unwrapped to the inner plaintext, where the old single-pass decoder stopped
+// at the first (still-encoded) layer.
+func TestDecodeMultiLayer(t *testing.T) {
 	inner := "powershellPayloadHiddenTwoLayersDeep"
 	b1 := base64.StdEncoding.EncodeToString([]byte(inner)) // first layer (still base64 text)
 	outer := base64.StdEncoding.EncodeToString([]byte(b1)) // second layer
 	buf := []byte(outer)
 
 	res := Extract(buf, time.Time{})
-	if res.DecodedStreams == 0 {
-		t.Fatalf("DecodedStreams = 0, want >0 (one layer must decode)")
-	}
-	// The single decode yields b1 (still encoded); the inner plaintext must NOT appear.
 	if !streamsContain(res, b1) {
 		t.Fatalf("first decode layer (b1) not surfaced")
 	}
-	if streamsContain(res, "powershellPayload") {
-		t.Fatalf("inner plaintext surfaced — decode chained beyond depth 1")
+	if !streamsContain(res, "powershellPayloadHidden") {
+		t.Fatalf("inner plaintext not surfaced — recursion did not chain to depth 2")
+	}
+}
+
+// TestDecodeDepthCapped verifies the recursion stops at maxDecodeDepth: a payload
+// nested ONE layer deeper than the cap must not fully unwrap to the deepest
+// plaintext.
+func TestDecodeDepthCapped(t *testing.T) {
+	// Innermost plaintext, then maxDecodeDepth+1 base64 layers on top. A decode
+	// chain runs at most maxDecodeDepth passes (depths 0..maxDecodeDepth-1), so it
+	// peels maxDecodeDepth layers and leaves the innermost plaintext still wrapped.
+	s := "secretDeepPayloadMarkerXYZ"
+	for i := 0; i < maxDecodeDepth+1; i++ {
+		s = base64.StdEncoding.EncodeToString([]byte(s))
+	}
+	res := Extract([]byte(s), time.Time{})
+	if streamsContain(res, "secretDeepPayloadMarker") {
+		t.Fatalf("payload nested beyond maxDecodeDepth was fully unwrapped")
+	}
+}
+
+// TestDecodeRecursesIntoVBAFold verifies looksEncoded re-enqueues a child blob
+// that decoded into a VBA string-build construct: a base64 layer hiding a
+// Replace(...) call must fold to the cleartext payload one layer down.
+func TestDecodeRecursesIntoVBAFold(t *testing.T) {
+	// Replace("poXwerXshell","X","") -> "powershell"
+	vba := `Replace("poXwerXshell","X","")`
+	buf := []byte(base64.StdEncoding.EncodeToString([]byte(vba)))
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "powershell") {
+		t.Fatalf("base64->Replace() not folded; recursion missed the VBA construct; streams=%q", res.Streams)
+	}
+}
+
+// TestDecodePerStreamBudget pins the MSD-1 budget contract: the blob budget is
+// reset per source stream, not shared across them. Many streams, each carrying
+// several encoded runs, must EACH get decoded — a single shared 32-blob pool
+// would starve the later streams.
+func TestDecodePerStreamBudget(t *testing.T) {
+	const nStreams = 30
+	const runsPer = 5
+	res := &Result{}
+	for i := 0; i < nStreams; i++ {
+		var b strings.Builder
+		for j := 0; j < runsPer; j++ {
+			// Each payload is a distinct, recognisable, >=18-byte marker so its
+			// base64 clears minBase64Run and its plaintext clears minDecodedLen.
+			payload := "PER-STREAM-PAYLOAD-" + string(rune('A'+i)) + string(rune('0'+j)) + "-pad"
+			b.WriteString(base64.StdEncoding.EncodeToString([]byte(payload)))
+			b.WriteByte(' ')
+		}
+		res.Streams = append(res.Streams, []byte(b.String()))
+	}
+	// Decode pass over the pre-populated streams (buf empty).
+	fromEncoded(nil, res, time.Time{})
+
+	// A shared 32-blob budget would stop after ~6 streams (6*5=30). Assert the LAST
+	// stream's payload decoded — only possible if each stream had its own budget.
+	last := "PER-STREAM-PAYLOAD-" + string(rune('A'+nStreams-1))
+	if !streamsContain(*res, last) {
+		t.Fatalf("last stream's payload not decoded — budget shared across streams, not per-stream")
 	}
 }
 

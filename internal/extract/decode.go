@@ -11,23 +11,27 @@ import (
 	"time"
 )
 
-// Static single-layer deobfuscation. Malware authors hide a payload (a URL, a
+// Static multi-layer deobfuscation. Malware authors hide a payload (a URL, a
 // PowerShell one-liner, a dropped EXE) inside an otherwise-cleartext script or
-// macro by base64/hex-encoding it or writing keywords backwards (VBA
-// StrReverse). A raw keyword scan never sees the payload because the bytes on
-// disk are the encoded form. fromEncoded reverses the cheap, deterministic
-// transforms — base64, hex, and a whole-buffer reverse — over the raw buffer and
-// every already-extracted cleartext stream, emitting each decoded result as an
-// extra stream so the keyword/maldoc rules match the real content.
+// macro by base64/hex-encoding it, writing keywords backwards (VBA StrReverse),
+// or stacking several such layers. A raw keyword scan never sees the payload
+// because the bytes on disk are the encoded form. fromEncoded reverses the cheap,
+// deterministic transforms — base64, hex, a whole-buffer reverse, and the VBA
+// string-building folds — over the raw buffer and every already-extracted
+// cleartext stream, emitting each decoded result as an extra stream so the
+// keyword/maldoc rules match the real content.
 //
-// This is the tractable slice of oletools' deobfuscation: SINGLE-LAYER static
-// transforms, NOT emulation. It deliberately does not chain (a decoded blob is
-// never fed back through fromEncoded — depth cap 1) and does not interpret VBA
-// or evaluate XLM/Excel-4.0 macros; that decode/emulation tail (Dridex-style
-// multi-stage unpacking) stays with olevba/ViperMonkey (rspamd-olefy).
+// This is the tractable slice of oletools' deobfuscation: static transforms, NOT
+// emulation. Unlike the original single-pass version, it now CHAINS: a decoded
+// blob that still looksEncoded is fed back through the decoders one layer deeper,
+// up to maxDecodeDepth (MSD-1), so a Dridex-style nested payload is unwrapped. It
+// still does not interpret VBA or evaluate XLM/Excel-4.0 macros; that emulation
+// tail stays with olevba/ViperMonkey (rspamd-olefy).
 //
 // Everything is bounded and fail-open: a source that decodes to nothing, a cap
-// hit, or a malformed run just yields fewer streams — never an error.
+// hit, or a malformed run just yields fewer streams — never an error. The
+// recursion is bounded by a per-source blob/byte budget (reset per source stream,
+// shared across its depths), a depth cap, and a per-source iteration cap.
 
 const (
 	// minBase64Run / minHexRun are the shortest encoded runs we bother decoding.
@@ -45,6 +49,15 @@ const (
 	maxDecodedBlobs        = 32
 	maxBytesPerDecodedBlob = 1 << 20
 	maxCumulativeDecoded   = 4 << 20
+	// maxDecodeDepth bounds the recursive multi-layer decode (MSD-1): each source
+	// stream is depth 0, and every decoded blob that still looksEncoded is
+	// re-decoded one layer deeper, up to this depth. olevba unpacks Dridex-style
+	// payloads to roughly this many layers.
+	maxDecodeDepth = 4
+	// maxDecodeIterations is a hard cap on worklist dequeues PER SOURCE stream — a
+	// safety floor against a decode cycle or fan-out that the depth and blob/byte
+	// budgets somehow don't already stop (the blob budget normally bites first).
+	maxDecodeIterations = 256
 	// maxB64Encoded / maxHexEncoded bound the ENCODED candidate length we hand to
 	// a decoder, so one giant run can't allocate/copy far past maxBytesPerDecodedBlob
 	// before the emit cap truncates (base64 expands ~4/3, hex 2x). Both stay
@@ -355,11 +368,17 @@ func dridexURLDecode(in string) (out string, ok bool) {
 	return b.String(), true
 }
 
-// fromEncoded runs the single-layer static decoders over buf and a snapshot of
-// the streams extracted so far, appending any decoded blobs to res.Streams and
-// setting res.Decoded when at least one was emitted. It NEVER reprocesses its own
-// output: the source list is snapshotted before the first append, so a decoded
-// blob is scanned by libyara but not decoded again (depth cap 1).
+// fromEncoded runs the static decoders over buf and a snapshot of the streams
+// extracted so far, appending decoded blobs to res.Streams. Each source stream is
+// decoded RECURSIVELY (MSD-1): a decoded blob that still looksEncoded is fed back
+// through the decoders one layer deeper, up to maxDecodeDepth, so a Dridex-style
+// base64-over-hex-over-reverse payload is fully unwrapped.
+//
+// Budget contract: the per-source caps (maxDecodedBlobs / maxCumulativeDecoded)
+// are GLOBAL across a source stream's recursion depths but RESET for each new
+// source stream — so one noisy stream can't starve the others' detection in a
+// multi-stream document. The global res.Streams/maxStreams ceiling still bounds
+// the absolute total across all streams.
 func fromEncoded(buf []byte, res *Result, deadline time.Time) {
 	// Snapshot: the raw buffer plus the streams present right now. Appends below
 	// grow res.Streams (possibly reallocating its backing array) but never touch
@@ -368,10 +387,35 @@ func fromEncoded(buf []byte, res *Result, deadline time.Time) {
 	sources = append(sources, buf)
 	sources = append(sources, res.Streams...)
 
-	var blobs, cum int
-	// emit appends one decoded blob, enforcing the caps. It returns false when a
-	// global cap is hit (the caller must stop), true otherwise (incl. a skipped
-	// too-short blob).
+	total := 0
+	for _, src := range sources {
+		if expired(deadline) || len(res.Streams) >= maxStreams {
+			break
+		}
+		total += decodeSourceTree(src, res, deadline)
+	}
+	// Record how many blobs the pass appended (always the trailing res.Streams),
+	// so the caller can keep the macro/extracted-stream metrics free of decode noise.
+	res.DecodedStreams = total
+}
+
+// decodeSourceTree runs the recursive multi-layer decode for ONE source stream
+// and returns the number of blobs it emitted. The blob/byte budget is local to
+// this call (the per-source reset of the MSD-1 contract); it is shared across all
+// recursion depths of this source via the closure below. A FIFO worklist gives
+// breadth-first unwrapping so the budget is spent on shallow layers (more likely
+// to be the real payload) before deep ones.
+func decodeSourceTree(src []byte, res *Result, deadline time.Time) int {
+	type item struct {
+		data  []byte
+		depth int
+	}
+	queue := []item{{src, 0}}
+
+	var blobs, cum, iters int
+	// children collects the blobs emitted while decoding the CURRENT item, so we
+	// can decide which to re-enqueue one layer deeper after the decoders run.
+	var children [][]byte
 	emit := func(b []byte) bool {
 		if len(b) < minDecodedLen {
 			return true
@@ -383,35 +427,78 @@ func fromEncoded(buf []byte, res *Result, deadline time.Time) {
 			return false
 		}
 		res.Streams = append(res.Streams, b)
+		children = append(children, b)
 		blobs++
 		cum += len(b)
 		return true
 	}
 
-	for _, src := range sources {
-		if expired(deadline) || blobs >= maxDecodedBlobs || cum >= maxCumulativeDecoded {
+	for len(queue) > 0 {
+		if expired(deadline) || iters >= maxDecodeIterations ||
+			blobs >= maxDecodedBlobs || cum >= maxCumulativeDecoded ||
+			len(res.Streams) >= maxStreams {
 			break
 		}
-		// Only decode mostly-text sources; binary container bytes yield noise.
-		if !mostlyText(src) {
+		iters++
+		cur := queue[0]
+		queue = queue[1:]
+		// Only decode mostly-text data; binary container/blob bytes yield noise.
+		if !mostlyText(cur.data) {
 			continue
 		}
-		if !decodeBase64Runs(src, deadline, emit) {
-			break
+
+		children = children[:0]
+		ok := decodeBase64Runs(cur.data, deadline, emit) &&
+			decodeHexRuns(cur.data, deadline, emit) &&
+			emitReversed(cur.data, emit) &&
+			foldVBAStrings(cur.data, deadline, emit)
+
+		// Re-enqueue this item's encoded children one layer deeper. Gate on
+		// looksEncoded so a fully-decoded cleartext blob isn't re-scanned for
+		// nothing (the main speed lever — keeps deep layers ~free on benign input).
+		// `+1 < maxDecodeDepth` bounds a decode chain to exactly maxDecodeDepth
+		// passes: the source decodes at depth 0 and each child one deeper, so the
+		// deepest decoded item is at depth maxDecodeDepth-1.
+		if cur.depth+1 < maxDecodeDepth {
+			for _, c := range children {
+				if looksEncoded(c) {
+					queue = append(queue, item{c, cur.depth + 1})
+				}
+			}
 		}
-		if !decodeHexRuns(src, deadline, emit) {
-			break
-		}
-		if !emitReversed(src, emit) {
-			break
-		}
-		if !foldVBAStrings(src, deadline, emit) {
-			break
+		if !ok {
+			break // a per-source budget cap was hit — stop this source's tree
 		}
 	}
-	// Record how many blobs the pass appended (always the last res.Streams), so
-	// the caller can keep the macro/extracted-stream metrics free of decode noise.
-	res.DecodedStreams = blobs
+	return blobs
+}
+
+// looksEncoded reports whether b plausibly carries another encoded layer worth
+// re-decoding: a long base64/hex run, a reversed high-signal token, or a VBA
+// string-building construct. Used to gate the MSD-1 recursion so cleartext output
+// is not re-enqueued. The scan length is clamped (RE2 is linear, but a multi-MiB
+// blob would still cost a full pass) — a real nested payload sits well within it.
+func looksEncoded(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	scan := b
+	if len(scan) > maxFoldInput {
+		scan = scan[:maxFoldInput]
+	}
+	if reBase64.Match(scan) || reHex.Match(scan) {
+		return true
+	}
+	low := bytes.ToLower(scan)
+	for _, m := range reversedMarkers {
+		if bytes.Contains(low, m) {
+			return true
+		}
+	}
+	// Mirror EVERY pattern foldVBAStrings handles, so a child blob that decoded
+	// into any VBA string-build construct is re-enqueued and folded one layer down.
+	return reChrConcat.Match(scan) || reReplace.Match(scan) || reArrayXor.Match(scan) ||
+		reStrReverse.Match(scan) || reEnviron.Match(scan) || reDridex.Match(scan)
 }
 
 // mostlyText reports whether a leading sample of b is at least textPrintablePct
