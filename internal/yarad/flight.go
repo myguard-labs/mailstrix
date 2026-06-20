@@ -40,12 +40,21 @@ func (g *flightGroup) Do(key string, fn func() []Match) (matches []Match, shared
 	g.m[key] = fl
 	g.mu.Unlock()
 
-	fl.matches = fn()
-	fl.wg.Done()
+	// Release waiters and drop the map entry via defer so that a panic in fn
+	// (e.g. a libyara binding fault) cannot leave coalesced callers blocked
+	// forever on fl.wg.Wait() with the key permanently stuck in g.m. The
+	// panic is re-raised after cleanup so the leader still fails loudly.
+	// fl.shared is read here under g.mu — a late joiner sets it under the same
+	// lock, so this is the only race-free place to read it.
+	defer func() {
+		fl.wg.Done()
+		g.mu.Lock()
+		delete(g.m, key)
+		shared = fl.shared
+		g.mu.Unlock()
+	}()
 
-	g.mu.Lock()
-	delete(g.m, key)
-	wasShared := fl.shared
-	g.mu.Unlock()
-	return fl.matches, wasShared
+	matches = fn()
+	fl.matches = matches
+	return
 }
