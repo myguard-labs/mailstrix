@@ -146,6 +146,9 @@ type dirModRecord struct {
 // returns the per-module records. It mirrors the logic in oleparse.ExtractMacros
 // but extracts only {name, streamName, MODULEOFFSET}. Fails open on truncation.
 func walkDirStream(dir []byte) ([]dirModRecord, error) {
+	const maxModules = 256
+	const maxRecordSize = 1 << 20
+
 	i := 0
 
 	readU16 := func() (uint16, bool) {
@@ -200,7 +203,13 @@ func walkDirStream(dir []byte) ([]dirModRecord, error) {
 				return nil, fmt.Errorf("truncated PROJECTMODULES count")
 			}
 			moduleCount = int(cnt)
+			if moduleCount > maxModules {
+				moduleCount = maxModules
+			}
 			break
+		}
+		if sz > uint32(maxRecordSize) {
+			return nil, fmt.Errorf("dir record 0x%04x size %d exceeds cap", id, sz)
 		}
 		if !skipN(int(sz)) {
 			return nil, fmt.Errorf("truncated inside section 0x%04x", id)
@@ -235,6 +244,10 @@ func walkDirStream(dir []byte) ([]dirModRecord, error) {
 		idTERMINATOR        = uint16(0x002B)
 	)
 
+	if moduleCount == 0 {
+		return nil, nil
+	}
+
 	var result []dirModRecord
 
 moduleLoop:
@@ -249,6 +262,9 @@ moduleLoop:
 		if !ok {
 			break
 		}
+		if sz > uint32(maxRecordSize) {
+			return nil, fmt.Errorf("dir record 0x%04x size %d exceeds cap", idMODULENAME, sz)
+		}
 		nameBytes, ok := readN(int(sz))
 		if !ok {
 			break
@@ -262,6 +278,9 @@ moduleLoop:
 			}
 			ssz, ok2 := readU32()
 			if !ok2 {
+				break moduleLoop
+			}
+			if ssz > uint32(maxRecordSize) {
 				break moduleLoop
 			}
 			switch sid {

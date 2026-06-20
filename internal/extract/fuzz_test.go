@@ -51,6 +51,11 @@ func FuzzExtract(f *testing.F) {
 	// RTF with an \objdata group of odd-length/garbage hex — fuzz the hex decoder
 	// and the fromRTF group-scan bounds (must terminate, never over-read).
 	f.Add([]byte("{\\rtf1{\\object{\\*\\objdata d0cf11e0 a1b11ae1 zz}}}"))
+	// VBA dir-stream seed: exercise walkDirStream bounds-checks via the full
+	// Extract path (wrapped in an OLE2 container by the fuzzer's mutations).
+	f.Add(buildSyntheticDirStream([]testModule{
+		{name: "Module1", streamName: "Module1", offset: 100},
+	}))
 	f.Add([]byte{})
 	f.Add([]byte("plain text"))
 
