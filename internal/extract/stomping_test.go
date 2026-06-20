@@ -197,7 +197,12 @@ func TestWalkDirStream_UnknownRecordTypes(t *testing.T) {
 	base := buildSyntheticDirStream([]testModule{
 		{name: "Module1", streamName: "Module1", offset: 42},
 	})
-	// Insert unknown records just before the final TERMINATOR (last 6 bytes).
+	// Copy the TERMINATOR (last 6 bytes) before splicing — sub-slices share
+	// the backing array, so append into body would corrupt term otherwise.
+	term := make([]byte, 6)
+	copy(term, base[len(base)-6:])
+	body := append([]byte{}, base[:len(base)-6]...)
+
 	unknown := []byte{}
 	unknown = appendU16(unknown, 0x0099) // unknown record ID
 	unknown = appendU32(unknown, 4)
@@ -206,8 +211,6 @@ func TestWalkDirStream_UnknownRecordTypes(t *testing.T) {
 	unknown = appendU32(unknown, 2)
 	unknown = append(unknown, 0xCA, 0xFE)
 
-	term := base[len(base)-6:]
-	body := base[:len(base)-6]
 	patched := append(body, unknown...)
 	patched = append(patched, term...)
 
