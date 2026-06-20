@@ -130,6 +130,9 @@ func fromEncoded(buf []byte, res *Result, deadline time.Time) {
 		if !emitReversed(src, emit) {
 			break
 		}
+		if !foldVBAConst(src, deadline, emit) {
+			break
+		}
 	}
 	// Record how many blobs the pass appended (always the last res.Streams), so
 	// the caller can keep the macro/extracted-stream metrics free of decode noise.
