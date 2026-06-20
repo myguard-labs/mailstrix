@@ -187,6 +187,9 @@ func cmdServe(args []string) int {
 		log.Printf("[yarad] FATAL: cannot load rules: %v", err)
 		return 1
 	}
+	// Stop the abuse.ch feed refresher goroutines on any exit path (nil-safe
+	// when the feeds are disabled), so they don't outlive a graceful shutdown.
+	defer scanner.Close()
 	if cfg.Canary {
 		logf("CANARY MODE: all matches tagged yarad_canary=1 (shadow/observe-only)")
 	}

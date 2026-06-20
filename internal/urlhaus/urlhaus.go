@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -95,6 +96,9 @@ type Checker struct {
 	failures    atomic.Uint64
 	lookups     atomic.Uint64
 	hits        atomic.Uint64
+
+	stop     chan struct{} // closed by Close to end refreshLoop
+	stopOnce sync.Once
 }
 
 // New builds a Checker and starts its background refresher. It returns nil when
@@ -116,6 +120,7 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	c := &Checker{
 		key:     key,
 		refresh: refresh,
+		stop:    make(chan struct{}),
 		client:  &http.Client{Timeout: fetchTimeout},
 		logf:    logf,
 	}
@@ -156,12 +161,27 @@ func (c *Checker) refreshLoop() {
 	}
 	t := time.NewTicker(c.refresh)
 	defer t.Stop()
-	for range t.C {
-		if err := c.refreshOnce(); err != nil {
-			c.failures.Add(1)
-			c.logf("urlhaus feed refresh failed (keeping previous set): %v", err)
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-t.C:
+			if err := c.refreshOnce(); err != nil {
+				c.failures.Add(1)
+				c.logf("urlhaus feed refresh failed (keeping previous set): %v", err)
+			}
 		}
 	}
+}
+
+// Close stops the background refresher. Safe to call more than once and on a
+// nil *Checker (the disabled-feature case), so shutdown code can call it
+// unconditionally.
+func (c *Checker) Close() {
+	if c == nil {
+		return
+	}
+	c.stopOnce.Do(func() { close(c.stop) })
 }
 
 func (c *Checker) refreshOnce() error {

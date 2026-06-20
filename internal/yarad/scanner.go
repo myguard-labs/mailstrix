@@ -841,6 +841,15 @@ func (s *Scanner) ReloadDenylist() {
 	s.logf("denylist reloaded: %d from env + %d from file = %d total", len(s.baseDenylist), added, len(merged))
 }
 
+// Close releases the scanner's background resources: it stops the abuse.ch feed
+// refresher goroutines (URLhaus + MalwareBazaar) so they don't outlive a
+// graceful shutdown. Both Close calls are nil-safe (no-op when the feed is
+// disabled) and idempotent. Call after the HTTP server has drained.
+func (s *Scanner) Close() {
+	s.urlhaus.Close()
+	s.mbazaar.Close()
+}
+
 // URLhausMetrics reports the URLhaus checker's state for /metrics, or a disabled
 // snapshot when no Auth-Key is configured.
 func (s *Scanner) URLhausMetrics() urlhaus.Metrics {

@@ -136,3 +136,28 @@ func TestNewDisabledNoKey(t *testing.T) {
 		t.Error("empty key must disable the checker (nil)")
 	}
 }
+
+// TestCloseNilSafeAndIdempotent: Close on a nil *Checker (disabled feature) and
+// a double Close must not panic, so shutdown code can call it unconditionally.
+// (STAB-7)
+func TestCloseNilSafeAndIdempotent(t *testing.T) {
+	var nilC *Checker
+	nilC.Close() // must be a no-op, not a panic
+
+	// A live checker (bogus key so the background fetch just fails) must close
+	// cleanly, and a second Close must be a no-op rather than a double-close
+	// panic on the stop channel.
+	c := New("bogus-key", 0, "", func(string, ...any) {})
+	if c == nil {
+		t.Fatal("New returned nil for a non-empty key")
+	}
+	c.Close()
+	c.Close() // idempotent
+
+	select {
+	case <-c.stop:
+		// closed as expected
+	default:
+		t.Fatal("Close did not close the stop channel")
+	}
+}
