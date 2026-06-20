@@ -756,3 +756,39 @@ func TestReadyNotDegradedWithNoopCache(t *testing.T) {
 		t.Errorf("/ready body should not mention degraded for noopCache: %q", w.Body.String())
 	}
 }
+
+// brokenCache is a test double for the Cache interface that always fails —
+// every Get misses, Put is a no-op, and Degraded reports a non-empty reason.
+// It simulates a Redis instance that is down or unreachable.
+type brokenCache struct{}
+
+func (brokenCache) Get(string) ([]Match, bool) { return nil, false }
+func (brokenCache) Put(string, []Match)        {}
+func (brokenCache) Flush()                     {}
+func (brokenCache) Degraded() string           { return "test-broken" }
+
+// TestScanWithBrokenCache is a regression test: when the cache layer is
+// completely broken (simulating Redis down), the scanner must still return
+// matches — the cache is fail-open and must never block a scan result.
+func TestScanWithBrokenCache(t *testing.T) {
+	eng := &fakeEngine{matches: []Match{{Rule: "EICAR_Test_File", Tags: []string{"test"}}}, count: 1}
+	s := newTestServer(eng, "tok")
+	// Replace the production cache with one that always misses and reports degraded.
+	s.cache = brokenCache{}
+
+	if d := s.cache.Degraded(); d == "" {
+		t.Fatal("precondition: brokenCache.Degraded() must return non-empty")
+	}
+
+	w := post(s, "payload", map[string]string{"X-YARAD-Token": "tok"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("scan with broken cache: HTTP %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp scanResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Matches) != 1 || resp.Matches[0].Rule != "EICAR_Test_File" {
+		t.Fatalf("scan with broken cache returned wrong matches: %+v", resp.Matches)
+	}
+}
