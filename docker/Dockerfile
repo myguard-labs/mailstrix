@@ -24,7 +24,8 @@ WORKDIR /tmp/yara-${YARA_VERSION}
 # distroless base-debian12 final image needs only glibc + libssl + libz. Crypto
 # (--with-crypto) stays for the "hash" module many public rules use.
 RUN ./bootstrap.sh \
-    && ./configure --disable-shared --enable-static --with-crypto \
+    && CFLAGS="-O2 -flto -DNDEBUG" LDFLAGS="-flto" \
+       ./configure --disable-shared --enable-static --with-crypto \
     && make -j"$(nproc)" && make install && ldconfig
 
 # ---- go build ---------------------------------------------------------------
