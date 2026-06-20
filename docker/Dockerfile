@@ -139,6 +139,7 @@ COPY --from=build /out/yarad /usr/local/bin/yarad
 # file stays world-readable (0644 from yarac) so nonroot can still read it to seed.
 COPY --from=rules /rules/compiled.yac /usr/share/yarad/compiled.yac
 COPY --from=rules /rules/sources.json /usr/share/yarad/sources.json
+COPY --from=build /src/NOTICE /usr/share/yarad/NOTICE
 # A writable cache dir owned by nonroot, so yarad can seed even with no bindmount
 # (a bindmount or tmpfs at /var/cache/yarad simply overlays it).
 COPY --from=rules --chown=nonroot:nonroot /var/cache/yarad /var/cache/yarad

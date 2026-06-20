@@ -1,0 +1,66 @@
+yarad — YARA scanner backend for rspamd
+Copyright (c) 2026 eilandert
+Licensed under the MIT License. See LICENSE.
+
+This software bundles YARA rules from the following third-party sources
+at image build time. Each source retains its own license:
+
+1. YARA-Forge (core/extended/full bundle)
+   URL:     https://github.com/YARAHQ/yara-forge
+   License: mixed (each contributing ruleset retains its own license;
+            see the YARA-Forge repository for the per-rule attribution)
+
+2. Neo23x0/signature-base
+   URL:     https://github.com/Neo23x0/signature-base
+   License: Creative Commons Attribution-NonCommercial 4.0 International
+            (CC BY-NC 4.0)
+
+3. ANY.RUN YARA Rules
+   URL:     https://github.com/anyrun/YARA
+   License: MIT
+
+4. DidierStevens/DidierStevensSuite (curated OLE/RTF/maldoc rules)
+   URL:     https://github.com/DidierStevens/DidierStevensSuite
+   License: Public Domain ("Source code put in public domain by Didier
+            Stevens, no Copyright")
+
+5. bartblaze/Yara-rules
+   URL:     https://github.com/bartblaze/Yara-rules
+   License: MIT
+
+6. InQuest/yara-rules-vt (curated selection)
+   URL:     https://github.com/InQuest/yara-rules-vt
+   License: MIT
+
+7. Local rules (yarad)
+   URL:     https://github.com/eilandert/rspamd-yarad
+   License: MIT (same as this project)
+
+---
+
+This software statically links libyara (VirusTotal/yara):
+   URL:     https://github.com/VirusTotal/yara
+   License: BSD 3-Clause License
+
+   Copyright (c) 2007-2021. The YARA Authors. All Rights Reserved.
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions are met:
+   * Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+   * Neither the name of the copyright holder nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+   AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+   ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+   LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+   CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+   SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+   INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+   CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+   ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+   POSSIBILITY OF SUCH DAMAGE.
