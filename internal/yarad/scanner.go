@@ -68,6 +68,7 @@ type Scanner struct {
 	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
 	exDeduped                                                         atomic.Uint64 // extracted streams skipped as duplicates (content hash matched a prior stream or raw buf)
 	exDocProps                                                        atomic.Uint64 // documents with doc-property strings extracted
+	exXLMFold                                                         atomic.Uint64 // documents with XLM formula constant-folding applied
 
 	// Rule-reload observability (see ReloadMetrics).
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
@@ -130,6 +131,7 @@ type ExtractMetrics struct {
 	// SHA256 matched a previously scanned stream (or the raw input buffer itself).
 	Deduped  uint64
 	DocProps uint64 // documents with doc-property strings extracted
+	XLMFold  uint64 // documents with XLM formula constant-folding applied
 }
 
 // ExtractMetrics returns the current pre-extraction counters.
@@ -154,6 +156,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		StreamMatches: s.exStreamMatches.Load(),
 		Deduped:       s.exDeduped.Load(),
 		DocProps:      s.exDocProps.Load(),
+		XLMFold:       s.exXLMFold.Load(),
 	}
 }
 
@@ -645,6 +648,9 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	}
 	if res.HasDocProps {
 		s.exDocProps.Add(1)
+	}
+	if res.HasXLMFold {
+		s.exXLMFold.Add(1)
 	}
 	if res.DecodedStreams > 0 {
 		s.exDecoded.Add(1)

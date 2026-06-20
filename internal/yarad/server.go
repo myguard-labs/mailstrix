@@ -593,6 +593,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_encoded_script_total", "buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block", ex.EncScript)
 	fm("extract_decoded_total", "buffers with >=1 base64/hex/reversed blob from the static decode pass", ex.Decoded)
 	fm("extract_docprops_total", "documents with doc-property strings (OOXML docProps/customXml/docVars or OLE2 SummaryInformation) extracted for scanning", ex.DocProps)
+	fm("extract_xlm_fold_total", "documents with XLM formula constant-folding (CHAR/string reassembly) applied", ex.XLMFold)
 	fm("extract_stream_matches_total", "rule hits attributable only to an extracted stream (not raw bytes)", ex.StreamMatches)
 	fm("extract_deduped_total", "extracted streams skipped before YARA scan (content-hash duplicate of a prior stream or raw buf)", ex.Deduped)
 

@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -180,6 +180,9 @@ type Result struct {
 	// OLE2 \x05SummaryInformation / \x05DocumentSummaryInformation streams) and
 	// emitted for YARA scanning. Drives the extract_docprops_total metric.
 	HasDocProps bool
+	// HasXLMFold is true when at least one XLM formula was constant-folded
+	// and the folded cleartext was emitted for YARA scanning.
+	HasXLMFold bool
 	// DecodedStreams is how many blobs the single-layer static decode pass
 	// (base64/hex/whole-buffer reverse; see decode.go) appended to Streams. These
 	// are the trailing len-N entries of Streams; the caller subtracts them so the
@@ -551,6 +554,14 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time) {
 	// a synthetic "XLM-HIDDEN-MACROSHEET <state> <name>" stream.
 	// Fail-open: any parse error is silently ignored.
 	fromOOXMLXLM(zr, &out, deadline)
+	// Constant-fold XLM formula strings from OOXML macrosheets. Reassembles
+	// obfuscated CHAR()&CHAR()&"..." concatenations into cleartext so
+	// keyword/URL/IOC YARA rules fire. Also emits XLM-DANGEROUS-FUNC markers.
+	prevLen := len(out)
+	fromOOXMLXLMFold(zr, &out, deadline)
+	if len(out) > prevLen {
+		res.HasXLMFold = true
+	}
 	// Carve payload strings from OOXML document-property parts
 	// (docProps/core.xml, docProps/app.xml, docProps/custom.xml,
 	// customXml/item*.xml) and word/settings.xml docVars.
