@@ -256,6 +256,41 @@ cache. A reload that fails to compile keeps the previous (working) rules — a b
 edit can't disarm a running scanner. On SIGTERM/SIGINT yarad drains (`/ready` →
 `503`, in-flight scans finish) before exiting — safe for rolling updates.
 
+## Sizing profiles
+
+`YARAD_MAX_CONCURRENT` defaults to the CPU count (`auto`). On a many-core host
+(32+ CPUs) that reserves significant memory: each concurrent scan can hold up to
+`MAX_BODY` bytes in RAM, so peak resident is roughly `MAX_CONCURRENT × MAX_BODY +
+64 MB` overhead. Size `mem_limit` accordingly and pin `MAX_CONCURRENT` explicitly
+when the default is too aggressive.
+
+`YARAD_MAX_INFLIGHT` (default `2×MAX_CONCURRENT`) is the admission gate — excess
+requests receive a `503` immediately rather than queuing. Keep it above
+`MAX_CONCURRENT` so a slow body read or Redis round-trip can't starve scan slots.
+
+Redis/Valkey L2 (`YARAD_REDIS_URL`) dramatically improves throughput for repeated
+attachments, which is common in mail (bulk campaigns, MTA retries, one body to N
+recipients). Without it each scanner instance maintains its own in-process LRU
+only.
+
+| Profile | `YARAD_MAX_CONCURRENT` | `YARAD_MAX_BODY` | `mem_limit` | Redis | Expected p95 | RPS capacity |
+|---------|------------------------|------------------|-------------|-------|-------------|-------------|
+| **Small** — single mailhost, <100 msgs/min | `2` | `10485760` (10 MiB) | `128m` | optional (LRU only) | <500 ms | ~10 |
+| **Medium** — mailhost, 100–1000 msgs/min | `auto` (CPU count) | `26214400` (25 MiB) | `256m` | recommended | <300 ms | ~50 |
+| **Large** — cluster, >1000 msgs/min | `auto` | `26214400` (25 MiB) | `512m`+ | required | <200 ms | ~200+ |
+
+Notes:
+- MalwareBazaar full-dump mode (`YARAD_MBAZAAR_KEY` set) adds ~40 MiB resident
+  plus a ~100–150 MiB transient spike on refresh — raise `mem_limit` to ~768m in
+  that case.
+- For the Large profile, run multiple replicas behind a load balancer rather than
+  one container with a very high `MAX_CONCURRENT`: smaller per-container concurrency
+  improves tail latency under burst load and avoids one libyara panic taking all
+  capacity.
+- `YARAD_BACKEND_TIMEOUT` (default `1s`) caps how long a request waits for an
+  admission slot. Under sustained overload this is the 503 fuse — keep it short
+  so callers (rspamd) fail fast rather than stacking connections.
+
 ## Rules
 
 The image bakes six public rulesets at build time; a daily rebuild
