@@ -276,3 +276,41 @@ func streamsAsStrings(res Result) []string {
 	}
 	return out
 }
+
+// TestFoldVBAStringsInputClamp verifies the foldVBAStrings input clamp (STAB-5):
+// a fold pattern within the first maxFoldInput bytes is still folded, while one
+// pushed entirely past the clamp is ignored, and a multi-MiB body terminates
+// quickly (worst-case bound, not a hang).
+func TestFoldVBAStringsInputClamp(t *testing.T) {
+	// Pattern within the clamp window: folds normally.
+	within := []byte(`x = Replace("p_o_w_e_r_s_h_e_l_l", "_", "")`)
+	got := false
+	foldVBAStrings(within, time.Time{}, func(b []byte) bool {
+		if string(b) == "powershell" {
+			got = true
+		}
+		return true
+	})
+	if !got {
+		t.Fatal("fold within clamp window was not emitted")
+	}
+
+	// Pattern pushed entirely past maxFoldInput: must be clamped away (not seen).
+	big := make([]byte, 0, maxFoldInput+128)
+	big = append(big, bytes.Repeat([]byte("A"), maxFoldInput)...)
+	big = append(big, []byte(`Replace("p_o_w_e_r_s_h_e_l_l", "_", "")`)...)
+	emitted := 0
+	done := make(chan struct{})
+	go func() {
+		foldVBAStrings(big, time.Time{}, func([]byte) bool { emitted++; return true })
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("foldVBAStrings did not terminate on a multi-MiB body")
+	}
+	if emitted != 0 {
+		t.Fatalf("pattern past the clamp boundary was folded: %d emits", emitted)
+	}
+}

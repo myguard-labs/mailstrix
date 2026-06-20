@@ -53,6 +53,10 @@ const (
 	maxHexEncoded = maxBytesPerDecodedBlob * 2
 	// maxReverseInput bounds the per-source cost of the whole-buffer reverse.
 	maxReverseInput = 1 << 20
+	// maxFoldInput bounds the source length scanned by the VBA fold regexes
+	// (Chr/Replace/Xor concat). RE2 is linear, so this caps worst-case CPU/alloc
+	// on a pathological multi-MiB script, not a backtracking blow-up.
+	maxFoldInput = 1 << 20
 	// textSample / textPrintablePct gate transforms to mostly-printable sources:
 	// base64/hex/reverse over a binary container (an OLE2/PDF body) is pure noise,
 	// so we only run them on script/text carriers and on the decompressed cleartext
@@ -107,6 +111,15 @@ var (
 // string. Returns false if a global cap was hit.
 func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool {
 	const maxMatches = 64
+
+	// Clamp the input handed to the regex engine. Go's regexp is RE2 (linear, no
+	// catastrophic backtracking), so this is not a ReDoS fix but a worst-case
+	// CPU/alloc bound: a multi-MiB script body would otherwise have every fold
+	// regex scan its full length. A real VBA fold target sits well within this;
+	// the prefix keeps the common case identical. Mirrors maxReverseInput.
+	if len(src) > maxFoldInput {
+		src = src[:maxFoldInput]
+	}
 
 	// Chr/ChrW concat
 	matches := reChrConcat.FindAll(src, maxMatches)
