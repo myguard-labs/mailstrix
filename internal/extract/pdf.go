@@ -31,6 +31,21 @@ var (
 	pdfEndStream = []byte("endstream")
 )
 
+// PDF dropper indicator names (pdfid keyword set, mail-relevant high-risk
+// subset — pdfid.py:433-453). Each is a PDF *name* token; matched as a whole
+// name (trailing delimiter required) so /JS doesn't fire on /JStuff. The /JS and
+// /JavaScript pair is the script body; /OpenAction and /AA auto-fire on open.
+var (
+	pdfNameOpenAction   = []byte("/OpenAction")
+	pdfNameAA           = []byte("/AA")
+	pdfNameLaunch       = []byte("/Launch")
+	pdfNameJS           = []byte("/JS")
+	pdfNameJavaScript   = []byte("/JavaScript")
+	pdfNameEmbeddedFile = []byte("/EmbeddedFile")
+	pdfNameJBIG2        = []byte("/JBIG2Decode")
+	pdfNameObjStm       = []byte("/ObjStm")
+)
+
 const (
 	// maxPDFStreams bounds how many object streams we inflate from one PDF.
 	maxPDFStreams = 256
@@ -105,6 +120,150 @@ func fromPDF(buf []byte, res *Result, deadline time.Time) {
 		res.Streams = append(res.Streams, dec)
 		total += len(dec)
 	}
+
+	// Structural dropper indicators (PDF-DEEPEN): action/JS/launch/embedded-file
+	// keywords that auto-fire or carry a payload. These are name tokens in the
+	// PDF body itself (not the inflated streams), so they are surfaced separately.
+	fromPDFIndicators(scan, res, deadline)
+}
+
+// fromPDFIndicators emits pdfid-style structural markers for a PDF's high-risk
+// name tokens. To defeat hex-name obfuscation (/J#61vaScript → /JavaScript,
+// pdfid.py:510-527) it canonicalises name tokens first — but only when a '#' is
+// actually present, so the common case pays nothing. The hex-escape count itself
+// is an evasion signal (PDF-HEXOBFUSC). Bounded, fail-open, deadline-aware.
+func fromPDFIndicators(scan []byte, res *Result, deadline time.Time) {
+	if expired(deadline) || len(res.Streams) >= maxStreams {
+		return
+	}
+	buf := scan
+	hexCount := 0
+	if bytes.IndexByte(scan, '#') >= 0 {
+		buf, hexCount = canonicalizePDFNames(scan)
+	}
+
+	emit := func(marker string) {
+		if len(res.Streams) < maxStreams {
+			res.Streams = append(res.Streams, []byte(marker))
+		}
+	}
+
+	// Hex-escaped name(s) present at all → obfuscation/evasion signal.
+	if hexCount > 0 {
+		emit("PDF-HEXOBFUSC")
+	}
+	// /OpenAction + a script body = JavaScript that auto-runs on document open.
+	if pdfHasName(buf, pdfNameOpenAction) &&
+		(pdfHasName(buf, pdfNameJS) || pdfHasName(buf, pdfNameJavaScript)) {
+		emit("PDF-OPENACTION-JS")
+	}
+	if pdfHasName(buf, pdfNameAA) {
+		emit("PDF-AA-ACTION") // additional-actions dictionary — auto-fire on open/page
+	}
+	if pdfHasName(buf, pdfNameLaunch) {
+		emit("PDF-LAUNCH") // /Launch action runs an external program
+	}
+	if pdfHasName(buf, pdfNameEmbeddedFile) {
+		emit("PDF-EMBEDDEDFILE")
+	}
+	if pdfHasName(buf, pdfNameJBIG2) {
+		emit("PDF-JBIG2") // JBIG2Decode — CVE-2009-3459 exploit vector
+	}
+	if pdfHasName(buf, pdfNameObjStm) {
+		emit("PDF-OBJSTM") // object stream — hides objects from naive scanners
+	}
+}
+
+// pdfHasName reports whether buf contains name as a complete PDF name token,
+// i.e. followed by a name terminator (whitespace/delimiter) or end-of-buffer, so
+// a short name like /JS does not match inside /JStuff.
+func pdfHasName(buf, name []byte) bool {
+	from := 0
+	for {
+		rel := bytes.Index(buf[from:], name)
+		if rel < 0 {
+			return false
+		}
+		end := from + rel + len(name)
+		if end >= len(buf) || isPDFNameTerminator(buf[end]) {
+			return true
+		}
+		from = from + rel + 1
+	}
+}
+
+// isPDFNameTerminator reports whether c ends a PDF name token: PDF whitespace or
+// one of the delimiter characters ()<>[]{}/% (PDF spec 7.2.2).
+func isPDFNameTerminator(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n', '\f', 0,
+		'(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
+		return true
+	}
+	return false
+}
+
+// canonicalizePDFNames returns a copy of scan with #XX hex escapes inside name
+// tokens decoded to their literal byte (pdfid's EqualCanonical, pdf-parser:1003),
+// plus the number of escapes decoded. Hex decoding is confined to name context
+// (between a '/' and the next terminator) so a '#' in stream/binary data is left
+// untouched and cannot fabricate a keyword.
+func canonicalizePDFNames(scan []byte) ([]byte, int) {
+	out := make([]byte, 0, len(scan))
+	count := 0
+	inName := false
+	for i := 0; i < len(scan); i++ {
+		c := scan[i]
+		if c == '/' {
+			inName = true
+			out = append(out, c)
+			continue
+		}
+		if inName {
+			if isPDFNameTerminator(c) {
+				inName = false
+				out = append(out, c)
+				continue
+			}
+			if c == '#' && i+2 < len(scan) {
+				hi := hexVal(scan[i+1])
+				lo := hexVal(scan[i+2])
+				if hi >= 0 && lo >= 0 {
+					b := byte(hi<<4 | lo)
+					count++ // a hex escape was used — obfuscation signal regardless
+					// An escaped byte is a LITERAL name character (PDF 7.3.5), even
+					// when it decodes to a delimiter/whitespace. Emitting that raw
+					// byte would fabricate a name boundary (/foo#2FLaunch -> /Launch,
+					// /OpenAction#20x -> a terminated /OpenAction), so only substitute
+					// when the result is a name-regular char; otherwise keep the
+					// escape verbatim. The high-risk keywords are all letters, so this
+					// loses no real de-obfuscation.
+					if !isPDFNameTerminator(b) {
+						out = append(out, b)
+					} else {
+						out = append(out, '#', scan[i+1], scan[i+2])
+					}
+					i += 2
+					continue
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	return out, count
+}
+
+// hexVal returns the value of a hex digit, or -1 if c is not one.
+func hexVal(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 // pdfTokenBoundary reports whether the `stream` match at kwAt (body byte at

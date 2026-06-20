@@ -135,3 +135,90 @@ func TestExtractNotPDF(t *testing.T) {
 		t.Error("plain text wrongly flagged IsPDF")
 	}
 }
+
+// --- PDF-DEEPEN structural indicators ---
+
+// An /OpenAction that runs /JavaScript must surface PDF-OPENACTION-JS.
+func TestExtractPDFOpenActionJS(t *testing.T) {
+	buf := []byte("%PDF-1.7\n1 0 obj\n<< /OpenAction << /S /JavaScript /JS (app.alert(1)) >> >>\nendobj\n%%EOF")
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "PDF-OPENACTION-JS") {
+		t.Errorf("auto-run JS not flagged; streams=%v", res.Streams)
+	}
+}
+
+// /Launch, /EmbeddedFile, /JBIG2Decode, /AA, /ObjStm each get their own marker.
+func TestExtractPDFIndicatorMarkers(t *testing.T) {
+	cases := []struct {
+		body, marker string
+	}{
+		{"<< /Launch << /F (cmd.exe) >> >>", "PDF-LAUNCH"},
+		{"<< /Type /Filespec /EmbeddedFile 2 0 R >>", "PDF-EMBEDDEDFILE"},
+		{"<< /Filter /JBIG2Decode >>", "PDF-JBIG2"},
+		{"<< /AA << /O 3 0 R >> >>", "PDF-AA-ACTION"},
+		{"<< /Type /ObjStm /N 5 >>", "PDF-OBJSTM"},
+	}
+	for _, c := range cases {
+		buf := []byte("%PDF-1.7\n1 0 obj\n" + c.body + "\nendobj\n%%EOF")
+		res := Extract(buf, time.Time{})
+		if !streamsContain(res, c.marker) {
+			t.Errorf("%s not flagged for body %q; streams=%v", c.marker, c.body, res.Streams)
+		}
+	}
+}
+
+// A hex-escaped name (/J#61vaScript = /JavaScript) must both de-obfuscate to fire
+// PDF-OPENACTION-JS and raise PDF-HEXOBFUSC.
+func TestExtractPDFHexObfuscatedName(t *testing.T) {
+	buf := []byte("%PDF-1.7\n1 0 obj\n<< /OpenAction << /S /J#61vaScript /JS (x) >> >>\nendobj\n%%EOF")
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "PDF-HEXOBFUSC") {
+		t.Errorf("hex-escape obfuscation not flagged; streams=%v", res.Streams)
+	}
+	if !streamsContain(res, "PDF-OPENACTION-JS") {
+		t.Errorf("de-obfuscated /JavaScript not matched; streams=%v", res.Streams)
+	}
+}
+
+// A short name like /JS must not match inside a longer name (/JSomething), and a
+// benign PDF must emit no indicator markers (no false positives).
+func TestExtractPDFNoFalsePositive(t *testing.T) {
+	buf := []byte("%PDF-1.7\n1 0 obj\n<< /Type /Page /JSomething (not js) /Contents 2 0 R >>\nendobj\n%%EOF")
+	res := Extract(buf, time.Time{})
+	for _, m := range []string{"PDF-OPENACTION-JS", "PDF-LAUNCH", "PDF-AA-ACTION", "PDF-JBIG2", "PDF-EMBEDDEDFILE", "PDF-OBJSTM", "PDF-HEXOBFUSC"} {
+		if streamsContain(res, m) {
+			t.Errorf("false positive %s on benign PDF; streams=%v", m, res.Streams)
+		}
+	}
+}
+
+// An escaped delimiter (#2F = '/', #20 = space) inside a name is a LITERAL name
+// char and must NOT be decoded into a boundary that fabricates a keyword.
+func TestExtractPDFEscapedDelimiterNoFabrication(t *testing.T) {
+	// /foo#2FLaunch would become /foo/Launch if #2F were decoded to '/'.
+	buf := []byte("%PDF-1.7\n1 0 obj\n<< /foo#2FLaunch (x) /OpenAction#20y 1 0 R >>\nendobj\n%%EOF")
+	res := Extract(buf, time.Time{})
+	if streamsContain(res, "PDF-LAUNCH") {
+		t.Errorf("escaped delimiter fabricated /Launch; streams=%v", res.Streams)
+	}
+	if streamsContain(res, "PDF-OPENACTION-JS") {
+		t.Errorf("escaped space fabricated /OpenAction match; streams=%v", res.Streams)
+	}
+	// The escape is still present, so the obfuscation signal must fire.
+	if !streamsContain(res, "PDF-HEXOBFUSC") {
+		t.Errorf("hex escape not counted as obfuscation; streams=%v", res.Streams)
+	}
+}
+
+// pdfHasName must respect name-token boundaries.
+func TestPDFHasNameBoundary(t *testing.T) {
+	if pdfHasName([]byte("<< /JSomething >>"), pdfNameJS) {
+		t.Error("/JS matched inside /JSomething")
+	}
+	if !pdfHasName([]byte("<< /JS 1 0 R >>"), pdfNameJS) {
+		t.Error("/JS not matched as a whole name")
+	}
+	if !pdfHasName([]byte("/ObjStm"), pdfNameObjStm) {
+		t.Error("/ObjStm at end-of-buffer not matched")
+	}
+}
