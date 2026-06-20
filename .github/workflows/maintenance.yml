@@ -118,3 +118,26 @@ jobs:
             rules-out/libyara.version
             rules-build.log
           retention-days: 90
+
+  perf-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+
+      - uses: docker/setup-buildx-action@8d2750c64d4f89012b439cd2de0e09c3ed2f4e32
+
+      - name: build test image
+        run: |
+          docker buildx build --target test             --load -t yarad-test             -f docker/Dockerfile .
+
+      - name: run benchmarks
+        run: |
+          docker run --rm yarad-test             go test -bench=. -benchmem -count=3 -timeout=10m             ./internal/yarad/ ./internal/extract/             | tee bench-results.txt
+
+      - name: upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench-results.txt
+          retention-days: 90
