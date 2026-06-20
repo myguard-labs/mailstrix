@@ -490,6 +490,8 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] `/health`, `/ready`, `/version`, `/metrics` (Prometheus); graceful drain on SIGTERM
 - [x] Verdict cache (LRU+TTL) + request coalescing; optional Redis/Valkey L2 with circuit breaker
 - [x] Fail-open everywhere; concurrency gate, admission gate, per-request scan deadline, body cap
+- [x] Hot-path hygiene: body hashed once per scan (cache key + dedup + reputation share it), pooled `yara.Scanner` reuse, per-fold/carve 1 MiB input clamps, panic-safe scan coalescing, clean feed-goroutine shutdown
+- [x] `/debug/pprof` (token-gated) + `docker/pprof-capture.sh` baseline harness
 - [x] OLE2/OOXML macro decompression (MS-OVBA) → scans raw **and** decompressed VBA, `VBA` external var
 - [x] Container extraction: RTF `\objdata`, OLE Package, MSI, Outlook `.msg`, OneNote, PDF, `.lnk`, VBE/JSE, nested archives
 - [x] Local heuristic `Maldoc_AutoExec_Write_Execute` (mraptor-style autoexec∧write∧execute), baked from `docker/local-rules/`
@@ -516,13 +518,30 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] XLM hidden-macrosheet detection (OOXML veryHidden+macrosheets, legacy xls BIFF BOUNDSHEET)
 - [x] VBA stomping detection (p-code vs. source heuristic; `VBA_Stomped` rule via `vba_stomping.yara`)
 - [x] Equation Editor exploit detection (`equation_editor.yara`): OLE2 with Equation Native/CLSID + MTEF bytecode
-- [x] UserForm hidden-string extraction (carves payload strings from VBA UserForm `o`/`f`/`\x03VBFrame` OLE2 streams; `Maldoc_UserForm_Payload` rule)
-- [x] Document-properties string extraction (OOXML `docProps/`, `customXml/`, `word/settings.xml` docVars; OLE2 `\x05SummaryInformation`; `Maldoc_DocProps_Payload` rule)
+
+**oletools-parity track** (closing the gap with `olevba`/`oleid`; reference-verified against the actual oletools/pyxlsb2/olefile/ClamAV sources):
+
+- [x] VBA string folds at `olevba` parity: `Chr`/`Replace`/`Array Xor`/`StrReverse("lit")`/`Environ`→marker + **Dridex** `DridexUrlDecode`
+- [x] `oleid` structural indicators: embedded-OLE `ObjectPool` + Flash/SWF markers
+- [ ] **Multi-stage deobfuscation** — bounded recursive decode (depth ~4) so a 2+-layer payload (Dridex-style) is unwound, not just the first layer; the remaining `olevba` edge over yarad
+- [ ] **BIFF8/`.xlsb`/SLK XLM folding** — static `ptg`-token string reassembly for legacy/binary/SLK macrosheets (OOXML `.xlsm` already folds), fuzz-gated
+- [ ] **PDF action/JS triage** — `/OpenAction`+`/JS`, `/AA`, `/Launch`, `/EmbeddedFile`, `/JBIG2Decode`, hex-name de-obfuscation markers (oletools has no PDF triage; this leads it)
+- [ ] CFB orphan/timestamp indicators (`oledir`/`oletimes`: unreferenced dir entries carved + scanned, FILETIME anomalies)
+- [ ] Encryption-type + digital-signature markers (`ENCRYPTION-<RC4|XOR|AES>`, `DIGITAL-SIGNATURE`)
+- [ ] Parse-robustness hardening (explicit CFB block-bounds / chain-loop / recursion / module-count guards; pathological-input fuzz)
+- [ ] `olevba`-parity matrix doc + CI check (every claimed marker has a rule and a test)
+
+**Performance / operations**
+
+- [ ] **Effort tiers** — `YARAD_EFFORT=1..10` (or `auto` from load) scaling extract depth / decode passes / XLM / reputation, with a per-request `X-YARAD-Effort` header so the rspamd caller picks effort from sender reputation (low on the latency-tight front, deep on the dovecot backend)
+- [ ] Batch `/scan` endpoint (collapse N part round-trips)
+
+**Other planned**
+
 - [ ] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
 - [ ] File-level fuzzy hashing (TLSH/ssdeep)
 - [ ] CHM / CAB / MSIX extraction
 - [ ] Extractor sandbox hardening (seccomp/rlimits)
-- [ ] Batch `/scan` endpoint (collapse N part round-trips)
 - [ ] PE-overlay bytes; `.url`/`.settingcontent-ms` launcher fields
 
 > Disk-image (ISO/UDF/`.dmg`/`.pkg`) and Android `.apk` are intentionally out of
