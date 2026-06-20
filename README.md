@@ -521,7 +521,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
 - **[Dovecot/Sieve example](sieve/)** — quarantine a match with the `yarad-scan` client.
 - **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/2026/06/yara-malware-scanning-rspamd-yarad/) — the why and how, on deb.myguard.nl.
-- **Docker Hub:** `eilandert/rspamd-yarad` *(TODO: link once the repo page exists)*.
+- **Docker Hub:** [`eilandert/rspamd-yarad`](https://hub.docker.com/r/eilandert/rspamd-yarad).
 
 ## License
 
