@@ -26,7 +26,13 @@ type Config struct {
 	MaxConcurrent  int           // YARAD_MAX_CONCURRENT  (default "auto" = CPU count)
 	MaxInflight    int           // YARAD_MAX_INFLIGHT    (default 2×MaxConcurrent); admission gate
 	MaxBody        int64         // YARAD_MAX_BODY bytes  (default 8 MiB)
-	Token          string        // YARAD_TOKEN[_FILE]    (required for /scan)
+	Token          string        // YARAD_TOKEN[_FILE]    (required for /scan; comma-separated for rotation)
+	TokenNext      string        // YARAD_TOKEN_NEXT[_FILE] (incoming rotation token; empty = no rotation)
+
+	// tokens is the expanded accepted-token set: comma-separated parts of Token
+	// plus TokenNext (if set and not a sentinel). Built by sanitize(); never set
+	// directly. Use len(tokens)>0 to test whether auth is required.
+	tokens []string
 
 	// RulesDir is the directory of *.yar / *.yara source files compiled at boot
 	// and on SIGHUP. RulesPath, if set, is a single precompiled (.yac) ruleset
@@ -114,6 +120,7 @@ func LoadConfig() *Config {
 		MaxInflight:    envIntAuto("YARAD_MAX_INFLIGHT", 0), // 0 -> sanitize sets 2×MaxConcurrent
 		MaxBody:        envInt64("YARAD_MAX_BODY", 8*1024*1024),
 		Token:          envOrFile("YARAD_TOKEN"),
+		TokenNext:      envOrFile("YARAD_TOKEN_NEXT"),
 		RulesDir:       envStr("YARAD_RULES_DIR", "/rules"),
 		RulesPath:      strings.TrimSpace(os.Getenv("YARAD_RULES")),
 		CacheDir:       strings.TrimSpace(os.Getenv("YARAD_CACHE_DIR")),
@@ -149,7 +156,34 @@ func (c *Config) sanitize() {
 	// operator can run an OPEN scanner on a trusted network (the server logs a
 	// loud warning). Done here so it covers both the env value and a -token flag
 	// (NewServer re-sanitizes after flags are applied).
-	c.Token = normalizeToken(c.Token)
+	//
+	// Expand the (possibly comma-separated) primary token and the optional
+	// next-rotation token (YARAD_TOKEN_NEXT[_FILE]) into the accepted-token set.
+	// Each comma-separated part is trimmed; sentinel/empty parts are dropped.
+	// Duplicates (e.g. TokenNext already in the primary list) are skipped.
+	rawToken := c.Token
+	c.Token = normalizeToken(rawToken) // keep normalised primary for logs/authRequired fallback
+	c.tokens = nil
+	for _, part := range strings.Split(rawToken, ",") {
+		if normalizeToken(part) != "" {
+			c.tokens = append(c.tokens, strings.TrimSpace(part))
+		}
+	}
+	if next := normalizeToken(c.TokenNext); next != "" {
+		c.TokenNext = next
+		dup := false
+		for _, t := range c.tokens {
+			if t == next {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			c.tokens = append(c.tokens, next)
+		}
+	} else {
+		c.TokenNext = ""
+	}
 
 	clamp := func(name string, got, def int) int {
 		log.Printf("[yarad] WARNING: invalid %s=%d; using %d", name, got, def)

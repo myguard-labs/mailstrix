@@ -531,7 +531,7 @@ func (s *Server) metricsAuthed(r *http.Request) bool {
 // authRequired reports whether a shared-secret gate is in force. False when no
 // token is configured (YARAD_TOKEN unset / none / 0 / off) — /scan is then OPEN
 // (a trusted-network deployment), flagged with a loud startup warning.
-func (s *Server) authRequired() bool { return s.cfg.Token != "" }
+func (s *Server) authRequired() bool { return len(s.cfg.tokens) > 0 }
 
 // authOK validates the presented secret against the configured token in constant
 // time. Only meaningful when authRequired(). Accepts the token as a Bearer
@@ -543,7 +543,12 @@ func (s *Server) authOK(r *http.Request) bool {
 	} else {
 		presented = strings.TrimSpace(r.Header.Get("X-YARAD-Token"))
 	}
-	return hmac.Equal([]byte(presented), []byte(s.cfg.Token))
+	for _, tok := range s.cfg.tokens {
+		if hmac.Equal([]byte(presented), []byte(tok)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) serveMetrics(w http.ResponseWriter) {

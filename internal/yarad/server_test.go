@@ -611,6 +611,63 @@ func TestNotFound(t *testing.T) {
 	}
 }
 
+// TestDualTokenAuth verifies that comma-separated YARAD_TOKEN and/or
+// YARAD_TOKEN_NEXT enable zero-downtime token rotation: both tokens are
+// accepted, a wrong token is still rejected, and duplicates are not admitted
+// twice.
+func TestDualTokenAuth(t *testing.T) {
+	eng := &fakeEngine{count: 1}
+
+	// Case 1: comma-separated Token — both parts accepted, wrong rejected.
+	t.Run("comma_sep_primary", func(t *testing.T) {
+		cfg := &Config{Token: "old,new", MaxConcurrent: 4, MaxBody: 1 << 20, BackendTimeout: 0}
+		cfg.sanitize()
+		s := NewServer(cfg, eng)
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "old"}); w.Code != 200 {
+			t.Errorf("old token: %d want 200", w.Code)
+		}
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "new"}); w.Code != 200 {
+			t.Errorf("new token: %d want 200", w.Code)
+		}
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "wrong"}); w.Code != 401 {
+			t.Errorf("wrong token: %d want 401", w.Code)
+		}
+	})
+
+	// Case 2: primary + TokenNext — both accepted.
+	t.Run("token_next", func(t *testing.T) {
+		cfg := &Config{Token: "primary", TokenNext: "next", MaxConcurrent: 4, MaxBody: 1 << 20, BackendTimeout: 0}
+		cfg.sanitize()
+		s := NewServer(cfg, eng)
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "primary"}); w.Code != 200 {
+			t.Errorf("primary: %d want 200", w.Code)
+		}
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "next"}); w.Code != 200 {
+			t.Errorf("next: %d want 200", w.Code)
+		}
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "other"}); w.Code != 401 {
+			t.Errorf("other: %d want 401", w.Code)
+		}
+	})
+
+	// Case 3: TokenNext already present in comma-sep primary — no duplicate,
+	// still accepted.
+	t.Run("no_duplicate", func(t *testing.T) {
+		cfg := &Config{Token: "primary,next", TokenNext: "next", MaxConcurrent: 4, MaxBody: 1 << 20, BackendTimeout: 0}
+		cfg.sanitize()
+		s := NewServer(cfg, eng)
+		if len(s.cfg.tokens) != 2 {
+			t.Errorf("tokens len = %d, want 2 (no duplicate)", len(s.cfg.tokens))
+		}
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "primary"}); w.Code != 200 {
+			t.Errorf("primary: %d want 200", w.Code)
+		}
+		if w := post(s, "x", map[string]string{"X-YARAD-Token": "next"}); w.Code != 200 {
+			t.Errorf("next: %d want 200", w.Code)
+		}
+	})
+}
+
 // TestDecodeFilenameB64Variants covers the wire-format tolerance of the
 // X-YARAD-Filename decoder: standard padded base64, raw (unpadded) base64, and a
 // whitespace-folded value all decode to the same bytes; non-base64 garbage is
