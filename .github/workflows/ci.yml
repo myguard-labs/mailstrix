@@ -477,6 +477,14 @@ jobs:
       - name: zizmor (Actions supply-chain hardening)
         run: docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/woodruffw/zizmor:1.6.0 --format plain .github/workflows/
 
+      - name: luacheck (Lua lint for rspamd plugin)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -c '
+            apk add --no-cache luarocks5.4 lua5.4-dev gcc musl-dev >/dev/null 2>&1
+            luarocks-5.4 install luacheck >/dev/null 2>&1
+            luacheck rspamd/
+          '
+
       - name: semgrep (non-blocking until tuned)
         continue-on-error: true
         run: |
