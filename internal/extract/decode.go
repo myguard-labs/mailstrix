@@ -76,6 +76,9 @@ var (
 	// VBA Array(N,N,...) Xor K — trivial single-byte XOR decoder.
 	reArrayXor = regexp.MustCompile(`(?i)Array\(([\d,\s]+)\)\s*Xor\s+(\d{1,3})`)
 
+	// Tokens inside a Chr/ChrW concat chain: a string literal or a Chr(N) call.
+	reChrTok = regexp.MustCompile(`(?i)"([^"]*)"|Chr[W]?\((\d{1,5})\)`)
+
 	// Lowercased reversed forms of high-signal tokens. The whole-buffer reverse
 	// is skipped unless one is present, so a normal buffer never gets a reversed
 	// twin scanned (StrReverse obfuscation is niche; reversing every body would
@@ -104,8 +107,7 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 		}
 		var buf []byte
 		s := string(m)
-		reTok := regexp.MustCompile(`(?i)"([^"]*)"|Chr[W]?\((\d{1,5})\)`)
-		toks := reTok.FindAllStringSubmatch(s, -1)
+		toks := reChrTok.FindAllStringSubmatch(s, -1)
 		for _, tok := range toks {
 			if tok[1] != "" {
 				buf = append(buf, []byte(tok[1])...)
@@ -148,8 +150,11 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 			if p == "" {
 				continue
 			}
-			n, _ := strconv.Atoi(p)
-			buf = append(buf, byte(n^key)) // #nosec G115 -- intentional truncation to byte
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 0 || n > 255 {
+				continue
+			}
+			buf = append(buf, byte(n^key)) // #nosec G115 -- n bounded 0..255 above
 		}
 		if !emit(buf) {
 			return false
