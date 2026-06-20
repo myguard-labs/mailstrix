@@ -70,6 +70,7 @@ type Scanner struct {
 	// Rule-reload observability (see ReloadMetrics).
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
 	reloadLastUnix, reloadLastMillis     atomic.Int64
+	reloadPrevFP                         atomic.Pointer[string] // fingerprint before the last successful reload
 	// rulesModUnix is the mtime (unix seconds) of the loaded ruleset on disk:
 	// the .yac bundle, or the newest source file in the rules dir. A daily image
 	// rebuild refreshes it; if the rebuild silently breaks (fetch failed, image
@@ -180,25 +181,31 @@ func (s *Scanner) RuleCount() int64 { return s.count.Load() }
 // SIGHUP that silently fails (e.g. a bad rule edit) is visible to alerting
 // instead of only appearing in logs.
 type ReloadMetrics struct {
-	Attempts   uint64 // Reload() calls (includes the initial boot load)
-	Successes  uint64
-	Failures   uint64
-	LastUnix   int64 // unix seconds of the last successful reload
-	LastMillis int64 // wall-clock duration of the last reload attempt
-	Rules      int64 // rule count after the last successful reload
-	ModUnix    int64 // mtime (unix seconds) of the loaded ruleset on disk; 0 if unknown
+	Attempts        uint64 // Reload() calls (includes the initial boot load)
+	Successes       uint64
+	Failures        uint64
+	LastUnix        int64  // unix seconds of the last successful reload
+	LastMillis      int64  // wall-clock duration of the last reload attempt
+	Rules           int64  // rule count after the last successful reload
+	ModUnix         int64  // mtime (unix seconds) of the loaded ruleset on disk; 0 if unknown
+	PrevFingerprint string // fingerprint before the last reload ("" on first load)
 }
 
 // ReloadMetrics returns the current reload counters.
 func (s *Scanner) ReloadMetrics() ReloadMetrics {
+	prev := ""
+	if p := s.reloadPrevFP.Load(); p != nil {
+		prev = *p
+	}
 	return ReloadMetrics{
-		Attempts:   s.reloadAttempts.Load(),
-		Successes:  s.reloadOK.Load(),
-		Failures:   s.reloadFail.Load(),
-		LastUnix:   s.reloadLastUnix.Load(),
-		LastMillis: s.reloadLastMillis.Load(),
-		Rules:      s.count.Load(),
-		ModUnix:    s.rulesModUnix.Load(),
+		Attempts:        s.reloadAttempts.Load(),
+		Successes:       s.reloadOK.Load(),
+		Failures:        s.reloadFail.Load(),
+		LastUnix:        s.reloadLastUnix.Load(),
+		LastMillis:      s.reloadLastMillis.Load(),
+		Rules:           s.count.Load(),
+		ModUnix:         s.rulesModUnix.Load(),
+		PrevFingerprint: prev,
 	}
 }
 
@@ -232,6 +239,9 @@ func (s *Scanner) Reload() error {
 	s.rules.Swap(rules)
 	s.count.Store(int64(len(list)))
 	fp := fingerprint(list)
+	if old := s.fp.Load(); old != nil {
+		s.reloadPrevFP.Store(old)
+	}
 	s.fp.Store(&fp)
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())

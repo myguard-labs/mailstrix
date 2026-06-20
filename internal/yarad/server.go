@@ -294,6 +294,9 @@ func (s *Server) serveVersion(w http.ResponseWriter) {
 		"repo":              RepoURL,
 		"license":           License,
 	}
+	if rl.PrevFingerprint != "" {
+		resp["prev_fingerprint"] = rl.PrevFingerprint
+	}
 	// Provenance of the loaded compiled bundle, when it came from the cache (set
 	// by fetch-rules / the seeded manifest): which published rule version, when it
 	// was generated, and the libyara it was compiled against.

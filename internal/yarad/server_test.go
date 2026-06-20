@@ -550,6 +550,57 @@ func TestMetricsMalwareBazaar(t *testing.T) {
 	}
 }
 
+// TestVersionPrevFingerprint verifies that after two reloads, /version surfaces
+// the prev_fingerprint field with a non-empty value.
+func TestVersionPrevFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		RulesDir:    dir,
+		ScanTimeout: 5 * time.Second,
+	}
+	// Write two minimal YARA rule files so we can swap between them.
+	rule1 := []byte("rule A { condition: false }\n")
+	rule2 := []byte("rule B { condition: false }\n")
+	if err := os.WriteFile(filepath.Join(dir, "rules.yar"), rule1, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := NewScanner(cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("NewScanner: %v", err)
+	}
+	// First reload gives us a fingerprint but prev should still be "".
+	fp1 := sc.ReloadMetrics().PrevFingerprint
+	if fp1 != "" {
+		t.Errorf("prev_fingerprint after first load = %q, want empty", fp1)
+	}
+	// Second reload: swap the rule set so the fingerprint changes.
+	if err := os.WriteFile(filepath.Join(dir, "rules.yar"), rule2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := sc.Reload(); err != nil {
+		t.Fatalf("second Reload: %v", err)
+	}
+	rl := sc.ReloadMetrics()
+	if rl.PrevFingerprint == "" {
+		t.Error("prev_fingerprint is empty after second reload, want non-empty")
+	}
+
+	// Verify /version exposes it.
+	s := newTestServer(sc, "")
+	w := get(s, "/version")
+	if w.Code != http.StatusOK {
+		t.Fatalf("/version: %d", w.Code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	prev, ok := m["prev_fingerprint"].(string)
+	if !ok || prev == "" {
+		t.Errorf("/version prev_fingerprint = %v, want non-empty string", m["prev_fingerprint"])
+	}
+}
+
 func TestNotFound(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1}, "tok")
 	w := httptest.NewRecorder()
