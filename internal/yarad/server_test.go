@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,6 +103,45 @@ func TestVersionEndpoint(t *testing.T) {
 	}
 	if m["extractor_version"] == "" || m["extractor_version"] == nil {
 		t.Error("extractor_version missing")
+	}
+}
+
+// /version surfaces per-ruleset provenance (the manifest's sources array) so an
+// operator can audit which rule sources are baked into the running bundle.
+func TestVersionEndpointSources(t *testing.T) {
+	dir := t.TempDir()
+	man := RulesManifest{
+		Version: 7, Generated: "2026-06-20T00:00:00Z", Libyara: "4.5.0", Rules: 42,
+		Sources: []RuleSource{
+			{Name: "yaraforge", Repo: "https://github.com/YARAHQ/yara-forge", License: "DRL-1.1", Ref: "v20260601", Set: "extended"},
+			{Name: "local", Repo: "in-repo docker/local-rules", License: "MIT", Ref: "main"},
+		},
+	}
+	b, err := json.Marshal(man)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, manifestName), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestServer(&fakeEngine{count: 5, fp: "abc"}, "tok")
+	s.cfg.CacheDir = dir
+	w := get(s, "/version")
+	if w.Code != http.StatusOK {
+		t.Fatalf("version: %d", w.Code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	srcs, ok := m["sources"].([]any)
+	if !ok || len(srcs) != 2 {
+		t.Fatalf("sources = %v, want 2 entries", m["sources"])
+	}
+	first, _ := srcs[0].(map[string]any)
+	if first["name"] != "yaraforge" || first["license"] != "DRL-1.1" {
+		t.Errorf("first source = %v, want yaraforge/DRL-1.1", first)
 	}
 }
 
