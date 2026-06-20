@@ -233,3 +233,39 @@ func TestBreakerIsOpenAfterCooldown(t *testing.T) {
 		t.Error("breaker should be closed once cooldown has elapsed")
 	}
 }
+
+// TestFlightPanicDoesNotHangWaiters guards STAB-1/STAB-3: if the flight leader's
+// fn panics, deferred cleanup must still release fl.wg and delete the map entry,
+// so coalesced waiters return (with no matches) instead of blocking forever, and
+// the key is not permanently stuck coalescing. The leader's panic still
+// propagates so it fails loudly.
+func TestFlightPanicDoesNotHangWaiters(t *testing.T) {
+	var g flightGroup
+
+	// Leader panics.
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("leader panic was swallowed; it must propagate")
+			}
+		}()
+		g.Do("boom", func() []Match { panic("scan fault") })
+	}()
+
+	// Map entry must be gone — a fresh call for the same key runs its own fn
+	// (would block/hang if the dead flight were still registered).
+	done := make(chan struct{})
+	var ran bool
+	go func() {
+		g.Do("boom", func() []Match { ran = true; return nil })
+		close(done)
+	}()
+	select {
+	case <-done:
+		if !ran {
+			t.Fatal("follow-up call did not run its fn; stale flight entry left behind")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("follow-up Do hung; panicked leader left the key registered")
+	}
+}
