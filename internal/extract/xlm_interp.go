@@ -123,7 +123,7 @@ func interpretXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadlin
 				// Also try on the raw formula in case folding didn't help.
 				m = reSetValue.FindStringSubmatch(cell.formula)
 			}
-			if m != nil && len(m) >= 3 {
+			if len(m) >= 3 {
 				targetCoord := normCoord(m[1])
 				if targetCoord != "" && reValidCoord.MatchString(targetCoord) {
 					if len(vals) < maxXLMInterpCells {
