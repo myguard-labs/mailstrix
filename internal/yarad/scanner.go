@@ -71,6 +71,7 @@ type Scanner struct {
 	exLNK                                                             atomic.Uint64 // Windows shell links (.lnk) with StringData surfaced
 	exPDF                                                             atomic.Uint64 // PDFs with FlateDecode object streams inflated
 	exRTF                                                             atomic.Uint64 // RTF docs with \objdata embedded objects carved
+	exSLK                                                             atomic.Uint64 // SYLK (.slk) spreadsheets with XLM/DDE formulas scanned
 	exEncodedScript                                                   atomic.Uint64 // buffers with >=1 decoded MS-Script-Encoder block
 	exDecoded                                                         atomic.Uint64 // buffers with >=1 base64/hex/reversed blob from the static decode pass
 	exStreamMatches                                                   atomic.Uint64 // distinct rule hits that came ONLY from an extracted stream (not raw bytes)
@@ -238,6 +239,7 @@ type ExtractMetrics struct {
 	LNK        uint64 // Windows shell links (.lnk) with StringData surfaced
 	PDF        uint64 // PDFs with FlateDecode object streams inflated
 	RTF        uint64 // RTF docs with \objdata embedded objects carved
+	SLK        uint64 // SYLK (.slk) spreadsheets with XLM/DDE formulas scanned
 	EncScript  uint64 // buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block
 	Decoded    uint64 // buffers with >=1 base64/hex/reversed blob from the static decode pass
 	// StreamMatches counts rule hits attributable ONLY to an extracted stream
@@ -268,6 +270,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		LNK:           s.exLNK.Load(),
 		PDF:           s.exPDF.Load(),
 		RTF:           s.exRTF.Load(),
+		SLK:           s.exSLK.Load(),
 		EncScript:     s.exEncodedScript.Load(),
 		Decoded:       s.exDecoded.Load(),
 		StreamMatches: s.exStreamMatches.Load(),
@@ -758,6 +761,9 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	}
 	if res.IsRTF {
 		s.exRTF.Add(1)
+	}
+	if res.IsSLK {
+		s.exSLK.Add(1)
 	}
 	if res.EncodedScript {
 		s.exEncodedScript.Add(1)

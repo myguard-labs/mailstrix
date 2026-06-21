@@ -141,6 +141,8 @@ func containerKind(r extract.Result) string {
 		return "ole2 + ole-package"
 	case r.IsRTF:
 		return "rtf"
+	case r.IsSLK:
+		return "sylk (.slk)"
 	case r.IsPDF:
 		return "pdf"
 	case r.IsLNK:

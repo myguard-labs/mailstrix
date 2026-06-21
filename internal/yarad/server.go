@@ -607,6 +607,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_lnk_total", "Windows shell links (.lnk) with StringData (command-line args/paths) surfaced", ex.LNK)
 	fm("extract_pdf_total", "PDFs with FlateDecode object streams inflated for scanning", ex.PDF)
 	fm("extract_rtf_total", "RTF docs with \\objdata embedded objects hex-decoded and carved", ex.RTF)
+	fm("extract_slk_total", "SYLK (.slk) spreadsheets whose XLM/DDE cell formulas were extracted for scanning", ex.SLK)
 	fm("extract_encoded_script_total", "buffers with >=1 decoded MS-Script-Encoder (VBE/JSE) block", ex.EncScript)
 	fm("extract_decoded_total", "buffers with >=1 base64/hex/reversed blob from the static decode pass", ex.Decoded)
 	fm("extract_docprops_total", "documents with doc-property strings (OOXML docProps/customXml/docVars or OLE2 SummaryInformation) extracted for scanning", ex.DocProps)
