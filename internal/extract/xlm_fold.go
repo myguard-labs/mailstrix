@@ -91,7 +91,9 @@ func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 	}
 }
 
-// processXLMFoldSheet parses one macrosheet XML and folds its formulas.
+// processXLMFoldSheet parses one macrosheet XML, collects cell coordinates,
+// formulas (<f>), and pre-computed values (<v>), then runs the two-pass
+// XLM cell-reference interpreter (XLM-6) before emitting results.
 func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time) {
 	if sf.UncompressedSize64 > maxBytesWorkbookXML {
 		return
@@ -109,61 +111,77 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	dec.Strict = false
 
-	formulaCount := 0
+	var cells []xlmCell
+	var currentCell xlmCell
+	inCell := false
+
 	for {
 		if expired(deadline) || len(*out) >= maxStreams {
-			return
+			break // stop collecting, but still interpret+emit what we have
 		}
-		if formulaCount >= maxXLMFoldFormulas {
-			return
+		if len(cells) >= maxXLMFoldFormulas {
+			break
 		}
 
 		tok, err := dec.Token()
 		if err != nil {
-			return // EOF or malformed
-		}
-		se, ok := tok.(xml.StartElement)
-		if !ok {
-			continue
+			break // EOF or malformed
 		}
 
-		switch se.Name.Local {
-		case "f":
-			// Formula element — read its text content.
-			var content string
-			if err := dec.DecodeElement(&content, &se); err != nil {
-				continue
-			}
-			formulaCount++
-			if len(content) == 0 || len(content) > maxXLMFoldFormulaLen {
-				continue
-			}
-			// Pass the deadline into the fold recursion (STAB-2): a single
-			// pathological 64KB formula folded across the depth-16 recursion must
-			// be able to bail mid-fold, not only at this per-formula boundary.
-			folded := foldXLMFormulaDepth(content, 0, deadline)
-			// Shared sink: minlen floor + output cap + dangerous-func markers.
-			if !emitFoldedFormula(folded, out, totalOutput, true) {
-				return // per-document output cap reached
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "c":
+				// Cell element — capture the "r" attribute (coordinate).
+				inCell = true
+				currentCell = xlmCell{}
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "r" {
+						currentCell.coord = attr.Value
+						break
+					}
+				}
+
+			case "f":
+				// Formula element inside a cell.
+				if !inCell {
+					continue
+				}
+				var content string
+				if err := dec.DecodeElement(&content, &t); err != nil {
+					continue
+				}
+				if len(content) > 0 && len(content) <= maxXLMFoldFormulaLen {
+					currentCell.formula = content
+				}
+
+			case "v":
+				// Pre-computed value element inside a cell.
+				if !inCell {
+					continue
+				}
+				var content string
+				if err := dec.DecodeElement(&content, &t); err != nil {
+					continue
+				}
+				if len(content) <= maxXLMFoldFormulaLen {
+					currentCell.value = content
+				}
 			}
 
-		case "v":
-			// Value element — may contain a pre-computed string result.
-			var content string
-			if err := dec.DecodeElement(&content, &se); err != nil {
-				continue
-			}
-			formulaCount++
-			if len(content) > maxXLMFoldFormulaLen {
-				continue
-			}
-			// Precomputed value: no dangerous-marker scan (it's a result, not a
-			// formula call) — matches the prior <v> behaviour.
-			if !emitFoldedFormula(content, out, totalOutput, false) {
-				return // per-document output cap reached
+		case xml.EndElement:
+			if t.Name.Local == "c" && inCell {
+				if currentCell.formula != "" || currentCell.value != "" {
+					cells = append(cells, currentCell)
+				}
+				inCell = false
+				currentCell = xlmCell{}
 			}
 		}
 	}
+
+	// Two-pass cell-reference interpreter (XLM-6).
+	interpretXLMCells(cells, out, totalOutput, deadline)
 }
 
 // emitFoldedFormula is the shared emit sink for folded/precomputed XLM strings.
