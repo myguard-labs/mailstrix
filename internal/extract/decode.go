@@ -2,6 +2,7 @@ package extract
 
 import (
 	"bytes"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // Static multi-layer deobfuscation. Malware authors hide a payload (a URL, a
@@ -64,6 +66,27 @@ const (
 	// alignment-valid (mult of 4 / mult of 2) when we slice a prefix.
 	maxB64Encoded = (maxBytesPerDecodedBlob/3 + 1) * 4
 	maxHexEncoded = maxBytesPerDecodedBlob * 2
+
+	// MSD-encodings: per-encoding run-length constants.
+	// minXxx is the minimum number of encoded units in a run for us to bother;
+	// maxXxxEncoded is the longest encoded candidate we hand to the decoder.
+	minXEscRun     = 8 // min \xHH escapes (each 4 encoded bytes)
+	maxXEscEncoded = maxBytesPerDecodedBlob * 4
+	minAmpHRun     = 8 // min &HXX groups
+	// &HXX with NO separator is the densest form (4 encoded chars per byte:
+	// "&H" + 2 hex), so the worst-case decoded size is encoded/4. ×4 keeps the
+	// pre-emit allocation at maxBytesPerDecodedBlob even on a separator-less run
+	// (a ×5 cap would let a dense run alloc 1.25 MiB before emit truncates).
+	maxAmpHEncoded    = maxBytesPerDecodedBlob * 4
+	minUEscRun        = 8 // min \uXXXX / %uXXXX units
+	maxUEscEncoded    = maxBytesPerDecodedBlob * 6
+	minDecSeqRun      = 12 // min decimal-separated tokens (1 + at least 11 more)
+	maxDecSeqEncoded  = maxBytesPerDecodedBlob * 4
+	minNetbiosRun     = 32 // min NETBIOS-encoded chars (16 decoded bytes)
+	maxNetbiosEncoded = maxBytesPerDecodedBlob * 2
+	minBase32Run      = 32 // min base32 chars (20 decoded bytes)
+	maxBase32Encoded  = (maxBytesPerDecodedBlob/5 + 1) * 8
+
 	// maxReverseInput bounds the per-source cost of the whole-buffer reverse.
 	maxReverseInput = 1 << 20
 	// maxFoldInput bounds the source length scanned by the VBA fold regexes
@@ -119,6 +142,30 @@ var (
 	// (a Dridex blob must contain a non-hex letter G-Z/g-z; olevba.py:901).
 	reDridex     = regexp.MustCompile(`"[0-9A-Za-z]{20,}"`)
 	dridexNotHex = regexp.MustCompile(`[G-Zg-z]`)
+
+	// MSD-encodings: compiled regexes for the 6 new encoding patterns.
+
+	// \xHH hex-escape sequences: literal \x followed by two hex digits, repeated min minXEscRun times.
+	reXEsc = regexp.MustCompile(fmt.Sprintf(`(?:\\x[0-9A-Fa-f]{2}){%d,}`, minXEscRun))
+
+	// &HXX VBA hex literals: &H or &h followed by two hex digits with optional comma/whitespace separators.
+	reAmpH = regexp.MustCompile(fmt.Sprintf(`(?:&[Hh][0-9A-Fa-f]{2}[,\s]*){%d,}`, minAmpHRun))
+	// Sub-regex to extract individual &HXX groups within a run.
+	reAmpHTok = regexp.MustCompile(`&[Hh]([0-9A-Fa-f]{2})`)
+
+	// \uXXXX / %uXXXX Unicode escape sequences: backslash-u or percent-u followed by four hex digits.
+	reUEsc = regexp.MustCompile(fmt.Sprintf(`(?:[\\%%]u[0-9A-Fa-f]{4}){%d,}`, minUEscRun))
+
+	// Decimal-separated byte sequences: a leading 1-3 digit number followed by at least (minDecSeqRun-1)
+	// more comma- or semicolon-separated 1-3 digit groups.
+	reDecSeq = regexp.MustCompile(fmt.Sprintf(`\d{1,3}(?:[;,]\d{1,3}){%d,}`, minDecSeqRun-1))
+
+	// NETBIOS (RFC1001) encoded strings: runs of uppercase A-P chars, min minNetbiosRun (even length required).
+	// Uppercase only — actual NETBIOS encoding always produces A-P; lowercase reduces FP but is non-standard.
+	reNetbios = regexp.MustCompile(fmt.Sprintf(`[A-P]{%d,}`, minNetbiosRun))
+
+	// Base32 encoded strings: standard alphabet [A-Z2-7] with optional padding, min minBase32Run chars.
+	reBase32 = regexp.MustCompile(fmt.Sprintf(`[A-Z2-7]{%d,}={0,6}`, minBase32Run))
 
 	// Lowercased reversed forms of high-signal tokens. The whole-buffer reverse
 	// is skipped unless one is present, so a normal buffer never gets a reversed
@@ -514,7 +561,13 @@ func decodeSourceTree(src []byte, res *Result, deadline time.Time) int {
 		ok := decodeBase64Runs(cur.data, deadline, emit) &&
 			decodeHexRuns(cur.data, deadline, emit) &&
 			emitReversed(cur.data, emit) &&
-			foldVBAStrings(cur.data, deadline, emit)
+			foldVBAStrings(cur.data, deadline, emit) &&
+			decodeXEscRuns(cur.data, deadline, emit) &&
+			decodeAmpHRuns(cur.data, deadline, emit) &&
+			decodeUEscRuns(cur.data, deadline, emit) &&
+			decodeDecSeqRuns(cur.data, deadline, emit) &&
+			decodeNetbiosRuns(cur.data, deadline, emit) &&
+			decodeBase32Runs(cur.data, deadline, emit)
 
 		// Re-enqueue this item's encoded children one layer deeper. Gate on
 		// looksEncoded so a fully-decoded cleartext blob isn't re-scanned for
@@ -580,8 +633,17 @@ func looksEncoded(b []byte) bool {
 	}
 	// Mirror EVERY pattern foldVBAStrings handles, so a child blob that decoded
 	// into any VBA string-build construct is re-enqueued and folded one layer down.
+	// Also mirror the MSD-encodings patterns so nested encoded payloads recurse.
 	return reChrConcat.Match(scan) || reReplace.Match(scan) || reArrayXor.Match(scan) ||
-		reStrReverse.Match(scan) || reEnviron.Match(scan) || reDridex.Match(scan)
+		reStrReverse.Match(scan) || reEnviron.Match(scan) || reDridex.Match(scan) ||
+		reXEsc.Match(scan) || reAmpH.Match(scan) || reUEsc.Match(scan) ||
+		reDecSeq.Match(scan) || reBase32.Match(scan)
+	// reNetbios is deliberately OMITTED here: [A-P]{32,} matches plain uppercase
+	// text (acronyms, ALL-CAPS, base64's A-P slice), so re-enqueueing on it would
+	// re-decode benign cleartext every layer. NETBIOS is still decoded at the
+	// source layer by decodeNetbiosRuns (gated on mostlyText/magic); it just does
+	// not drive recursion. A genuinely NETBIOS-over-base64 nest still recurses via
+	// the base64/base32 patterns above.
 }
 
 // mostlyText reports whether a leading sample of b is at least textPrintablePct
@@ -690,6 +752,362 @@ func decodeHexRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool 
 		rest = rest[loc[1]:]
 	}
 	return true
+}
+
+// decodeXEscRuns decodes runs of \xHH hex-escape sequences (e.g. \x68\x74\x74…).
+// Common in JavaScript/PowerShell malware obfuscation. Returns false on cap hit.
+func decodeXEscRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	rest := src
+	for len(rest) > 0 {
+		if expired(deadline) {
+			return true
+		}
+		loc := reXEsc.FindIndex(rest)
+		if loc == nil {
+			return true
+		}
+		run := rest[loc[0]:loc[1]]
+		// Clamp to maxXEscEncoded; trim to nearest multiple of 4 (each \xHH is 4 bytes).
+		if len(run) > maxXEscEncoded {
+			run = run[:maxXEscEncoded-(maxXEscEncoded%4)]
+		}
+		// Decode: each group of 4 bytes is \xHH; parse the 2 hex chars at offset 2.
+		dec := make([]byte, 0, len(run)/4)
+		for i := 0; i+4 <= len(run); i += 4 {
+			hi := run[i+2]
+			lo := run[i+3]
+			var b byte
+			switch {
+			case hi >= '0' && hi <= '9':
+				b = (hi - '0') << 4
+			case hi >= 'a' && hi <= 'f':
+				b = (hi - 'a' + 10) << 4
+			case hi >= 'A' && hi <= 'F':
+				b = (hi - 'A' + 10) << 4
+			}
+			switch {
+			case lo >= '0' && lo <= '9':
+				b |= lo - '0'
+			case lo >= 'a' && lo <= 'f':
+				b |= lo - 'a' + 10
+			case lo >= 'A' && lo <= 'F':
+				b |= lo - 'A' + 10
+			}
+			dec = append(dec, b)
+		}
+		if !emit(dec) {
+			return false
+		}
+		rest = rest[loc[1]:]
+	}
+	return true
+}
+
+// decodeAmpHRuns decodes runs of VBA &HXX hex literals (e.g. &H68,&H74,&H74…).
+// Common in VBA macro malware. Returns false on cap hit.
+func decodeAmpHRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	rest := src
+	for len(rest) > 0 {
+		if expired(deadline) {
+			return true
+		}
+		loc := reAmpH.FindIndex(rest)
+		if loc == nil {
+			return true
+		}
+		run := rest[loc[0]:loc[1]]
+		if len(run) > maxAmpHEncoded {
+			run = run[:maxAmpHEncoded]
+		}
+		// Extract each &HXX group via sub-regex; parse the captured hex pair.
+		toks := reAmpHTok.FindAllSubmatch(run, -1)
+		if len(toks) == 0 {
+			rest = rest[loc[1]:]
+			continue
+		}
+		dec := make([]byte, 0, len(toks))
+		for _, tok := range toks {
+			hi := tok[1][0]
+			lo := tok[1][1]
+			var b byte
+			switch {
+			case hi >= '0' && hi <= '9':
+				b = (hi - '0') << 4
+			case hi >= 'a' && hi <= 'f':
+				b = (hi - 'a' + 10) << 4
+			case hi >= 'A' && hi <= 'F':
+				b = (hi - 'A' + 10) << 4
+			}
+			switch {
+			case lo >= '0' && lo <= '9':
+				b |= lo - '0'
+			case lo >= 'a' && lo <= 'f':
+				b |= lo - 'a' + 10
+			case lo >= 'A' && lo <= 'F':
+				b |= lo - 'A' + 10
+			}
+			dec = append(dec, b)
+		}
+		if !emit(dec) {
+			return false
+		}
+		rest = rest[loc[1]:]
+	}
+	return true
+}
+
+// decodeUEscRuns decodes runs of \uXXXX or %uXXXX Unicode escape sequences.
+// Assembles UTF-16 code units and decodes them to UTF-8 via unicode/utf16.
+// Returns false on cap hit.
+func decodeUEscRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	rest := src
+	for len(rest) > 0 {
+		if expired(deadline) {
+			return true
+		}
+		loc := reUEsc.FindIndex(rest)
+		if loc == nil {
+			return true
+		}
+		run := rest[loc[0]:loc[1]]
+		if len(run) > maxUEscEncoded {
+			// Each unit is 6 chars; trim to multiple of 6.
+			run = run[:maxUEscEncoded-(maxUEscEncoded%6)]
+		}
+		// Collect UTF-16 code units. Each encoded unit is 6 chars: \uXXXX or %uXXXX.
+		units := make([]uint16, 0, len(run)/6)
+		for i := 0; i+6 <= len(run); i += 6 {
+			// Chars at i='\' or '%', i+1='u', i+2..i+5 are 4 hex digits.
+			h3 := run[i+2]
+			h2 := run[i+3]
+			h1 := run[i+4]
+			h0 := run[i+5]
+			hexByte := func(c byte) uint16 {
+				switch {
+				case c >= '0' && c <= '9':
+					return uint16(c - '0')
+				case c >= 'a' && c <= 'f':
+					return uint16(c-'a') + 10
+				default: // A-F
+					return uint16(c-'A') + 10
+				}
+			}
+			u := hexByte(h3)<<12 | hexByte(h2)<<8 | hexByte(h1)<<4 | hexByte(h0)
+			units = append(units, u)
+		}
+		if len(units) == 0 {
+			rest = rest[loc[1]:]
+			continue
+		}
+		runes := utf16.Decode(units)
+		dec := []byte(string(runes))
+		if !emit(dec) {
+			return false
+		}
+		rest = rest[loc[1]:]
+	}
+	return true
+}
+
+// decodeDecSeqRuns decodes decimal-separated byte sequences (e.g. "104,116,116,112…").
+// Conservative: requires ALL tokens to be 0..255 and a consistent separator (all ',' or all ';').
+// Returns false on cap hit.
+func decodeDecSeqRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	rest := src
+	for len(rest) > 0 {
+		if expired(deadline) {
+			return true
+		}
+		loc := reDecSeq.FindIndex(rest)
+		if loc == nil {
+			return true
+		}
+		run := rest[loc[0]:loc[1]]
+		if len(run) > maxDecSeqEncoded {
+			run = run[:maxDecSeqEncoded]
+			// Trim back to the last separator so the clamp never cuts a token in
+			// half (e.g. "256" → "25", which Atoi would silently accept as a wrong
+			// byte). Drop the trailing partial token entirely.
+			if i := bytes.LastIndexAny(run, ",;"); i >= 0 {
+				run = run[:i]
+			}
+		}
+		// Determine the separator from the first separator character.
+		sep := byte(',')
+		for _, c := range run {
+			if c == ',' || c == ';' {
+				sep = c
+				break
+			}
+		}
+		// Split on the separator and validate all tokens.
+		parts := bytes.Split(run, []byte{sep})
+		dec := make([]byte, 0, len(parts))
+		valid := true
+		for _, p := range parts {
+			p = bytes.TrimSpace(p)
+			if len(p) == 0 {
+				valid = false
+				break
+			}
+			// Reject if any byte is the OTHER separator (mixed separators).
+			otherSep := byte(';')
+			if sep == ';' {
+				otherSep = ','
+			}
+			if bytes.IndexByte(p, otherSep) >= 0 {
+				valid = false
+				break
+			}
+			n, err := strconv.Atoi(string(p))
+			if err != nil || n < 0 || n > 255 {
+				valid = false
+				break
+			}
+			dec = append(dec, byte(n)) // #nosec G115 -- n bounded 0..255 above
+		}
+		if valid && len(dec) >= minDecSeqRun {
+			if !emit(dec) {
+				return false
+			}
+		}
+		rest = rest[loc[1]:]
+	}
+	return true
+}
+
+// decodeNetbiosRuns decodes NETBIOS (RFC1001) encoded strings.
+// Each byte is encoded as two uppercase letters in [A-P]: high nibble = (b>>4)+'A', low = (b&0xF)+'A'.
+// Decoding: ((c1-'A')<<4) | (c2-'A'). Only emits if decoded result is mostly printable text
+// or starts with a known container magic (ZIP/OLE/MZ/PDF), to gate FP from random uppercase text.
+// Returns false on cap hit.
+func decodeNetbiosRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	rest := src
+	for len(rest) > 0 {
+		if expired(deadline) {
+			return true
+		}
+		loc := reNetbios.FindIndex(rest)
+		if loc == nil {
+			return true
+		}
+		run := rest[loc[0]:loc[1]]
+		// Cap to maxNetbiosEncoded; further clamp to even length.
+		if len(run) > maxNetbiosEncoded {
+			run = run[:maxNetbiosEncoded]
+		}
+		if len(run)%2 != 0 {
+			run = run[:len(run)-1]
+		}
+		dec := make([]byte, len(run)/2)
+		for i := 0; i < len(run); i += 2 {
+			hi := run[i] - 'A'
+			lo := run[i+1] - 'A'
+			// Both nibbles must be in range [0,15] (chars A-P map to 0-15).
+			// The regex [A-P] already guarantees this, but clamp defensively.
+			if hi > 15 || lo > 15 {
+				dec = nil
+				break
+			}
+			dec[i/2] = (hi << 4) | lo
+		}
+		if dec == nil {
+			rest = rest[loc[1]:]
+			continue
+		}
+		// Gate: only emit if decoded result is mostly printable text OR carries
+		// a known container magic (PK zip, OLE, MZ exe, PDF). This prevents emitting
+		// garbage from random uppercase text like variable names or acronyms.
+		if mostlyText(dec) || hasContainerMagic(dec) {
+			if !emit(dec) {
+				return false
+			}
+		}
+		rest = rest[loc[1]:]
+	}
+	return true
+}
+
+// hasContainerMagic reports whether b starts with a known binary container signature:
+// PK (ZIP), OLE2 (D0CF), MZ (EXE/DLL), or PDF (%PDF).
+func hasContainerMagic(b []byte) bool {
+	if len(b) < 2 {
+		return false
+	}
+	switch {
+	case b[0] == 0x50 && b[1] == 0x4B: // PK (ZIP)
+		return true
+	case b[0] == 0xD0 && b[1] == 0xCF: // OLE2
+		return true
+	case b[0] == 0x4D && b[1] == 0x5A: // MZ (EXE/DLL)
+		return true
+	case len(b) >= 4 && b[0] == 0x25 && b[1] == 0x50 && b[2] == 0x44 && b[3] == 0x46: // %PDF
+		return true
+	}
+	return false
+}
+
+// decodeBase32Runs decodes standard base32 encoded strings ([A-Z2-7] alphabet).
+// To reduce FP against base64/NETBIOS/plain-text runs of pure [A-Z], only decodes
+// runs containing at least one digit from [2-7] — the base32-distinctive chars.
+// Returns false on cap hit.
+func decodeBase32Runs(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	rest := src
+	for len(rest) > 0 {
+		if expired(deadline) {
+			return true
+		}
+		loc := reBase32.FindIndex(rest)
+		if loc == nil {
+			return true
+		}
+		run := rest[loc[0]:loc[1]]
+		if len(run) > maxBase32Encoded {
+			// Trim to multiple of 8 (base32 groups).
+			n := maxBase32Encoded - (maxBase32Encoded % 8)
+			run = run[:n]
+		}
+		// Require at least one base32-distinctive digit (2-7). Pure [A-Z] runs are
+		// ambiguous (could be base64, NETBIOS, or plain text); runs with 2-7 are
+		// distinctively base32.
+		hasDistinctive := false
+		for _, c := range run {
+			if c >= '2' && c <= '7' {
+				hasDistinctive = true
+				break
+			}
+		}
+		if !hasDistinctive {
+			rest = rest[loc[1]:]
+			continue
+		}
+		dec, ok := tryBase32(run)
+		if ok {
+			if !emit(dec) {
+				return false
+			}
+		}
+		rest = rest[loc[1]:]
+	}
+	return true
+}
+
+// tryBase32 decodes one run with standard base32 encoding, tolerating missing
+// padding (appends '=' to make length a multiple of 8 if needed).
+func tryBase32(run []byte) ([]byte, bool) {
+	s := string(run)
+	if dec, err := base32.StdEncoding.DecodeString(s); err == nil {
+		return dec, true
+	}
+	// Pad to multiple of 8 and retry.
+	s = strings.TrimRight(s, "=")
+	if rem := len(s) % 8; rem != 0 {
+		s += strings.Repeat("=", 8-rem)
+	}
+	if dec, err := base32.StdEncoding.DecodeString(s); err == nil {
+		return dec, true
+	}
+	return nil, false
 }
 
 // emitReversed emits a whole-buffer reverse of src, but only when src carries a
