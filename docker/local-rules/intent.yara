@@ -86,3 +86,20 @@ rule Maldoc_AntiAnalysis_Evasion : evasion heuristic suspicious
     condition:
         filesize < 16MB and 2 of them
 }
+
+// VBA-ENVIRON %NAME% markers are emitted by the VBA string-fold
+// (internal/extract/decode.go foldVBAStrings) when an Environ("NAME") lookup is
+// folded — INCLUDING when the call was reassembled from Chr()/concat obfuscation,
+// where the raw "Environ(" keyword the heuristic rules grep for is gone. The
+// marker prefix is emitted only by yarad, so the literal is zero-FP. Env-var
+// probing alone is recon (path-building, sandbox checks), so a modest score; it
+// stacks with the anti-analysis / dropper rules above when present together.
+rule VBA_Environ_Probe : maldoc heuristic suspicious {
+    meta:
+        description = "VBA macro probes an environment variable (Environ), incl. obfuscation-folded"
+        score       = "20"
+    strings:
+        $marker = "VBA-ENVIRON %"
+    condition:
+        $marker
+}

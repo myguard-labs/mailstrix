@@ -404,6 +404,11 @@ jobs:
           me=$(printf '%s' "$e" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
           echo "evasion: $me"; grep -q Maldoc_AntiAnalysis_Evasion <<<"$me"
 
+          # VBA-ENVIRON %NAME% marker (folded Environ lookup) must fire VBA_Environ_Probe.
+          en=$(printf 'VBA-ENVIRON %%APPDATA%%\n')
+          men=$(printf '%s' "$en" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
+          echo "environ: $men"; grep -q VBA_Environ_Probe <<<"$men"
+
           # Negative: bare mentions without abusive args/combos must NOT fire.
           clean=$(printf 'newsletter about powershell and regsvr32 for admins\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18086/scan)
           echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
