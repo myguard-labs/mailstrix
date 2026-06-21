@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -189,6 +189,9 @@ type Result struct {
 	// HasXLMFold is true when at least one XLM formula was constant-folded
 	// and the folded cleartext was emitted for YARA scanning.
 	HasXLMFold bool
+	// IsSLK is true when buf was recognised as a SYLK (.slk) spreadsheet, whose
+	// C-record E-field formulas were scanned for XLM/DDE droppers.
+	IsSLK bool
 	// DecodedStreams is how many blobs the single-layer static decode pass
 	// (base64/hex/whole-buffer reverse; see decode.go) appended to Streams. These
 	// are the trailing len-N entries of Streams; the caller subtracts them so the
@@ -266,6 +269,12 @@ func Extract(buf []byte, deadline time.Time) (res Result) {
 		// embedded FileDataStoreObject payloads (the maldoc delivery vector).
 		res.IsDoc = true
 		fromOneNote(buf, &res, deadline)
+	case isSLK(buf):
+		// A SYLK (.slk) spreadsheet — plain text, but Excel executes its XLM/DDE
+		// cell formulas, so it's a macro-dropper carrier. Fold the C-record
+		// E-field formulas through the shared XLM sink.
+		res.IsDoc = true
+		fromSLK(buf, &res, deadline)
 	default:
 		// Not a container. The buffer may still hide an MS Script Encoder block
 		// (#@~^...^#~@) — an encoded VBScript/JScript that raw-byte rules can't see

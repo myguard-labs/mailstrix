@@ -54,3 +54,38 @@ rule Maldoc_DDE_Field : maldoc heuristic suspicious
         $marker and
         any of ($dde, $ddeauto)
 }
+
+/*
+  SLK_DDE_Command -- SYLK (.slk) DDE command-execution formula.
+
+  SYLK is a plain-text spreadsheet format Excel opens and whose cell formulas it
+  executes. A DDE command formula in a SYLK cell, e.g.
+      =cmd|'/c calc.exe'!A1
+  launches the named program when the file is opened — the macro-less command
+  execution vector, delivered as innocuous-looking text. The yarad extractor
+  (extract.fromSLK) parses the C-record E-fields and emits a synthetic
+  "SLK-DDE <formula>" stream for the DDE command form.
+
+  FP mitigation: requires the literal "SLK-DDE " prefix, only ever emitted by
+  yarad's extractor (never in raw file bytes), so matching it is zero-FP by
+  construction. score 70 = high confidence (a SYLK DDE command formula has no
+  benign analogue).
+
+  References:
+    https://attack.mitre.org/techniques/T1559/002/
+    https://www.lastline.com/labsblog/sylk-format-malicious-files/
+*/
+rule SLK_DDE_Command : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "SYLK (.slk) cell contains a DDE command-execution formula"
+        reference   = "https://attack.mitre.org/techniques/T1559/002/"
+        date        = "2026-06-21"
+        score       = "70"
+        tags        = "maldoc heuristic suspicious"
+    strings:
+        $marker = "SLK-DDE " ascii
+    condition:
+        filesize < 16MB and $marker
+}
