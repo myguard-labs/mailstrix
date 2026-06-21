@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -609,6 +609,10 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time) {
 	// keyword/URL/IOC YARA rules fire. Also emits XLM-DANGEROUS-FUNC markers.
 	prevLen := len(out)
 	fromOOXMLXLMFold(zr, &out, deadline)
+	// .xlsb stores macrosheets as BIFF12 binary parts (xl/macrosheets/sheet*.bin)
+	// rather than XML <f> elements, so fromOOXMLXLMFold (which only reads .xml)
+	// misses them. Fold the BIFF12 ptg token streams too (XLM-4).
+	fromXLSBXLMFold(zr, &out, deadline)
 	if len(out) > prevLen {
 		res.HasXLMFold = true
 	}
