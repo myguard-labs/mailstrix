@@ -119,3 +119,66 @@ rule OLETimes_SyntheticStamps : maldoc heuristic suspicious
     condition:
         filesize < 16MB and $marker
 }
+
+/*
+  Encryption-type + digital-signature markers.
+
+  yarad's extract.fromOLEEncType / fromOLEEncInfo classify the encryption kind
+  rather than reporting presence only:
+
+    - "ENCRYPTION-XOR" -- a BIFF8 FILEPASS record using XOR obfuscation. This is
+      trivially reversible, NOT real encryption: it is a known trick to slip a
+      macro past a naive scanner while looking "protected". Scored higher than
+      genuine encryption because it signals intent, not confidentiality.
+    - "ENCRYPTION-RC4" / "ENCRYPTION-AES" -- real stream/block ciphers (legacy
+      FILEPASS RC4, or an ECMA-376 encrypted OOXML wrapper). The encryption
+      itself is the signal (legit senders rarely default-password-encrypt), but
+      it is presence-level, so scored LOW.
+
+  extract.fromOLEDigSig emits "DIGITAL-SIGNATURE" when the OLE2 carries a
+  _signatures/_xmlsignatures storage. Benign on its own, so scored LOW; the value
+  is that it STACKS with macro/keyword signals (a code-signed-looking maldoc).
+
+  All three literals are emitted only by yarad -> matching is zero-FP.
+
+  Reference: https://github.com/decalage2/oletools/wiki/oleid
+*/
+rule Encrypted_XOR_Obfuscation : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "Document uses reversible XOR FILEPASS obfuscation (scanner-evasion tell)"
+        reference   = "https://github.com/decalage2/oletools/wiki/oleid"
+        score       = "40"
+    strings:
+        $marker = "ENCRYPTION-XOR" ascii
+    condition:
+        filesize < 16MB and $marker
+}
+
+rule Encrypted_Document : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "Document is encrypted (RC4/AES) -- presence indicator"
+        reference   = "https://github.com/decalage2/oletools/wiki/oleid"
+        score       = "15"
+    strings:
+        $rc4 = "ENCRYPTION-RC4" ascii
+        $aes = "ENCRYPTION-AES" ascii
+    condition:
+        filesize < 16MB and any of them
+}
+
+rule Document_DigitalSignature : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "Document carries a digital-signature storage -- oleid indicator (stacks with macros)"
+        reference   = "https://github.com/decalage2/oletools/wiki/oleid"
+        score       = "10"
+    strings:
+        $marker = "DIGITAL-SIGNATURE" ascii
+    condition:
+        filesize < 16MB and $marker
+}
