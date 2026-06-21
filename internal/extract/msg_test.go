@@ -14,6 +14,14 @@ type cfbEntry struct {
 	name string
 	mse  byte // 1 = storage, 2 = stream, 5 = root
 	data []byte
+
+	// Optional explicit red-black-tree links (original CFB SIDs). When linksSet
+	// is true, buildCFB writes these verbatim into SidLeftSib/SidRightSib/
+	// SidChild; otherwise it uses the legacy auto layout (root.SidChild=1, all
+	// siblings freeSect). The OLEDIR-1 orphan tests need a real reachable tree
+	// plus an unreferenced entry, which the auto layout cannot express.
+	left, right, child uint32
+	linksSet           bool
 }
 
 // buildCFB hand-builds a minimal valid OLE2/CFB that oleparse parses, with an
@@ -117,13 +125,19 @@ func buildCFB(t *testing.T, entries []cfbEntry) []byte {
 		copy(b[0:64], u)
 		binary.LittleEndian.PutUint16(b[64:], uint16(len(u)))
 		b[66] = e.mse
-		binary.LittleEndian.PutUint32(b[68:], freeSect) // SidLeftSib
-		binary.LittleEndian.PutUint32(b[72:], freeSect) // SidRightSib
-		// SidChild: root points at entry 1 if present (enough for oleparse to walk).
-		if e.mse == 5 && nEntries > 1 {
-			binary.LittleEndian.PutUint32(b[76:], 1)
+		if e.linksSet {
+			binary.LittleEndian.PutUint32(b[68:], e.left)
+			binary.LittleEndian.PutUint32(b[72:], e.right)
+			binary.LittleEndian.PutUint32(b[76:], e.child)
 		} else {
-			binary.LittleEndian.PutUint32(b[76:], freeSect)
+			binary.LittleEndian.PutUint32(b[68:], freeSect) // SidLeftSib
+			binary.LittleEndian.PutUint32(b[72:], freeSect) // SidRightSib
+			// SidChild: root points at entry 1 if present (enough for oleparse to walk).
+			if e.mse == 5 && nEntries > 1 {
+				binary.LittleEndian.PutUint32(b[76:], 1)
+			} else {
+				binary.LittleEndian.PutUint32(b[76:], freeSect)
+			}
 		}
 		binary.LittleEndian.PutUint32(b[116:], pl[i].start)
 		binary.LittleEndian.PutUint32(b[120:], uint32(len(e.data)))
