@@ -106,12 +106,31 @@ func fromPDF(buf []byte, res *Result, deadline time.Time) {
 		// Per the spec the keyword is followed by CRLF or LF before the data. Skip a
 		// single EOL so the inflater sees the real first byte.
 		bodyStart = skipPDFEOL(scan, bodyStart)
-		endRel := bytes.Index(scan[bodyStart:], pdfEndStream)
-		if endRel < 0 {
-			break // no terminator: truncated/hostile, stop
+		// Size the body by the declared /Length when it aligns with `endstream`
+		// (AUDIT-PDF-ENDSTREAM): a FlateDecode body whose (e.g. stored-block)
+		// compressed bytes contain the literal `endstream` would otherwise be
+		// truncated at the first occurrence, so the inflate drops the real payload
+		// tail. This mirrors the scrub path in scrubPDFForNames. Fall back to the
+		// first-`endstream` substring when /Length is indirect/absent or doesn't
+		// align — the narrowed residual.
+		var body []byte
+		sized := false
+		if l := pdfStreamLength(scan, kwAt); l >= 0 && bodyStart+l <= len(scan) {
+			after := bytes.TrimLeft(scan[bodyStart+l:], " \t\r\n\f")
+			if bytes.HasPrefix(after, pdfEndStream) {
+				body = scan[bodyStart : bodyStart+l]
+				pos = bodyStart + l + (len(scan[bodyStart+l:]) - len(after)) + len(pdfEndStream)
+				sized = true
+			}
 		}
-		body := scan[bodyStart : bodyStart+endRel]
-		pos = bodyStart + endRel + len(pdfEndStream)
+		if !sized {
+			endRel := bytes.Index(scan[bodyStart:], pdfEndStream)
+			if endRel < 0 {
+				break // no terminator: truncated/hostile, stop
+			}
+			body = scan[bodyStart : bodyStart+endRel]
+			pos = bodyStart + endRel + len(pdfEndStream)
+		}
 
 		attempts++
 		dec := inflatePDFStream(body)

@@ -247,6 +247,40 @@ func TestExtractPDFStreamEndstreamInBody(t *testing.T) {
 	}
 }
 
+// zlibStore zlib-wraps data with NO compression (stored blocks), so the
+// compressed bytes contain the literal payload — letting a test embed an
+// `endstream` token inside an otherwise-valid FlateDecode body.
+func zlibStore(data []byte) []byte {
+	var b bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&b, zlib.NoCompression)
+	_, _ = zw.Write(data)
+	_ = zw.Close()
+	return b.Bytes()
+}
+
+// AUDIT-PDF-ENDSTREAM: a FlateDecode body whose compressed bytes contain a
+// literal `endstream` must be carved by its declared /Length, not truncated at
+// the first `endstream` substring — otherwise the inflate drops everything past
+// the embedded token and the real payload tail evades scanning.
+func TestExtractPDFEndstreamInCompressedBody(t *testing.T) {
+	payload := []byte("app.alert('PDF_HEAD'); /* endstream */ this.exportDataObject('PDF_TAIL_KEYWORD')")
+	comp := zlibStore(payload)
+	if !bytes.Contains(comp, []byte("endstream")) {
+		t.Fatalf("test setup: stored-deflate body does not contain a literal 'endstream'")
+	}
+	obj := "1 0 obj\n<< /Length " + strconv.Itoa(len(comp)) + " >>\nstream\n"
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.7\n")
+	buf.WriteString(obj)
+	buf.Write(comp)
+	buf.WriteString("\nendstream\nendobj\n%%EOF")
+
+	res := Extract(buf.Bytes(), time.Time{})
+	if !streamsContain(res, "PDF_TAIL_KEYWORD") {
+		t.Errorf("payload past the embedded 'endstream' not inflated (carve truncated early); streams=%v", res.Streams)
+	}
+}
+
 // pdfStreamLength / readPDFLength: direct integer trusted, indirect refs and a
 // prior object's /Length rejected (the latter must not leak across objects).
 func TestPDFStreamLength(t *testing.T) {
