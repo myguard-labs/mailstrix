@@ -25,6 +25,8 @@ jobs:
         run: go test -run=x -fuzz='^FuzzExtract$' -fuzztime=10m ./internal/extract/
       - name: fuzz (extract — BIFF8 XLM ptg formula token stream)
         run: go test -run=x -fuzz='^FuzzParseBIFF8Formula$' -fuzztime=5m ./internal/extract/
+      - name: fuzz (extract — BIFF12 .xlsb XLM ptg formula token stream)
+        run: go test -run=x -fuzz='^FuzzParseBIFF12Formula$' -fuzztime=5m ./internal/extract/
 
   # AddressSanitizer over the CGO/libyara surface: catches heap errors in our
   # go-yara usage (Scanner lifecycle, buffer passing) that -race can't. Valgrind
