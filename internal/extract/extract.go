@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes"
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
 // embedded in OOXML, AND the encrypted-OOXML wrapper) and the local-file-header
@@ -354,6 +354,7 @@ func fromOLE(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 		// surface them on a no-macro OLE2 too.
 		fromOLEIndicators(ole, res, deadline)
 		fromOLEOrphans(ole, res, deadline)
+		fromOLETimes(ole, res, deadline)
 		// An OLE2Link object's URL moniker (CVE-2017-0199) is independent of VBA.
 		fromOLE2Link(ole, res, deadline)
 		return
@@ -382,6 +383,7 @@ func fromOLE(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	// objects) and embedded Flash/SWF objects. Emits OLEID-* markers.
 	fromOLEIndicators(ole, res, deadline)
 	fromOLEOrphans(ole, res, deadline)
+	fromOLETimes(ole, res, deadline)
 	// An OLE2Link object's URL moniker (CVE-2017-0199) auto-fetches a remote
 	// payload on open; surface it as an OLE2LINK-URL marker.
 	fromOLE2Link(ole, res, deadline)

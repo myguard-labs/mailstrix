@@ -75,3 +75,47 @@ rule OLE2Link_URL_Moniker : maldoc exploit malware
     condition:
         filesize < 16MB and $marker and any of ($u_http, $u_smb)
 }
+
+/*
+  OLETIMES anomaly -- oletools' oletimes (oletimes.py) reports CFB directory-entry
+  CreateTime/ModifyTime FILETIMEs. yarad's extract.fromOLETimes surfaces only the
+  two anomalies with no benign analogue:
+
+    - "OLETIMES-FUTURE ..."    -- an entry stamped beyond now + 48h clock-skew
+      slack. A real document cannot be authored in the future; a fabricated CFB
+      with a mis-set builder clock can.
+    - "OLETIMES-SYNTHETIC ..." -- >=3 directory entries share one identical
+      non-zero (create,modify) pair. Office sets per-entry varied stamps (or
+      zero); a mass-fabricated CFB stamps every entry the same.
+
+  Both are heuristic stacking signals, not conclusive alone -- scored LOW. The
+  marker prefix is emitted only by yarad, so matching it is zero-FP by
+  construction.
+
+  Reference: https://github.com/decalage2/oletools/wiki/oletimes
+*/
+rule OLETimes_FutureStamp : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "CFB directory entry stamped in the future -- oletimes anomaly"
+        reference   = "https://github.com/decalage2/oletools/wiki/oletimes"
+        score       = "20"
+    strings:
+        $marker = "OLETIMES-FUTURE " ascii
+    condition:
+        filesize < 16MB and $marker
+}
+
+rule OLETimes_SyntheticStamps : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "Multiple CFB entries share one identical timestamp -- oletimes fabrication tell"
+        reference   = "https://github.com/decalage2/oletools/wiki/oletimes"
+        score       = "20"
+    strings:
+        $marker = "OLETIMES-SYNTHETIC " ascii
+    condition:
+        filesize < 16MB and $marker
+}

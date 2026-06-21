@@ -22,6 +22,12 @@ type cfbEntry struct {
 	// plus an unreferenced entry, which the auto layout cannot express.
 	left, right, child uint32
 	linksSet           bool
+
+	// Optional CFB directory-entry FILETIMEs (100-ns ticks since 1601), written
+	// to offsets 100/108. Zero leaves them null, matching a real Office stamp.
+	// The OLETIMES-1 tests set these to synthesize future-dated / synthetic-
+	// identical anomalies.
+	ctime, mtime uint64
 }
 
 // buildCFB hand-builds a minimal valid OLE2/CFB that oleparse parses, with an
@@ -139,6 +145,8 @@ func buildCFB(t *testing.T, entries []cfbEntry) []byte {
 				binary.LittleEndian.PutUint32(b[76:], freeSect)
 			}
 		}
+		binary.LittleEndian.PutUint64(b[100:], e.ctime)
+		binary.LittleEndian.PutUint64(b[108:], e.mtime)
 		binary.LittleEndian.PutUint32(b[116:], pl[i].start)
 		binary.LittleEndian.PutUint32(b[120:], uint32(len(e.data)))
 	}
