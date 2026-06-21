@@ -1,6 +1,7 @@
 package yarad
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -124,12 +125,12 @@ func TestFlightCoalesces(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			m, _ := g.Do("samekey", func() []Match {
+			m, _, _ := g.Do(context.Background(), "samekey", func() ([]Match, bool) {
 				mu.Lock()
 				scans++
 				mu.Unlock()
 				time.Sleep(20 * time.Millisecond) // hold the flight so others join
-				return []Match{{Rule: "X"}}
+				return []Match{{Rule: "X"}}, false
 			})
 			results[i] = m
 		}(i)
@@ -151,8 +152,8 @@ func TestFlightCoalesces(t *testing.T) {
 
 func TestFlightDistinctKeysDontCoalesce(t *testing.T) {
 	var g flightGroup
-	_, sharedA := g.Do("a", func() []Match { return nil })
-	_, sharedB := g.Do("b", func() []Match { return nil })
+	_, sharedA, _ := g.Do(context.Background(), "a", func() ([]Match, bool) { return nil, false })
+	_, sharedB, _ := g.Do(context.Background(), "b", func() ([]Match, bool) { return nil, false })
 	if sharedA || sharedB {
 		t.Error("sequential distinct keys must not report shared")
 	}
@@ -234,8 +235,115 @@ func TestBreakerIsOpenAfterCooldown(t *testing.T) {
 	}
 }
 
+// TestFlightFollowerCancelReleases (AUDIT-FLIGHT-CONTEXT): a follower whose own
+// context is cancelled while waiting must return at once with ctx.Err(), not
+// block until the leader's (slow) scan finishes.
+func TestFlightFollowerCancelReleases(t *testing.T) {
+	var g flightGroup
+	leaderIn := make(chan struct{})
+	leaderRelease := make(chan struct{})
+	go func() {
+		g.Do(context.Background(), "k", func() ([]Match, bool) {
+			close(leaderIn)
+			<-leaderRelease // hold the flight open
+			return nil, false
+		})
+	}()
+	<-leaderIn // leader is now the in-flight owner
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := g.Do(ctx, "k", func() ([]Match, bool) { return nil, false })
+		done <- err
+	}()
+	cancel() // follower's client "disconnects"
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled follower must return ctx.Err(), got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled follower blocked on the leader instead of bailing")
+	}
+	close(leaderRelease)
+}
+
+// TestFlightAbortedLeaderFollowerRerun (AUDIT-FLIGHT-CONTEXT): when the leader
+// ABORTS (no real verdict, e.g. its client went away before a scan slot), a
+// still-connected follower must NOT inherit the empty non-verdict — it promotes
+// itself and re-runs fn, producing a real result.
+func TestFlightAbortedLeaderFollowerRerun(t *testing.T) {
+	var g flightGroup
+	leaderIn := make(chan struct{})
+	leaderRelease := make(chan struct{})
+	go func() {
+		g.Do(context.Background(), "k", func() ([]Match, bool) {
+			close(leaderIn)
+			<-leaderRelease
+			return nil, true // ABORT — no real verdict
+		})
+	}()
+	<-leaderIn
+
+	var ran bool
+	done := make(chan []Match, 1)
+	go func() {
+		m, _, _ := g.Do(context.Background(), "k", func() ([]Match, bool) {
+			ran = true
+			return []Match{{Rule: "REAL"}}, false
+		})
+		done <- m
+	}()
+	close(leaderRelease) // leader aborts → follower should re-run
+	select {
+	case m := <-done:
+		if !ran {
+			t.Fatal("follower accepted the aborted leader's non-verdict instead of re-running")
+		}
+		if len(m) != 1 || m[0].Rule != "REAL" {
+			t.Fatalf("follower re-run result = %+v, want [REAL]", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("follower hung after leader abort")
+	}
+}
+
+// TestFlightCancelledFollowerNotCountedShared (AUDIT-FLIGHT-CONTEXT, golang-pro
+// F1): a follower that cancels mid-wait must NOT cause the leader to report
+// shared=true (which would overcount cacheCoalesced). The leader of a flight that
+// only ever had a since-cancelled follower reports shared=false.
+func TestFlightCancelledFollowerNotCountedShared(t *testing.T) {
+	var g flightGroup
+	leaderIn := make(chan struct{})
+	leaderRelease := make(chan struct{})
+	leaderShared := make(chan bool, 1)
+	go func() {
+		_, shared, _ := g.Do(context.Background(), "k", func() ([]Match, bool) {
+			close(leaderIn)
+			<-leaderRelease
+			return []Match{{Rule: "X"}}, false
+		})
+		leaderShared <- shared
+	}()
+	<-leaderIn
+
+	ctx, cancel := context.WithCancel(context.Background())
+	followerGone := make(chan struct{})
+	go func() {
+		g.Do(ctx, "k", func() ([]Match, bool) { return nil, false })
+		close(followerGone)
+	}()
+	cancel()
+	<-followerGone       // follower has cancelled + decremented its registration
+	close(leaderRelease) // leader now finishes with zero live followers
+	if shared := <-leaderShared; shared {
+		t.Error("leader reported shared=true though its only follower had cancelled")
+	}
+}
+
 // TestFlightPanicDoesNotHangWaiters guards STAB-1/STAB-3: if the flight leader's
-// fn panics, deferred cleanup must still release fl.wg and delete the map entry,
+// fn panics, deferred cleanup must still close fl.done and delete the map entry,
 // so coalesced waiters return (with no matches) instead of blocking forever, and
 // the key is not permanently stuck coalescing. The leader's panic still
 // propagates so it fails loudly.
@@ -249,7 +357,7 @@ func TestFlightPanicDoesNotHangWaiters(t *testing.T) {
 				t.Fatal("leader panic was swallowed; it must propagate")
 			}
 		}()
-		g.Do("boom", func() []Match { panic("scan fault") })
+		g.Do(context.Background(), "boom", func() ([]Match, bool) { panic("scan fault") })
 	}()
 
 	// Map entry must be gone — a fresh call for the same key runs its own fn
@@ -257,7 +365,7 @@ func TestFlightPanicDoesNotHangWaiters(t *testing.T) {
 	done := make(chan struct{})
 	var ran bool
 	go func() {
-		g.Do("boom", func() []Match { ran = true; return nil })
+		g.Do(context.Background(), "boom", func() ([]Match, bool) { ran = true; return nil, false })
 		close(done)
 	}()
 	select {

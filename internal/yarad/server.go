@@ -447,39 +447,52 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, diges
 		s.metrics.cacheHit.Add(1)
 		return m, "hit"
 	}
-	matches, shared := s.flights.Do(key, func() []Match {
+	matches, shared, ferr := s.flights.Do(ctx, key, func() (m []Match, aborted bool) {
 		// A leader may have populated the cache between the first lookup and
 		// registering this flight.
 		if m, found := s.cache.Get(key); found {
-			return m
+			return m, false
 		}
 		s.metrics.cacheMiss.Add(1)
 		// Take the scan-CPU slot only for the actual libyara scan. If it can't be
 		// had within the budget (or the client is gone), fail open as "no match"
-		// — never block mail — and do NOT cache (no real verdict was computed).
+		// — never block mail — and do NOT cache (no real verdict was computed). This
+		// is an ABORT, not a verdict: the coalescing layer must not hand this empty
+		// non-result to still-connected followers (AUDIT-FLIGHT-CONTEXT) — they
+		// re-run instead. (A genuine clean scan returns aborted=false below.)
 		if !s.acquireOn(ctx, s.sem) {
 			s.metrics.busy.Add(1)
 			s.errf("/scan %dB no scan slot within budget (fail-open)", len(buf))
-			return nil
+			return nil, true
 		}
-		m, scanErr := func() ([]Match, error) {
+		scanned, scanErr := func() ([]Match, error) {
 			defer func() { <-s.sem }()
 			return s.dispatch(buf, digest, meta)
 		}()
 		if scanErr != nil {
 			// Fail open: a scan error is "no match" to the plugin so a scanner
 			// problem never blocks mail. A failed scan is NOT cached (don't
-			// pin a wrong empty verdict for the whole TTL).
+			// pin a wrong empty verdict for the whole TTL). This IS a real (if
+			// degraded) outcome for THIS body — shareable, so aborted=false: a
+			// re-run would hit the same error, and re-running every follower would
+			// amplify the failure under load.
 			s.metrics.errors.Add(1)
 			s.errf("/scan %dB scan error (fail-open): %v", len(buf), scanErr)
-			return nil
+			return nil, false
 		}
 		// Cache PUT, including optional Redis L2 SET, runs after the scan slot is
 		// released. A healthy-but-slow Redis may still delay this response a little
 		// but it no longer blocks unrelated libyara work.
-		s.cache.Put(key, m)
-		return m
+		s.cache.Put(key, scanned)
+		return scanned, false
 	})
+	if ferr != nil {
+		// THIS caller's context was cancelled while coalesced-waiting (client
+		// disconnected/timed out). Fail open, don't cache; the handler already
+		// counts canceled via ctx.Err() on its own paths.
+		s.metrics.canceled.Add(1)
+		return nil, "canceled"
+	}
 	if shared {
 		s.metrics.cacheCoalesced.Add(1)
 		return matches, "coalesced"
