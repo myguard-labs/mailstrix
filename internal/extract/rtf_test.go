@@ -179,6 +179,29 @@ func TestExtractRTFHexNestedGroups(t *testing.T) {
 	// Even though it won't be a valid OLE2, it should attempt the carve (and fail gracefully)
 }
 
+// RTF-HARDEN: \'HH hex-byte control symbols must decode as whole bytes, including
+// interleaved with the raw nibble run and Word's single-hex-digit \' quirk.
+func TestDecodeRTFHexQuoteBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []byte
+	}{
+		{"all-quoted", `\'4d\'5a`, []byte("MZ")},
+		{"quoted-then-raw", `\'4d 5a`, []byte("MZ")},
+		{"raw-then-quoted", `4d\'5a`, []byte("MZ")},
+		// A dangling raw nibble before an explicit byte: the nibble flushes as its
+		// own (high) half-byte, the \' byte stays intact — no cross-corruption.
+		{"dangling-nibble", `4\'41`, []byte{0x04, 0x41}},
+		{"single-digit-quirk", `\'4 5a`, []byte{0x04, 0x5a}},
+	}
+	for _, c := range cases {
+		if got := decodeRTFHex([]byte(c.in)); !bytes.Equal(got, c.want) {
+			t.Errorf("%s: decodeRTFHex(%q) = %x, want %x", c.name, c.in, got, c.want)
+		}
+	}
+}
+
 func TestExtractRTFHexControlWordSkip(t *testing.T) {
 	// Build a valid Ole10Native stream so the carved payload appears in res.Streams.
 	// The key assertion is that a \controlword injected in the middle of the hex run

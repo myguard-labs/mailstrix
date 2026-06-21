@@ -178,6 +178,23 @@ func fromRTF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	}
 }
 
+// rtfHexNibble returns the 0-15 value of the hex digit at b[i]. ok is false if i
+// is out of range or b[i] is not a hex digit.
+func rtfHexNibble(b []byte, i int) (val byte, ok bool) {
+	if i >= len(b) {
+		return 0, false
+	}
+	switch c := b[i]; {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
 // decodeRTFHex reads the ASCII-hex run that follows an `\objdata` control word
 // and returns the decoded bytes. It handles nested RTF groups (which obfuscators
 // inject to break naive hex decoders), \binN binary runs, and backslash control
@@ -240,8 +257,36 @@ func decodeRTFHex(b []byte) []byte {
 					continue
 				}
 			}
+			// \'HH — RTF hex-byte control symbol (rtfobj.py:741): an explicit single
+			// byte, used by obfuscators to interleave whole bytes with the nibble run.
+			// Decode the two hex digits as ONE byte. Flush any pending half-nibble
+			// first so the standalone byte doesn't corrupt the surrounding pairing
+			// (Word emits a real byte here regardless of nibble parity). A single
+			// hex digit (Word's odd-`\'` quirk) decodes that nibble as the low half.
+			if b[i] == '\'' {
+				i++
+				h1, ok := rtfHexNibble(b, i)
+				if !ok {
+					continue // malformed \' — skip the symbol, keep decoding
+				}
+				i++
+				if haveHi { // a dangling nibble can't pair with an explicit byte
+					out = append(out, hi)
+					haveHi = false
+				}
+				if h2, ok := rtfHexNibble(b, i); ok {
+					i++
+					out = append(out, h1<<4|h2)
+				} else {
+					out = append(out, h1) // single-digit quirk: low nibble
+				}
+				if len(out) >= maxBytesPerRTFObject {
+					break
+				}
+				continue
+			}
 			// Skip any other control word: advance past alphabetic chars + optional numeric param + delimiter.
-			// If the character after '\' is not alphabetic it is a control symbol (e.g. \*, \', \-)
+			// If the character after '\' is not alphabetic it is a control symbol (e.g. \*, \-)
 			// — advance past that single symbol byte so it doesn't stall or terminate the decoder.
 			prevI := i
 			for i < len(b) && b[i] >= 'a' && b[i] <= 'z' {
