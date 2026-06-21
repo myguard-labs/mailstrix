@@ -412,6 +412,25 @@ func decodeSourceTree(src []byte, res *Result, deadline time.Time) int {
 	}
 	queue := []item{{src, 0}}
 
+	// MSD-2: fnv64 content-dedup of EMITTED blobs. A decode cycle (A→B→A) or a
+	// fan-out where several layers converge on the same blob would otherwise emit +
+	// re-decode identical bytes at every reappearance — wasting iters/CPU (the
+	// duplicate STREAM is later dropped by the scanner's SHA256 dedup, but the
+	// decode work is not). Recording a blob only AFTER it is accepted, and querying
+	// before re-enqueue, makes the walk O(distinct emitted blobs) and breaks cycles
+	// structurally. fnv64 is non-cryptographic; a collision merely skips one
+	// re-decode (never drops a stream, since seen() gates enqueue, not emit), and is
+	// astronomically unlikely on the bounded blob count.
+	//
+	// The set holds ONLY successfully-emitted blobs — NOT the source (a decoded blob
+	// byte-identical to the source must still reach YARA) and NOT budget-rejected
+	// blobs (whose clamped-prefix hash must not suppress a later, different blob).
+	seen := make(map[uint64]struct{})
+	alreadyEmitted := func(b []byte) bool {
+		_, ok := seen[fnv64(b)]
+		return ok
+	}
+
 	var blobs, cum, iters int
 	// children collects the blobs emitted while decoding the CURRENT item, so we
 	// can decide which to re-enqueue one layer deeper after the decoders run.
@@ -423,11 +442,19 @@ func decodeSourceTree(src []byte, res *Result, deadline time.Time) int {
 		if len(b) > maxBytesPerDecodedBlob {
 			b = b[:maxBytesPerDecodedBlob]
 		}
+		// MSD-2: skip a blob already EMITTED in this source tree (two identical
+		// encoded runs, or a fan-out convergence). Hash the CLAMPED bytes — that is
+		// what is stored. A skip is not a budget failure (return true), so decoding
+		// continues past the duplicate.
+		if alreadyEmitted(b) {
+			return true
+		}
 		if blobs >= maxDecodedBlobs || len(res.Streams) >= maxStreams || cum+len(b) > maxCumulativeDecoded {
-			return false
+			return false // budget hit — NOT recorded as seen, so a later distinct blob isn't masked
 		}
 		res.Streams = append(res.Streams, b)
 		children = append(children, b)
+		seen[fnv64(b)] = struct{}{} // record only accepted blobs
 		blobs++
 		cum += len(b)
 		return true
@@ -460,6 +487,10 @@ func decodeSourceTree(src []byte, res *Result, deadline time.Time) int {
 		// passes: the source decodes at depth 0 and each child one deeper, so the
 		// deepest decoded item is at depth maxDecodeDepth-1.
 		if cur.depth+1 < maxDecodeDepth {
+			// `children` are exactly the blobs emit() ACCEPTED this pass, so each is
+			// already distinct (emit's markSeen dropped duplicates). Re-enqueue the
+			// still-encoded ones one layer deeper; the dedup at emit time means a
+			// blob seen at a shallower depth never reappears here (cycle-break).
 			for _, c := range children {
 				if looksEncoded(c) {
 					queue = append(queue, item{c, cur.depth + 1})
@@ -471,6 +502,22 @@ func decodeSourceTree(src []byte, res *Result, deadline time.Time) int {
 		}
 	}
 	return blobs
+}
+
+// fnv64 is the 64-bit FNV-1a hash of b, inlined (no hasher allocation) for the
+// MSD-2 worklist dedup hot path. Used only to detect re-decode of identical
+// bytes; a collision merely skips one decode, never produces a wrong stream.
+func fnv64(b []byte) uint64 {
+	const (
+		offset = 14695981039346656037
+		prime  = 1099511628211
+	)
+	h := uint64(offset)
+	for _, c := range b {
+		h ^= uint64(c)
+		h *= prime
+	}
+	return h
 }
 
 // looksEncoded reports whether b plausibly carries another encoded layer worth

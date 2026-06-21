@@ -156,6 +156,64 @@ func TestDecodePerStreamBudget(t *testing.T) {
 	}
 }
 
+// TestDecodeMSD2DedupsRepeatedBlob (MSD-2): when the same encoded run appears
+// twice in one source, the recursive walk decodes it ONCE — fan-out convergence
+// is collapsed by the fnv64 worklist dedup, so the decoded blob count does not
+// double. (The scanner SHA-dedups emitted streams anyway; MSD-2 saves the
+// redundant DECODE work that would otherwise re-run at every reappearance.)
+func TestDecodeMSD2DedupsRepeatedBlob(t *testing.T) {
+	// A two-layer payload (base64 wrapping base64) so the decoded layer-1 blob is
+	// itself re-enqueued — the dedup point. Repeat the SAME outer run twice.
+	inner := "MSD2_DEDUP_CONVERGENCE_PAYLOAD_KEYWORD"
+	l1 := base64.StdEncoding.EncodeToString([]byte(inner))
+	outer := base64.StdEncoding.EncodeToString([]byte(l1))
+
+	once := &Result{Streams: [][]byte{[]byte(outer)}}
+	fromEncoded(nil, once, time.Time{})
+
+	twice := &Result{Streams: [][]byte{[]byte(outer + " " + outer)}}
+	fromEncoded(nil, twice, time.Time{})
+
+	if !streamsContain(*twice, inner) {
+		t.Fatalf("payload not decoded at all; streams=%d", len(twice.Streams))
+	}
+	// The duplicated source must not produce more decoded blobs than the single one
+	// (the second copy converges on already-seen bytes and is skipped).
+	if twice.DecodedStreams > once.DecodedStreams {
+		t.Errorf("MSD-2 dedup failed: %d decoded blobs for the duplicated run vs %d for one",
+			twice.DecodedStreams, once.DecodedStreams)
+	}
+}
+
+// TestDecodeReversedEqualsSourceStillEmitted (MSD-2 golang-pro F1): a decoded
+// blob byte-identical to its SOURCE must still be emitted to YARA — the dedup set
+// holds only EMITTED blobs, never the source, so seeding can't swallow a real
+// decoded layer. Here a palindrome (X+reverse(X)) that carries a reversed marker
+// reverses to itself; the reversed (==source) blob must surface its keyword.
+func TestDecodeReversedEqualsSourceStillEmitted(t *testing.T) {
+	// "cmd.exe" + "exe.dmc" — its own reverse, and contains the reversed marker
+	// "exe.dmc" so emitReversed fires; the reversed output equals the source.
+	buf := []byte("cmd.exeexe.dmc")
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "cmd.exe") {
+		t.Errorf("reversed-equals-source blob was swallowed by dedup seeding; streams=%v", res.Streams)
+	}
+}
+
+// TestFNV64 sanity-checks the inlined hash: deterministic, and distinct inputs
+// (incl. empty) hash distinctly here.
+func TestFNV64(t *testing.T) {
+	if fnv64([]byte("abc")) != fnv64([]byte("abc")) {
+		t.Error("fnv64 not deterministic")
+	}
+	if fnv64([]byte("abc")) == fnv64([]byte("abd")) {
+		t.Error("fnv64 collided on a 1-byte difference")
+	}
+	if fnv64(nil) == fnv64([]byte("x")) {
+		t.Error("fnv64(empty) == fnv64(\"x\")")
+	}
+}
+
 // TestDecodeBinarySkipped checks the mostly-text gate: a binary buffer is not
 // fed to the decoders even if it embeds a long base64-alphabet run.
 func TestDecodeBinarySkipped(t *testing.T) {
