@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/zlib"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -207,6 +209,78 @@ func TestExtractPDFEscapedDelimiterNoFabrication(t *testing.T) {
 	// The escape is still present, so the obfuscation signal must fire.
 	if !streamsContain(res, "PDF-HEXOBFUSC") {
 		t.Errorf("hex escape not counted as obfuscation; streams=%v", res.Streams)
+	}
+}
+
+// AUDIT-PDF-LEXER: an indicator name embedded in a literal string, a comment, a
+// hex string, or a stream body must NOT fabricate a marker (FP injection).
+func TestExtractPDFIndicatorContextScrub(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"literal-string", "1 0 obj\n<< /Title (see /OpenAction and /JS in this caption) >>\nendobj"},
+		{"comment", "1 0 obj\n% /OpenAction /JS /Launch /JBIG2Decode are discussed here\n<< /Type /Page >>\nendobj"},
+		{"hex-string", "1 0 obj\n<< /Title </OpenAction and /JS inside angle brackets> >>\nendobj"},
+		{"stream-body", "1 0 obj\n<< /Length 40 >>\nstream\n/OpenAction /JS /Launch /JBIG2Decode\nendstream\nendobj"},
+	}
+	for _, c := range cases {
+		buf := []byte("%PDF-1.7\n" + c.body + "\n%%EOF")
+		res := Extract(buf, time.Time{})
+		for _, m := range []string{"PDF-OPENACTION-JS", "PDF-LAUNCH", "PDF-JBIG2"} {
+			if streamsContain(res, m) {
+				t.Errorf("[%s] fabricated %s from non-name context; streams=%v", c.name, m, res.Streams)
+			}
+		}
+	}
+}
+
+// A stream whose body contains the literal bytes "endstream" followed by fake
+// indicator names must NOT fabricate markers: /Length tells the scrubber the
+// exact body size, so the embedded "endstream" + fake names stay inside the body.
+func TestExtractPDFStreamEndstreamInBody(t *testing.T) {
+	body := "binary endstream /OpenAction /JS /Launch more binary"
+	obj := "1 0 obj\n<< /Length " + strconv.Itoa(len(body)) + " >>\nstream\n" + body + "\nendstream\nendobj"
+	buf := []byte("%PDF-1.7\n" + obj + "\n%%EOF")
+	res := Extract(buf, time.Time{})
+	for _, m := range []string{"PDF-OPENACTION-JS", "PDF-LAUNCH"} {
+		if streamsContain(res, m) {
+			t.Errorf("fabricated %s from a stream body containing 'endstream'; streams=%v", m, res.Streams)
+		}
+	}
+}
+
+// pdfStreamLength / readPDFLength: direct integer trusted, indirect refs and a
+// prior object's /Length rejected (the latter must not leak across objects).
+func TestPDFStreamLength(t *testing.T) {
+	streamPos := func(b string) int { return bytes.Index([]byte(b), []byte("stream")) }
+
+	direct := "1 0 obj\n<< /Type /X /Length 42 >>\nstream\n"
+	if got := pdfStreamLength([]byte(direct), streamPos(direct)); got != 42 {
+		t.Errorf("direct /Length: got %d, want 42", got)
+	}
+	// Indirect `/Length 9 0 R` — unresolvable, must be -1.
+	indirect := "2 0 obj\n<< /Length 9 0 R >>\nstream\n"
+	if got := pdfStreamLength([]byte(indirect), streamPos(indirect)); got != -1 {
+		t.Errorf("indirect /Length: got %d, want -1", got)
+	}
+	// Indirect split by a comment `/Length 9 %c\n0 R` — still -1 (comment is ws).
+	commented := "3 0 obj\n<< /Length 9 %c\n0 R >>\nstream\n"
+	if got := pdfStreamLength([]byte(commented), streamPos(commented)); got != -1 {
+		t.Errorf("comment-split indirect /Length: got %d, want -1", got)
+	}
+	// /Length only in a PRIOR object; this stream's object has none → -1.
+	stale := "1 0 obj\n<< /Length 5 >>\nendobj\n2 0 obj\n<< /Type /X >>\nstream\n"
+	if got := pdfStreamLength([]byte(stale), strings.LastIndex(stale, "stream")); got != -1 {
+		t.Errorf("prior-object /Length leaked: got %d, want -1", got)
+	}
+}
+
+// A real dictionary /OpenAction must still fire even when the document ALSO
+// contains a decoy /OpenAction inside a string (scrub keeps real names).
+func TestExtractPDFIndicatorRealAfterDecoy(t *testing.T) {
+	buf := []byte("%PDF-1.7\n1 0 obj\n<< /Title (decoy /OpenAction here) >>\nendobj\n" +
+		"2 0 obj\n<< /OpenAction << /S /JavaScript /JS (real) >> >>\nendobj\n%%EOF")
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "PDF-OPENACTION-JS") {
+		t.Errorf("real /OpenAction not detected past a string decoy; streams=%v", res.Streams)
 	}
 }
 

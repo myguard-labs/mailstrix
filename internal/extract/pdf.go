@@ -44,6 +44,7 @@ var (
 	pdfNameEmbeddedFile = []byte("/EmbeddedFile")
 	pdfNameJBIG2        = []byte("/JBIG2Decode")
 	pdfNameObjStm       = []byte("/ObjStm")
+	pdfNameLength       = []byte("/Length")
 )
 
 const (
@@ -127,19 +128,40 @@ func fromPDF(buf []byte, res *Result, deadline time.Time) {
 	fromPDFIndicators(scan, res, deadline)
 }
 
+// pdfIndicatorNames is the set of name tokens fromPDFIndicators looks for, used
+// for a cheap "any candidate present?" pre-check before the (more expensive)
+// content scrub.
+var pdfIndicatorNames = [][]byte{
+	pdfNameOpenAction, pdfNameAA, pdfNameLaunch, pdfNameJS, pdfNameJavaScript,
+	pdfNameEmbeddedFile, pdfNameJBIG2, pdfNameObjStm,
+}
+
 // fromPDFIndicators emits pdfid-style structural markers for a PDF's high-risk
-// name tokens. To defeat hex-name obfuscation (/J#61vaScript → /JavaScript,
-// pdfid.py:510-527) it canonicalises name tokens first — but only when a '#' is
-// actually present, so the common case pays nothing. The hex-escape count itself
-// is an evasion signal (PDF-HEXOBFUSC). Bounded, fail-open, deadline-aware.
+// name tokens. The match runs over a SCRUBBED copy of the PDF where literal
+// strings, hex strings, comments, and stream bodies are blanked (AUDIT-PDF-LEXER)
+// — otherwise an attacker could embed `(/OpenAction /JS)` inside a string or a
+// stream and fabricate a high-score marker, a false-positive injection. The
+// scrub also de-obfuscates hex-name escapes (/J#61vaScript → /JavaScript) and the
+// escape count is itself an evasion signal (PDF-HEXOBFUSC). The scrub runs only
+// when a '#' or a candidate name actually appears in the raw bytes, so a PDF with
+// none of these pays nothing. Bounded, fail-open, deadline-aware.
 func fromPDFIndicators(scan []byte, res *Result, deadline time.Time) {
 	if expired(deadline) || len(res.Streams) >= maxStreams {
 		return
 	}
 	buf := scan
 	hexCount := 0
-	if bytes.IndexByte(scan, '#') >= 0 {
-		buf, hexCount = canonicalizePDFNames(scan)
+	needScrub := bytes.IndexByte(scan, '#') >= 0
+	if !needScrub {
+		for _, nm := range pdfIndicatorNames {
+			if bytes.Contains(scan, nm) {
+				needScrub = true
+				break
+			}
+		}
+	}
+	if needScrub {
+		buf, hexCount = scrubPDFForNames(scan)
 	}
 
 	emit := func(marker string) {
@@ -203,55 +225,215 @@ func isPDFNameTerminator(c byte) bool {
 	return false
 }
 
-// canonicalizePDFNames returns a copy of scan with #XX hex escapes inside name
-// tokens decoded to their literal byte (pdfid's EqualCanonical, pdf-parser:1003),
-// plus the number of escapes decoded. Hex decoding is confined to name context
-// (between a '/' and the next terminator) so a '#' in stream/binary data is left
-// untouched and cannot fabricate a keyword.
-func canonicalizePDFNames(scan []byte) ([]byte, int) {
+// scrubPDFForNames returns a copy of scan in which the byte regions that must NOT
+// be searched for indicator names — literal strings `(...)`, hex strings `<...>`,
+// comments `%...`, and `stream`…`endstream` bodies — are blanked to spaces, while
+// real name tokens are preserved and their #XX hex escapes canonicalised. It also
+// returns the number of hex escapes decoded inside names. This keeps the
+// dictionary structure intact (so /OpenAction in a real dictionary still matches)
+// but stops an attacker fabricating a marker from a name embedded in a string,
+// comment, or binary stream (AUDIT-PDF-LEXER). Single linear pass, fail-open.
+func scrubPDFForNames(scan []byte) ([]byte, int) {
 	out := make([]byte, 0, len(scan))
 	count := 0
-	inName := false
-	for i := 0; i < len(scan); i++ {
+	n := len(scan)
+	i := 0
+	for i < n {
 		c := scan[i]
-		if c == '/' {
-			inName = true
-			out = append(out, c)
-			continue
-		}
-		if inName {
-			if isPDFNameTerminator(c) {
-				inName = false
-				out = append(out, c)
-				continue
+		switch {
+		case c == '%':
+			// Comment: blank to end of line.
+			for i < n && scan[i] != '\n' && scan[i] != '\r' {
+				out = append(out, ' ')
+				i++
 			}
-			if c == '#' && i+2 < len(scan) {
-				hi := hexVal(scan[i+1])
-				lo := hexVal(scan[i+2])
-				if hi >= 0 && lo >= 0 {
-					b := byte(hi<<4 | lo) // #nosec G115 -- hexVal returns 0..15, so hi<<4|lo is 0..255
-					// A hex escape was used — obfuscation signal regardless of decode.
-					count++
-					// An escaped byte is a LITERAL name character (PDF 7.3.5), even
-					// when it decodes to a delimiter/whitespace. Emitting that raw
-					// byte would fabricate a name boundary (/foo#2FLaunch -> /Launch,
-					// /OpenAction#20x -> a terminated /OpenAction), so only substitute
-					// when the result is a name-regular char; otherwise keep the
-					// escape verbatim. The high-risk keywords are all letters, so this
-					// loses no real de-obfuscation.
-					if !isPDFNameTerminator(b) {
-						out = append(out, b)
-					} else {
-						out = append(out, '#', scan[i+1], scan[i+2])
+		case c == '(':
+			// Literal string: blank to the balanced ')', honouring '\' escapes and
+			// nested parens (PDF 7.3.4.2).
+			depth := 1
+			out = append(out, ' ')
+			i++
+			for i < n && depth > 0 {
+				switch scan[i] {
+				case '\\':
+					out = append(out, ' ')
+					i++
+					if i < n {
+						out = append(out, ' ')
+						i++
 					}
-					i += 2
 					continue
+				case '(':
+					depth++
+				case ')':
+					depth--
+				}
+				out = append(out, ' ')
+				i++
+			}
+		case c == '<':
+			if i+1 < n && scan[i+1] == '<' {
+				// Dictionary open '<<' — structural, keep it.
+				out = append(out, '<', '<')
+				i += 2
+			} else {
+				// Hex string '<...>' — blank to the closing '>'.
+				out = append(out, ' ')
+				i++
+				for i < n && scan[i] != '>' {
+					out = append(out, ' ')
+					i++
+				}
+				if i < n {
+					out = append(out, ' ')
+					i++
 				}
 			}
+		case c == 's' && bytes.HasPrefix(scan[i:], pdfStreamKW) &&
+			pdfTokenBoundary(scan, i, i+len(pdfStreamKW)):
+			// `stream` keyword + EOL begins a binary body. Prefer the declared
+			// /Length (looked up in THIS stream's preceding dict): skip the keyword,
+			// one EOL, then exactly that many body bytes, and only trust it when
+			// `endstream` actually follows. Otherwise fall back to the first
+			// `endstream` substring (so a body containing those bytes can still leak
+			// — that residual is AUDIT-PDF-ENDSTREAM, narrowed here to bodies whose
+			// /Length is indirect/absent).
+			bodyStart := skipPDFEOL(scan, i+len(pdfStreamKW))
+			stop := -1
+			if l := pdfStreamLength(scan, i); l >= 0 && bodyStart+l <= n {
+				after := bytes.TrimLeft(scan[bodyStart+l:], " \t\r\n\f")
+				if bytes.HasPrefix(after, pdfEndStream) {
+					stop = (bodyStart + l) + (len(scan[bodyStart+l:]) - len(after)) + len(pdfEndStream)
+				}
+			}
+			if stop < 0 {
+				if endRel := bytes.Index(scan[bodyStart:], pdfEndStream); endRel >= 0 {
+					stop = bodyStart + endRel + len(pdfEndStream)
+				} else {
+					stop = n
+				}
+			}
+			for ; i < stop; i++ {
+				out = append(out, ' ')
+			}
+		case c == '/':
+			// Name token: keep '/', canonicalise #XX escapes (name-regular only —
+			// an escaped delimiter stays verbatim so it can't fabricate a boundary,
+			// /foo#2FLaunch -> kept, not /Launch; PDF 7.3.5).
+			out = append(out, '/')
+			i++
+			for i < n && !isPDFNameTerminator(scan[i]) {
+				if scan[i] == '#' && i+2 < n {
+					hi := hexVal(scan[i+1])
+					lo := hexVal(scan[i+2])
+					if hi >= 0 && lo >= 0 {
+						b := byte(hi<<4 | lo) // #nosec G115 -- hexVal returns 0..15, so hi<<4|lo is 0..255
+						count++
+						if !isPDFNameTerminator(b) {
+							out = append(out, b)
+						} else {
+							out = append(out, '#', scan[i+1], scan[i+2])
+						}
+						i += 3
+						continue
+					}
+				}
+				out = append(out, scan[i])
+				i++
+			}
+		default:
+			out = append(out, c)
+			i++
 		}
-		out = append(out, c)
 	}
 	return out, count
+}
+
+// pdfStreamLength returns the direct-integer /Length for the stream whose
+// `stream` keyword is at streamPos, by searching a bounded window of the bytes
+// just before it (the stream's own dictionary). Looking it up per stream — rather
+// than carrying state forward — means a /Length from an earlier object can never
+// be mis-applied to a later stream. Returns -1 when none is found nearby or it is
+// an indirect reference.
+func pdfStreamLength(b []byte, streamPos int) int {
+	const window = 512 // a stream dict is small; bound the backward scan
+	lo := streamPos - window
+	if lo < 0 {
+		lo = 0
+	}
+	// Clip the search to THIS object: the `obj` keyword that opens it (or the
+	// previous object's `endobj`, both matched by "obj") sits right before this
+	// dict, so starting after the nearest "obj" stops a prior object's /Length
+	// from being mis-picked. A wrong clip only yields -1 (safe fallback).
+	if oi := bytes.LastIndex(b[lo:streamPos], []byte("obj")); oi >= 0 {
+		lo += oi + len("obj")
+	}
+	rel := bytes.LastIndex(b[lo:streamPos], pdfNameLength)
+	if rel < 0 {
+		return -1
+	}
+	after := lo + rel + len(pdfNameLength)
+	// Require a name boundary so "/Length1"/"/LengthFoo" don't shadow "/Length".
+	// On a shadow we conservatively return -1 (the caller falls back to the
+	// `endstream` substring — the AUDIT-PDF-ENDSTREAM residual, not a new leak).
+	if after < streamPos && !isPDFNameTerminator(b[after]) {
+		return -1
+	}
+	return readPDFLength(b, after)
+}
+
+// readPDFLength parses a stream's /Length value starting at j (just past the
+// "/Length" name). It returns the direct integer, or -1 when the value is absent
+// or an indirect reference (`N G R`) — which can't be resolved without the xref,
+// so the caller falls back to the `endstream` substring. Whitespace skipping is
+// comment-aware (a `%…` comment is whitespace in PDF), so an indirect length
+// split by a comment is still recognised. Bounded; reads only a short digit run.
+func readPDFLength(b []byte, j int) int {
+	n := len(b)
+	j = skipPDFWS(b, j)
+	start := j
+	val := 0
+	for j < n && b[j] >= '0' && b[j] <= '9' {
+		val = val*10 + int(b[j]-'0')
+		if val > maxPDFScan { // implausibly large — treat as unusable
+			return -1
+		}
+		j++
+	}
+	if j == start { // no digits
+		return -1
+	}
+	// Detect an indirect reference `<int> <int> R`: another integer then 'R'.
+	k := skipPDFWS(b, j)
+	if k < n && b[k] >= '0' && b[k] <= '9' {
+		for k < n && b[k] >= '0' && b[k] <= '9' {
+			k++
+		}
+		k = skipPDFWS(b, k)
+		if k < n && b[k] == 'R' {
+			return -1 // indirect /Length — unresolvable here
+		}
+	}
+	return val
+}
+
+// skipPDFWS advances past PDF whitespace AND comments (`%` to end of line), which
+// the spec treats as whitespace, returning the next significant-byte offset.
+func skipPDFWS(b []byte, j int) int {
+	n := len(b)
+	for j < n {
+		switch b[j] {
+		case ' ', '\t', '\r', '\n', '\f', 0:
+			j++
+		case '%':
+			for j < n && b[j] != '\n' && b[j] != '\r' {
+				j++
+			}
+		default:
+			return j
+		}
+	}
+	return j
 }
 
 // hexVal returns the value of a hex digit, or -1 if c is not one.
