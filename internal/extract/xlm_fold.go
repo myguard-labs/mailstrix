@@ -142,17 +142,10 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 			// pathological 64KB formula folded across the depth-16 recursion must
 			// be able to bail mid-fold, not only at this per-formula boundary.
 			folded := foldXLMFormulaDepth(content, 0, deadline)
-			if len(folded) < minXLMFoldResult {
-				continue
+			// Shared sink: minlen floor + output cap + dangerous-func markers.
+			if !emitFoldedFormula(folded, out, totalOutput, true) {
+				return // per-document output cap reached
 			}
-			if *totalOutput+len(folded) > maxXLMFoldOutputLen {
-				return
-			}
-			*totalOutput += len(folded)
-			*out = append(*out, []byte(folded))
-
-			// Check for dangerous functions.
-			emitDangerousMarkers(folded, out)
 
 		case "v":
 			// Value element — may contain a pre-computed string result.
@@ -161,16 +154,38 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 				continue
 			}
 			formulaCount++
-			if len(content) < minXLMFoldResult || len(content) > maxXLMFoldFormulaLen {
+			if len(content) > maxXLMFoldFormulaLen {
 				continue
 			}
-			if *totalOutput+len(content) > maxXLMFoldOutputLen {
-				return
+			// Precomputed value: no dangerous-marker scan (it's a result, not a
+			// formula call) — matches the prior <v> behaviour.
+			if !emitFoldedFormula(content, out, totalOutput, false) {
+				return // per-document output cap reached
 			}
-			*totalOutput += len(content)
-			*out = append(*out, []byte(content))
 		}
 	}
+}
+
+// emitFoldedFormula is the shared emit sink for folded/precomputed XLM strings.
+// It enforces the minXLMFoldResult floor (skip-but-continue) and the
+// maxXLMFoldOutputLen per-document cap (stop), appends the string to *out, and —
+// when checkDangerous — emits XLM-DANGEROUS-FUNC markers. Both the OOXML path and
+// the future BIFF8 ptg front-end (XLM-2/3) feed this sink so they cannot drift on
+// the floor, the cap, or marker emission. Returns false when the output cap is
+// reached, signalling the caller to stop emitting.
+func emitFoldedFormula(s string, out *[][]byte, totalOutput *int, checkDangerous bool) bool {
+	if len(s) < minXLMFoldResult {
+		return true // below the noise floor — skip, but keep scanning
+	}
+	if *totalOutput+len(s) > maxXLMFoldOutputLen {
+		return false // per-document output cap reached
+	}
+	*totalOutput += len(s)
+	*out = append(*out, []byte(s))
+	if checkDangerous {
+		emitDangerousMarkers(s, out)
+	}
+	return true
 }
 
 // emitDangerousMarkers appends XLM-DANGEROUS-FUNC markers for any dangerous

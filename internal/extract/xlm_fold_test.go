@@ -132,6 +132,68 @@ func TestEmitDangerousMarkers_None(t *testing.T) {
 	}
 }
 
+// --- emitFoldedFormula shared-sink tests (XLM-1) ---
+
+func TestEmitFoldedFormula_BelowFloor(t *testing.T) {
+	var out [][]byte
+	total := 0
+	// shorter than minXLMFoldResult — skipped but keep-scanning (true).
+	if !emitFoldedFormula("short", &out, &total, true) {
+		t.Fatalf("below-floor emit should return true (continue)")
+	}
+	if len(out) != 0 || total != 0 {
+		t.Fatalf("below-floor must not emit: out=%d total=%d", len(out), total)
+	}
+}
+
+func TestEmitFoldedFormula_Emits(t *testing.T) {
+	var out [][]byte
+	total := 0
+	s := "http://evil.example.com/payload"
+	if !emitFoldedFormula(s, &out, &total, false) {
+		t.Fatalf("emit should return true")
+	}
+	if len(out) != 1 || !bytes.Equal(out[0], []byte(s)) {
+		t.Fatalf("expected the string emitted, got %v", out)
+	}
+	if total != len(s) {
+		t.Fatalf("total: got %d want %d", total, len(s))
+	}
+}
+
+func TestEmitFoldedFormula_DangerousFlag(t *testing.T) {
+	// checkDangerous=true emits the value AND the marker.
+	var withMarker [][]byte
+	totalA := 0
+	emitFoldedFormula("=EXEC(calc.exe)", &withMarker, &totalA, true)
+	if len(withMarker) != 2 {
+		t.Fatalf("checkDangerous=true: want value+marker (2), got %d", len(withMarker))
+	}
+	if !bytes.Equal(withMarker[1], []byte("XLM-DANGEROUS-FUNC EXEC")) {
+		t.Errorf("marker: got %q", withMarker[1])
+	}
+
+	// checkDangerous=false emits the value only (no marker scan) — <v> behaviour.
+	var noMarker [][]byte
+	totalB := 0
+	emitFoldedFormula("=EXEC(calc.exe)", &noMarker, &totalB, false)
+	if len(noMarker) != 1 {
+		t.Fatalf("checkDangerous=false: want value only (1), got %d", len(noMarker))
+	}
+}
+
+func TestEmitFoldedFormula_OutputCap(t *testing.T) {
+	var out [][]byte
+	total := maxXLMFoldOutputLen - 4 // only 4 bytes of budget left
+	s := "this is longer than four bytes"
+	if emitFoldedFormula(s, &out, &total, false) {
+		t.Fatalf("over-cap emit must return false (stop)")
+	}
+	if len(out) != 0 {
+		t.Fatalf("over-cap must not emit, got %d", len(out))
+	}
+}
+
 // --- fromOOXMLXLMFold integration tests ---
 
 // makeOOXMLWithXLMFold builds a minimal xlsm zip with a macrosheet containing
