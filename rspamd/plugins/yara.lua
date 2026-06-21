@@ -298,13 +298,20 @@ local function check_cb(task)
             if m.namespace and m.namespace ~= "" then
               opt = m.rule .. " (" .. m.namespace .. ")"
             end
+            -- Dedup key is namespace+rule, NOT rule alone: a scanner match's
+            -- identity is (namespace, rule), so two same-named rules shipped by
+            -- different files (e.g. a generic "http" in two rulesets) are distinct
+            -- hits. Keying on m.rule alone would drop the second and let it inherit
+            -- the first's tier/weight (twin of the fixed Go mergeMatches bug). The
+            -- \31 (unit separator) can't appear in a rule/namespace token.
+            local key = "y:" .. (m.namespace or "") .. "\31" .. m.rule
             -- yarad allowlist: a known-FP rule demoted to log-only. Keep it
             -- visible but route to the 0-weight symbol instead of a scoring tier.
             if type(m.meta) == "table" and m.meta.yarad_allow == "1" then
-              add(settings.allow_symbol, opt, "y:" .. m.rule, 1.0)
+              add(settings.allow_symbol, opt, key, 1.0)
             else
               -- Modulate within the tier by the rule's meta.score (1.0 if absent).
-              add(classify(m), opt, "y:" .. m.rule, score_weight(m))
+              add(classify(m), opt, key, score_weight(m))
             end
           end
         end

@@ -485,6 +485,13 @@ jobs:
             luacheck rspamd/
           '
 
+      - name: lua plugin unit tests (dedup contract)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -c '
+            apk add --no-cache lua5.4 >/dev/null 2>&1
+            lua5.4 rspamd/test/yara_dedup_spec.lua
+          '
+
       - name: semgrep (non-blocking until tuned)
         continue-on-error: true
         run: |
