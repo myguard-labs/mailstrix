@@ -274,6 +274,101 @@ func TestXLMBIFF_FormulaNotFoldedInWorksheet(t *testing.T) {
 	}
 }
 
+// buildBIFFNAMEWorkbook constructs a minimal BIFF8 Workbook stream containing a
+// single NAME record (0x0018). grbit controls the flags word (LE uint16); cch is the
+// name-length byte at payload[3]; builtinCode is payload[14] (the builtin name code).
+// Bytes [2] and [4..13] are zero-padded, matching the MS-XLS NAME record layout.
+func buildBIFFNAMEWorkbook(t *testing.T, grbit uint16, cch byte, builtinCode byte) []byte {
+	t.Helper()
+
+	// NAME payload must be at least 15 bytes to cover rgch[0] (the builtin code).
+	// Layout: grbit(2) [2](1 pad) cch(1) [4..13](10 pad) rgch[0](1) = 15 bytes total.
+	payload := make([]byte, 15)
+	binary.LittleEndian.PutUint16(payload[0:], grbit) // [0..1] grbit
+	// payload[2] = 0 (reserved)
+	payload[3] = cch // [3] cch
+	// payload[4..13] = zero (itab, reserved, nameindex, etc.)
+	payload[14] = builtinCode // [14] rgch[0] = builtin name code
+
+	var record bytes.Buffer
+	b2 := make([]byte, 2)
+	binary.LittleEndian.PutUint16(b2, 0x0018) // NAME record type
+	record.Write(b2)
+	binary.LittleEndian.PutUint16(b2, uint16(len(payload)))
+	record.Write(b2)
+	record.Write(payload)
+
+	return buildCFB(t, []cfbEntry{
+		{name: "Root Entry", mse: 5},
+		{name: "Workbook", mse: 2, data: record.Bytes()},
+	})
+}
+
+// TestXLMBIFF_NameAutoOpen checks that a NAME record with fBuiltin set and
+// builtin code 0x01 emits XLM-AUTO-OPEN.
+func TestXLMBIFF_NameAutoOpen(t *testing.T) {
+	// grbit 0x0020 = fBuiltin; cch=1 (single-byte builtin name); code 0x01 = Auto_Open.
+	buf := buildBIFFNAMEWorkbook(t, 0x0020, 1, 0x01)
+	res := Extract(buf, time.Time{})
+
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if !bytes.Contains(joined, []byte("XLM-AUTO-OPEN")) {
+		t.Fatalf("expected XLM-AUTO-OPEN; streams=%d joined=%q", len(res.Streams), joined)
+	}
+}
+
+// TestXLMBIFF_NameAutoClose checks that builtin code 0x02 emits XLM-AUTO-CLOSE.
+func TestXLMBIFF_NameAutoClose(t *testing.T) {
+	buf := buildBIFFNAMEWorkbook(t, 0x0020, 1, 0x02)
+	res := Extract(buf, time.Time{})
+
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if !bytes.Contains(joined, []byte("XLM-AUTO-CLOSE")) {
+		t.Fatalf("expected XLM-AUTO-CLOSE; streams=%d joined=%q", len(res.Streams), joined)
+	}
+}
+
+// TestXLMBIFF_NameNonBuiltinNoMarker checks that a NAME record without fBuiltin
+// (grbit bit 0x0020 clear) does NOT emit an autorun marker (FP guard).
+func TestXLMBIFF_NameNonBuiltinNoMarker(t *testing.T) {
+	// grbit 0x0000 — fBuiltin NOT set; code byte = 0x01 (would be Auto_Open if builtin).
+	buf := buildBIFFNAMEWorkbook(t, 0x0000, 1, 0x01)
+	res := Extract(buf, time.Time{})
+
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if bytes.Contains(joined, []byte("XLM-AUTO-")) {
+		t.Fatalf("non-builtin NAME wrongly emitted autorun marker; got %q", joined)
+	}
+}
+
+// TestXLMBIFF_NameTooShortNoMarker checks that a NAME record shorter than 15
+// bytes is silently skipped — no marker, no panic.
+func TestXLMBIFF_NameTooShortNoMarker(t *testing.T) {
+	// Build a NAME record with a 10-byte payload (< 15 minimum).
+	payload := make([]byte, 10)
+	binary.LittleEndian.PutUint16(payload[0:], 0x0020) // fBuiltin set
+	payload[3] = 1                                     // cch = 1
+
+	var record bytes.Buffer
+	b2 := make([]byte, 2)
+	binary.LittleEndian.PutUint16(b2, 0x0018)
+	record.Write(b2)
+	binary.LittleEndian.PutUint16(b2, uint16(len(payload)))
+	record.Write(b2)
+	record.Write(payload)
+
+	buf := buildCFB(t, []cfbEntry{
+		{name: "Root Entry", mse: 5},
+		{name: "Workbook", mse: 2, data: record.Bytes()},
+	})
+	res := Extract(buf, time.Time{})
+
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if bytes.Contains(joined, []byte("XLM-AUTO-")) {
+		t.Fatalf("short NAME record wrongly emitted autorun marker; got %q", joined)
+	}
+}
+
 // TestXLMDeadline checks that an already-expired deadline causes fromBIFFXLM
 // and fromOOXMLXLM to return immediately with nothing emitted.
 func TestXLMDeadline(t *testing.T) {

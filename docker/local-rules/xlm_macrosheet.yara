@@ -32,6 +32,24 @@ rule XLM_Dangerous_Function : maldoc heuristic suspicious {
         any of them
 }
 
+// XLM-AUTO-OPEN / XLM-AUTO-CLOSE markers are emitted from the workbook-level NAME
+// record (0x0018) when fBuiltin is set and the builtin code is Auto_Open (0x01) or
+// Auto_Close (0x02). Auto_Open alone is extremely common in legitimate macro workbooks
+// (templates, add-ins, productivity tools) — do NOT score it in isolation. Instead stack
+// it with a hidden-macrosheet or code-execution marker to target the dropper pattern.
+rule XLM_AutoOpen_Dropper : maldoc heuristic suspicious {
+    meta:
+        description = "Excel-4.0 autorun (Auto_Open/Close NAME) combined with a hidden macrosheet or code-exec function"
+        score = 80
+    strings:
+        $open   = "XLM-AUTO-OPEN"
+        $close  = "XLM-AUTO-CLOSE"
+        $hidden = "XLM-HIDDEN-MACROSHEET"
+        $danger = "XLM-DANGEROUS-FUNC "
+    condition:
+        ($open or $close) and ($hidden or $danger)
+}
+
 // A dangerous XLM function inside a HIDDEN/veryHidden macrosheet is the canonical
 // Excel-4.0 dropper (hide the sheet from the user, run code on open). Stack the
 // two markers for a higher score than either alone.

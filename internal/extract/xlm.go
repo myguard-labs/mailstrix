@@ -256,6 +256,37 @@ func fromBIFFXLM(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			continue
 		}
 
+		// NAME (0x0018): workbook-level defined name. Built-in names (fBuiltin set
+		// in grbit) include Auto_Open (code 0x01) and Auto_Close (code 0x02) — the
+		// autorun triggers for XLM dropper workbooks. Emit a synthetic marker so a
+		// stacking YARA rule can detect the combination of autorun + hidden macrosheet
+		// or dangerous function. MS-XLS NAME record layout:
+		//   [0..1]  grbit  uint16 LE — bit 0x0020 = fBuiltin
+		//   [3]     cch    uint8  — name length (1 for a builtin)
+		//   [14]    rgch   first byte = builtin name code (0x01=Auto_Open, 0x02=Auto_Close)
+		if recType == 0x0018 {
+			if recLen >= 15 {
+				payload := make([]byte, recLen)
+				if _, err := io.ReadFull(r, payload); err != nil {
+					break // malformed — fail-open
+				}
+				grbit := binary.LittleEndian.Uint16(payload[0:])
+				if grbit&0x0020 != 0 && payload[3] == 1 { // fBuiltin + single-byte name
+					switch payload[14] {
+					case 0x01:
+						res.Streams = append(res.Streams, []byte("XLM-AUTO-OPEN"))
+					case 0x02:
+						res.Streams = append(res.Streams, []byte("XLM-AUTO-CLOSE"))
+					}
+				}
+			} else {
+				if _, err := r.Seek(int64(recLen), io.SeekCurrent); err != nil {
+					break
+				}
+			}
+			continue
+		}
+
 		if recType != 0x0085 {
 			// Not a record we handle — skip the payload.
 			if _, err := r.Seek(int64(recLen), io.SeekCurrent); err != nil {

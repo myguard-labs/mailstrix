@@ -56,6 +56,8 @@ var parityMarkers = map[string]markerKind{
 	"RTF-OBJUPDATE":         contractMarker, // rtf_tricks.yara RTF_ObjUpdate
 	"XLM-DANGEROUS-FUNC":    contractMarker, // xlm_macrosheet.yara XLM_Dangerous_Function
 	"XLM-HIDDEN-MACROSHEET": contractMarker, // xlm_macrosheet.yara
+	"XLM-AUTO-OPEN":         contractMarker, // xlm_macrosheet.yara XLM_AutoOpen_Dropper
+	"XLM-AUTO-CLOSE":        contractMarker, // xlm_macrosheet.yara XLM_AutoOpen_Dropper
 	"OLEID-OBJECTPOOL":      contractMarker, // oleid_indicators.yara OLEID_ObjectPool
 	"OLEID-FLASH":           contractMarker, // oleid_indicators.yara OLEID_Flash
 	"OLE2LINK-URL":          contractMarker, // oleid_indicators.yara OLE2Link_URL_Moniker
