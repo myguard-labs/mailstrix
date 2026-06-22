@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -589,13 +590,23 @@ type ScanMeta struct {
 	Filename  string // sanitized basename, e.g. "invoice.exe" ("" if none)
 	Extension string // lowercased extension WITH the leading dot, e.g. ".exe" (Loki/THOR convention); "" if none
 	FileType  string // coarse optional type context for rules that use file_type, e.g. "outlook" for .msg/.oft
+	// Effort is the resolved effort-tier level (1..EffortMax) for this scan
+	// (EFFORT-1). It rides on ScanMeta so it is automatically part of the
+	// verdict-cache key (see cacheKey) — the same bytes scanned at different
+	// effort can yield different verdicts and must not share a cached one. Zero
+	// means "unset" (legacy callers / internal scans); cacheKey treats 0 and the
+	// resolved default identically only when both produce the same key string, so
+	// resolution always fills a concrete level before Scan.
+	Effort int
 }
 
 // cacheKey renders the metadata for the verdict cache key. The verdict depends on
 // these externals, so two scans of the same bytes with different metadata must
 // land on different keys. Extension derives from Filename but is included so the
 // key is explicit. NUL separator can't occur in either (NewScanMeta strips it).
-func (m ScanMeta) cacheKey() string { return m.Filename + "\x00" + m.Extension + "\x00" + m.FileType }
+func (m ScanMeta) cacheKey() string {
+	return m.Filename + "\x00" + m.Extension + "\x00" + m.FileType + "\x00" + strconv.Itoa(m.Effort)
+}
 
 // maxFilenameLen caps the attacker-controlled attachment name fed to libyara —
 // a hostile multi-kilobyte name must not bloat the cache key or the per-scan

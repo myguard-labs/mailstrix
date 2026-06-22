@@ -399,6 +399,13 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// rules fire (see ScanMeta).
 	meta := scanMetaFromRequest(r)
 
+	// Resolve the effort tier for this scan (EFFORT-1): X-YARAD-Effort header,
+	// else the configured env default, clamped to [1, EffortMax]. The clamp is the
+	// DoS guard — a caller-set header can never exceed the operator's ceiling. The
+	// resolved level rides on meta so it folds into the verdict-cache key below.
+	hv, hset := effortHeader(r)
+	meta.Effort = ResolveEffortLevel(hv, hset, s.cfg.Effort, s.cfg.EffortMax)
+
 	// Mix the active ruleset fingerprint AND the metadata into the cache key. The
 	// fingerprint invalidates old verdicts on a SIGHUP reload (old keys orphan and
 	// TTL-expire; no stale "clean" after a rule update). The metadata is in the key
@@ -697,6 +704,36 @@ func writeRaw(w http.ResponseWriter, code int, ctype string, body []byte) {
 // CR/LF or control byte from injecting an HTTP header or log line. Absent or
 // undecodable ⇒ no metadata, never an error (the scan still runs).
 const filenameHeader = "X-YARAD-Filename"
+
+// effortHeader is the per-request effort-tier override (EFFORT-1/EFFORT-3). The
+// caller (e.g. the rspamd plugin) sets it from sender reputation / prior score:
+// a low value for trusted senders (cheap shallow scan), a high value for
+// suspicious ones (full-depth). The value is clamped to the operator's
+// EffortMax, so it can only ever LOWER effort below the ceiling, never raise it
+// past the configured DoS bound (see ResolveEffortLevel).
+const effortHeaderName = "X-YARAD-Effort"
+
+// effortHeader parses the X-YARAD-Effort request header. It returns the integer
+// value and true when the header carried a usable non-negative integer; a
+// missing or malformed header returns (0, false) so the caller falls back to the
+// configured default. Out-of-range integers are NOT rejected here — clamping is
+// ResolveEffortLevel's job (fail-toward-configured, never error a scan over a
+// header).
+func effortHeader(r *http.Request) (int, bool) {
+	raw := strings.TrimSpace(r.Header.Get(effortHeaderName))
+	if raw == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false // not an integer — fall back to the configured default
+	}
+	// A negative value IS a present header (a caller asking for minimum effort or a
+	// typo), not "no header" — return it set so ResolveEffortLevel clamps it UP to
+	// 1, rather than silently falling back to the env default (which could be
+	// higher, the surprising outcome). Only a missing/non-integer header defaults.
+	return n, true
+}
 
 // scanMetaFromRequest extracts and normalizes the attachment metadata the plugin
 // attached to the scan. See filenameHeader for the wire format / why base64.

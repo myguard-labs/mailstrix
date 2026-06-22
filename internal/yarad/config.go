@@ -114,6 +114,25 @@ type Config struct {
 	// by default. A name in BOTH lists is denied (drop wins over demote).
 	RuleAllowlist map[string]struct{} // YARAD_RULE_ALLOWLIST (comma-sep, default empty)
 
+	// Effort tiers (EFFORT-1). A single 1..EffortMax dial scales every bounded
+	// extraction/scan cap so one binary serves both a latency-tight front
+	// (rspamd, pre-queue) and a deeper backend (LDA/sieve), and can shed work
+	// under load. Level 1 = raw + shallowest extraction, EffortMax = everything.
+	//
+	// Resolution order per request (see ResolveEffort / scanMetaFromRequest):
+	// X-YARAD-Effort header ?? Effort (env default), clamped to [1, EffortMax].
+	// EffortMax is the DoS ceiling — an attacker-set header can never raise effort
+	// above it. The resolved level folds into the verdict-cache key (the same
+	// bytes scanned at effort 2 vs 9 can yield different verdicts).
+	//
+	// EFFORT-1 wires the contract (config + resolution + cache key + profile
+	// struct); the individual caps still read their package constants until
+	// EFFORT-4 retrofits them to read EffortProfile. So today every level behaves
+	// identically — the plumbing is inert but present, so each new feature can
+	// wire its cap in from day one.
+	Effort    int // YARAD_EFFORT     (default = EffortMax; the env/default level)
+	EffortMax int // YARAD_EFFORT_MAX (default 10; hard ceiling for header override)
+
 	Version string // build version string, set by main (not from env); for /version
 }
 
@@ -153,6 +172,8 @@ func LoadConfig() *Config {
 		MBazaarFeed:    strings.TrimSpace(os.Getenv("YARAD_MBAZAAR_FEED")),
 		RuleDenylist:   envSet("YARAD_RULE_DENYLIST", "http"),
 		RuleAllowlist:  envSet("YARAD_RULE_ALLOWLIST", ""),
+		EffortMax:      envInt("YARAD_EFFORT_MAX", defaultEffortMax),
+		Effort:         envInt("YARAD_EFFORT", 0), // 0 -> sanitize sets = EffortMax
 	}
 	c.sanitize()
 	return c
@@ -231,7 +252,33 @@ func (c *Config) sanitize() {
 	if c.RulesMaxAge < 0 {
 		c.RulesMaxAge = 0 // negative is nonsensical; 0 disables the staleness check
 	}
+	// Effort tiers: EffortMax is the ceiling (clamp to [1, maxEffortCeiling]); the
+	// env-default Effort then clamps to [1, EffortMax] (0 => "= EffortMax", the
+	// full-depth default so an operator who sets nothing keeps today's behaviour).
+	if c.EffortMax < 1 || c.EffortMax > maxEffortCeiling {
+		c.EffortMax = clamp("YARAD_EFFORT_MAX", c.EffortMax, defaultEffortMax)
+	}
+	if c.Effort == 0 {
+		c.Effort = c.EffortMax // unset -> full-depth default (today's behaviour)
+	}
+	// Clamp into [1, EffortMax]. A too-LOW value (incl. a negative typo) floors to
+	// 1 — minimum effort, never silently bumped to the ceiling; a too-HIGH value
+	// caps at EffortMax.
+	if c.Effort < 1 {
+		log.Printf("[yarad] WARNING: invalid YARAD_EFFORT=%d; using 1", c.Effort)
+		c.Effort = 1
+	} else if c.Effort > c.EffortMax {
+		c.Effort = clamp("YARAD_EFFORT", c.Effort, c.EffortMax)
+	}
 }
+
+// Effort-tier bounds. EffortMax defaults to 10 (the documented 1..10 dial);
+// maxEffortCeiling is the absolute upper limit an operator can configure, so the
+// level can be used as a small bounded array/profile index without overflow.
+const (
+	defaultEffortMax = 10
+	maxEffortCeiling = 10
+)
 
 // normalizeToken maps the explicit "no auth" sentinels (and an unset value) to
 // an empty token, so /scan runs OPEN. A real secret equal to one of these words
