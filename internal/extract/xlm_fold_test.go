@@ -320,7 +320,8 @@ func TestFromOOXMLXLMFold_NoMacrosheets(t *testing.T) {
 }
 
 func TestFromOOXMLXLMFold_ShortResultFiltered(t *testing.T) {
-	// Formula that folds to < 8 bytes should be filtered.
+	// Formula that folds to < 8 bytes should be filtered (no real emulator/interpreter output).
+	// The emulator always emits the depth marker (D8), so we expect exactly 1 stream.
 	formulas := []string{`=CHAR(65)&CHAR(66)`} // "AB" — only 2 bytes
 	buf := makeOOXMLWithXLMFold(t, formulas)
 
@@ -330,8 +331,12 @@ func TestFromOOXMLXLMFold_ShortResultFiltered(t *testing.T) {
 	}
 	var out [][]byte
 	fromOOXMLXLMFold(zr, &out, time.Time{})
-	if len(out) != 0 {
-		t.Errorf("short result not filtered: got %d streams", len(out))
+	// Exactly 1 stream: the XLM-EMUL-DEPTH marker (emitted always); no real formula output.
+	if len(out) != 1 {
+		t.Errorf("expected 1 stream (depth marker only), got %d", len(out))
+	}
+	if len(out) == 1 && !bytes.Contains(out[0], []byte("XLM-EMUL-DEPTH")) {
+		t.Errorf("expected depth marker in the single stream, got %q", out[0])
 	}
 }
 

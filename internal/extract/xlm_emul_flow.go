@@ -223,6 +223,7 @@ func (m *xlmMachine) handleIF(formula, sheetName, coord string, curSheet, curCoo
 				names:  maps.Clone(m.names),
 				steps:  m.steps,
 			})
+			m.ifForksPushed++
 		}
 		if trueCoord != "" {
 			*curSheet = trueSheet

@@ -80,6 +80,9 @@ var parityMarkers = map[string]markerKind{
 	"PDF-OBJSTM":            contractMarker, // pdf_indicators.yara PDF_ObjStm
 	"PDF-HEXOBFUSC":         contractMarker, // pdf_indicators.yara PDF_HexObfuscatedName
 
+	// D8: emulation-depth class marker for YARA depth-correlated rules.
+	"XLM-EMUL-DEPTH": contractMarker, // xlm_macrosheet.yara XLM_Emulator_Deep_Exec
+
 	// --- carved-payload labels (scanned by existing keyword/IOC rules; no own rule) ---
 	"DOCPROPS-STRINGS": internalMarker,
 	"USERFORM-STRINGS": internalMarker,

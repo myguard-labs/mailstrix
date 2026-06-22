@@ -55,18 +55,19 @@ type xlmSheet struct {
 
 // xlmMachine is the full emulator state for one document.
 type xlmMachine struct {
-	sheets      map[string]*xlmSheet
-	names       map[string]string // defined names → value
-	branchStack []branchFrame     // GOTO/CALL return stack (D4)
-	whileDepth  int               // bounded unroll counter (D5, legacy; superceded by whileStack)
-	forkQueue   []forkFrame       // D5: IF-branch COW fork frames to explore after main loop
-	whileStack  []string          // D5: active WHILE cell addresses ("sheet!coord"), one per nesting level
-	forCellCount int              // D5: FOR.CELL iteration counter (capped at maxEmulWhileUnroll)
-	visited     map[string]int    // "sheet!coord" → revisit count (fuse)
-	steps       int               // PC advance counter (fuse)
-	deadline    time.Time
-	out         *[][]byte
-	totalOutput *int
+	sheets       map[string]*xlmSheet
+	names        map[string]string // defined names → value
+	branchStack  []branchFrame     // GOTO/CALL return stack (D4)
+	whileDepth   int               // bounded unroll counter (D5, legacy; superceded by whileStack)
+	forkQueue    []forkFrame       // D5: IF-branch COW fork frames to explore after main loop
+	whileStack   []string          // D5: active WHILE cell addresses ("sheet!coord"), one per nesting level
+	forCellCount int               // D5: FOR.CELL iteration counter (capped at maxEmulWhileUnroll)
+	visited      map[string]int    // "sheet!coord" → revisit count (fuse)
+	steps        int               // PC advance counter (fuse)
+	ifForksPushed int              // D8: counts how many IF not-taken forks were pushed to forkQueue
+	deadline     time.Time
+	out          *[][]byte
+	totalOutput  *int
 }
 
 // newMachine creates an empty xlmMachine ready for cell population.
@@ -169,6 +170,23 @@ func (m *xlmMachine) getFormulaCell(sheetName string) *emulCell {
 	return nil
 }
 
+// emulDepthClass returns the depth classification of this emulator run.
+// "branched" wins over "looped" (branched is higher signal).
+func emulDepthClass(m *xlmMachine) string {
+	for _, count := range m.visited {
+		if count > 1 {
+			if m.ifForksPushed > 0 {
+				return "branched"
+			}
+			return "looped"
+		}
+	}
+	if m.ifForksPushed > 0 {
+		return "branched"
+	}
+	return "shallow"
+}
+
 // emulateXLMCells is the live entry point for the bounded XLM emulator (D6).
 // It populates a machine from cells, finds the Auto_Open entry coordinate via
 // a three-tier name lookup, runs the emulator, and falls back to
@@ -207,8 +225,19 @@ func emulateXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline 
 
 	m.run(sheetName, startCoord)
 
-	// Zero-output fallback: if emulator produced nothing, try old interpreter.
-	if len(*out) == priorLen {
+	// Capture the emulator blob count before emitting the depth marker, so the
+	// fallback decision is based on real emulator output only (not the marker).
+	emulatorLen := len(*out)
+
+	// Emit depth class marker so YARA rules can correlate emulation depth with
+	// dangerous-func co-occurrence (e.g. CALL + branched = high signal).
+	depthMarker := "XLM-EMUL-DEPTH " + emulDepthClass(m)
+	emitFoldedFormula(depthMarker, m.out, m.totalOutput, false)
+
+	// Zero-output fallback: if the emulator produced no real output (depth
+	// marker is not counted), fall back to the old interpreter for
+	// defense-in-depth coverage.
+	if emulatorLen <= priorLen {
 		interpretXLMCells(cells, out, totalOutput, deadline)
 	}
 }
