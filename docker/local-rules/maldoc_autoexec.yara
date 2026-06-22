@@ -38,6 +38,12 @@ rule Maldoc_AutoExec_Write_Execute : maldoc heuristic suspicious
         $auto8  = "Workbook_Open"        ascii wide nocase
         $auto9  = "Document_BeforeClose" ascii wide nocase
         $auto10 = "Workbook_Activate"    ascii wide nocase
+        // ActiveX control event handlers abused as autorun (Emotet/Trickbot
+        // InkPicture1_Painted era). Suffix-matched and FP-prone on their own —
+        // they only ever fire here gated by the write AND execute categories.
+        $auto11 = "_Painted"             ascii wide nocase
+        $auto12 = "_GotFocus"            ascii wide nocase
+        $auto13 = "_LostFocus"           ascii wide nocase
         // file-write / drop primitives
         $write1 = "SaveToFile"           ascii wide nocase
         $write2 = "ADODB.Stream"         ascii wide nocase
@@ -62,6 +68,11 @@ rule Maldoc_AutoExec_Write_Execute : maldoc heuristic suspicious
         $exec6 = "MSXML2.XMLHTTP"         ascii wide nocase
         $exec7 = "WinHttp.WinHttpRequest" ascii wide nocase
         $exec8 = "Shell("                 ascii wide nocase
+        // SetTimer schedules an AddressOf callback (timer shellcode runner);
+        // ExecuteExcel4Macro runs an XLM string from VBA (VBA->XLM bridge).
+        // Both are execution primitives rare in benign VBA.
+        $exec9  = "SetTimer"             ascii wide nocase
+        $exec10 = "ExecuteExcel4Macro"   ascii wide nocase
     condition:
         filesize < 16MB and
         any of ($auto*) and

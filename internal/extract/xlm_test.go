@@ -369,36 +369,6 @@ func TestXLMBIFF_NameTooShortNoMarker(t *testing.T) {
 	}
 }
 
-// buildBIFFWorkbookNamed is like buildBIFFWorkbook but writes the CFB stream
-// under the given streamName ("Workbook" or "Book") instead of always "Workbook".
-func buildBIFFWorkbookNamed(t *testing.T, streamName, sheetName string, dt byte, hidden byte) []byte {
-	t.Helper()
-
-	cch := byte(len(sheetName))
-	payload := make([]byte, 0, 6+2+int(cch))
-	lbPlyPos := make([]byte, 4)
-	binary.LittleEndian.PutUint32(lbPlyPos, 0)
-	payload = append(payload, lbPlyPos...)
-	payload = append(payload, hidden, dt)
-	payload = append(payload, cch)
-	payload = append(payload, 0)
-	payload = append(payload, []byte(sheetName)...)
-
-	recLen := uint16(len(payload))
-	var record bytes.Buffer
-	b2 := make([]byte, 2)
-	binary.LittleEndian.PutUint16(b2, 0x0085)
-	record.Write(b2)
-	binary.LittleEndian.PutUint16(b2, recLen)
-	record.Write(b2)
-	record.Write(payload)
-
-	return buildCFB(t, []cfbEntry{
-		{name: "Root Entry", mse: 5},
-		{name: streamName, mse: 2, data: record.Bytes()},
-	})
-}
-
 // buildDualStreamCFB builds a CFB with BOTH a "Workbook" stream AND a "Book"
 // stream. workbookData and bookData are the raw BIFF bytes for each stream.
 // Entry layout: index 0 = Root Entry, index 1 = Workbook, index 2 = Book.
