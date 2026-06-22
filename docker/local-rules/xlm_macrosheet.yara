@@ -63,3 +63,23 @@ rule XLM_Hidden_Dangerous_Dropper : maldoc heuristic suspicious {
     condition:
         $hidden and $danger
 }
+
+// XLM-EMUL-DEPTH <shallow|looped|branched> markers are emitted by the XLM emulator
+// (internal/extract/xlm_emul_model.go emulDepthClass) after each emulation run.
+// "looped" means a cell was revisited (tight loop/WHILE/GOTO self-ref).
+// "branched" means at least one IF with unknown condition forked both paths.
+// CALL co-occurring with looped or branched is a strong evasion indicator
+// (attacker uses control-flow obfuscation to evade static analysis).
+rule XLM_Emulator_Deep_Exec : maldoc heuristic
+{
+    meta:
+        author      = "yarad"
+        description = "XLM macro with CALL in a looped or branched execution path — evasion indicator"
+        score       = "75"
+    strings:
+        $call         = "CALL" ascii nocase
+        $looped       = "XLM-EMUL-DEPTH looped" ascii
+        $branched     = "XLM-EMUL-DEPTH branched" ascii
+    condition:
+        filesize < 64MB and $call and ($looped or $branched)
+}

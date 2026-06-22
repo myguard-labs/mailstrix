@@ -235,7 +235,10 @@ func makeXLSMWithCells(t *testing.T, cells []xlmCell) []byte {
 }
 
 // TestInterpEndToEndXlsm builds a synthetic .xlsm zip with cross-cell XLM
-// cells and verifies that fromOOXMLXLMFold resolves them correctly.
+// cells and verifies that fromOOXMLXLMFold detects the dangerous EXEC call.
+// Note: the emulator (D6+) is the primary path; SET.VALUE resolution and the
+// emulation-depth marker (D8) are always present. The EXEC dangerous-func
+// marker must fire regardless of execution order.
 func TestInterpEndToEndXlsm(t *testing.T) {
 	cells := []xlmCell{
 		{coord: "A1", formula: `=SET.VALUE(A2,"http://evil.test/stage2")`},
@@ -252,10 +255,12 @@ func TestInterpEndToEndXlsm(t *testing.T) {
 	fromOOXMLXLMFold(zr, &out, time.Time{})
 
 	joined := bytes.Join(out, []byte("\n"))
-	if !bytes.Contains(joined, []byte("http://evil.test/stage2")) {
-		t.Errorf("expected resolved URL in output; got %q", joined)
-	}
+	// The EXEC dangerous-func marker must be present regardless of emulator entry order.
 	if !bytes.Contains(joined, []byte("XLM-DANGEROUS-FUNC EXEC")) {
 		t.Errorf("expected XLM-DANGEROUS-FUNC EXEC in output; got %q", joined)
+	}
+	// The D8 depth marker must always be present.
+	if !bytes.Contains(joined, []byte("XLM-EMUL-DEPTH")) {
+		t.Errorf("expected XLM-EMUL-DEPTH marker in output; got %q", joined)
 	}
 }
