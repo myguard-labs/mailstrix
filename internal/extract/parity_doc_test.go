@@ -68,6 +68,7 @@ var parityMarkers = map[string]markerKind{
 	"ENCRYPTION-RC4":        contractMarker, // oleid_indicators.yara Encrypted_Document
 	"ENCRYPTION-AES":        contractMarker, // oleid_indicators.yara Encrypted_Document
 	"DIGITAL-SIGNATURE":     contractMarker, // oleid_indicators.yara Document_DigitalSignature
+	"PPT-VBA-EXTRACTED":     contractMarker, // oleid_indicators.yara PPT_VBA_Macro
 	"VBA-ENVIRON":           contractMarker, // intent.yara VBA_Environ_Probe
 	"VBA-STOMPED":           contractMarker, // vba_stomping.yara
 	"MSD-DEEPDECODE":        contractMarker, // intent.yara Multilayer_Encoded_Payload

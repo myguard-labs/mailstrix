@@ -203,3 +203,16 @@ rule Document_DigitalSignature : maldoc heuristic suspicious
     condition:
         filesize < 16MB and $marker
 }
+
+rule PPT_VBA_Macro : maldoc heuristic
+{
+    meta:
+        author      = "yarad"
+        description = "Legacy PowerPoint (.ppt/.pps) file with an embedded VBA macro project (ExternalObjectStorage)"
+        reference   = "https://github.com/decalage2/oletools/wiki/ppt_parser"
+        score       = "60"
+    strings:
+        $marker = "PPT-VBA-EXTRACTED" ascii
+    condition:
+        filesize < 64MB and $marker
+}
