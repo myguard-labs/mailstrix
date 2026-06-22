@@ -187,6 +187,25 @@ if [ "${INQUEST:-1}" = "1" ]; then
     fi
 fi
 
+# 7) abuse.ch YARAify (YARAhub) — community malware-family rules curated from
+#    live ThreatFox/MalwareBazaar hunting. Fresh family coverage (stealers,
+#    loaders, RATs, ransomware) that complements the broader forge/sigbase sets.
+#    Whole-zip: per-file test-compile in compile-rules.sh prunes any rule that
+#    references a module we don't load or fails yarac, so a noisy community rule
+#    can't break the bundle. YARAIFY=0 to skip; YARAIFY_URL to override.
+if [ "${YARAIFY:-1}" = "1" ]; then
+    YARAIFY_URL="${YARAIFY_URL:-https://yaraify.abuse.ch/yarahub/yaraify-rules.zip}"
+    echo "fetch-rules: yaraify <- $YARAIFY_URL"
+    if curl -fsSL "$YARAIFY_URL" -o "$TMP/yaraify.zip"; then
+        unzip -o -q "$TMP/yaraify.zip" -d "$TMP/yaraify" || fail "unzip yaraify failed"
+        find "$TMP/yaraify" \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
+            cp "$f" "$OUT/yaraify-$(basename "$f")"
+        done
+    else
+        fail "download yaraify failed"
+    fi
+fi
+
 COUNT="$(find "$OUT" -name '*.yar' -o -name '*.yara' | wc -l)"
 echo "fetch-rules: $COUNT rule files in $OUT"
 [ "$COUNT" -gt 0 ] || fail "no rule files fetched"
@@ -208,6 +227,9 @@ echo "fetch-rules: $COUNT rule files in $OUT"
     fi
     if [ "${INQUEST:-1}" = "1" ]; then
         printf ',\n  {"name":"inquest","repo":"https://github.com/InQuest/yara-rules-vt","license":"MIT","ref":"%s"}' "${INQUEST_REF:-main}"
+    fi
+    if [ "${YARAIFY:-1}" = "1" ]; then
+        printf ',\n  {"name":"yaraify","repo":"https://yaraify.abuse.ch/yarahub/","license":"CC0","ref":"latest"}'
     fi
     printf ',\n  {"name":"local","repo":"https://github.com/eilandert/rspamd-yarad","license":"MIT","ref":"baked"}'
     printf '\n]\n'
