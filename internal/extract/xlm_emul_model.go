@@ -29,9 +29,10 @@ const (
 	maxEmulFormulaCell = 1000 // getFormulaCell iteration cap
 )
 
-// branchFrame is a stub for the GOTO/CALL return-address stack (wired in D4).
+// branchFrame holds a return address for RUN/CALL return stack (wired in D4).
 type branchFrame struct {
-	returnAddr string // coord to resume after RETURN
+	returnSheet string // sheet to resume after RETURN
+	returnAddr  string // coord to resume after RETURN
 }
 
 // emulCell is a single macrosheet cell in the emulator grid.
@@ -56,6 +57,7 @@ type xlmMachine struct {
 	branchStack []branchFrame     // GOTO/CALL return stack (D4)
 	whileDepth  int               // bounded unroll counter (D5)
 	visited     map[string]int    // "sheet!coord" → revisit count (fuse)
+	steps       int               // PC advance counter (fuse)
 	deadline    time.Time
 	out         *[][]byte
 	totalOutput *int
