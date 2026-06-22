@@ -92,7 +92,17 @@ func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 	}
 }
 
-// processXLSBSheet walks one .bin macrosheet, folding each FMLA_* cell's ptg.
+// biff12FormulaCollected holds the decoded coordinate and raw ptg bytes of
+// one FMLA_* record within a macrosheet, for the two-pass emulator batch.
+type biff12FormulaCollected struct {
+	coord string
+	rgce  []byte
+}
+
+// processXLSBSheet walks one .bin macrosheet using a two-pass strategy (D7):
+// pass 1 collects all FMLA_* cell ptg bytes with their A1 coordinates; pass 2
+// feeds them to the emulator. If the emulator produces no output the original
+// one-by-one fold path is used as fallback (defense-in-depth).
 func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time) {
 	if sf.UncompressedSize64 > maxBytesWorkbookXML {
 		return
@@ -107,42 +117,91 @@ func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline ti
 		return
 	}
 
+	// Pass 1: collect cells.
+	// BrtRowHdr (record type 0) carries the current row number at payload[0:4].
+	const biff12BrtRowHdr = 0
 	pos := 0
 	records := 0
-	formulas := 0
+	var currentRow uint32
+	var collected []biff12FormulaCollected
+
 	for pos < len(raw) {
 		if expired(deadline) || len(*out) >= maxStreams {
-			return
+			break
 		}
-		if records >= maxBIFF12Records || formulas >= maxXLMFoldFormulas {
-			return
+		if records >= maxBIFF12Records || len(collected) >= maxXLMFoldFormulas {
+			break
 		}
 		records++
 
 		recID, n := readVarint(raw[pos:])
 		if n == 0 {
-			return // truncated record id
+			break // truncated record id
 		}
 		pos += n
 		recLen, n := readVarint(raw[pos:])
 		if n == 0 {
-			return // truncated length
+			break // truncated length
 		}
 		pos += n
 		if recLen > maxBIFF12RecordLen || recLen > len(raw)-pos {
-			return // declared length overruns the buffer — fail-open
+			break // declared length overruns the buffer — fail-open
 		}
 		payload := raw[pos : pos+recLen]
 		pos += recLen
 
 		switch recID {
+		case biff12BrtRowHdr:
+			// Row header: row index at bytes 0–3 (uint32 LE).
+			if len(payload) >= 4 {
+				currentRow = uint32(payload[0]) | uint32(payload[1])<<8 |
+					uint32(payload[2])<<16 | uint32(payload[3])<<24
+			}
+
 		case biff12FmlaString, biff12FmlaNum, biff12FmlaBool, biff12FmlaError:
-			formulas++
 			rgce := biff12FormulaRgce(payload)
 			if rgce == nil {
 				continue
 			}
-			folded := parseBIFF12Formula(rgce)
+			// Column is the first uint32 LE in the payload.
+			var col uint32
+			if len(payload) >= 4 {
+				col = uint32(payload[0]) | uint32(payload[1])<<8 |
+					uint32(payload[2])<<16 | uint32(payload[3])<<24
+			}
+			coord := biffCellToA1(uint16(currentRow), uint16(col))
+			if coord == "" {
+				coord = "A" + strconv.Itoa(int(currentRow)+1)
+			}
+			buf := make([]byte, len(rgce))
+			copy(buf, rgce)
+			collected = append(collected, biff12FormulaCollected{coord: coord, rgce: buf})
+		}
+	}
+
+	if len(collected) == 0 {
+		return
+	}
+
+	// Pass 2: build xlmCell slice and try the emulator.
+	xlmCells := make([]xlmCell, 0, len(collected))
+	for _, bc := range collected {
+		formula := parseBIFF12FormulaWithRefs(bc.rgce)
+		if formula == "" {
+			continue
+		}
+		xlmCells = append(xlmCells, xlmCell{coord: bc.coord, formula: formula})
+	}
+
+	priorLen := len(*out)
+	if len(xlmCells) > 0 {
+		emulateXLMCells(xlmCells, out, totalOutput, deadline)
+	}
+
+	if len(*out) == priorLen {
+		// Emulator produced no output — fall back to one-by-one fold.
+		for _, bc := range collected {
+			folded := parseBIFF12Formula(bc.rgce)
 			if !emitFoldedFormula(folded, out, totalOutput, true) {
 				return // per-document output cap reached
 			}

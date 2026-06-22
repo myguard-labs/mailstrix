@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -192,12 +193,62 @@ func fromBIFFXLM(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 // Per-call locals (scanned, records, xlmOutput) reset for each stream, so each
 // stream gets its own folded-output and record-walk budget (≤2× total). The
 // shared global caps (countXLMMarkers / len(res.Streams)) still bound the union.
+//
+// D7: FORMULA records are now collected per macrosheet substream and fed to the
+// XLM emulator as a batch (two-pass). If the emulator produces no output the
+// original one-by-one fold path is used as fallback (defense-in-depth).
 func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
+	// biffFormulaCell holds the decoded coordinate and raw ptg bytes of one
+	// FORMULA record within a macrosheet substream, for two-pass emulation.
+	type biffFormulaCell struct {
+		coord string
+		rgce  []byte
+	}
+
 	r := bytes.NewReader(workbookData)
 	scanned := 0
 	records := 0
 	inMacroSheet := false // set by BOF; gates FORMULA folding to macro substreams
-	xlmOutput := 0        // folded-formula byte budget (XLM-3), separate from markers
+	xlmOutput := 0        // folded-formula byte budget, separate from markers
+	sheetIndex := 0       // monotonic counter for synthetic sheet names
+
+	var macroSheetCells []biffFormulaCell // accumulator for current macrosheet
+
+	// flushMacroSheet emits output for the cells collected from the current
+	// macrosheet substream. It tries the emulator first; if that produces no
+	// output it falls back to the original one-by-one fold path.
+	flushMacroSheet := func() {
+		if len(macroSheetCells) == 0 {
+			return
+		}
+		cells := macroSheetCells
+		macroSheetCells = nil
+
+		// Build xlmCell slice using WithRefs parser so the emulator can
+		// resolve intra-sheet cell references.
+		xlmCells := make([]xlmCell, 0, len(cells))
+		for _, bc := range cells {
+			formula := parseBIFF8FormulaWithRefs(bc.rgce)
+			if formula == "" {
+				continue
+			}
+			xlmCells = append(xlmCells, xlmCell{coord: bc.coord, formula: formula})
+		}
+
+		priorLen := len(res.Streams)
+		if len(xlmCells) > 0 {
+			emulateXLMCells(xlmCells, &res.Streams, &xlmOutput, deadline)
+		}
+
+		if len(res.Streams) == priorLen {
+			// Emulator produced no output — fall back to one-by-one fold.
+			for _, bc := range cells {
+				folded := parseBIFF8Formula(bc.rgce)
+				emitFoldedFormula(folded, &res.Streams, &xlmOutput, true)
+			}
+		}
+	}
+
 	for {
 		if expired(deadline) {
 			break
@@ -229,7 +280,10 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 		// whether the following records belong to an Excel-4.0 MACROSHEET
 		// substream (dt 0x0040) — only then do we fold its FORMULA cells, so
 		// ordinary worksheet formulas (=SUM(...)) can't fabricate folded streams.
+		//
+		// D7: flush the previous macrosheet's accumulated cells before switching.
 		if recType == 0x0809 {
+			flushMacroSheet() // emit/fallback for the substream we just left
 			inMacroSheet = false
 			if recLen >= 4 {
 				payload := make([]byte, recLen)
@@ -237,17 +291,20 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 					break
 				}
 				dt := binary.LittleEndian.Uint16(payload[2:])
-				inMacroSheet = dt == 0x0040
+				if dt == 0x0040 {
+					inMacroSheet = true
+					sheetIndex++
+				}
 			} else if _, err := r.Seek(int64(recLen), io.SeekCurrent); err != nil {
 				break
 			}
 			continue
 		}
 
-		// FORMULA (0x0006): when inside a macrosheet substream, fold its ptg
-		// token stream (XLM-3). Payload layout: row(2) col(2) ixfe(2) result(8)
-		// grbit(2) chn(4) cce(2) rgce[cce] — the ptg bytes start at offset 22,
-		// length cce (uint16 at offset 20).
+		// FORMULA (0x0006): when inside a macrosheet substream, collect its ptg
+		// bytes for the two-pass emulator batch (D7). Payload layout:
+		//   row(2) col(2) ixfe(2) result(8) grbit(2) chn(4) cce(2) rgce[cce]
+		// ptg bytes start at offset 22, length cce (uint16 at offset 20).
 		if recType == 0x0006 {
 			if !inMacroSheet || recLen < 22 {
 				if _, err := r.Seek(int64(recLen), io.SeekCurrent); err != nil {
@@ -259,15 +316,22 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 			if _, err := io.ReadFull(r, payload); err != nil {
 				break
 			}
-			cce := int(binary.LittleEndian.Uint16(payload[20:]))
-			rgce := payload[22:]
-			if cce > len(rgce) {
-				cce = len(rgce) // clamp to available bytes (truncated record)
+			if len(macroSheetCells) < maxXLMFoldFormulas {
+				row := binary.LittleEndian.Uint16(payload[0:])
+				col := binary.LittleEndian.Uint16(payload[2:])
+				coord := biffCellToA1(row, col)
+				if coord == "" {
+					coord = "A" + strconv.Itoa(int(row)+1) // fallback
+				}
+				cce := int(binary.LittleEndian.Uint16(payload[20:]))
+				rgce := payload[22:]
+				if cce > len(rgce) {
+					cce = len(rgce)
+				}
+				buf := make([]byte, cce)
+				copy(buf, rgce[:cce])
+				macroSheetCells = append(macroSheetCells, biffFormulaCell{coord: coord, rgce: buf})
 			}
-			folded := parseBIFF8Formula(rgce[:cce])
-			// Feed the shared OOXML sink so .xls and .xlsm can't drift on the
-			// minlen floor, the output cap, or dangerous-func marker emission.
-			emitFoldedFormula(folded, &res.Streams, &xlmOutput, true)
 			continue
 		}
 
@@ -343,6 +407,11 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 		name := biffSheetName(payload[6:])
 		res.Streams = append(res.Streams, []byte("XLM-HIDDEN-MACROSHEET "+stateLabel+" "+name))
 	}
+
+	// Flush any cells accumulated from the final macrosheet substream.
+	flushMacroSheet()
+
+	_ = sheetIndex // used only for disambiguation; suppress unused warning
 }
 
 // biffSheetName decodes the name field from a BOUNDSHEET8 payload slice starting
