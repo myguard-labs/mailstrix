@@ -156,6 +156,27 @@ rule Encrypted_XOR_Obfuscation : maldoc heuristic suspicious
         filesize < 16MB and $marker
 }
 
+// extract.fromDefaultPWXOR emits "DEFAULTPW-DECRYPTED" when a BIFF8 workbook
+// was encrypted with the VelvetSweatshop transparent password (XOR Method 1)
+// AND the decrypted Workbook stream was successfully recovered. The fact that
+// the file uses default-password XOR encryption is itself suspicious (it hides
+// content from naive scanners while Excel opens it silently), but the real
+// weight comes from the recovered XLM macro markers that follow in the stream.
+// Scored modestly: DEFAULTPW-DECRYPTED alone just means "interesting"; stacked
+// with XLM-HIDDEN-MACROSHEET or XLM-AUTO-OPEN it becomes actionable.
+rule DefaultPW_Decrypted : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "BIFF8 workbook decrypted with VelvetSweatshop default password -- scanner-evasion tell"
+        reference   = "https://github.com/decalage2/oletools/blob/master/oletools/crypto.py"
+        score       = "25"
+    strings:
+        $marker = "DEFAULTPW-DECRYPTED" ascii
+    condition:
+        filesize < 16MB and $marker
+}
+
 rule Encrypted_Document : maldoc heuristic suspicious
 {
     meta:

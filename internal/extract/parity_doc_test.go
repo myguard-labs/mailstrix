@@ -63,6 +63,7 @@ var parityMarkers = map[string]markerKind{
 	"OLE2LINK-URL":          contractMarker, // oleid_indicators.yara OLE2Link_URL_Moniker
 	"OLETIMES-FUTURE":       contractMarker, // oleid_indicators.yara OLETimes_FutureStamp
 	"OLETIMES-SYNTHETIC":    contractMarker, // oleid_indicators.yara OLETimes_SyntheticStamps
+	"DEFAULTPW-DECRYPTED":   contractMarker, // oleid_indicators.yara DefaultPW_Decrypted
 	"ENCRYPTION-XOR":        contractMarker, // oleid_indicators.yara Encrypted_XOR_Obfuscation
 	"ENCRYPTION-RC4":        contractMarker, // oleid_indicators.yara Encrypted_Document
 	"ENCRYPTION-AES":        contractMarker, // oleid_indicators.yara Encrypted_Document
