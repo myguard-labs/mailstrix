@@ -132,6 +132,34 @@ func TestEmitDangerousMarkers_None(t *testing.T) {
 	}
 }
 
+// TestEmitDangerousMarkers_DDE covers the DDE command-execution verbs
+// (ftab 175 INITIATE / 178 EXECUTE): EXECUTE must fire its own marker and not
+// be masked by the =EXEC( substring rule, and INITIATE flags the VBA->DDE bridge.
+func TestEmitDangerousMarkers_DDE(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"=EXECUTE(cmd)", "XLM-DANGEROUS-FUNC EXECUTE"},
+		{"=INITIATE(srv)", "XLM-DANGEROUS-FUNC INITIATE"},
+	} {
+		var out [][]byte
+		emitDangerousMarkers(tc.in, &out)
+		if len(out) != 1 || !bytes.Equal(out[0], []byte(tc.want)) {
+			t.Errorf("%q: got %q, want [%q]", tc.in, out, tc.want)
+		}
+	}
+}
+
+// TestEmitDangerousMarkers_ExecNotExecute guards the substring boundary:
+// =EXECUTE( must NOT also match the shorter EXEC verb.
+func TestEmitDangerousMarkers_ExecNotExecute(t *testing.T) {
+	var out [][]byte
+	emitDangerousMarkers("=EXECUTE(cmd)", &out)
+	for _, m := range out {
+		if bytes.Equal(m, []byte("XLM-DANGEROUS-FUNC EXEC")) {
+			t.Errorf("EXEC marker wrongly fired on =EXECUTE(")
+		}
+	}
+}
+
 // --- emitFoldedFormula shared-sink tests (XLM-1) ---
 
 func TestEmitFoldedFormula_BelowFloor(t *testing.T) {

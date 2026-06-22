@@ -316,3 +316,23 @@ func ptgStr8a(s string) []byte {
 	b := []byte{ptgStr, byte(n), 0x00}
 	return append(b, []byte(s[:n])...)
 }
+
+// TestBIFF8FuncNames_DDE verifies the DDE ftab ids (175 INITIATE / 177 POKE /
+// 179 TERMINATE) now render as named functions so their args stay YARA-visible
+// and (for INITIATE) the dangerous-func marker can fire downstream.
+func TestBIFF8FuncNames_DDE(t *testing.T) {
+	for _, tc := range []struct {
+		id   uint16
+		name string
+	}{
+		{175, "INITIATE"},
+		{177, "POKE"},
+		{179, "TERMINATE"},
+	} {
+		stream := append(ptgStr8("x"), ptgFuncVarTok(1, tc.id)...)
+		got := parseBIFF8Formula(stream)
+		if !strings.Contains(got, tc.name) {
+			t.Errorf("ftab %d: %q not in folded output; got %q", tc.id, tc.name, got)
+		}
+	}
+}

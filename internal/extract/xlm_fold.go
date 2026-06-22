@@ -51,6 +51,8 @@ const (
 // triggers a synthetic XLM-DANGEROUS-FUNC marker.
 var xlmDangerousFuncs = []string{
 	"EXEC",
+	"EXECUTE",  // DDE command execution (ftab 178); distinct from =EXEC( above
+	"INITIATE", // DDE conversation open (ftab 175) — VBA→DDE XLM bridge
 	"CALL",
 	"REGISTER",
 	"FOPEN",
