@@ -42,6 +42,23 @@ const (
 	// to 18 bytes; 32 hex chars to 16 bytes.
 	minBase64Run = 24
 	minHexRun    = 32
+	// PERF-4: minPrefilterRun is the contiguous run-length threshold the cheap
+	// scalar prefilter (mayBeEncoded) uses before the decode chain / looksEncoded
+	// regex work. It MUST be <= the smallest minimum-run of every alphabet-class
+	// decoder so the prefilter can never skip a buffer a decoder would have
+	// accepted. The alphabet-class decoders' minimum encoded-run lengths are:
+	// base64=24, hex=32, netbios=32, base32=32, and the Dridex fold's quoted
+	// alnum literal =20 (reDridex `"[0-9A-Za-z]{20,}"`). 20 is the smallest, so
+	// minPrefilterRun=20: any run a decoder would match is >= 20 contiguous
+	// base64-alphabet bytes and thus passes the gate. Lower than every threshold
+	// = strict pre-gate (false-positive only; never a false-negative skip).
+	minPrefilterRun = 20
+	// minPrefilterDecRun is the run-length gate for the decimal-sequence decoder
+	// (reDecSeq = `\d{1,3}(?:[;,]\d{1,3}){11,}`). Its shortest match is 12 groups
+	// of >=1 digit separated by 11 single-char separators: 12 + 11 = 23 contiguous
+	// bytes from the class [0-9,;]. 23 is exact-minimum, so use it directly (a run
+	// shorter than 23 of that class can never satisfy reDecSeq).
+	minPrefilterDecRun = 23
 	// minDecodedLen drops a decode result too short to carry a keyword/URL.
 	minDecodedLen = 8
 	// maxDecodedBlobs caps how many decoded streams one buffer can add (across all
@@ -548,6 +565,16 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 		if !mostlyText(cur.data) {
 			continue
 		}
+		// PERF-4: cheap scalar pre-gate. Prose passes mostlyText but has no long
+		// encoding-alphabet run and no structural marker, so the 10-decoder regex
+		// chain finds nothing — skip it. Strict pre-gate: anything a decoder would
+		// accept has a run >= its minimum (>= minPrefilterRun) or a marker, so it
+		// still passes. Only no-op work on plain text is skipped. Gated before
+		// st.iters++ so a skip does not consume the per-source iteration budget
+		// (strictly leaves more budget for real items — never less work).
+		if !mayBeEncoded(cur.data) {
+			continue
+		}
 		st.iters++
 
 		curLayer := cur.depth + 1
@@ -786,6 +813,115 @@ func fnv64(b []byte) uint64 {
 	return h
 }
 
+// prefilterMarkers are the cheap structural substrings the decode chain /
+// looksEncoded key on that do NOT manifest as a long alphabet-class run, so the
+// run-length gate alone would miss them. A buffer containing ANY of these must
+// pass the prefilter (do the expensive work). Lowercased; matched against a
+// lowercased copy of the (clamped) scan window. Each corresponds to a decoder
+// or looksEncoded pattern:
+//   - "\\x"        -> reXEsc  (\xHH escapes; the literal 2 bytes backslash-x)
+//   - "\\u","%u"   -> reUEsc  (\uXXXX / %uXXXX)
+//   - "&h"         -> reAmpH  (&HXX VBA hex literals; case-insensitive)
+//   - "chr"        -> reChrConcat (Chr/ChrW concat)
+//   - "replace("   -> reReplace
+//   - "array("     -> reArrayXor
+//   - "strreverse" -> reStrReverse
+//   - "environ"    -> reEnviron
+//
+// The reversedMarkers (llehsrewop, …) are also short substrings with no long
+// run, so they are appended here too. reDridex (>=20 alnum in quotes) and the
+// base64/hex/netbios/base32 runs are covered by the run-length gate, not here.
+var prefilterMarkers = [][]byte{
+	[]byte(`\x`),
+	[]byte(`\u`),
+	[]byte(`%u`),
+	[]byte(`&h`),
+	[]byte("chr"),
+	[]byte("replace("),
+	[]byte("array("),
+	[]byte("strreverse"),
+	[]byte("environ"),
+}
+
+// mayBeEncoded is the PERF-4 cheap scalar pre-gate run BEFORE the regex decode
+// chain and looksEncoded. It returns true ("do the expensive work") whenever the
+// buffer could plausibly carry an encoded payload, and false ONLY for buffers
+// that demonstrably cannot — plain prose with no long encoding-alphabet run and
+// no structural marker. It is a STRICT pre-gate: every input the chain or
+// looksEncoded would have decoded still passes, because the thresholds are <=
+// every decoder's own minimum run (see minPrefilterRun / minPrefilterDecRun).
+// When in doubt it passes (returns true); the win is purely from prose being
+// skipped, never from skipping anything decodable.
+//
+// One linear pass tracks two independent run lengths:
+//   - b64Run: contiguous base64-alphabet bytes [A-Za-z0-9+/] (covers base64,
+//     hex, netbios A-P, base32 A-Z2-7, and Dridex alnum — all subsets). >=20 passes.
+//   - decRun: contiguous [0-9,;] bytes (the reDecSeq class). >=23 passes.
+//
+// Prose breaks both classes every few chars with spaces/punctuation, so it
+// never accumulates a qualifying run; a real payload has one long unbroken run.
+func mayBeEncoded(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	scan := b
+	if len(scan) > maxFoldInput {
+		scan = scan[:maxFoldInput]
+	}
+	b64Run, decRun := 0, 0
+	// reChrConcat can match a concat of pure string LITERALS (e.g. "a" & "b")
+	// with no "chr" marker and no long run, so the marker scan below would miss
+	// it. Detect the necessary ingredients cheaply: a double-quote AND a concat
+	// operator ('&' or '+'). If both are present anywhere in the scan, pass (the
+	// regex MIGHT match — strict pre-gate). Prose with quotes but no &/+ (or vice
+	// versa) is still skipped. Tracked in the same pass.
+	hasQuote, hasConcatOp := false, false
+	for _, c := range scan {
+		switch c {
+		case '"':
+			hasQuote = true
+		case '&', '+':
+			hasConcatOp = true
+		}
+		// base64-alphabet class.
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') || c == '+' || c == '/' {
+			b64Run++
+			if b64Run >= minPrefilterRun {
+				return true
+			}
+		} else {
+			b64Run = 0
+		}
+		// decimal-sequence class [0-9,;].
+		if (c >= '0' && c <= '9') || c == ',' || c == ';' {
+			decRun++
+			if decRun >= minPrefilterDecRun {
+				return true
+			}
+		} else {
+			decRun = 0
+		}
+	}
+	// reChrConcat string-literal-only form (quoted literals joined by &/+).
+	if hasQuote && hasConcatOp {
+		return true
+	}
+	// No long run — fall back to the cheap structural-marker scan. Lowercase once.
+	low := bytes.ToLower(scan)
+	for _, m := range prefilterMarkers {
+		if bytes.Contains(low, m) {
+			return true
+		}
+	}
+	for _, m := range reversedMarkers {
+		if bytes.Contains(low, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // looksEncoded reports whether b plausibly carries another encoded layer worth
 // re-decoding: a long base64/hex run, a reversed high-signal token, or a VBA
 // string-building construct. Used to gate the MSD-1 recursion so cleartext output
@@ -793,6 +929,14 @@ func fnv64(b []byte) uint64 {
 // blob would still cost a full pass) — a real nested payload sits well within it.
 func looksEncoded(b []byte) bool {
 	if len(b) == 0 {
+		return false
+	}
+	// PERF-4: cheap scalar pre-gate. Every pattern below (a long base64/hex run,
+	// a reversed marker, or a VBA construct) implies either a base64-alphabet run
+	// >= minPrefilterRun or one of prefilterMarkers/reversedMarkers, all of which
+	// mayBeEncoded reports true for. So if mayBeEncoded is false, none of the
+	// regexes below can match — short-circuit and skip the 11-automata scan.
+	if !mayBeEncoded(b) {
 		return false
 	}
 	scan := b
