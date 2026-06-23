@@ -15,7 +15,7 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
       - uses: ./.github/actions/go-setup
@@ -29,6 +29,12 @@ jobs:
         run: go test -run=x -fuzz='^FuzzParseBIFF12Formula$' -fuzztime=5m ./internal/extract/
       - name: fuzz (extract — bounded XLM emulator)
         run: go test -run=x -fuzz='^FuzzEmulateXLM$' -fuzztime=5m ./internal/extract/
+      - name: fuzz (extract — MS-OVBA DecompressStream token bomb)
+        run: go test -run=x -fuzz='^FuzzDecompressStream$' -fuzztime=5m ./internal/extract/
+      - name: fuzz (extract — XLM formula constant-fold)
+        run: go test -run=x -fuzz='^FuzzFoldXLMFormula$' -fuzztime=5m ./internal/extract/
+      - name: fuzz (extract — multi-layer static decode)
+        run: go test -run=x -fuzz='^FuzzFromEncoded$' -fuzztime=5m ./internal/extract/
 
   # AddressSanitizer over the CGO/libyara surface: catches heap errors in our
   # go-yara usage (Scanner lifecycle, buffer passing) that -race can't. Valgrind
