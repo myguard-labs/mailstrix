@@ -26,9 +26,10 @@ import (
 // decode layers, skips the PDF structural-indicator pass, and skips the
 // URLhaus/MalwareBazaar lookups; the ceiling runs everything at full depth.
 //
-// Not (yet) effort-scaled: the per-libyara-scan wall-clock (scanTimeout) and the
-// XLM formula/sheet caps — deferred to a follow-up (see TODO EFFORT-4-SCANTIMEOUT/
-// EFFORT-4-XLMCAPS); they still read their package constants.
+// Not (yet) effort-scaled: the XLM formula/sheet caps — deferred to a follow-up
+// (see TODO EFFORT-4-XLMCAPS); they still read their package constants.
+// The per-libyara-scan wall-clock (scanTimeout) is now effort-scaled (EFFORT-4-SCANTIMEOUT)
+// via EffortProfile.ScanTimeout.
 
 // EffortProfile is the resolved set of caps for one scan's effort level. As of
 // EFFORT-4 the fields are LIVE: ExtractOptions maps DecodeDepth/DecodeIterations/
@@ -51,6 +52,11 @@ type EffortProfile struct {
 	DecodeIterations int
 	PDFDeepen        bool
 	ReputationFeeds  bool
+
+	// ScanTimeout is the per-request libyara wall-clock budget scaled by effort
+	// level. At level 1 it is 50% of the base; at the ceiling it equals the base.
+	// A zero base (no limit) keeps ScanTimeout at 0 (no limit).
+	ScanTimeout time.Duration
 }
 
 // Cap ceilings used by the effort table. fullDecodeDepth mirrors
@@ -80,7 +86,11 @@ const (
 // level is assumed already resolved/clamped to [1, EffortMax] by
 // ResolveEffortLevel; it is defensively floored at 1 here so a stray 0 can't
 // produce a degenerate profile. effortMax is the configured ceiling (>=1).
-func EffortProfileFor(level, effortMax int) EffortProfile {
+// minScanTimeout is the floor for scaled ScanTimeout so a low effort level
+// never accidentally sets a very-short timeout that aborts benign scans.
+const minScanTimeout = 1 * time.Second
+
+func EffortProfileFor(level, effortMax int, baseScanTimeout time.Duration) EffortProfile {
 	if effortMax < 1 {
 		effortMax = 1
 	}
@@ -113,12 +123,25 @@ func EffortProfileFor(level, effortMax int) EffortProfile {
 		iters = fullDecodeIters
 	}
 
+	// ScanTimeout: scale linearly from 50% of base at level 1 to 100% at the
+	// ceiling. A zero base means no limit — keep it zero. Floor at minScanTimeout
+	// so a stray low effort level can't set an unreasonably short timeout.
+	var scanTimeout time.Duration
+	if baseScanTimeout > 0 {
+		scaled := time.Duration(float64(baseScanTimeout) * (0.5 + 0.5*frac))
+		if scaled < minScanTimeout {
+			scaled = minScanTimeout
+		}
+		scanTimeout = scaled
+	}
+
 	return EffortProfile{
 		Level:            level,
 		DecodeDepth:      depth,
 		DecodeIterations: iters,
 		PDFDeepen:        frac > 0.2,  // skip only the cheapest tier (lowest ~fifth)
 		ReputationFeeds:  frac >= 0.5, // external feeds shed first: upper half only
+		ScanTimeout:      scanTimeout,
 	}
 }
 

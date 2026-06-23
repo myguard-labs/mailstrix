@@ -727,11 +727,6 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// not be able to spend scanTimeout × N and monopolize a worker far past the
 	// rspamd/backend timeout. A zero/negative scanTimeout means "no limit" (yara
 	// convention), so the deadline is disabled then.
-	var deadline time.Time
-	if s.scanTimeout > 0 {
-		deadline = time.Now().Add(s.scanTimeout)
-	}
-
 	// EFFORT-4: resolve the per-request cap profile from the effort level the
 	// server folded into meta (header ?? auto ?? env, already clamped to the
 	// ceiling). The HTTP path always sets meta.Effort >= 1 (ResolveEffortLevel);
@@ -740,12 +735,24 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// the configured ceiling", NOT as level 1, so an un-resolved scan keeps full
 	// depth rather than silently degrading to the cheapest tier. The profile
 	// drives the MSD decode depth and PDF indicator pass (via extract.Options
-	// below) and whether the external reputation feeds run (gated near the end).
-	profile := EffortProfileFor(resolveScanEffort(meta.Effort, s.effortMax), s.effortMax)
+	// below), whether the external reputation feeds run (gated near the end), and
+	// the per-request libyara wall-clock budget (EFFORT-4-SCANTIMEOUT: scaled
+	// 50%→100% of the base across the effort range to shed CPU under load).
+	profile := EffortProfileFor(resolveScanEffort(meta.Effort, s.effortMax), s.effortMax, s.scanTimeout)
+
+	// One wall-clock budget for the WHOLE request (raw + every extracted stream),
+	// not per-scan: a hostile document with up to maxStreams macro modules must
+	// not be able to spend scanTimeout × N and monopolize a worker far past the
+	// rspamd/backend timeout. A zero/negative scanTimeout means "no limit" (yara
+	// convention), so the deadline is disabled then.
+	var deadline time.Time
+	if profile.ScanTimeout > 0 {
+		deadline = time.Now().Add(profile.ScanTimeout)
+	}
 
 	// Raw bytes first. A failure here is the scanner's verdict (propagated,
 	// fail-open at the server) — unchanged behaviour for non-documents.
-	out, err := s.scanOne(rules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, s.scanTimeout)
+	out, err := s.scanOne(rules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, profile.ScanTimeout)
 	if err != nil {
 		return nil, err
 	}
