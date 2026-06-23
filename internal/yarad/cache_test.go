@@ -87,6 +87,11 @@ func TestCacheLRUEviction(t *testing.T) {
 	if _, ok := c.Get("c"); !ok {
 		t.Error("c just inserted, should be present")
 	}
+	if lru, ok := c.(*lruCache); ok {
+		if got := lru.Evictions(); got != 1 {
+			t.Errorf("Evictions() = %d, want 1", got)
+		}
+	}
 }
 
 func TestCacheFlush(t *testing.T) {
