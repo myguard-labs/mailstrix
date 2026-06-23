@@ -88,6 +88,11 @@ rule Maldoc_AutoExec_Write_Execute : maldoc heuristic suspicious
         // Both are execution primitives rare in benign VBA.
         $exec9  = "SetTimer"             ascii wide nocase
         $exec10 = "ExecuteExcel4Macro"   ascii wide nocase
+        // FollowHyperlink opens a URL/file via the Windows shell (browser or
+        // ShellExecute path) — used by droppers to launch a download or spawn
+        // a remote payload. Only meaningful stacked with auto-exec + write, which
+        // the three-category AND enforces.
+        $exec11 = "FollowHyperlink"      ascii wide nocase
     condition:
         filesize < 16MB and
         any of ($auto*) and
