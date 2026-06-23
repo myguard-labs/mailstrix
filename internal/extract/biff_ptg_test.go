@@ -160,13 +160,30 @@ func TestBIFF8UnknownPtgBails(t *testing.T) {
 	}
 }
 
-func TestBIFF8AttrBails(t *testing.T) {
-	// ptgAttr (variable-size control token) must bail cleanly.
-	stream := ptgStr8("safe")
-	stream = append(stream, ptgAttr, 0x04, 0x00, 0x00)
+func TestBIFF8AttrNonChooseSkips(t *testing.T) {
+	// ptgAttr with non-CHOOSE grbit (e.g. bitAttrSemi=0x01) must skip 4 bytes
+	// and continue parsing rather than bailing. A ptgStr8 after it must appear.
+	stream := ptgStr8("before")
+	stream = append(stream, ptgAttr, 0x01, 0x00, 0x00) // Semi; w=0
+	stream = append(stream, ptgStr8("after")...)
 	got := parseBIFF8Formula(stream)
-	if got != "safe" {
-		t.Fatalf("attr bail: got %q", got)
+	if got != "beforeafter" {
+		t.Fatalf("attr non-choose skip: got %q", got)
+	}
+}
+
+func TestBIFF8PtgAttrChooseSkip(t *testing.T) {
+	// ptgAttr with bitAttrChoose (grbit=0x04): w=2 means 3 cases → 6 bytes of
+	// branch offsets follow. Parser must skip the whole record and continue.
+	// A ptgStr8 token placed immediately after the jump table must be folded in.
+	stream := ptgStr8("func")
+	// opcode=ptgAttr, grbit=0x04, w=2 (little-endian), then (2+1)*2=6 offset bytes
+	stream = append(stream, ptgAttr, 0x04, 0x02, 0x00)
+	stream = append(stream, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00) // 3 offsets
+	stream = append(stream, ptgStr8("result")...)
+	got := parseBIFF8Formula(stream)
+	if got != "funcresult" {
+		t.Fatalf("ptgAttrChoose skip: got %q, want \"funcresult\"", got)
 	}
 }
 
