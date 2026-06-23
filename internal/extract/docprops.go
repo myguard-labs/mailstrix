@@ -23,7 +23,9 @@ package extract
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -253,6 +255,14 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if len(data) == 0 {
 			continue
 		}
+		// Parse DOC_SECURITY (PIDSI 0x13) from SummaryInformation only.
+		if name == "\x05SummaryInformation" {
+			if v, ok := docSecurityFlags(data); ok {
+				if len(res.Streams) < maxStreams {
+					res.Streams = append(res.Streams, []byte(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v)))
+				}
+			}
+		}
 		for _, run := range carveStrings(data) {
 			if len(carved) >= maxDocPropsStreams || len(res.Streams)+len(carved) >= maxStreams {
 				break
@@ -274,6 +284,80 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		}
 		res.Streams = append(res.Streams, s)
 	}
+}
+
+// oleDocSecMarkerPrefix is the prefix for the DOC_SECURITY protection marker.
+const oleDocSecMarkerPrefix = "OLE-DOC-SECURITY-"
+
+// docSecurityFlags parses a raw SummaryInformation property-set stream
+// (MS-OLEPS) and returns the DOC_SECURITY bitfield value (PIDSI 0x13) plus
+// true when the parse succeeds and the value is non-zero. All reads are
+// bounds-checked; any malformation returns (0, false) without panicking.
+func docSecurityFlags(data []byte) (uint32, bool) {
+	// Property set stream header: minimum 48 bytes
+	// [0:2]   ByteOrder (must be 0xFFFE)
+	// [24:28] cSections (number of property sets, >= 1)
+	// [28:44] FMTID of first section (16 bytes)
+	// [44:48] offset of first section (uint32)
+	if len(data) < 48 {
+		return 0, false
+	}
+	byteOrder := binary.LittleEndian.Uint16(data[0:2])
+	if byteOrder != 0xFFFE {
+		return 0, false
+	}
+	cSections := binary.LittleEndian.Uint32(data[24:28])
+	if cSections < 1 {
+		return 0, false
+	}
+	secOff := binary.LittleEndian.Uint32(data[44:48])
+	// Section header: cbSection (4) + cProperties (4) = 8 bytes minimum.
+	if uint64(secOff)+8 > uint64(len(data)) {
+		return 0, false
+	}
+	cProperties := binary.LittleEndian.Uint32(data[secOff+4 : secOff+8])
+	if cProperties == 0 {
+		return 0, false
+	}
+	if cProperties > 1024 {
+		cProperties = 1024
+	}
+	// Each identifier/offset entry is 8 bytes: propID (4) + propOffset (4).
+	// They follow the section header at secOff+8.
+	arrayStart := uint64(secOff) + 8
+	arrayEnd := arrayStart + uint64(cProperties)*8
+	if arrayEnd > uint64(len(data)) {
+		return 0, false
+	}
+	var propOff uint32
+	found := false
+	for i := uint32(0); i < cProperties; i++ {
+		base := arrayStart + uint64(i)*8
+		propID := binary.LittleEndian.Uint32(data[base : base+4])
+		if propID == 0x13 {
+			propOff = binary.LittleEndian.Uint32(data[base+4 : base+8])
+			found = true
+			break
+		}
+	}
+	if !found {
+		return 0, false
+	}
+	// Property value at sectionOffset + propOffset.
+	// Layout: type (uint32) + value (uint32/int32).
+	valueBase := uint64(secOff) + uint64(propOff)
+	if valueBase+8 > uint64(len(data)) {
+		return 0, false
+	}
+	propType := binary.LittleEndian.Uint32(data[valueBase : valueBase+4])
+	if propType != 3 { // VT_I4
+		return 0, false
+	}
+	value := binary.LittleEndian.Uint32(data[valueBase+4 : valueBase+8])
+	if value == 0 {
+		return 0, false
+	}
+	return value, true
 }
 
 // docPropsMarker is the synthetic marker emitted as the first stream when

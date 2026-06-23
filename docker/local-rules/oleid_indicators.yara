@@ -204,6 +204,32 @@ rule Document_DigitalSignature : maldoc heuristic suspicious
         filesize < 16MB and $marker
 }
 
+/*
+  DOC_SECURITY property (SummaryInformation PIDSI 0x13).
+
+  yarad's extract.docSecurityFlags parses the SummaryInformation property set and
+  emits "OLE-DOC-SECURITY-<value>" when the DOC_SECURITY bitfield is non-zero.
+  The low bit (value & 1 == 1, i.e. odd values) means PasswordProtected --
+  Office set a transparent/legacy password. On its own a protected document is
+  benign, so this is a LOW stacking signal; weight comes from co-occurrence with
+  macro / encryption markers from the same scan. The literal prefix is emitted
+  only by yarad -> matching is zero-FP by construction.
+
+  Reference: https://learn.microsoft.com/openspecs/office_file_formats/ms-oshared
+*/
+rule OLE_Doc_Security : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "Document SummaryInformation DOC_SECURITY flag set (password/read-only protection)"
+        reference   = "https://learn.microsoft.com/openspecs/office_file_formats/ms-oshared"
+        score       = "10"
+    strings:
+        $marker = "OLE-DOC-SECURITY-" ascii
+    condition:
+        filesize < 16MB and $marker
+}
+
 rule PPT_VBA_Macro : maldoc heuristic
 {
     meta:

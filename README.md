@@ -453,6 +453,7 @@ or a new marker is added without classification).
 | `oleid` — ObjectPool + Flash indicators | parity+ (`OLEID-OBJECTPOOL`, `OLEID-FLASH` markers + rules) |
 | `oleid` — encrypted / ext-rels / vba indicators | parity (`ENCRYPTION-AES`, `OOXML-EXTERNAL-REL`) |
 | `oleid` — encryption TYPE (RC4/XOR/AES) | parity+ — typed (`ENCRYPTION-XOR`/`-RC4`/`-AES`) |
+| `oleid` — DOC_SECURITY property flag | parity+ (`OLE-DOC-SECURITY-<n>` marker + rule) |
 | `oletimes` — timestamp anomaly | **lead** — anomaly heuristic, not raw dump (`OLETIMES-FUTURE`/`-SYNTHETIC`) |
 | `oledir` — orphaned/unreferenced streams | **lead** — carves+scans, not just lists |
 | `olemap` — sector/FAT layout dump | **SKIP (defensible)** — covered by oledir carve + Failed/Panicked metrics |
@@ -536,6 +537,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] Static single-layer decode pass (base64/hex/`StrReverse`) over raw + extracted streams, re-scanned (depth cap 1)
 - [x] VBA string folding: `Chr`/`Replace`/`Array Xor`/`StrReverse("lit")`/`Environ`→marker + **Dridex** (`DridexUrlDecode`); per-fold input clamp
 - [x] oleid structural indicators: `OLEID-OBJECTPOOL` (embedded OLE objects) + `OLEID-FLASH` (SWF) markers → `oleid_indicators.yara`
+- [x] oleid DOC_SECURITY: `SummaryInformation` PIDSI 0x13 bitfield → `OLE-DOC-SECURITY-<n>` marker + `OLE_Doc_Security` rule
 - [x] Filename/extension externals (name-keyed rules) via `X-YARAD-Filename`
 - [x] URL defang + URLhaus URL/host lookup; MalwareBazaar attachment-hash lookup (cached feeds, fail-open)
 - [x] `YARAD_RULE_DENYLIST` (drop) + `YARAD_RULE_ALLOWLIST` (log-only)
