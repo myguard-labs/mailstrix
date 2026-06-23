@@ -94,6 +94,17 @@ func fromCSVDDE(buf []byte, res *Result, deadline time.Time) {
 	}
 	buf = bytes.TrimPrefix(buf, utf8BOM)
 
+	// Fast-path guard: a CSV-DDE match requires a formula-trigger cell ('=+-@')
+	// AND an unquoted '|' AND an unquoted '!' (see isFormulaInjectionDDE). If the
+	// whole buffer lacks a '|' or a '!', no cell can ever match — skip the entire
+	// per-line/per-cell walk. This is the common case for benign text buffers and
+	// avoids the per-line string() alloc + cell split. O(n) single pass, far below
+	// the cost it replaces. (The trigger char is implied by '|'+'!' being rare in
+	// plain prose, so we gate on the two mandatory structural chars only.)
+	if bytes.IndexByte(buf, '|') < 0 || bytes.IndexByte(buf, '!') < 0 {
+		return
+	}
+
 	rest := buf
 	lines := 0
 	for len(rest) > 0 {
@@ -111,34 +122,34 @@ func fromCSVDDE(buf []byte, res *Result, deadline time.Time) {
 		if len(line) > maxCSVLineLen {
 			line = line[:maxCSVLineLen]
 		}
-		scanCSVLine(string(line), res, deadline)
+		scanCSVLine(line, res, deadline)
 	}
 }
 
 // scanCSVLine splits one record into cells (on ',' or '\t') and emits a CSV-DDE
 // marker for each cell carrying the DDE command form.
-func scanCSVLine(line string, res *Result, deadline time.Time) {
+func scanCSVLine(line []byte, res *Result, deadline time.Time) {
 	// Delimiter: comma is the CSV default; fall back to tab only for a genuine TSV
 	// (a line with tabs but no comma). Preferring comma avoids mis-splitting a
 	// comma-CSV row that merely contains a tab inside a quoted field (which would
 	// otherwise hide a comma-separated DDE cell). A real DDE payload cell never
 	// embeds the active delimiter, so a quote-unaware split is enough.
 	delim := byte(',')
-	if strings.IndexByte(line, ',') < 0 && strings.IndexByte(line, '\t') >= 0 {
+	if bytes.IndexByte(line, ',') < 0 && bytes.IndexByte(line, '\t') >= 0 {
 		delim = '\t'
 	}
 	cells := 0
-	for line != "" {
+	for len(line) > 0 {
 		if cells >= maxCSVCellsPerLine || countCSVDDE(res.Streams) >= maxCSVDDEMarkers ||
 			len(res.Streams) >= maxStreams || expired(deadline) {
 			return
 		}
 		cells++
-		var cell string
-		if idx := strings.IndexByte(line, delim); idx >= 0 {
+		var cell []byte
+		if idx := bytes.IndexByte(line, delim); idx >= 0 {
 			cell, line = line[:idx], line[idx+1:]
 		} else {
-			cell, line = line, ""
+			cell, line = line, nil
 		}
 		emitIfCSVDDE(cell, res)
 	}
@@ -146,26 +157,26 @@ func scanCSVLine(line string, res *Result, deadline time.Time) {
 
 // emitIfCSVDDE tests one cell for the formula-injection DDE form and appends a
 // "CSV-DDE <cell>" marker if it matches.
-func emitIfCSVDDE(cell string, res *Result) {
+func emitIfCSVDDE(cell []byte, res *Result) {
 	c := normCSVCell(cell)
-	if c == "" || !isFormulaInjectionDDE(c) {
+	if len(c) == 0 || !formulaTriggers[c[0]] || !isFormulaInjectionDDE(string(c)) {
 		return
 	}
 	if len(c) > maxCSVDDECell {
 		c = c[:maxCSVDDECell]
 	}
-	res.Streams = append(res.Streams, []byte("CSV-DDE "+c))
+	res.Streams = append(res.Streams, append([]byte("CSV-DDE "), c...))
 }
 
 // normCSVCell strips surrounding whitespace and a single layer of CSV double
 // quoting ("=..." → =...), unescaping the doubled-quote ("") escape, so a
 // quoted formula cell is tested in its effective (unquoted) form. Excel applies
 // the formula trigger to the unquoted text.
-func normCSVCell(cell string) string {
-	c := strings.TrimSpace(cell)
+func normCSVCell(cell []byte) []byte {
+	c := bytes.TrimSpace(cell)
 	if len(c) >= 2 && c[0] == '"' && c[len(c)-1] == '"' {
-		c = strings.ReplaceAll(c[1:len(c)-1], `""`, `"`)
-		c = strings.TrimSpace(c)
+		c = bytes.ReplaceAll(c[1:len(c)-1], []byte(`""`), []byte(`"`))
+		c = bytes.TrimSpace(c)
 	}
 	return c
 }
@@ -283,7 +294,7 @@ func fromSpreadsheetML(buf []byte, res *Result, deadline time.Time) {
 		if v == nil {
 			continue
 		}
-		emitIfCSVDDE(attrValue(v), res)
+		emitIfCSVDDE([]byte(attrValue(v)), res)
 	}
 
 	// 2) <Data ...>=...</Data> element text.
@@ -306,7 +317,7 @@ func fromSpreadsheetML(buf []byte, res *Result, deadline time.Time) {
 		if end < 0 {
 			end = len(body)
 		}
-		emitIfCSVDDE(unescapeXMLText(string(body[:end])), res)
+		emitIfCSVDDE([]byte(unescapeXMLText(string(body[:end]))), res)
 		rest = body
 	}
 }

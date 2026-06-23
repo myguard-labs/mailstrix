@@ -37,13 +37,13 @@ func TestIsFormulaInjectionDDE(t *testing.T) {
 }
 
 func TestNormCSVCell(t *testing.T) {
-	if got := normCSVCell(`  "=cmd|'/c calc'!A1"  `); got != `=cmd|'/c calc'!A1` {
+	if got := string(normCSVCell([]byte(`  "=cmd|'/c calc'!A1"  `))); got != `=cmd|'/c calc'!A1` {
 		t.Errorf("quote/space strip: got %q", got)
 	}
-	if got := normCSVCell(`"=a""b"`); got != `=a"b` {
+	if got := string(normCSVCell([]byte(`"=a""b"`))); got != `=a"b` {
 		t.Errorf("doubled-quote unescape: got %q", got)
 	}
-	if got := normCSVCell("=plain"); got != "=plain" {
+	if got := string(normCSVCell([]byte("=plain"))); got != "=plain" {
 		t.Errorf("unquoted passthrough: got %q", got)
 	}
 }
@@ -94,6 +94,42 @@ func TestFromCSVDDE_BenignNoMarker(t *testing.T) {
 		if strings.HasPrefix(string(s), "CSV-DDE ") {
 			t.Fatalf("benign CSV produced a CSV-DDE marker: %q", s)
 		}
+	}
+}
+
+// TestFromCSVDDE_GuardSkip exercises the buffer-level fast-path guard: a DDE
+// match requires both '|' and '!' in the buffer, so a buffer that has formula
+// triggers ('=' cells) but lacks either char must early-return with no markers.
+// This is the common benign case the guard short-circuits.
+func TestFromCSVDDE_GuardSkip(t *testing.T) {
+	cases := []string{
+		"name,total\nfoo,=SUM(A1:A9)\nbar,=A1+B2\n", // triggers, no '|' and no '!'
+		"=cmd '/c calc'A1\n",                        // trigger + no '|', no '!'
+		"=cmd|'/c calc'A1\n",                        // has '|' but no '!' → guard skips
+		"=cmd '/c calc'!A1\n",                       // has '!' but no '|' → guard skips
+		"plain text, nothing here at all\n",         // no trigger, no '|', no '!'
+	}
+	for _, doc := range cases {
+		var res Result
+		fromCSVDDE([]byte(doc), &res, time.Time{})
+		for _, s := range res.Streams {
+			if strings.HasPrefix(string(s), "CSV-DDE ") {
+				t.Fatalf("guard should skip %q but emitted %q", doc, s)
+			}
+		}
+	}
+	// Sanity: a buffer that DOES carry both '|' and '!' in a real DDE cell still
+	// passes the guard and emits (guard must not over-reject).
+	var res Result
+	fromCSVDDE([]byte("a,=cmd|'/c calc.exe'!A1\n"), &res, time.Time{})
+	saw := false
+	for _, s := range res.Streams {
+		if strings.HasPrefix(string(s), "CSV-DDE ") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("guard over-rejected a real DDE cell; streams=%q", res.Streams)
 	}
 }
 
