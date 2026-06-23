@@ -451,25 +451,15 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 	// maxDecodedBlobs / maxCumulativeDecoded ceilings (a memory amplifier on
 	// crafted multi-stream input). These run across the WHOLE fromEncoded pass.
 	var defangBlobs, defangCum int
-	// EFFORT-4 monotonicity note: a higher opts.DecodeDepth can emit more blobs
-	// from an EARLIER source, so under maxStreams saturation a later source may be
-	// reached at low effort but skipped at high effort — coverage is monotone only
-	// up to the global maxStreams ceiling, below which source ORDER (not effort)
-	// decides. maxStreams is large relative to a realistic per-source blob count,
-	// so this is a corner case on crafted multi-stream input; tracked as
-	// EFFORT-4-MAXSTREAMS-ORDER in TODO.md rather than reordering the worklist.
+
+	// MSD-4: defang pass — run before the global BFS so un-defanged copies are
+	// available as extra sources. Each source is processed independently here
+	// (its decode tree is fed through decodeSourceTree as before) because the
+	// defang-then-redecode path is already one extra source, not a BFS item.
 	for _, src := range sources {
 		if expired(deadline) || len(res.Streams) >= maxStreams {
 			break
 		}
-		// MSD-4: defang pass — reverse IOC-evasion markers (hxxp, [.], [at], …)
-		// in each source ONCE before the decode tree so URL/keyword rules see the
-		// real on-wire form.  Gate on mostlyText: defanging binary blobs is noise.
-		// Emit only when something actually changed (undefang returns ok=false on
-		// no-op, so we never emit an unchanged dup).  Then, if the un-defanged
-		// copy itself looksEncoded (e.g. the payload behind the defang was base64),
-		// feed it through decodeSourceTree too — but ONLY then, to avoid an
-		// un-gated amplifier on plain cleartext URLs.
 		if mostlyText(src) {
 			if ud, ok := undefang(src); ok && len(ud) >= minDecodedLen {
 				if len(ud) > maxBytesPerDecodedBlob {
@@ -492,19 +482,154 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 				}
 			}
 		}
-		total += decodeSourceTree(src, res, opts)
 	}
+
+	// EFFORT-4 global BFS: seed ALL sources at depth 0 before any depth-1 child
+	// is enqueued, so the global FIFO processes all sources shallowly before any
+	// source deeply. Under maxStreams saturation this means the cut happens by
+	// source ORDER × depth — never by effort — making coverage monotone in effort:
+	// raising DecodeDepth only ADDS deeper layers after all shallower layers of
+	// all sources are emitted.
+	//
+	// Per-source state (blobs, cum, iters, seen, maxLayer) is carried in per-index
+	// maps so the per-source budget/dedup/marker semantics (MSD-1, MSD-2,
+	// RULE-MSD-MULTILAYER) are fully preserved.
+	maxDepth := opts.DecodeDepth
+	if maxDepth < 1 {
+		maxDepth = 1
+	}
+	maxItersPerSource := opts.DecodeIterations
+	if maxItersPerSource < 1 {
+		maxItersPerSource = 1
+	}
+
+	type bfsItem struct {
+		data   []byte
+		depth  int
+		srcIdx int // which source this item belongs to
+	}
+
+	// Per-source state maps.
+	type srcState struct {
+		blobs    int
+		cum      int
+		iters    int
+		maxLayer int
+		seen     map[uint64]struct{}
+	}
+	states := make([]srcState, len(sources))
+	for i := range states {
+		states[i].seen = make(map[uint64]struct{})
+	}
+
+	// Seed: all sources at depth 0, in source order.
+	queue := make([]bfsItem, 0, len(sources))
+	for i, src := range sources {
+		queue = append(queue, bfsItem{src, 0, i})
+	}
+
+	// Global BFS: children re-enqueued at depth+1 land after ALL existing items
+	// (including other sources' depth-d items), giving breadth-first-by-depth
+	// globally across all sources.
+	var curChildren [][]byte
+	for len(queue) > 0 {
+		if expired(deadline) || len(res.Streams) >= maxStreams {
+			break
+		}
+		cur := queue[0]
+		queue = queue[1:]
+		st := &states[cur.srcIdx]
+
+		// Per-source iteration cap (matches old per-source maxIters semantics).
+		if st.iters >= maxItersPerSource ||
+			st.blobs >= maxDecodedBlobs || st.cum >= maxCumulativeDecoded {
+			continue
+		}
+		if !mostlyText(cur.data) {
+			continue
+		}
+		st.iters++
+
+		curLayer := cur.depth + 1
+		curChildren = curChildren[:0]
+
+		emit := func(b []byte) bool {
+			if len(b) < minDecodedLen {
+				return true
+			}
+			if len(b) > maxBytesPerDecodedBlob {
+				b = b[:maxBytesPerDecodedBlob]
+			}
+			// MSD-2: per-source-tree dedup (preserves old per-tree semantics).
+			h := fnv64(b)
+			if _, dup := st.seen[h]; dup {
+				return true
+			}
+			if st.blobs >= maxDecodedBlobs || len(res.Streams) >= maxStreams || st.cum+len(b) > maxCumulativeDecoded {
+				return false
+			}
+			res.Streams = append(res.Streams, b)
+			curChildren = append(curChildren, b)
+			st.seen[h] = struct{}{}
+			st.blobs++
+			st.cum += len(b)
+			total++
+			if curLayer > st.maxLayer {
+				st.maxLayer = curLayer
+			}
+			return true
+		}
+
+		ok := decodeBase64Runs(cur.data, deadline, emit) &&
+			decodeHexRuns(cur.data, deadline, emit) &&
+			emitReversed(cur.data, emit) &&
+			foldVBAStrings(cur.data, deadline, emit) &&
+			decodeXEscRuns(cur.data, deadline, emit) &&
+			decodeAmpHRuns(cur.data, deadline, emit) &&
+			decodeUEscRuns(cur.data, deadline, emit) &&
+			decodeDecSeqRuns(cur.data, deadline, emit) &&
+			decodeNetbiosRuns(cur.data, deadline, emit) &&
+			decodeBase32Runs(cur.data, deadline, emit)
+
+		if cur.depth+1 < maxDepth {
+			for _, c := range curChildren {
+				if looksEncoded(c) {
+					queue = append(queue, bfsItem{c, cur.depth + 1, cur.srcIdx})
+				}
+			}
+		}
+		_ = ok // fail-open: budget cap in emit already stops further work for this source
+	}
+
+	// RULE-MSD-MULTILAYER: emit one MSD-DEEPDECODE marker per source tree that
+	// reached deepDecodeLayer, in source order. Markers are appended after the
+	// global walk so they never consume budget that could have gone to a real blob.
+	for i := range sources {
+		if expired(deadline) || len(res.Streams) >= maxStreams {
+			break
+		}
+		if states[i].maxLayer >= deepDecodeLayer {
+			res.Streams = append(res.Streams, []byte("MSD-DEEPDECODE depth="+strconv.Itoa(states[i].maxLayer)))
+			total++
+		}
+	}
+
 	// Record how many blobs the pass appended (always the trailing res.Streams),
 	// so the caller can keep the macro/extracted-stream metrics free of decode noise.
 	res.DecodedStreams = total
 }
 
 // decodeSourceTree runs the recursive multi-layer decode for ONE source stream
-// and returns the number of blobs it emitted. The blob/byte budget is local to
-// this call (the per-source reset of the MSD-1 contract); it is shared across all
-// recursion depths of this source via the closure below. A FIFO worklist gives
-// breadth-first unwrapping so the budget is spent on shallow layers (more likely
-// to be the real payload) before deep ones.
+// and returns the number of blobs it emitted. Used by the MSD-4 defang path
+// (un-defanged copies that looksEncoded are fed here as standalone sources).
+// The blob/byte budget is local to this call (the per-source reset of the
+// MSD-1 contract); it is shared across all recursion depths of this source via
+// the closure below. A FIFO worklist gives breadth-first unwrapping within this
+// source so the budget is spent on shallow layers before deep ones.
+//
+// The main multi-source decode walk in fromEncoded uses its own global BFS
+// rather than calling this per-source, giving monotone coverage in effort across
+// all sources simultaneously.
 func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 	deadline := opts.Deadline
 	// EFFORT-4: per-request caps, floored to 1 so a zero-value Options never
