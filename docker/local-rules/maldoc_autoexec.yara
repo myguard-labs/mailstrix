@@ -44,19 +44,23 @@ rule Maldoc_AutoExec_Write_Execute : maldoc heuristic suspicious
         $auto11 = "AutoExit"             ascii wide nocase
         $auto12 = "AutoNew"              ascii wide nocase
         $auto13 = "NewDocument"          ascii wide nocase
+        // Workbook_BeforeClose fires when the workbook is being closed — used by
+        // droppers that execute payloads or wipe traces on close (safer than the
+        // full close family; mraptor classifies it as auto-exec).
+        $auto14 = "Workbook_BeforeClose" ascii wide nocase
         // ActiveX control event handlers abused as autorun (Emotet/Trickbot
         // InkPicture1_Painted era). Suffix-matched and FP-prone on their own —
         // they only ever fire here gated by the write AND execute categories.
-        $auto14 = "_Painted"             ascii wide nocase
-        $auto15 = "_GotFocus"            ascii wide nocase
-        $auto16 = "_LostFocus"           ascii wide nocase
+        $auto15 = "_Painted"             ascii wide nocase
+        $auto16 = "_GotFocus"            ascii wide nocase
+        $auto17 = "_LostFocus"           ascii wide nocase
         // file-write / drop primitives
-        $write1 = "SaveToFile"           ascii wide nocase
-        $write2 = "ADODB.Stream"         ascii wide nocase
-        $write3 = "RegWrite"             ascii wide nocase
-        $write4 = "CreateTextFile"       ascii wide nocase
-        $write5 = "FileCopy"             ascii wide nocase
-        $write6 = "CopyHere"             ascii wide nocase
+        $write1  = "SaveToFile"           ascii wide nocase
+        $write2  = "ADODB.Stream"         ascii wide nocase
+        $write3  = "RegWrite"             ascii wide nocase
+        $write4  = "CreateTextFile"       ascii wide nocase
+        $write5  = "FileCopy"             ascii wide nocase
+        $write6  = "CopyHere"             ascii wide nocase
         $write7  = " For Output"          ascii wide nocase
         $write8  = " For Binary"          ascii wide nocase
         $write9  = " For Append"          ascii wide nocase
@@ -71,14 +75,14 @@ rule Maldoc_AutoExec_Write_Execute : maldoc heuristic suspicious
         // execute category and collapse the three-way AND. Real execution via
         // CreateObject still trips a specific object name below (WScript.Shell,
         // Shell.Application→ShellExecute, MSXML2.XMLHTTP, …).
-        $exec1 = "WScript.Shell"          ascii wide nocase
-        $exec2 = "ShellExecute"           ascii wide nocase
-        $exec3 = "URLDownloadToFile"      ascii wide nocase
-        $exec4 = "powershell"             ascii wide nocase
-        $exec5 = "cmd.exe"                ascii wide nocase
-        $exec6 = "MSXML2.XMLHTTP"         ascii wide nocase
-        $exec7 = "WinHttp.WinHttpRequest" ascii wide nocase
-        $exec8 = "Shell("                 ascii wide nocase
+        $exec1  = "WScript.Shell"          ascii wide nocase
+        $exec2  = "ShellExecute"           ascii wide nocase
+        $exec3  = "URLDownloadToFile"      ascii wide nocase
+        $exec4  = "powershell"             ascii wide nocase
+        $exec5  = "cmd.exe"                ascii wide nocase
+        $exec6  = "MSXML2.XMLHTTP"         ascii wide nocase
+        $exec7  = "WinHttp.WinHttpRequest" ascii wide nocase
+        $exec8  = "Shell("                 ascii wide nocase
         // SetTimer schedules an AddressOf callback (timer shellcode runner);
         // ExecuteExcel4Macro runs an XLM string from VBA (VBA->XLM bridge).
         // Both are execution primitives rare in benign VBA.

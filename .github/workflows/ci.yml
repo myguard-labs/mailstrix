@@ -146,6 +146,11 @@ jobs:
           # CreateObject() would wrongly satisfy the "execute" category.
           clean=$(printf 'Sub AutoOpen()\n  Set o = CreateObject("ADODB.Stream")\n  o.SaveToFile "data.bin"\nEnd Sub\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18081/scan)
           echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
+
+          # Positive: Workbook_BeforeClose (new $auto* entry) + write + execute must fire.
+          close_body=$(printf 'Private Sub Workbook_BeforeClose(Cancel As Boolean)\n  Set o = CreateObject("ADODB.Stream")\n  o.SaveToFile "x.exe"\n  CreateObject("WScript.Shell").Run "cmd.exe /c x.exe"\nEnd Sub\n')
+          close_match=$(printf '%s' "$close_body" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18081/scan)
+          echo "close_match: $close_match"; grep -q Maldoc_AutoExec_Write_Execute <<<"$close_match"
           docker rm -f ym
 
       - name: smoke (maldoc suspicious-keyword tier — count heuristic + shellcode-API)
