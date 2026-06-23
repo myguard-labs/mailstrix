@@ -143,6 +143,11 @@ func fromArchive(buf []byte, res *Result, b *archiveBudget, depth int, deadline 
 // it as a stream, and recurses into it if it is itself a container. The bytes are
 // clamped to maxBytesPerMember before this is called.
 func emitMember(data []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	defer func() {
+		if recover() != nil {
+			res.Panicked = true
+		}
+	}()
 	if len(data) == 0 || b.spent() || len(res.Streams) >= maxStreams {
 		return
 	}

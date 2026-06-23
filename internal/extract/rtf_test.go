@@ -420,3 +420,17 @@ func TestExtractRTFMultipleObjects(t *testing.T) {
 		t.Errorf("expected both objdata payloads carved; got %d streams", len(res.Streams))
 	}
 }
+
+// TestCarveRTFObjectPanicRecovery verifies that carveRTFObject does not propagate
+// a panic on a hostile blob that starts with OLE magic but is otherwise garbage.
+// oleparse may panic on such input; the defer/recover guard must catch it and mark
+// res.Panicked without losing any previously written streams.
+func TestCarveRTFObjectPanicRecovery(t *testing.T) {
+	// OLE magic followed by attacker-controlled garbage — enough bytes to pass
+	// the magic check but malformed enough to trigger deep panic paths in oleparse.
+	hostile := append(append([]byte{}, oleMagic...), bytes.Repeat([]byte{0xFF}, 4096)...)
+	res := &Result{}
+	bud := &archiveBudget{}
+	// Must not panic.
+	carveRTFObject(hostile, res, bud, 0, time.Time{})
+}

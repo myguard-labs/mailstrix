@@ -354,6 +354,11 @@ func decodeRTFHex(b []byte) []byte {
 // bud/depth are the shared nested-carrier budget: a carved package payload that
 // is itself a carrier is routed through extractChild (see nested.go).
 func carveRTFObject(blob []byte, res *Result, bud *archiveBudget, depth int, deadline time.Time) {
+	defer func() {
+		if recover() != nil {
+			res.Panicked = true
+		}
+	}()
 	// Charge the decoded \objdata blob against the shared nested-carrier budget once
 	// here (covers BOTH the CFB and bare-Ole10Native branches below), so an RTF that
 	// fans out many embedded objects is bounded together with archive members and

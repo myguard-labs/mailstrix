@@ -252,3 +252,20 @@ func TestExtractNotArchive(t *testing.T) {
 		t.Error("plain text wrongly flagged IsArchive")
 	}
 }
+
+// TestEmitMemberPanicRecovery verifies that emitMember does not propagate a panic
+// on hostile data. A blob that begins with OLE magic but is otherwise garbage may
+// drive oleparse to panic inside extractChild; the defer/recover guard must catch
+// it and mark res.Panicked without losing already-written streams.
+func TestEmitMemberPanicRecovery(t *testing.T) {
+	// Prepend a sentinel stream so we can verify partial results are preserved.
+	sentinel := []byte("sentinel-stream")
+	res := &Result{Streams: [][]byte{sentinel}}
+	bud := &archiveBudget{}
+	hostile := append(append([]byte{}, oleMagic...), bytes.Repeat([]byte{0xFF}, 4096)...)
+	// Must not panic.
+	emitMember(hostile, res, bud, 0, time.Time{})
+	if len(res.Streams) == 0 || !bytes.Equal(res.Streams[0], sentinel) {
+		t.Error("partial streams before the panic should be preserved")
+	}
+}

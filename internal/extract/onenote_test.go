@@ -154,3 +154,21 @@ func TestExtractOneNoteGUIDInDataNotReEmitted(t *testing.T) {
 		t.Errorf("carved stream mismatch:\n  got  %q\n  want %q", res.Streams[0], payload)
 	}
 }
+
+// TestFromOneNotePanicRecovery verifies that fromOneNote does not propagate a
+// panic on a hostile buffer. The FDSO header GUID is present but the payload is
+// truncated so that length-field reads and slice operations are out-of-bounds —
+// potential panic sites without the recover guard.
+func TestFromOneNotePanicRecovery(t *testing.T) {
+	// A buffer containing the FDSO header GUID but only 4 bytes of data after it
+	// (less than the 20-byte minimum header the parser expects). The subsequent
+	// binary.LittleEndian.Uint64 and slice operations would previously panic.
+	hostile := append(append([]byte{}, oneSectionGUID...), oneFDSOHeaderGUID...)
+	hostile = append(hostile, []byte{0xDE, 0xAD, 0xBE, 0xEF}...)
+	res := &Result{}
+	// Must not panic.
+	fromOneNote(hostile, res, time.Time{})
+	if !res.IsOneNote {
+		t.Error("IsOneNote should be set regardless of parse failure")
+	}
+}

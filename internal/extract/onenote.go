@@ -76,6 +76,11 @@ func isOneNote(buf []byte) bool {
 // recognised OneNote file (whether or not any embedded file was found). Bounded
 // by the maxONE* caps; best-effort, a malformed object is skipped.
 func fromOneNote(buf []byte, res *Result, deadline time.Time) {
+	defer func() {
+		if recover() != nil {
+			res.Panicked = true
+		}
+	}()
 	res.IsOneNote = true
 	var total int
 	rest := buf
