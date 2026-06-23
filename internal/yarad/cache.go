@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -40,12 +41,13 @@ func (noopCache) Degraded() string           { return "" }
 // the map/list ops, never across a scan. Under load the lock is uncontended
 // relative to scan cost.
 type lruCache struct {
-	mu    sync.Mutex
-	ttl   time.Duration
-	max   int
-	ll    *list.List               // front = most recently used
-	items map[string]*list.Element // key -> element
-	redis *redisLayer              // optional shared L2 (nil when no YARAD_REDIS_URL)
+	mu        sync.Mutex
+	ttl       time.Duration
+	max       int
+	ll        *list.List               // front = most recently used
+	items     map[string]*list.Element // key -> element
+	redis     *redisLayer              // optional shared L2 (nil when no YARAD_REDIS_URL)
+	evictions atomic.Int64             // LRU evictions (capacity-driven, not TTL expiry)
 }
 
 type entry struct {
@@ -122,6 +124,7 @@ func (c *lruCache) Put(key string, matches []Match) {
 		c.items[key] = el
 		for c.ll.Len() > c.max {
 			c.removeElement(c.ll.Back())
+			c.evictions.Add(1)
 		}
 		c.mu.Unlock()
 	}
@@ -149,6 +152,10 @@ func (l *lruCache) Degraded() string {
 	}
 	return ""
 }
+
+// Evictions returns the total number of LRU capacity-evictions since start.
+// TTL expiry is not counted; only entries pushed out by new insertions into a full cache.
+func (c *lruCache) Evictions() int64 { return c.evictions.Load() }
 
 // removeElement must be called with the lock held.
 func (c *lruCache) removeElement(el *list.Element) {

@@ -605,6 +605,9 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("cache_hits_total", "verdicts served from cache", s.metrics.cacheHit.Load())
 	fm("cache_misses_total", "scans that ran (cache miss)", s.metrics.cacheMiss.Load())
 	fm("cache_coalesced_total", "scans coalesced onto an in-flight identical scan", s.metrics.cacheCoalesced.Load())
+	if lru, ok := s.cache.(*lruCache); ok {
+		fm("cache_evictions_total", "L1 LRU evictions (capacity-driven; not TTL expiry)", lru.Evictions())
+	}
 	b.WriteString("# HELP yarad_rules loaded YARA rule count\n")
 	b.WriteString("# TYPE yarad_rules gauge\n")
 	b.WriteString("yarad_rules " + strconv.FormatInt(s.engine.RuleCount(), 10) + "\n")
