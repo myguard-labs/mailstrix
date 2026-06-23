@@ -64,6 +64,13 @@ type Options struct {
 	// (fromPDFIndicators). Disabled at low effort: only the inflated object streams
 	// are scanned, not the action/JS/launch name markers.
 	PDFDeepen bool
+
+	// XLMFoldSheets caps the number of macrosheets scanned per document by the
+	// XLM constant-fold pass. 0 means use the package default (maxXLMFoldSheets).
+	XLMFoldSheets int
+	// XLMFoldFormulas caps the number of formulas processed per macrosheet by the
+	// XLM constant-fold pass. 0 means use the package default (maxXLMFoldFormulas).
+	XLMFoldFormulas int
 }
 
 // FullOptions returns an Options at maximum depth for the given deadline — the
@@ -75,7 +82,30 @@ func FullOptions(deadline time.Time) *Options {
 		DecodeDepth:      maxDecodeDepth,
 		DecodeIterations: maxDecodeIterations,
 		PDFDeepen:        true,
+		XLMFoldSheets:    maxXLMFoldSheets,
+		XLMFoldFormulas:  maxXLMFoldFormulas,
 	}
+}
+
+// xlmFoldSheets returns the effective sheet cap for the XLM fold pass.
+// Falls back to the package constant when the field is zero (unset), and
+// clamps to the package ceiling: the effort dial may only SHED work, never
+// raise the cap above the always-on bound (anti-amplifier defense).
+func (o *Options) xlmFoldSheets() int {
+	if o != nil && o.XLMFoldSheets > 0 && o.XLMFoldSheets < maxXLMFoldSheets {
+		return o.XLMFoldSheets
+	}
+	return maxXLMFoldSheets
+}
+
+// xlmFoldFormulas returns the effective formula cap for the XLM fold pass.
+// Falls back to the package constant when the field is zero (unset), and
+// clamps to the package ceiling (see xlmFoldSheets — effort may only shed).
+func (o *Options) xlmFoldFormulas() int {
+	if o != nil && o.XLMFoldFormulas > 0 && o.XLMFoldFormulas < maxXLMFoldFormulas {
+		return o.XLMFoldFormulas
+	}
+	return maxXLMFoldFormulas
 }
 
 // OLE2/CFB compound-document magic (legacy .doc/.xls, the vbaProject.bin
@@ -291,7 +321,7 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// a plain archive whose members may be droppers (unpack them). The macro
 		// path also flags Failed on an unopenable (corrupt) zip; never member-dump
 		// an Office doc.
-		fromOOXML(buf, &res, deadline)
+		fromOOXML(buf, &res, deadline, opts)
 		if !isOfficeZip(buf) {
 			fromArchive(buf, &res, b, 0, deadline)
 		}
@@ -633,7 +663,8 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 // and decompress the VBA out of every *.bin member, mirroring oleparse.ParseFile
 // but without touching disk. A zip we can't open at all is a parse failure; a
 // single unparseable .bin is skipped without losing the rest.
-func fromOOXML(buf []byte, res *Result, deadline time.Time) {
+// opts carries per-request caps (nil degrades to package defaults).
+func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) {
 	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
 	if err != nil {
 		res.Failed = true
@@ -711,11 +742,11 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time) {
 	// obfuscated CHAR()&CHAR()&"..." concatenations into cleartext so
 	// keyword/URL/IOC YARA rules fire. Also emits XLM-DANGEROUS-FUNC markers.
 	prevLen := len(out)
-	fromOOXMLXLMFold(zr, &out, deadline)
+	fromOOXMLXLMFold(zr, &out, deadline, opts)
 	// .xlsb stores macrosheets as BIFF12 binary parts (xl/macrosheets/sheet*.bin)
 	// rather than XML <f> elements, so fromOOXMLXLMFold (which only reads .xml)
 	// misses them. Fold the BIFF12 ptg token streams too (XLM-4).
-	fromXLSBXLMFold(zr, &out, deadline)
+	fromXLSBXLMFold(zr, &out, deadline, opts)
 	if len(out) > prevLen {
 		res.HasXLMFold = true
 	}

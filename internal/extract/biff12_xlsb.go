@@ -52,8 +52,6 @@ const (
 	// maxBIFF12Records caps records walked per .bin sheet — a macrosheet is
 	// dominated by FMLA records, so the formula cap alone doesn't bound the walk.
 	maxBIFF12Records = 1 << 18
-	// maxBIFF12Sheets caps macrosheet .bin parts scanned per workbook.
-	maxBIFF12Sheets = maxXLMFoldSheets
 	// maxBIFF12RecordLen caps a single record's declared length (varint guard) so
 	// a hostile 4-byte length cannot ask us to allocate gigabytes.
 	maxBIFF12RecordLen = maxBytesWorkbookXML
@@ -65,16 +63,20 @@ const (
 // the results to the shared emitFoldedFormula sink (so .xlsb cannot drift from
 // .xls/.xlsm on the minlen floor, output cap, or dangerous-func markers).
 // Fail-open: any read/parse error silently returns. Bounded; respects deadline.
-func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+// opts carries the per-request sheet/formula caps; nil uses package defaults.
+func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Options) {
 	if expired(deadline) {
 		return
 	}
+
+	sheetCap := opts.xlmFoldSheets()
+	formulaCap := opts.xlmFoldFormulas()
 
 	var sheets []*zip.File
 	for _, f := range zr.File {
 		if strings.HasPrefix(f.Name, "xl/macrosheets/") && strings.HasSuffix(strings.ToLower(f.Name), ".bin") {
 			sheets = append(sheets, f)
-			if len(sheets) >= maxBIFF12Sheets {
+			if len(sheets) >= sheetCap {
 				break
 			}
 		}
@@ -88,7 +90,7 @@ func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		if expired(deadline) || len(*out) >= maxStreams {
 			return
 		}
-		processXLSBSheet(sf, out, &totalOutput, deadline)
+		processXLSBSheet(sf, out, &totalOutput, deadline, formulaCap)
 	}
 }
 
@@ -103,7 +105,8 @@ type biff12FormulaCollected struct {
 // pass 1 collects all FMLA_* cell ptg bytes with their A1 coordinates; pass 2
 // feeds them to the emulator. If the emulator produces no output the original
 // one-by-one fold path is used as fallback (defense-in-depth).
-func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time) {
+// formulaCap limits how many formula records are collected (effort-scaled).
+func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int) {
 	if sf.UncompressedSize64 > maxBytesWorkbookXML {
 		return
 	}
@@ -129,7 +132,7 @@ func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline ti
 		if expired(deadline) || len(*out) >= maxStreams {
 			break
 		}
-		if records >= maxBIFF12Records || len(collected) >= maxXLMFoldFormulas {
+		if records >= maxBIFF12Records || len(collected) >= formulaCap {
 			break
 		}
 		records++

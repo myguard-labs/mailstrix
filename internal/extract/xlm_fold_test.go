@@ -270,7 +270,7 @@ func TestFromOOXMLXLMFold_Basic(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 
 	joined := bytes.Join(out, []byte("\n"))
 	if !bytes.Contains(joined, []byte("https://evil.com")) {
@@ -289,7 +289,7 @@ func TestFromOOXMLXLMFold_DangerousFunc(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 
 	joined := bytes.Join(out, []byte("\n"))
 	if !bytes.Contains(joined, []byte("XLM-DANGEROUS-FUNC EXEC")) {
@@ -313,7 +313,7 @@ func TestFromOOXMLXLMFold_NoMacrosheets(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 	if len(out) != 0 {
 		t.Errorf("no macrosheets: expected 0 streams, got %d", len(out))
 	}
@@ -330,7 +330,7 @@ func TestFromOOXMLXLMFold_ShortResultFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 	// Exactly 1 stream: the XLM-EMUL-DEPTH marker (emitted always); no real formula output.
 	if len(out) != 1 {
 		t.Errorf("expected 1 stream (depth marker only), got %d", len(out))
@@ -353,9 +353,56 @@ func TestFromOOXMLXLMFold_FormulaCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 	if len(out) > maxXLMFoldFormulas {
 		t.Errorf("formula cap exceeded: got %d streams, max %d", len(out), maxXLMFoldFormulas)
+	}
+}
+
+// TestFromOOXMLXLMFold_EffortFormulaCap proves the per-request (effort-scaled)
+// formula cap actually sheds work below the package default: a low-effort
+// Options must stop the fold well before maxXLMFoldFormulas.
+func TestFromOOXMLXLMFold_EffortFormulaCap(t *testing.T) {
+	const lowCap = 8
+	const nFormulas = lowCap + 50
+	formulas := make([]string, nFormulas)
+	for i := range formulas {
+		formulas[i] = `="AAAAAAAA"`
+	}
+	buf := makeOOXMLWithXLMFold(t, formulas)
+
+	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out [][]byte
+	fromOOXMLXLMFold(zr, &out, time.Time{}, &Options{XLMFoldFormulas: lowCap})
+	// The low cap must shed work: output is bounded near lowCap (a small
+	// fixed slack for any per-sheet marker stream), far below the input count.
+	if len(out) > lowCap+2 {
+		t.Errorf("effort formula cap not honoured: got %d streams, low cap %d", len(out), lowCap)
+	}
+	if len(out) >= nFormulas {
+		t.Errorf("low-effort cap failed to shed: got %d, input %d", len(out), nFormulas)
+	}
+}
+
+// TestOptionsXLMCapClamp proves the effort dial can only SHED: an Options
+// value above the package ceiling is clamped down, never raising the bound.
+func TestOptionsXLMCapClamp(t *testing.T) {
+	o := &Options{XLMFoldSheets: maxXLMFoldSheets * 10, XLMFoldFormulas: maxXLMFoldFormulas * 10}
+	if got := o.xlmFoldSheets(); got != maxXLMFoldSheets {
+		t.Errorf("sheet cap not clamped: got %d, ceiling %d", got, maxXLMFoldSheets)
+	}
+	if got := o.xlmFoldFormulas(); got != maxXLMFoldFormulas {
+		t.Errorf("formula cap not clamped: got %d, ceiling %d", got, maxXLMFoldFormulas)
+	}
+	// nil and zero still fall back to the default ceiling.
+	if got := (*Options)(nil).xlmFoldSheets(); got != maxXLMFoldSheets {
+		t.Errorf("nil sheet cap: got %d, want %d", got, maxXLMFoldSheets)
+	}
+	if got := (&Options{}).xlmFoldFormulas(); got != maxXLMFoldFormulas {
+		t.Errorf("zero formula cap: got %d, want %d", got, maxXLMFoldFormulas)
 	}
 }
 
@@ -371,7 +418,7 @@ func TestFromOOXMLXLMFold_Deadline(t *testing.T) {
 	}
 	var out [][]byte
 	past := time.Now().Add(-time.Second)
-	fromOOXMLXLMFold(zr, &out, past)
+	fromOOXMLXLMFold(zr, &out, past, nil)
 	if len(out) != 0 {
 		t.Errorf("expired deadline: expected 0 streams, got %d", len(out))
 	}
@@ -388,7 +435,7 @@ func TestFromOOXMLXLMFold_TooLongFormula(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 	if len(out) != 0 {
 		t.Errorf("too-long formula not skipped: got %d streams", len(out))
 	}
@@ -451,7 +498,7 @@ func TestFromOOXMLXLMFold_ValueElement(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 
 	joined := bytes.Join(out, []byte("\n"))
 	if !bytes.Contains(joined, []byte("https://evil.com/payload")) {

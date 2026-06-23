@@ -1041,7 +1041,7 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 				return
 			}
 			res.Streams = append(res.Streams, []byte("DEFAULTPW-DECRYPTED"))
-			fromOOXML(plain, res, deadline)
+			fromOOXML(plain, res, deadline, nil)
 			return
 		}
 	} else if (vMajor == 2 || vMajor == 3 || vMajor == 4) && vMinor == 2 {
@@ -1063,7 +1063,7 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 				return
 			}
 			res.Streams = append(res.Streams, []byte("DEFAULTPW-DECRYPTED"))
-			fromOOXML(plain, res, deadline)
+			fromOOXML(plain, res, deadline, nil)
 			return
 		}
 	}

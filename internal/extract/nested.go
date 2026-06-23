@@ -45,7 +45,7 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		// XML would scan ordinary text and invite FPs (mirror the top-level guard);
 		// a plain archive gets member unpacking.
 		if isOfficeZip(data) {
-			fromOOXML(data, res, deadline)
+			fromOOXML(data, res, deadline, nil)
 		} else {
 			fromArchive(data, res, b, depth, deadline)
 		}

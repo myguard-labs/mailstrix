@@ -67,17 +67,21 @@ var xlmDangerousFuncs = []string{
 // appends the non-trivial folded results to *out. Also emits XLM-DANGEROUS-FUNC
 // markers for dangerous XLM function names found in the folded output.
 // Fail-open: any read/parse error silently returns. Bounded; respects deadline.
-func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+// opts carries the per-request sheet/formula caps; nil uses package defaults.
+func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Options) {
 	if expired(deadline) {
 		return
 	}
+
+	sheetCap := opts.xlmFoldSheets()
+	formulaCap := opts.xlmFoldFormulas()
 
 	// Collect macrosheet zip entries.
 	var sheets []*zip.File
 	for _, f := range zr.File {
 		if strings.HasPrefix(f.Name, "xl/macrosheets/") && strings.HasSuffix(f.Name, ".xml") {
 			sheets = append(sheets, f)
-			if len(sheets) >= maxXLMFoldSheets {
+			if len(sheets) >= sheetCap {
 				break
 			}
 		}
@@ -91,14 +95,15 @@ func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		if expired(deadline) || len(*out) >= maxStreams {
 			return
 		}
-		processXLMFoldSheet(sf, out, &totalOutput, deadline)
+		processXLMFoldSheet(sf, out, &totalOutput, deadline, formulaCap)
 	}
 }
 
 // processXLMFoldSheet parses one macrosheet XML, collects cell coordinates,
 // formulas (<f>), and pre-computed values (<v>), then runs the two-pass
 // XLM cell-reference interpreter (XLM-6) before emitting results.
-func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time) {
+// formulaCap limits how many cells are collected (effort-scaled).
+func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int) {
 	if sf.UncompressedSize64 > maxBytesWorkbookXML {
 		return
 	}
@@ -123,7 +128,7 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 		if expired(deadline) || len(*out) >= maxStreams {
 			break // stop collecting, but still interpret+emit what we have
 		}
-		if len(cells) >= maxXLMFoldFormulas {
+		if len(cells) >= formulaCap {
 			break
 		}
 

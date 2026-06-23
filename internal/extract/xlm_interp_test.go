@@ -252,7 +252,7 @@ func TestInterpEndToEndXlsm(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromOOXMLXLMFold(zr, &out, time.Time{})
+	fromOOXMLXLMFold(zr, &out, time.Time{}, nil)
 
 	joined := bytes.Join(out, []byte("\n"))
 	// The EXEC dangerous-func marker must be present regardless of emulator entry order.

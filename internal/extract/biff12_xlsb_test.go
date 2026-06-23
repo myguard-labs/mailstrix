@@ -189,7 +189,7 @@ func foldStreams(t *testing.T, data []byte) [][]byte {
 		t.Fatal(err)
 	}
 	var out [][]byte
-	fromXLSBXLMFold(zr, &out, time.Time{})
+	fromXLSBXLMFold(zr, &out, time.Time{}, nil)
 	return out
 }
 

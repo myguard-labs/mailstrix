@@ -26,10 +26,9 @@ import (
 // decode layers, skips the PDF structural-indicator pass, and skips the
 // URLhaus/MalwareBazaar lookups; the ceiling runs everything at full depth.
 //
-// Not (yet) effort-scaled: the XLM formula/sheet caps — deferred to a follow-up
-// (see TODO EFFORT-4-XLMCAPS); they still read their package constants.
-// The per-libyara-scan wall-clock (scanTimeout) is now effort-scaled (EFFORT-4-SCANTIMEOUT)
-// via EffortProfile.ScanTimeout.
+// As of EFFORT-4-XLMCAPS the XLM formula/sheet caps are wired via
+// EffortProfile.XLMFoldSheets/XLMFoldFormulas. The per-libyara-scan wall-clock
+// (scanTimeout) is effort-scaled (EFFORT-4-SCANTIMEOUT) via EffortProfile.ScanTimeout.
 
 // EffortProfile is the resolved set of caps for one scan's effort level. As of
 // EFFORT-4 the fields are LIVE: ExtractOptions maps DecodeDepth/DecodeIterations/
@@ -57,6 +56,15 @@ type EffortProfile struct {
 	// level. At level 1 it is 50% of the base; at the ceiling it equals the base.
 	// A zero base (no limit) keeps ScanTimeout at 0 (no limit).
 	ScanTimeout time.Duration
+
+	// XLMFoldSheets caps the number of macrosheets scanned per document by the
+	// XLM constant-fold pass. Scaled linearly from 4 at level 1 to 64 at the
+	// ceiling (EFFORT-4-XLMCAPS).
+	XLMFoldSheets int
+	// XLMFoldFormulas caps the number of formulas processed per macrosheet by the
+	// XLM constant-fold pass. Scaled linearly from 256 at level 1 to 4096 at the
+	// ceiling (EFFORT-4-XLMCAPS).
+	XLMFoldFormulas int
 }
 
 // Cap ceilings used by the effort table. fullDecodeDepth mirrors
@@ -68,6 +76,15 @@ const (
 	fullDecodeDepth = 4
 	fullDecodeIters = 256
 	minDecodeIters  = 64 // floor so even level 1 can finish a small worklist
+
+	// XLM fold cap ceilings/floors (EFFORT-4-XLMCAPS). The ceiling values mirror
+	// extract.maxXLMFoldSheets and extract.maxXLMFoldFormulas (package-private
+	// constants; we hardcode the same numbers here so the yarad package doesn't
+	// import internal extract details for a single constant).
+	fullXLMFoldSheets   = 64   // mirrors extract.maxXLMFoldSheets
+	fullXLMFoldFormulas = 4096 // mirrors extract.maxXLMFoldFormulas
+	minXLMFoldSheets    = 4    // low-effort floor
+	minXLMFoldFormulas  = 256  // low-effort floor
 )
 
 // EffortProfileFor maps a resolved effort level to its cap profile (EFFORT-4).
@@ -135,6 +152,17 @@ func EffortProfileFor(level, effortMax int, baseScanTimeout time.Duration) Effor
 		scanTimeout = scaled
 	}
 
+	// XLMFoldSheets/XLMFoldFormulas scale linearly between the min (level 1) and
+	// max (ceiling) floors (EFFORT-4-XLMCAPS). Rounded to the nearest integer.
+	xlmSheets := minXLMFoldSheets + int(frac*float64(fullXLMFoldSheets-minXLMFoldSheets)+0.5)
+	if xlmSheets > fullXLMFoldSheets {
+		xlmSheets = fullXLMFoldSheets
+	}
+	xlmFormulas := minXLMFoldFormulas + int(frac*float64(fullXLMFoldFormulas-minXLMFoldFormulas)+0.5)
+	if xlmFormulas > fullXLMFoldFormulas {
+		xlmFormulas = fullXLMFoldFormulas
+	}
+
 	return EffortProfile{
 		Level:            level,
 		DecodeDepth:      depth,
@@ -142,6 +170,8 @@ func EffortProfileFor(level, effortMax int, baseScanTimeout time.Duration) Effor
 		PDFDeepen:        frac > 0.2,  // skip only the cheapest tier (lowest ~fifth)
 		ReputationFeeds:  frac >= 0.5, // external feeds shed first: upper half only
 		ScanTimeout:      scanTimeout,
+		XLMFoldSheets:    xlmSheets,
+		XLMFoldFormulas:  xlmFormulas,
 	}
 }
 
@@ -166,6 +196,8 @@ func (p EffortProfile) ExtractOptions(deadline time.Time) *extract.Options {
 		DecodeDepth:      p.DecodeDepth,
 		DecodeIterations: p.DecodeIterations,
 		PDFDeepen:        p.PDFDeepen,
+		XLMFoldSheets:    p.XLMFoldSheets,
+		XLMFoldFormulas:  p.XLMFoldFormulas,
 	}
 }
 
