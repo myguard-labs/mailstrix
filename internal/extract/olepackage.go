@@ -66,6 +66,9 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 	}
 	var found bool
 	var total int
+	var emitted int // THIS format's emitted count — must not be confused with the
+	// global len(res.Streams), or a parent that already filled Streams would wrongly
+	// pre-consume this package's per-format budget and suppress its objects.
 	for _, d := range ole.Directory {
 		if d == nil || d.Header.Mse != 2 || d.Header.Size == 0 {
 			continue
@@ -74,7 +77,7 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 			continue
 		}
 		found = true
-		if len(res.Streams) >= maxPackageObjects || total >= maxTotalPackage || expired(deadline) || bud.spent() {
+		if emitted >= maxPackageObjects || len(res.Streams) >= maxStreams || total >= maxTotalPackage || expired(deadline) || bud.spent() {
 			break
 		}
 		b := ole.GetStream(d.Index)
@@ -89,6 +92,7 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 		res.Streams = append(res.Streams, payload)
 		res.IsOLEPackage = true
 		total += len(data)
+		emitted++
 		// Charge the shared nested-carrier budget, then crack the dropped file's
 		// own carrier layer if it is one (depth+1). See nested.go.
 		bud.members++

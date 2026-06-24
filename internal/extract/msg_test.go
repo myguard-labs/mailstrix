@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"testing"
 	"time"
+
+	"www.velocidex.com/golang/oleparse"
 )
 
 // cfbEntry is one directory entry for buildCFB: a named storage (mse=1) or
@@ -196,6 +198,42 @@ func TestExtractMSGAttachment(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("attachment data stream not surfaced; got %d streams", len(res.Streams))
+	}
+}
+
+// Per-format cap regression (audit 2026-06-25): the .msg attachment cap is THIS
+// .msg's own count, not the global len(res.Streams). A .msg carried inside a
+// parent (whose streams already fill res.Streams up to maxMSGAttachments) must
+// still surface its own attachment — before the fix the global comparison
+// pre-consumed the per-format budget and suppressed it.
+func TestFromMSGCapIsLocalNotGlobal(t *testing.T) {
+	marker := []byte("MZ\x90\x00 nested msg attachment payload must still surface")
+	cfb := buildCFB(t, []cfbEntry{
+		{name: "Root Entry", mse: 5},
+		{name: "__properties_version1.0", mse: 2, data: []byte("props blob")},
+		{name: "__attach_version1.0_#00000000", mse: 1},
+		{name: "__substg1.0_3701000D", mse: 2, data: marker},
+	})
+	ole, err := oleparse.NewOLEFile(cfb)
+	if err != nil {
+		t.Fatalf("NewOLEFile: %v", err)
+	}
+	// Simulate a parent that already filled res.Streams to the per-format limit.
+	res := &Result{}
+	for i := 0; i < maxMSGAttachments; i++ {
+		res.Streams = append(res.Streams, []byte("parent stream filler"))
+	}
+	if !fromMSG(ole, res, &archiveBudget{}, 0, time.Time{}) {
+		t.Fatal("fromMSG returned false on a real .msg")
+	}
+	found := false
+	for _, s := range res.Streams {
+		if bytes.Contains(s, []byte("nested msg attachment payload")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("nested .msg attachment suppressed — per-format cap is still global, not local")
 	}
 }
 

@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal"
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
 // budget. It is resolved once per scan from the effort level and threaded to the
@@ -761,6 +761,8 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 	}
 	res.IsMSG = true
 	var total int
+	var emitted int // THIS .msg's attachment count, not the global len(res.Streams)
+	// (a parent stream count must not pre-consume this .msg's per-format budget).
 	for _, d := range ole.Directory {
 		if d == nil || d.Header.Mse != 2 || d.Header.Size == 0 {
 			continue
@@ -769,7 +771,7 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		if n != msgAttachData1 && n != msgAttachData2 {
 			continue
 		}
-		if len(res.Streams) >= maxMSGAttachments || total >= maxTotalMSG || expired(deadline) || bud.spent() {
+		if emitted >= maxMSGAttachments || len(res.Streams) >= maxStreams || total >= maxTotalMSG || expired(deadline) || bud.spent() {
 			break
 		}
 		b := ole.GetStream(d.Index)
@@ -781,6 +783,7 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		}
 		res.Streams = append(res.Streams, b)
 		total += len(b)
+		emitted++
 		// Charge the shared nested-carrier budget so a .msg → carrier fan-out is
 		// bounded together with archive members (see nested.go), then crack the
 		// attachment's own carrier layer if it is one (depth+1: one carrier deeper

@@ -173,7 +173,8 @@ func fromEncodedScript(buf []byte, res *Result, deadline time.Time) {
 		return
 	}
 	rest := buf
-	for len(res.Streams) < maxStreams && len(res.Streams) < maxEncodedScripts && !expired(deadline) {
+	var emitted int // THIS buffer's decoded-block count, not global len(res.Streams)
+	for len(res.Streams) < maxStreams && emitted < maxEncodedScripts && !expired(deadline) {
 		i := bytes.Index(rest, []byte(scriptStart))
 		if i < 0 {
 			break
@@ -193,6 +194,7 @@ func fromEncodedScript(buf []byte, res *Result, deadline time.Time) {
 		if len(clear) > 0 {
 			res.Streams = append(res.Streams, clear)
 			res.EncodedScript = true
+			emitted++
 		}
 		rest = body[end+len(scriptEnd):]
 	}

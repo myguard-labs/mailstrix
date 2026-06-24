@@ -90,8 +90,9 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 	}()
 	res.IsOneNote = true
 	var total int
+	var emitted int // THIS section's embedded-file count, not global len(res.Streams)
 	rest := buf
-	for len(res.Streams) < maxStreams && len(res.Streams) < maxONEFiles && total < maxTotalONE && !expired(deadline) {
+	for len(res.Streams) < maxStreams && emitted < maxONEFiles && total < maxTotalONE && !expired(deadline) {
 		i := bytes.Index(rest, oneFDSOHeaderGUID)
 		if i < 0 {
 			break
@@ -115,6 +116,7 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 			b := append([]byte(nil), data[:n]...)
 			res.Streams = append(res.Streams, b)
 			total += len(b)
+			emitted++
 			// Recurse the embedded file as a child carrier so a nested
 			// zip/pdf/OOXML/OLE2/lnk payload is unpacked, not just raw-scanned.
 			// nil bud (direct fromOneNote callers / tests) → skip recursion, the
