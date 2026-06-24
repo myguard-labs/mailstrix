@@ -75,3 +75,26 @@ rule JS_Dropper_CharCodeArray_ActiveX : javascript dropper heuristic suspicious
         // $dec + WSH primitive already identifies the dropper in linear time.)
         filesize < 16MB and $dec and $ax and ($run or $ws)
 }
+
+rule JS_Dropper_XorArray_ActiveX : javascript dropper heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "JS XOR-array dropper: int-array decoded via fromCharCode(arr[i] ^ key.charCodeAt(i % len)) to rebuild ActiveXObject at runtime"
+        reference   = "MalwareBazaar live .js corpus 2026 (a630ae17… 0-hit miss)"
+        score       = "65"
+    strings:
+        // the XOR-decode mechanic: fromCharCode(arr[i] ^ key.charCodeAt(...)).
+        // Distinct from the additive variant above (n - K + 256) % 256 — this
+        // family XORs each array element against a rolling key char. Idents and
+        // the optional space around `^` are length-bounded so the regex stays
+        // linear (no #174/#177 catastrophic-backtracking class). `ascii wide`
+        // because these droppers ship UTF-16LE as often as ASCII.
+        $xor = /String\.fromCharCode\([a-zA-Z_$][\w$]{0,40}\[[a-zA-Z_$][\w$]{0,40}\] ?\^ ?[a-zA-Z_$][\w$]{0,40}\.charCodeAt\(/ ascii wide nocase
+        // runtime WSH primitive the decoded names resolve to
+        $ax  = "ActiveXObject" ascii wide nocase
+    condition:
+        // the XOR-decode mechanic plus the WSH object primitive — benign JS does
+        // not reconstruct ActiveXObject names through an XOR-array decoder.
+        filesize < 16MB and $xor and $ax
+}

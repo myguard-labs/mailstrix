@@ -41,6 +41,7 @@ func TestJSObfuscationRule_Present(t *testing.T) {
 	for _, want := range []string{
 		"rule JS_Obfusc_StringConcat_Accumulate",
 		"rule JS_Dropper_CharCodeArray_ActiveX",
+		"rule JS_Dropper_XorArray_ActiveX",
 	} {
 		if !bytes.Contains(data, []byte(want)) {
 			t.Errorf("js_obfuscation.yara missing %q", want)
@@ -56,6 +57,8 @@ func TestJSObfuscationRule_Anchors(t *testing.T) {
 		"String.fromCharCode", // additive-decode mechanic (rule B)
 		"ActiveXObject",       // WSH primitive (rule B)
 		"this.",               // self-concat shape (rule A)
+		".charCodeAt(",        // XOR-decode key access (rule C)
+		`\^`,                  // XOR operator in the decode mechanic (rule C)
 	} {
 		if !bytes.Contains(data, []byte(anchor)) {
 			t.Errorf("js_obfuscation.yara missing anchor %q", anchor)
