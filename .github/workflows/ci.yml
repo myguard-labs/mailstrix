@@ -355,11 +355,16 @@ jobs:
           done
           [ "$(docker inspect -f '{{.State.Health.Status}}' yuf)" = healthy ] || { docker logs yuf; exit 1; }
 
-          # Positive: synthetic body with USERFORM-STRINGS marker + powershell — must fire.
-          # Built at runtime — no real maldoc shipped.
-          v=$(printf 'USERFORM-STRINGS\npowershell -nop -w hidden -enc ABCDEF\n')
-          match=$(printf '%s' "$v" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18090/scan)
-          echo "match: $match"; grep -q Maldoc_UserForm_Payload <<<"$match"
+          # Phase 2b: Maldoc_UserForm_Payload is now `: marker`-tagged. It fires
+          # ONLY on the out-of-band Markers channel — when the extractor carves
+          # UserForm strings and co-locates them with the marker in one buffer.
+          # Adversarial: a RAW body planting the marker literal + an IOC must NOT
+          # fire (marker-tagged hits are rejected on raw/content — zero-FP by
+          # construction). The firing path is covered by the Go extract tests and
+          # the doc-properties end-to-end smoke below (same Markers-channel
+          # mechanism); a real OLE UserForm container is impractical to build here.
+          adv=$(printf 'USERFORM-STRINGS\npowershell -nop -w hidden -enc ABCDEF\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18090/scan)
+          echo "adv: $adv"; [ "$adv" = '{"matches":[]}' ]
 
           # Negative: plain body with no marker must NOT fire.
           clean=$(printf 'just a plain document body\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18090/scan)
@@ -378,11 +383,29 @@ jobs:
           done
           [ "$(docker inspect -f '{{.State.Health.Status}}' ydp)" = healthy ] || { docker logs ydp; exit 1; }
 
-          # Positive: synthetic body with DOCPROPS-STRINGS marker + powershell -- must fire.
-          # Built at runtime -- no real maldoc shipped.
-          v=$(printf 'DOCPROPS-STRINGS\npowershell -nop -w hidden -enc ABCDEF\n')
-          match=$(printf '%s' "$v" | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18091/scan)
+          # Phase 2b POSITIVE (real end-to-end): build a genuine OOXML doc whose
+          # docProps/core.xml hides a C2 URL. The extractor carves it, co-locates
+          # it with the DOCPROPS-STRINGS marker in ONE buffer, and routes that to
+          # the out-of-band Markers channel where the (: marker)-tagged
+          # Maldoc_DocProps_Payload rule fires.
+          python3 - <<'PY'
+          import zipfile
+          core = ('<?xml version="1.0"?><cp:coreProperties '
+                  'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties">'
+                  '<dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">http://evil.example/c2</dc:title>'
+                  '</cp:coreProperties>')
+          with zipfile.ZipFile('/tmp/s.docx', 'w') as z:
+              z.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+              z.writestr('docProps/core.xml', core)
+          PY
+          fn=$(printf 's.docx' | base64 -w0)
+          match=$(curl -s -H "X-YARAD-Token: ci" -H "X-YARAD-Filename: $fn" --data-binary @/tmp/s.docx http://127.0.0.1:18091/scan)
           echo "match: $match"; grep -q Maldoc_DocProps_Payload <<<"$match"
+
+          # Adversarial: a RAW body planting the marker literal + IOC must NOT fire
+          # (marker-tagged hits rejected on raw/content — zero-FP by construction).
+          adv=$(printf 'DOCPROPS-STRINGS\npowershell -nop -w hidden -enc ABCDEF\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18091/scan)
+          echo "adv: $adv"; [ "$adv" = '{"matches":[]}' ]
 
           # Negative: plain body with no marker must NOT fire.
           clean=$(printf 'just a plain document body\n' | curl -s -H "X-YARAD-Token: ci" --data-binary @- http://127.0.0.1:18091/scan)
