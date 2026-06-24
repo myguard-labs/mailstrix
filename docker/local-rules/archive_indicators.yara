@@ -20,3 +20,17 @@ rule Archive_Encrypted : archive evasion heuristic suspicious marker
     condition:
         filesize < 16MB and $marker
 }
+
+rule Polyglot_PE_ZIP : polyglot evasion heuristic malware marker
+{
+    meta:
+        author      = "yarad"
+        description = "File-type confusion: buffer is simultaneously a valid PE image and a valid ZIP (gateway parses ZIP, endpoint runs PE)"
+        reference   = "https://attack.mitre.org/techniques/T1027/001/"
+        tier        = "malware"
+        score       = "90"
+    strings:
+        $marker = "POLYGLOT-PE-ZIP" ascii
+    condition:
+        filesize < 16MB and $marker
+}

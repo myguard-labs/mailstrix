@@ -36,6 +36,7 @@ var pureMarkerLiterals = map[string]struct{}{
 	"HTML-SMUGGLING-DATAURI": {}, // html.go
 	"SVG-SCRIPT":             {}, // html.go
 	"ARCHIVE-ENCRYPTED":      {}, // archive.go
+	"POLYGLOT-PE-ZIP":        {}, // polyglot.go
 }
 
 // msdDeepDecodePrefix is the PURE marker emitted by the static-decode pass; the
