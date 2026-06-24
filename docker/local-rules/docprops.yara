@@ -7,7 +7,7 @@ rule Maldoc_DocProps_Payload
 
     strings:
         $marker  = "DOCPROPS-STRINGS"
-        $url     = /https?:\/\/[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}/
+        $url     = /https?:\/\/[a-zA-Z0-9\-\.]{1,253}\.[a-zA-Z]{2,24}/
         $cmd     = "cmd.exe" nocase
         $ps      = "powershell" nocase
         $wscript = "wscript" nocase
