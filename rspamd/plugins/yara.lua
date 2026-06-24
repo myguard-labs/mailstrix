@@ -230,6 +230,21 @@ end
 -- tunable here (retuning needs only an rspamd reload, no yarad rebuild). The
 -- strongest signal wins; anything unrecognised falls back to the default symbol.
 local function classify(m)
+  -- Authoritative override: a rule may self-declare its scoring tier via
+  -- meta.tier ("malware"/"exploit"/"phishing"/"suspicious"). Honour it first so
+  -- yarad's own marker/heuristic rules classify deterministically instead of
+  -- being keyword-guessed from the rule name below (a LOLBin download-execute
+  -- hit, for example, otherwise falls through to the generic YARA symbol).
+  -- Read settings.symbol_* at call time so config overrides are respected.
+  -- Rules with no meta.tier are unaffected: behaviour is identical for them.
+  if type(m.meta) == "table" and m.meta.tier then
+    local t = string.lower(m.meta.tier)
+    if t == "malware" then return settings.symbol_malware end
+    if t == "exploit" then return settings.symbol_exploit end
+    if t == "phishing" then return settings.symbol_phishing end
+    if t == "suspicious" then return settings.symbol_suspicious end
+    -- "info"/"default"/unknown → fall through to the heuristic + meta.score.
+  end
   local hay = string.lower((m.rule or "") .. " " .. (m.namespace or ""))
   if type(m.tags) == "table" then
     hay = hay .. " " .. string.lower(table.concat(m.tags, " "))
@@ -365,6 +380,18 @@ local function check_cb(task)
             local opt = m.rule
             if m.namespace and m.namespace ~= "" then
               opt = m.rule .. " (" .. m.namespace .. ")"
+            end
+            -- Explainability: for yarad's own marker/heuristic rules
+            -- (meta.author=="yarad"), append the human description so the symbol
+            -- option in rspamd history says WHY it fired ("Living-off-the-land
+            -- binary invoked with a download/execute argument") instead of only a
+            -- rule name. Bounded so a long description can't bloat the option.
+            -- Restricted to yarad rules: baked-corpus descriptions are noisy/huge.
+            if type(m.meta) == "table" and m.meta.author == "yarad"
+              and type(m.meta.description) == "string" and m.meta.description ~= "" then
+              local d = m.meta.description
+              if #d > 80 then d = d:sub(1, 77) .. "..." end
+              opt = opt .. ": " .. d
             end
             -- Dedup key is namespace+rule, NOT rule alone: a scanner match's
             -- identity is (namespace, rule), so two same-named rules shipped by
