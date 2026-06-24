@@ -86,3 +86,16 @@ func TestJSObfuscationRule_WideForUTF16(t *testing.T) {
 		t.Error("JS_Dropper_CharCodeArray_ActiveX must use `wide` (UTF-16LE samples) — none found")
 	}
 }
+
+func TestJSObfuscationRule_NoCatastrophicQuantifier(t *testing.T) {
+	// A `$blob` regex with nested unbounded quantifiers — `([A-Za-z0-9]*d{6,}
+	// [A-Za-z0-9]*"\s*\+\s*){3,}` — caused catastrophic backtracking (~100s on
+	// the 8.86MB UTF-16 dropper), blowing scan_timeout so the file fail-opened
+	// and the dropper was MISSED. The construct was removed; guard against any
+	// nested `){N,}` quantifier creeping back into a string regex.
+	for _, bad := range [][]byte{[]byte("){3,}"), []byte("){2,}"), []byte("){4,}")} {
+		if bytes.Contains(loadJSObfuscationRule(t), bad) {
+			t.Errorf("js_obfuscation.yara contains nested quantifier %q — catastrophic-backtracking risk", bad)
+		}
+	}
+}

@@ -66,11 +66,12 @@ rule JS_Dropper_CharCodeArray_ActiveX : javascript dropper heuristic suspicious
         $ax  = "ActiveXObject" ascii wide nocase
         $run = /\.Run\(/ ascii wide nocase
         $ws  = "WScript" ascii wide nocase
-        // big homoglyph-style char blob: long runs of `dd` chunks concatenated
-        $blob = /("[A-Za-z0-9]*d{6,}[A-Za-z0-9]*"\s*\+\s*){3,}/ ascii wide
     condition:
-        // the decode mechanic plus at least one WSH execution primitive, OR the
-        // decode mechanic plus the giant concat blob (payload carrier). Either
-        // combination is well outside benign-JS territory.
-        filesize < 16MB and $dec and (($ax and ($run or $ws)) or $blob)
+        // the additive-decode mechanic plus at least one WSH execution primitive
+        // — well outside benign-JS territory. (An earlier `$blob` regex matching
+        // the giant "dddd..."+ concat carrier was REMOVED: its nested unbounded
+        // quantifiers caused catastrophic backtracking — ~100s on the 8.86MB
+        // UTF-16 sample — which blew the scan_timeout and fail-opened the file.
+        // $dec + WSH primitive already identifies the dropper in linear time.)
+        filesize < 16MB and $dec and $ax and ($run or $ws)
 }
