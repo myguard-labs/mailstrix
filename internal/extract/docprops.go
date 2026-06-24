@@ -206,16 +206,17 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		return
 	}
 
-	// Emit marker first so YARA rules can anchor on it.
-	if len(*out) >= maxStreams {
-		return
-	}
-	*out = append(*out, []byte(docPropsMarker))
+	// Emit each carved string individually so generic content rules see them,
+	// then ONE combined "DOCPROPS-STRINGS\n<carved>" buffer routed to the Markers
+	// channel for the marker-tagged Maldoc_DocProps_Payload rule (Phase 2b).
 	for _, s := range carved {
 		if len(*out) >= maxStreams {
 			break
 		}
 		*out = append(*out, s)
+	}
+	if len(*out) < maxStreams {
+		*out = append(*out, joinMarkerPayload(docPropsMarker, carved))
 	}
 }
 
@@ -275,14 +276,18 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		return
 	}
 
-	// Emit marker first.
+	// Emit each carved string individually (generic content rules), then ONE
+	// combined "DOCPROPS-STRINGS\n<carved>" buffer routed to the Markers channel
+	// for the marker-tagged Maldoc_DocProps_Payload rule (Phase 2b).
 	res.HasDocProps = true
-	res.Streams = append(res.Streams, []byte(docPropsMarker))
 	for _, s := range carved {
 		if len(res.Streams) >= maxStreams {
 			break
 		}
 		res.Streams = append(res.Streams, s)
+	}
+	if len(res.Streams) < maxStreams {
+		res.Streams = append(res.Streams, joinMarkerPayload(docPropsMarker, carved))
 	}
 }
 
@@ -364,10 +369,12 @@ func docSecurityFlags(data []byte) (uint32, bool) {
 // document-property strings are found. Used in tests.
 const docPropsMarker = "DOCPROPS-STRINGS"
 
-// hasDocPropsMarker reports whether any stream in streams is the docprops marker.
+// hasDocPropsMarker reports whether any stream carries the docprops marker —
+// either the bare literal or the combined "DOCPROPS-STRINGS\n<carved>" buffer
+// (Phase 2b), so it matches on a HasPrefix.
 func hasDocPropsMarker(streams [][]byte) bool {
 	for _, s := range streams {
-		if bytes.Equal(s, []byte(docPropsMarker)) {
+		if bytes.HasPrefix(s, []byte(docPropsMarker)) {
 			return true
 		}
 	}

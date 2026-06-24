@@ -38,10 +38,36 @@ var pureMarkerLiterals = map[string]struct{}{
 // trailing "depth=N" is a yarad-derived integer, not attacker bytes.
 const msdDeepDecodePrefix = "MSD-DEEPDECODE depth="
 
-// pureMarkerPrefixes are PURE markers of the form <yarad-literal><yarad-number>.
+// pureMarkerPrefixes are PURE markers of the form <yarad-literal><yarad-number>
+// or <yarad-literal>\n<carved payload> (the DocProps/UserForm combined buffer —
+// the literal is yarad-synthetic; the carved tail is real content the consuming
+// marker-tagged rule needs co-located, see joinMarkerPayload + Phase 2b).
 var pureMarkerPrefixes = []string{
 	msdDeepDecodePrefix,   // decode.go
 	oleDocSecMarkerPrefix, // docprops.go ("OLE-DOC-SECURITY-")
+	docPropsMarker + "\n", // docprops.go combined buffer
+	userFormMarker + "\n", // userform.go combined buffer
+}
+
+// joinMarkerPayload builds a single buffer "<marker>\n<carved...>" so a YARA
+// rule that needs the marker AND a carved IOC co-located in one buffer (e.g.
+// Maldoc_DocProps_Payload: `$marker and any of ($url,...)`) can match. yarad
+// emits the marker and carved strings as separate Streams entries (each scanned
+// independently), so such conjunctions were structurally dead until Phase 2b.
+// The buffer is prefixed by the marker literal so splitPureMarkers routes it to
+// the out-of-band Markers channel, where the (: marker)-tagged rule fires.
+func joinMarkerPayload(marker string, carved [][]byte) []byte {
+	n := len(marker)
+	for _, c := range carved {
+		n += 1 + len(c)
+	}
+	b := make([]byte, 0, n)
+	b = append(b, marker...)
+	for _, c := range carved {
+		b = append(b, '\n')
+		b = append(b, c...)
+	}
+	return b
 }
 
 // isPureMarker reports whether s is a yarad-emitted PURE marker entry.

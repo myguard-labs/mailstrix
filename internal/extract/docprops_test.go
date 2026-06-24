@@ -55,6 +55,59 @@ func TestDocPropsXMLTextExtraction(t *testing.T) {
 	}
 }
 
+// TestDocPropsCombinedBufferCoLocatesMarkerAndIOC pins the Phase 2b fix end to
+// end: the DOCPROPS-STRINGS marker and a carved IOC land in ONE buffer (so
+// Maldoc_DocProps_Payload `$marker and any of($url,...)` can match) and that
+// buffer routes to the out-of-band Markers channel.
+func TestDocPropsCombinedBufferCoLocatesMarkerAndIOC(t *testing.T) {
+	url := "http://evil.example/c2"
+	coreXML := `<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">` + url + `</dc:title></cp:coreProperties>`
+	zr := makeTestZip(t, map[string]string{"docProps/core.xml": coreXML})
+
+	var out [][]byte
+	fromOOXMLDocProps(zr, &out, time.Time{})
+
+	var combined []byte
+	for _, s := range out {
+		if bytes.HasPrefix(s, []byte(docPropsMarker)) {
+			combined = s
+			break
+		}
+	}
+	if combined == nil {
+		t.Fatal("no combined DOCPROPS-STRINGS buffer emitted")
+	}
+	if !bytes.Contains(combined, []byte(url)) {
+		t.Fatalf("combined buffer missing IOC %q: %q", url, combined)
+	}
+
+	content, markers, _ := splitPureMarkers(out)
+	routed := false
+	for _, m := range markers {
+		if bytes.Equal(m, combined) {
+			routed = true
+		}
+	}
+	if !routed {
+		t.Fatal("combined buffer not routed to Markers channel")
+	}
+	for _, c := range content {
+		if bytes.HasPrefix(c, []byte(docPropsMarker)) {
+			t.Fatalf("combined buffer leaked into content: %q", c)
+		}
+	}
+	// The individual carved string still lives in content for generic rules.
+	indiv := false
+	for _, c := range content {
+		if bytes.Equal(c, []byte(url)) {
+			indiv = true
+		}
+	}
+	if !indiv {
+		t.Fatal("individual carved IOC missing from content channel")
+	}
+}
+
 // TestDocPropsDocVarExtraction verifies that fromOOXMLDocProps extracts
 // w:docVar/@w:val attribute values from word/settings.xml.
 func TestDocPropsDocVarExtraction(t *testing.T) {

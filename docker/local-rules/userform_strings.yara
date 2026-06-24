@@ -1,4 +1,4 @@
-rule Maldoc_UserForm_Payload
+rule Maldoc_UserForm_Payload : marker
 {
     meta:
         description = "Suspicious strings hidden in VBA UserForm control data"

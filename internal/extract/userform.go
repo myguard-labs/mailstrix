@@ -187,13 +187,19 @@ func fromUserForms(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		return
 	}
 
-	// Emit the marker first so YARA rules can anchor on it.
-	res.Streams = append(res.Streams, []byte("USERFORM-STRINGS"))
+	// Emit each carved string individually so generic content rules see them
+	// (URL/keyword rules etc.). Then emit ONE combined "USERFORM-STRINGS\n<carved>"
+	// buffer — splitPureMarkers routes it to the Markers channel, where the
+	// marker-tagged Maldoc_UserForm_Payload rule needs the marker AND a carved IOC
+	// co-located (Phase 2b; previously dead — separate entries never matched).
 	for _, s := range carved {
 		if len(res.Streams) >= maxStreams {
 			break
 		}
 		res.Streams = append(res.Streams, s)
+	}
+	if len(res.Streams) < maxStreams {
+		res.Streams = append(res.Streams, joinMarkerPayload(userFormMarker, carved))
 	}
 }
 
@@ -201,10 +207,12 @@ func fromUserForms(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 // UserForm strings are found. Used in tests.
 const userFormMarker = "USERFORM-STRINGS"
 
-// hasUserFormMarker reports whether any stream in streams is the UserForm marker.
+// hasUserFormMarker reports whether any stream carries the UserForm marker —
+// either the bare literal or the combined "USERFORM-STRINGS\n<carved>" buffer
+// (Phase 2b), so it matches on a HasPrefix.
 func hasUserFormMarker(streams [][]byte) bool {
 	for _, s := range streams {
-		if bytes.Equal(s, []byte(userFormMarker)) {
+		if bytes.HasPrefix(s, []byte(userFormMarker)) {
 			return true
 		}
 	}

@@ -1,4 +1,4 @@
-rule Maldoc_DocProps_Payload
+rule Maldoc_DocProps_Payload : marker
 {
     meta:
         description = "Suspicious strings hidden in document properties or custom XML"

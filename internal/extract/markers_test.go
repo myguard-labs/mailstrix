@@ -81,6 +81,56 @@ func TestSplitPureMarkers_Partition(t *testing.T) {
 	}
 }
 
+// TestJoinMarkerPayload_CoLocateAndRoute pins the Phase 2b fix: a combined
+// "<marker>\n<carved...>" buffer co-locates the marker literal with each carved
+// IOC (so a `$marker and $ioc` rule can match in ONE buffer) AND routes to the
+// out-of-band Markers channel via the marker prefix, never staying in content.
+func TestJoinMarkerPayload_CoLocateAndRoute(t *testing.T) {
+	for _, marker := range []string{docPropsMarker, userFormMarker} {
+		carved := [][]byte{
+			[]byte("http://evil.example/c2"),
+			[]byte("powershell -enc AAA"),
+		}
+		buf := joinMarkerPayload(marker, carved)
+
+		if !bytes.HasPrefix(buf, []byte(marker)) {
+			t.Fatalf("%s: buffer missing marker prefix: %q", marker, buf)
+		}
+		for _, c := range carved {
+			if !bytes.Contains(buf, c) {
+				t.Fatalf("%s: buffer missing carved IOC %q: %q", marker, c, buf)
+			}
+		}
+		if !isPureMarker(buf) {
+			t.Fatalf("%s: combined buffer not recognised as a marker", marker)
+		}
+
+		content, markers, _ := splitPureMarkers([][]byte{
+			[]byte("real content no marker"), buf,
+		})
+		if len(markers) != 1 || !bytes.Equal(markers[0], buf) {
+			t.Fatalf("%s: combined buffer not routed to Markers: %v", marker, markers)
+		}
+		for _, c := range content {
+			if bytes.HasPrefix(c, []byte(marker)) {
+				t.Fatalf("%s: combined buffer leaked into content: %q", marker, c)
+			}
+		}
+	}
+}
+
+// TestJoinMarkerPayload_Empty: no carved strings → bare marker literal, still a
+// pure marker (routes to the channel; just carries no IOC so the rule won't fire).
+func TestJoinMarkerPayload_Empty(t *testing.T) {
+	buf := joinMarkerPayload(docPropsMarker, nil)
+	if !bytes.Equal(buf, []byte(docPropsMarker)) {
+		t.Fatalf("empty carved: want bare %q, got %q", docPropsMarker, buf)
+	}
+	if !isPureMarker(buf) {
+		t.Fatal("bare marker not recognised as pure marker")
+	}
+}
+
 // TestSplitPureMarkers_Empty: nil/empty input yields nil slices, no panic.
 func TestSplitPureMarkers_Empty(t *testing.T) {
 	content, markers, n := splitPureMarkers(nil)
