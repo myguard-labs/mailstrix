@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -253,6 +254,32 @@ func TestMetricsAuth(t *testing.T) {
 	}
 	if w := get(s, "/ready"); w.Code != http.StatusOK {
 		t.Errorf("ready must stay open under metrics auth: %d", w.Code)
+	}
+}
+
+// TestProcRSSMiB: on Linux the running test process always has a non-trivial
+// resident set, so the reader must return a positive MiB value.
+func TestProcRSSMiB(t *testing.T) {
+	if rss := procRSSMiB(); rss <= 0 {
+		t.Fatalf("procRSSMiB() = %d MiB; want > 0 for the running process", rss)
+	}
+}
+
+// TestLogStartupFoldsRSS: the startup memory estimate must add resident RSS
+// (rules + mbazaar feed) to the request-buffer term, not report buffers alone.
+// Drive logStartup with a huge MaxInflight×MaxBody so the buffer term dominates,
+// and assert the info line reports the folded RSS+buffers form.
+func TestLogStartupFoldsRSS(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1}, "tok")
+	s.cfg.MaxInflight = 8
+	s.cfg.MaxBody = 32 << 20 // 256 MiB of buffers
+	var info bytes.Buffer
+	s.info = log.New(&info, "", 0)
+	s.errl = log.New(io.Discard, "", 0)
+	s.logStartup("127.0.0.1:0")
+	out := info.String()
+	if !strings.Contains(out, "RSS=") || !strings.Contains(out, "est. peak memory") {
+		t.Fatalf("startup line did not fold RSS into peak estimate:\n%s", out)
 	}
 }
 

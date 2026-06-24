@@ -179,17 +179,29 @@ func (s *Server) logStartup(addr string) {
 	// container limit — with MAX_CONCURRENT=auto (CPU count) a many-core host can
 	// reserve far more buffer memory than a small mem_limit allows (memory != rule
 	// count). When the cgroup memory limit is known, warn if the buffers alone
-	// would take more than half of it (leaving no room for rules RSS + GC + burst).
+	// would exceed 3/4 of it (leaving room for GC headroom + burst); the estimate
+	// now includes rules+feed RSS, so it is the full resident peak, not buffers only.
 	// In-flight buffers are bounded by the admission gate (MaxInflight), not the
 	// scan gate, so size the estimate on that.
-	peakMiB := (int64(s.cfg.MaxInflight) * s.cfg.MaxBody) >> 20
-	s.logf("est. peak request-buffer memory ~%d MiB (max_inflight=%d × max_body=%d MiB) on top of rules RSS",
-		peakMiB, s.cfg.MaxInflight, s.cfg.MaxBody>>20)
-	if limitMiB := cgroupMemLimitMiB(); limitMiB > 0 && peakMiB > limitMiB/2 {
-		s.errf("WARNING: request buffers alone (~%d MiB) exceed half the %d MiB container memory limit; lower YARAD_MAX_INFLIGHT/YARAD_MAX_CONCURRENT or YARAD_MAX_BODY, or raise mem_limit",
-			peakMiB, limitMiB)
+	bufMiB := (int64(s.cfg.MaxInflight) * s.cfg.MaxBody) >> 20
+	// RSS at startup already holds the loaded rules + mbazaar feed (both built
+	// before ListenAndServe), so it captures the two terms the buffers-only
+	// estimate omits. peakMiB = resident base + worst-case request buffers; when
+	// RSS is unknown (0) fall back to buffers alone.
+	rssMiB := procRSSMiB()
+	peakMiB := bufMiB + rssMiB
+	if rssMiB > 0 {
+		s.logf("est. peak memory ~%d MiB (rules+feed RSS=%d MiB + max_inflight=%d × max_body=%d MiB buffers)",
+			peakMiB, rssMiB, s.cfg.MaxInflight, s.cfg.MaxBody>>20)
+	} else {
+		s.logf("est. peak request-buffer memory ~%d MiB (max_inflight=%d × max_body=%d MiB) on top of rules RSS",
+			bufMiB, s.cfg.MaxInflight, s.cfg.MaxBody>>20)
+	}
+	if limitMiB := cgroupMemLimitMiB(); limitMiB > 0 && peakMiB > (limitMiB*3)/4 {
+		s.errf("WARNING: est. peak memory (~%d MiB: %d MiB RSS + %d MiB buffers) exceeds 3/4 of the %d MiB container limit; lower YARAD_MAX_INFLIGHT/YARAD_MAX_CONCURRENT or YARAD_MAX_BODY, or raise mem_limit",
+			peakMiB, rssMiB, bufMiB, limitMiB)
 	} else if limitMiB == 0 && peakMiB > 512 {
-		s.errf("WARNING: max_inflight × max_body alone is ~%d MiB of buffers; lower YARAD_MAX_INFLIGHT or YARAD_MAX_BODY", peakMiB)
+		s.errf("WARNING: est. peak memory ~%d MiB (%d MiB RSS + %d MiB buffers); lower YARAD_MAX_INFLIGHT/YARAD_MAX_BODY or set a container mem_limit", peakMiB, rssMiB, bufMiB)
 	}
 	if quota := cgroupCPUQuota(); quota > 0 && float64(s.cfg.MaxConcurrent) > quota*1.5 {
 		s.errf("WARNING: max_concurrent=%d but cgroup cpu.max grants only %.1f CPUs; "+
@@ -228,6 +240,28 @@ func cgroupMemLimitMiB() int64 {
 		return n >> 20
 	}
 	return 0
+}
+
+// procRSSMiB returns this process's resident set size in MiB read from
+// /proc/self/statm (field 2 = resident pages × page size), or 0 if it can't be
+// read or parsed. Called once at startup AFTER the rule set and mbazaar feed are
+// loaded, so the value already includes rules RSS + feed bytes resident — the two
+// memory terms the buffer-only estimate omits. Best-effort: a 0 means "unknown",
+// and the caller falls back to the buffers-only peak.
+func procRSSMiB() int64 {
+	b, err := os.ReadFile("/proc/self/statm") // #nosec G304 -- fixed proc pseudo-file path
+	if err != nil {
+		return 0
+	}
+	f := strings.Fields(string(b))
+	if len(f) < 2 {
+		return 0
+	}
+	pages, err := strconv.ParseInt(f[1], 10, 64)
+	if err != nil || pages <= 0 {
+		return 0
+	}
+	return (pages * int64(os.Getpagesize())) >> 20
 }
 
 // cgroupCPUQuota returns the cgroup v2 CPU quota in fractional CPUs, or 0 if
