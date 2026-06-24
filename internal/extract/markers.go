@@ -15,23 +15,26 @@ import "bytes"
 // sites (encsig.go, oleid.go, userform.go, docprops.go, ppt.go, rtf.go,
 // xlm.go, defaultpw.go).
 var pureMarkerLiterals = map[string]struct{}{
-	"USERFORM-STRINGS":    {}, // userform.go
-	"DOCPROPS-STRINGS":    {}, // docprops.go
-	"OLEID-OBJECTPOOL":    {}, // oleid.go
-	"OLEID-FLASH":         {}, // oleid.go
-	"OLEID-VBA-PRESENT":   {}, // extract.go appendOLEIDMarker
-	"OLEID-EXTREL":        {}, // extract.go appendOLEIDMarker
-	"OLEID-DDE":           {}, // extract.go appendOLEIDMarker
-	"OLEID-XLM-PRESENT":   {}, // extract.go appendOLEIDMarker
-	"PPT-VBA-EXTRACTED":   {}, // ppt.go
-	"RTF-OBJUPDATE":       {}, // rtf.go
-	"DEFAULTPW-DECRYPTED": {}, // defaultpw.go
-	"DIGITAL-SIGNATURE":   {}, // encsig.go
-	"ENCRYPTION-AES":      {}, // encsig.go
-	"ENCRYPTION-RC4":      {}, // encsig.go
-	"ENCRYPTION-XOR":      {}, // encsig.go
-	"XLM-AUTO-OPEN":       {}, // xlm.go
-	"XLM-AUTO-CLOSE":      {}, // xlm.go
+	"USERFORM-STRINGS":       {}, // userform.go
+	"DOCPROPS-STRINGS":       {}, // docprops.go
+	"OLEID-OBJECTPOOL":       {}, // oleid.go
+	"OLEID-FLASH":            {}, // oleid.go
+	"OLEID-VBA-PRESENT":      {}, // extract.go appendOLEIDMarker
+	"OLEID-EXTREL":           {}, // extract.go appendOLEIDMarker
+	"OLEID-DDE":              {}, // extract.go appendOLEIDMarker
+	"OLEID-XLM-PRESENT":      {}, // extract.go appendOLEIDMarker
+	"PPT-VBA-EXTRACTED":      {}, // ppt.go
+	"RTF-OBJUPDATE":          {}, // rtf.go
+	"DEFAULTPW-DECRYPTED":    {}, // defaultpw.go
+	"DIGITAL-SIGNATURE":      {}, // encsig.go
+	"ENCRYPTION-AES":         {}, // encsig.go
+	"ENCRYPTION-RC4":         {}, // encsig.go
+	"ENCRYPTION-XOR":         {}, // encsig.go
+	"XLM-AUTO-OPEN":          {}, // xlm.go
+	"XLM-AUTO-CLOSE":         {}, // xlm.go
+	"HTML-SMUGGLING-BLOB":    {}, // html.go
+	"HTML-SMUGGLING-DATAURI": {}, // html.go
+	"SVG-SCRIPT":             {}, // html.go
 }
 
 // msdDeepDecodePrefix is the PURE marker emitted by the static-decode pass; the
