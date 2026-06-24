@@ -439,6 +439,13 @@ func DecompressStream(compressed_container []byte) []byte {
 	compressed_current += 1
 
 	for compressed_current < len(compressed_container) {
+		if len(decompressed_container) >= MAX_DECOMPRESSED {
+			// Decompression-bomb guard: a chunk grows the output by at most
+			// 4096 bytes, so overshoot past the cap is bounded. Return what we
+			// have (fail-open, consistent with the out-of-bound path below).
+			DebugPrintf("decompressed output reached MAX_DECOMPRESSED cap")
+			return decompressed_container
+		}
 		if compressed_current+2 > len(compressed_container) {
 			// At least 2 bytes for the header are needed
 			DebugPrintf("Compressed stream ended prematurely")
@@ -927,6 +934,9 @@ loop:
 	projectmodules_size := getUint32(dir_stream, &i)
 	check_value("PROJECTMODULES_Size", 0x0002, projectmodules_size)
 	projectmodules_count := getUint16(dir_stream, &i)
+	if int(projectmodules_count) > MAX_MODULES {
+		return nil, errors.New("projectmodules_count exceeds MAX_MODULES")
+	}
 	projectmodules_projectcookierecord_id := getUint16(dir_stream, &i)
 
 	check_value("PROJECTMODULES_ProjectCookieRecord_Id", 0x0013, uint32(projectmodules_projectcookierecord_id))
