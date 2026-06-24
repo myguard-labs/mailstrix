@@ -79,6 +79,7 @@ var parityMarkers = map[string]markerKind{
 	"HTML-SMUGGLING-BLOB":    contractMarker, // html_smuggling.yara HTML_Smuggling_Blob
 	"HTML-SMUGGLING-DATAURI": contractMarker, // html_smuggling.yara HTML_Smuggling_DataURI
 	"SVG-SCRIPT":             contractMarker, // html_smuggling.yara SVG_Scripted
+	"ARCHIVE-ENCRYPTED":      contractMarker, // archive_indicators.yara Archive_Encrypted
 	"PDF-OPENACTION-JS":      contractMarker, // pdf_indicators.yara PDF_OpenAction_JS
 	"PDF-AA-ACTION":          contractMarker, // pdf_indicators.yara PDF_Additional_Actions
 	"PDF-LAUNCH":             contractMarker, // pdf_indicators.yara PDF_Launch_Action

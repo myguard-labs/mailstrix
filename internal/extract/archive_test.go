@@ -112,6 +112,88 @@ func buildTarGz(t *testing.T, entries map[string][]byte) []byte {
 	return buildGzip(t, tb.Bytes())
 }
 
+// buildEncryptedZip builds a zip whose single member has the general-purpose
+// "encrypted" flag (bit 0) set. The body is written in the clear (Go's zip
+// writer has no encryptor), which is fine: yarad detects the flag and skips the
+// member BEFORE any Open/decrypt, so this faithfully exercises the detection
+// path without needing a real cipher.
+func buildEncryptedZip(t *testing.T, name string, data []byte) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store, Flags: 0x1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// A password-protected zip member must emit the ARCHIVE-ENCRYPTED marker (a
+// hidden-payload mail tell) and must NOT surface the encrypted bytes as content.
+func TestExtractEncryptedZipFlagged(t *testing.T) {
+	buf := buildEncryptedZip(t, "secret.exe", []byte("MZ encrypted dropper body"))
+	res := Extract(buf, time.Time{})
+	if !res.EncryptedArchive {
+		t.Error("encrypted zip member did not set EncryptedArchive")
+	}
+	if !streamsContain(res, "ARCHIVE-ENCRYPTED") {
+		t.Error("encrypted zip did not emit ARCHIVE-ENCRYPTED marker")
+	}
+	if streamsContain(res, "encrypted dropper body") {
+		t.Error("encrypted member body was surfaced (cannot be — no password)")
+	}
+}
+
+// A clean (unencrypted) zip must NOT be flagged or marked.
+func TestExtractCleanZipNotFlaggedEncrypted(t *testing.T) {
+	buf := buildZip(t, map[string][]byte{"ok.txt": []byte("plain member body")})
+	res := Extract(buf, time.Time{})
+	if res.EncryptedArchive {
+		t.Error("clean zip falsely flagged EncryptedArchive")
+	}
+	if streamsContain(res, "ARCHIVE-ENCRYPTED") {
+		t.Error("clean zip falsely emitted ARCHIVE-ENCRYPTED marker")
+	}
+}
+
+// The marker is emitted at most once even across multiple encrypted members /
+// nested archives, so it stays a signal rather than per-member noise.
+func TestExtractEncryptedMarkerEmittedOnce(t *testing.T) {
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	for _, n := range []string{"a.exe", "b.exe", "c.exe"} {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: n, Method: zip.Store, Flags: 0x1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte("body"))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	res := Extract(b.Bytes(), time.Time{})
+	n := 0
+	for _, s := range res.Streams {
+		if string(s) == "ARCHIVE-ENCRYPTED" {
+			n++
+		}
+	}
+	for _, s := range res.Markers {
+		if string(s) == "ARCHIVE-ENCRYPTED" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("ARCHIVE-ENCRYPTED emitted %d times, want exactly 1", n)
+	}
+}
+
 // streamsContain searches the union of what the scanner scans: real content
 // (res.Streams) plus the out-of-band marker channel (res.Markers, PLAN Phase 1).
 func streamsContain(res Result, needle string) bool {
