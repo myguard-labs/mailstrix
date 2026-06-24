@@ -121,7 +121,18 @@ func cmdExtract(args []string) int {
 		}
 	}
 
-	if len(res.Streams) == 0 {
+	// Out-of-band PURE markers (encrypted-archive, OLEID indicators, …) live in
+	// res.Markers, not res.Streams. Surface them too so a marker-only detection
+	// (e.g. a header-encrypted archive, which carves no content) is visible when
+	// debugging rather than reported as "0 carved / nothing found".
+	if len(res.Markers) > 0 {
+		fmt.Printf("markers:    %d\n", len(res.Markers))
+		for i, m := range res.Markers {
+			fmt.Printf("  [m%d] %s\n", i, string(m))
+		}
+	}
+
+	if len(res.Streams) == 0 && len(res.Markers) == 0 {
 		return 1
 	}
 	return 0
