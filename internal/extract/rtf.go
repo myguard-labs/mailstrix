@@ -376,16 +376,17 @@ func carveRTFObject(blob []byte, res *Result, bud *archiveBudget, depth int, dea
 	// bare Packager form does not. Many \objdata blobs are prefixed with an
 	// OLEStream header before the CFB magic, so search rather than require a prefix.
 	if i := bytes.Index(blob, oleMagic); i >= 0 {
-		if ole, err := oleparse.NewOLEFile(blob[i:]); err == nil {
-			// Reuse the full OLE2 extraction surface: macros, embedded package,
-			// MSI and .msg. Each helper is a no-op when the OLE2 isn't theirs.
-			if mods, err := oleparse.ExtractMacros(ole); err == nil {
-				res.Streams = codes(mods, res.Streams)
-			}
-			fromOLEPackage(ole, res, bud, depth, deadline)
-			if !fromMSG(ole, res, bud, depth, deadline) {
-				fromMSI(ole, res, deadline)
-			}
+		// Route the embedded CFB through the FULL OLE2 surface (fromOLE), not just
+		// macros + package + MSG/MSI: an RTF-embedded OLE2 can equally carry an
+		// OLE2Link/Equation exploit, a default-password-protected BIFF/OOXML, XLM
+		// macrosheets, VBA stomping, doc-property payloads, and the OLEID/oledir/
+		// oletimes indicators. fromOLE re-parses blob[i:] (the canonical OLE2
+		// entry) and dispatches all of them; depth+1 bounds the nesting and the
+		// blob is already charged to bud at function entry. Guard on a valid CFB
+		// first so a false oleMagic hit inside a bare Ole10Native blob still falls
+		// through to the carve below.
+		if _, err := oleparse.NewOLEFile(blob[i:]); err == nil {
+			fromOLE(blob[i:], res, bud, depth+1, deadline)
 			return
 		}
 	}
