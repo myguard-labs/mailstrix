@@ -11,7 +11,7 @@ rule RTF_DDE_Field : maldoc heuristic suspicious {
         and any of ($dde, $ddeauto)
 }
 
-rule RTF_ObjUpdate : maldoc heuristic suspicious {
+rule RTF_ObjUpdate : maldoc heuristic suspicious marker {
     meta:
         description = "RTF document with \\objupdate auto-fetch (CVE-2017-0199 vector)"
         score = 45

@@ -22,7 +22,7 @@
 
   Reference: https://github.com/decalage2/oletools/wiki/oleid
 */
-rule OLEID_ObjectPool : maldoc heuristic suspicious
+rule OLEID_ObjectPool : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -35,7 +35,7 @@ rule OLEID_ObjectPool : maldoc heuristic suspicious
         filesize < 16MB and $marker
 }
 
-rule OLEID_Flash : maldoc heuristic suspicious
+rule OLEID_Flash : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -143,7 +143,7 @@ rule OLETimes_SyntheticStamps : maldoc heuristic suspicious
 
   Reference: https://github.com/decalage2/oletools/wiki/oleid
 */
-rule Encrypted_XOR_Obfuscation : maldoc heuristic suspicious
+rule Encrypted_XOR_Obfuscation : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -164,7 +164,7 @@ rule Encrypted_XOR_Obfuscation : maldoc heuristic suspicious
 // weight comes from the recovered XLM macro markers that follow in the stream.
 // Scored modestly: DEFAULTPW-DECRYPTED alone just means "interesting"; stacked
 // with XLM-HIDDEN-MACROSHEET or XLM-AUTO-OPEN it becomes actionable.
-rule DefaultPW_Decrypted : maldoc heuristic suspicious
+rule DefaultPW_Decrypted : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -177,7 +177,7 @@ rule DefaultPW_Decrypted : maldoc heuristic suspicious
         filesize < 16MB and $marker
 }
 
-rule Encrypted_Document : maldoc heuristic suspicious
+rule Encrypted_Document : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -191,7 +191,7 @@ rule Encrypted_Document : maldoc heuristic suspicious
         filesize < 16MB and any of them
 }
 
-rule Document_DigitalSignature : maldoc heuristic suspicious
+rule Document_DigitalSignature : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -217,7 +217,7 @@ rule Document_DigitalSignature : maldoc heuristic suspicious
 
   Reference: https://learn.microsoft.com/openspecs/office_file_formats/ms-oshared
 */
-rule OLE_Doc_Security : maldoc heuristic suspicious
+rule OLE_Doc_Security : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -230,7 +230,7 @@ rule OLE_Doc_Security : maldoc heuristic suspicious
         filesize < 16MB and $marker
 }
 
-rule PPT_VBA_Macro : maldoc heuristic
+rule PPT_VBA_Macro : maldoc heuristic marker
 {
     meta:
         author      = "yarad"
@@ -255,7 +255,7 @@ rule PPT_VBA_Macro : maldoc heuristic
 
   Reference: https://github.com/decalage2/oletools/wiki/oleid
 */
-rule OLEID_OOXML_VBA_Present : maldoc heuristic suspicious
+rule OLEID_OOXML_VBA_Present : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -268,7 +268,7 @@ rule OLEID_OOXML_VBA_Present : maldoc heuristic suspicious
         filesize < 64MB and $marker
 }
 
-rule OLEID_OOXML_ExternalRel : maldoc heuristic suspicious
+rule OLEID_OOXML_ExternalRel : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -281,7 +281,7 @@ rule OLEID_OOXML_ExternalRel : maldoc heuristic suspicious
         filesize < 64MB and $marker
 }
 
-rule OLEID_OOXML_DDE : maldoc heuristic suspicious
+rule OLEID_OOXML_DDE : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"
@@ -294,7 +294,7 @@ rule OLEID_OOXML_DDE : maldoc heuristic suspicious
         filesize < 64MB and $marker
 }
 
-rule OLEID_OOXML_XLM_Present : maldoc heuristic suspicious
+rule OLEID_OOXML_XLM_Present : maldoc heuristic suspicious marker
 {
     meta:
         author      = "yarad"

@@ -841,6 +841,9 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	if err != nil {
 		return nil, err
 	}
+	// Phase 2 marker-channel: a PURE-marker rule must NOT fire on raw bytes (the
+	// literal is yarad-synthetic; a match here means an attacker planted it).
+	out = filterMarkerChannel(out, false)
 	// Pre-extract any OLE2/OOXML macro source and account for it. The flags feed
 	// /metrics so this path is observable; the streams are scanned below. The
 	// same overall deadline bounds extraction time, not just the libyara scans.
@@ -918,7 +921,7 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// the budget is exhausted so the caller stops the whole sweep. Markers and
 	// Streams share one `seen` set and one budget — a marker byte-identical to a
 	// real stream is scanned once, and markers can't overrun the deadline.
-	scanExtracted := func(stream []byte) (stop bool) {
+	scanExtracted := func(stream []byte, markerChannel bool) (stop bool) {
 		h := sha256.Sum256(stream)
 		if _, dup := seen[h]; dup {
 			s.exDeduped.Add(1)
@@ -941,6 +944,9 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 			s.logf("scan of extracted stream failed (raw verdict kept): %v", serr)
 			return false
 		}
+		// Phase 2 marker-channel: real content streams reject marker-tagged hits;
+		// the out-of-band Markers channel keeps ONLY marker-tagged hits.
+		m = filterMarkerChannel(m, markerChannel)
 		before := len(out)
 		out = mergeMatches(out, m)
 		// Anything mergeMatches appended is a rule that fired on the extracted
@@ -951,17 +957,19 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 		return false
 	}
 	for _, stream := range res.Streams {
-		if scanExtracted(stream) {
+		if scanExtracted(stream, false) {
 			break
 		}
 	}
-	// PLAN-marker-channel Phase 1: the out-of-band PURE markers are scanned against
-	// the SAME full ruleset as Streams, so Phase 1 changes nothing observable
-	// beyond the Streams/Markers split. (Phase 2 will reject marker-tagged hits on
-	// raw/content and accept them only here; Phase 3 will compile a markers.yac so
-	// marker rules execute ONLY on this channel.)
+	// PLAN-marker-channel Phase 2: the out-of-band PURE markers are still scanned
+	// against the full ruleset, but filterMarkerChannel now keeps ONLY
+	// marker-tagged hits here and rejects them on raw/content above — so a
+	// PURE-marker rule fires exclusively on this channel (zero-FP by
+	// construction). COMBINED markers (untagged rules) remain in res.Streams and
+	// are unaffected. Phase 3 will compile a markers.yac so marker rules execute
+	// ONLY on this channel (the perf win), making the filter redundant.
 	for _, marker := range res.Markers {
-		if scanExtracted(marker) {
+		if scanExtracted(marker, true) {
 			break
 		}
 	}
@@ -1198,4 +1206,53 @@ func mergeMatches(into, more []Match) []Match {
 		into = append(into, m)
 	}
 	return into
+}
+
+// markerTag is the YARA tag carried by yarad's PURE-marker rules (PLAN
+// marker-channel Phase 2). A rule wears it iff it keys ONLY on a yarad-emitted
+// PURE marker literal that extract routes to Result.Markers (see
+// internal/extract/markers.go pureMarkerLiterals). COMBINED markers (marker tag
+// + attacker IOC in one string) are NOT tagged — their rules still scan content.
+const markerTag = "marker"
+
+// matchIsMarker reports whether m comes from a marker-tagged rule.
+func matchIsMarker(m Match) bool {
+	for _, t := range m.Tags {
+		if t == markerTag {
+			return true
+		}
+	}
+	return false
+}
+
+// filterMarkerChannel enforces the Phase 2 marker-channel contract on one
+// channel's matches:
+//
+//   - markerChannel=false (raw bytes + real content streams): DROP marker-tagged
+//     matches. A PURE-marker rule keyed on a yarad literal must never fire on
+//     attacker-controlled raw bytes or real extracted content — that is the
+//     "zero-FP by construction" guarantee. An attacker who plants the literal
+//     "OLEID-OBJECTPOOL" in a body can no longer trip the marker rule.
+//   - markerChannel=true (out-of-band Result.Markers): KEEP ONLY marker-tagged
+//     matches. The channel carries yarad literals; a content/IOC rule has no
+//     business firing there, so its match is dropped.
+//
+// Returns in unchanged when nothing is filtered (common case, no alloc).
+func filterMarkerChannel(in []Match, markerChannel bool) []Match {
+	keep := 0
+	for _, m := range in {
+		if matchIsMarker(m) == markerChannel {
+			keep++
+		}
+	}
+	if keep == len(in) {
+		return in
+	}
+	out := make([]Match, 0, keep)
+	for _, m := range in {
+		if matchIsMarker(m) == markerChannel {
+			out = append(out, m)
+		}
+	}
+	return out
 }

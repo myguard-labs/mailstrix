@@ -112,7 +112,7 @@ rule VBA_Environ_Probe : maldoc heuristic suspicious {
 // yarad (zero-FP literal). Deep nesting is a deliberate detection-evasion signal
 // on its own, so a high score; whatever payload was finally unwrapped is ALSO
 // scanned by the keyword/URL rules and stacks on top.
-rule Multilayer_Encoded_Payload : maldoc heuristic suspicious {
+rule Multilayer_Encoded_Payload : maldoc heuristic suspicious marker {
     meta:
         author      = "yarad"
         description = "Payload hidden behind >=3 stacked decode layers (base64/hex/etc nesting) — deliberate obfuscation"
