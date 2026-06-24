@@ -47,6 +47,21 @@ type Scanner struct {
 	scanTimeout time.Duration
 	logf        func(string, ...any)
 
+	// bigRules is the small, high-signal "big-file" ruleset used by the
+	// oversized-buffer cost gate (STAB/BIGFILE). A full-ruleset scan of a multi-MB
+	// buffer is inherently unbounded and can time out (fail-open => malware MISSED),
+	// so when len(buf) > bigFileThreshold the raw buffer is scanned against THIS set
+	// instead of s.rules: it completes fast and the local heuristics still fire.
+	// Kept in sync with s.rules on Reload (compiled/loaded the same way). nil when
+	// no big-file ruleset is configured, in which case Scan falls back to s.rules
+	// for oversized buffers (logged once) rather than disarming.
+	bigRules         atomic.Pointer[yara.Rules]
+	bigFileThreshold int64         // >0 enables the gate; len(buf) over this uses bigRules
+	bigSrcDir        string        // YARAD_BIGFILE_RULES when it is a directory of sources
+	bigSrcFile       string        // YARAD_BIGFILE_RULES when it is a precompiled .yac
+	bigNilWarned     atomic.Bool   // log the "bigRules nil, falling back" path once
+	bigFileScans     atomic.Uint64 // oversized buffers scanned against bigRules
+
 	// scanners pools yara.Scanner objects so a scan that overrides external
 	// variables (VBA/filename — every macro stream) doesn't allocate and
 	// Destroy a fresh Scanner each time. Keyed to the active *yara.Rules: when
@@ -291,19 +306,35 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 // "everything is clean".
 func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 	s := &Scanner{
-		scanTimeout:  cfg.ScanTimeout,
-		logf:         logf,
-		srcDir:       cfg.RulesDir,
-		srcFile:      cfg.RulesPath,
-		urlhaus:      urlhaus.New(cfg.URLhausKey, cfg.URLhausRefresh, cfg.CacheDir, logf), // nil if no key
-		urlhausMax:   cfg.URLhausMaxURLs,
-		effortMax:    cfg.EffortMax,
-		mbazaar:      mbazaar.New(cfg.MBazaarKey, cfg.MBazaarRefresh, cfg.MBazaarFeed, cfg.CacheDir, logf), // nil if no key
-		canary:       cfg.Canary,
-		baseDenylist: cfg.RuleDenylist,
-		denylistFile: cfg.DenylistFile,
-		allowlist:    cfg.RuleAllowlist,
-		topMatches:   newMatchCounter(matchCounterCap),
+		scanTimeout:      cfg.ScanTimeout,
+		bigFileThreshold: cfg.BigFileThreshold,
+		logf:             logf,
+		srcDir:           cfg.RulesDir,
+		srcFile:          cfg.RulesPath,
+		urlhaus:          urlhaus.New(cfg.URLhausKey, cfg.URLhausRefresh, cfg.CacheDir, logf), // nil if no key
+		urlhausMax:       cfg.URLhausMaxURLs,
+		effortMax:        cfg.EffortMax,
+		mbazaar:          mbazaar.New(cfg.MBazaarKey, cfg.MBazaarRefresh, cfg.MBazaarFeed, cfg.CacheDir, logf), // nil if no key
+		canary:           cfg.Canary,
+		baseDenylist:     cfg.RuleDenylist,
+		denylistFile:     cfg.DenylistFile,
+		allowlist:        cfg.RuleAllowlist,
+		topMatches:       newMatchCounter(matchCounterCap),
+	}
+	// Resolve the big-file ruleset path into a precompiled .yac (load) or a source
+	// dir (compile), so Reload can build it the same way it builds the main set.
+	// A path that doesn't exist is treated as "unset" — the gate then falls back to
+	// the full ruleset for oversized buffers rather than failing startup.
+	if cfg.BigFileThreshold > 0 && cfg.BigFileRules != "" {
+		if fi, err := os.Stat(cfg.BigFileRules); err == nil {
+			if fi.IsDir() {
+				s.bigSrcDir = cfg.BigFileRules
+			} else {
+				s.bigSrcFile = cfg.BigFileRules
+			}
+		} else {
+			logf("WARNING: YARAD_BIGFILE_RULES=%s not found: %v (oversized-buffer gate will fall back to the full ruleset)", cfg.BigFileRules, err)
+		}
 	}
 	s.denylist.Store(&cfg.RuleDenylist)
 	if s.urlhaus != nil {
@@ -321,6 +352,11 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 
 // RuleCount reports how many rules are in the active set (for /health and logs).
 func (s *Scanner) RuleCount() int64 { return s.count.Load() }
+
+// BigFileScans reports how many oversized buffers were scanned against the
+// big-file (targeted) ruleset instead of the full set (BIGFILE gate). Surfaced on
+// /metrics so the gate's firing rate is observable.
+func (s *Scanner) BigFileScans() uint64 { return s.bigFileScans.Load() }
 
 // ReloadMetrics is a snapshot of rule-reload activity, surfaced on /metrics so a
 // SIGHUP that silently fails (e.g. a bad rule edit) is visible to alerting
@@ -404,6 +440,33 @@ func (s *Scanner) Reload() error {
 		src = s.srcFile
 	}
 	s.logf("loaded %d YARA rules from %s (fp=%s)", s.count.Load(), src, fp)
+
+	// Big-file (oversized-buffer) ruleset: compiled/loaded the SAME way as the main
+	// set and swapped in atomically so it stays in sync on every reload/SIGHUP. A
+	// failure here must NOT fail the reload — the main set is the trust anchor; the
+	// gate simply falls back to the full ruleset (logged) until the next good load.
+	if s.bigSrcFile != "" || s.bigSrcDir != "" {
+		var (
+			big    *yara.Rules
+			bigErr error
+		)
+		if s.bigSrcFile != "" {
+			big, bigErr = yara.LoadRules(s.bigSrcFile)
+		} else {
+			big, bigErr = compileDir(s.bigSrcDir, s.logf)
+		}
+		if bigErr != nil {
+			s.logf("WARNING: big-file ruleset reload failed, keeping previous (oversized-buffer gate may fall back to full set): %v", bigErr)
+		} else {
+			bigSrc := s.bigSrcDir
+			if s.bigSrcFile != "" {
+				bigSrc = s.bigSrcFile
+			}
+			s.bigRules.Swap(big)
+			s.logf("loaded %d big-file YARA rules from %s (oversized-buffer gate, threshold=%dB)", len(big.GetRules()), bigSrc, s.bigFileThreshold)
+		}
+	}
+
 	// Reset the top-matches counter so counts reflect the current rule set only,
 	// not a mix of old and new rule names that may have been renamed/removed.
 	s.topMatches.Reset()
@@ -750,9 +813,31 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 		deadline = time.Now().Add(profile.ScanTimeout)
 	}
 
+	// Oversized-buffer cost gate (BIGFILE): a full-ruleset scan of a multi-MB
+	// buffer is inherently unbounded (size × ~12k rules) and can time out even at a
+	// large ScanTimeout, after which the scanner fail-opens and a padded dropper is
+	// MISSED. When the buffer is over the threshold, scan the RAW bytes against the
+	// small high-signal big-file ruleset instead, so the scan completes fast and the
+	// local heuristics still fire. The trade is deliberate: we give up public-feed
+	// coverage on oversized inputs to GUARANTEE completion + local-rule coverage.
+	// If no big-file ruleset is loaded (misconfig / absent local.yac) we fall back
+	// to the full set rather than disarm — logged once so it's visible, never fatal.
+	rawRules := rules
+	if s.bigFileThreshold > 0 && int64(len(buf)) > s.bigFileThreshold {
+		if big := s.bigRules.Load(); big != nil {
+			rawRules = big
+			s.bigFileScans.Add(1)
+			s.logf("oversized buffer (%dB > %dB threshold): scanning against big-file ruleset instead of full set", len(buf), s.bigFileThreshold)
+		} else if s.bigNilWarned.CompareAndSwap(false, true) {
+			s.logf("WARNING: oversized buffer (%dB) but no big-file ruleset loaded; using full set (may time out)", len(buf))
+		}
+	}
+
 	// Raw bytes first. A failure here is the scanner's verdict (propagated,
-	// fail-open at the server) — unchanged behaviour for non-documents.
-	out, err := s.scanOne(rules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, profile.ScanTimeout)
+	// fail-open at the server) — unchanged behaviour for non-documents. Over the
+	// big-file threshold, rawRules is the targeted set (see the gate above);
+	// otherwise it is the full set.
+	out, err := s.scanOne(rawRules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, profile.ScanTimeout)
 	if err != nil {
 		return nil, err
 	}

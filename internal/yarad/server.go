@@ -30,6 +30,9 @@ import (
 type ScanEngine interface {
 	Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, error)
 	RuleCount() int64
+	// BigFileScans reports how many oversized buffers were scanned against the
+	// targeted big-file ruleset (YARAD_BIGFILE_THRESHOLD gate), for /metrics.
+	BigFileScans() uint64
 	// Fingerprint identifies the active rule set; it is mixed into the cache key
 	// so a reload that changes the rules invalidates old verdicts (L1 and Redis).
 	Fingerprint() string
@@ -169,9 +172,13 @@ func (s *Server) logStartup(addr string) {
 	if s.cfg.EffortAuto {
 		effort = "auto(idle=" + strconv.Itoa(s.cfg.Effort) + ")"
 	}
-	s.logf("listening on %s (rules=%d, timeout=%s, scan_timeout=%s, max_concurrent=%d, max_inflight=%d, max_body=%dB, cache=%s ttl=%s size=%d, effort=%s/%d, auth=%t)",
+	bigfile := "off"
+	if s.cfg.BigFileThreshold > 0 {
+		bigfile = strconv.FormatInt(s.cfg.BigFileThreshold, 10) + "B"
+	}
+	s.logf("listening on %s (rules=%d, timeout=%s, scan_timeout=%s, max_concurrent=%d, max_inflight=%d, max_body=%dB, bigfile_threshold=%s, cache=%s ttl=%s size=%d, effort=%s/%d, auth=%t)",
 		addr, s.engine.RuleCount(), s.cfg.BackendTimeout, s.cfg.ScanTimeout,
-		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, cache, s.cfg.CacheTTL, s.cfg.CacheSize, effort, s.cfg.EffortMax, s.authRequired())
+		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, bigfile, cache, s.cfg.CacheTTL, s.cfg.CacheSize, effort, s.cfg.EffortMax, s.authRequired())
 
 	// Worst-case request-buffer memory: each in-flight scan can hold a full body
 	// plus its extracted macro streams, on top of the loaded-rules RSS. Surface
@@ -667,6 +674,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("cache_hits_total", "verdicts served from cache", s.metrics.cacheHit.Load())
 	fm("cache_misses_total", "scans that ran (cache miss)", s.metrics.cacheMiss.Load())
 	fm("cache_coalesced_total", "scans coalesced onto an in-flight identical scan", s.metrics.cacheCoalesced.Load())
+	fm("bigfile_scans_total", "oversized buffers scanned against the targeted big-file ruleset instead of the full set (YARAD_BIGFILE_THRESHOLD gate)", s.engine.BigFileScans())
 	if lru, ok := s.cache.(*lruCache); ok {
 		fm("cache_evictions_total", "L1 LRU evictions (capacity-driven; not TTL expiry)", lru.Evictions())
 	}
