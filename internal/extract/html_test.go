@@ -143,3 +143,17 @@ func TestHTMLDataURICarveCapped(t *testing.T) {
 		t.Errorf("carved %d data: URIs, want <= %d (cap)", carved, htmlMaxDataURIs)
 	}
 }
+
+// HTML-smuggling triage must reach an .html part nested inside an archive, not
+// just a top-level text part (PR #190 covered top-level only; the extractChild
+// default path now also runs fromHTMLSmuggling). A blob-reconstruct+download
+// HTML stored in a zip must still surface HTML-SMUGGLING-BLOB.
+func TestHTMLSmugglingNestedInZip(t *testing.T) {
+	html := []byte(`<script>var b=new Blob([atob(data)]);var u=URL.createObjectURL(b);` +
+		`var a=document.createElement('a');a.href=u;a.download='invoice.exe';a.click();</script>`)
+	zipBuf := buildZip(t, map[string][]byte{"invoice.html": html})
+	res := Extract(zipBuf, time.Time{})
+	if !streamsContain(res, "HTML-SMUGGLING-BLOB") {
+		t.Error("HTML smuggling inside a zip member was not detected (nested path)")
+	}
+}

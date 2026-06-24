@@ -81,5 +81,14 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		// (#@~^…^#~@) carried as a child (.vbe/.jse inside an archive/.msg). Decode
 		// it so the keyword rules match; a no-op for ordinary bytes.
 		fromEncodedScript(data, res, deadline)
+		// It may also be an HTML/SVG part smuggling a payload (atob→Blob→download,
+		// a force-downloaded base64 data: URI, or a scripted <svg>) — e.g. an .html
+		// attachment delivered inside a .zip or .msg rather than as the top-level
+		// part. PR #190 wired this into the top-level text path only; cover the
+		// nested case here. Self-gating (emits a marker only on the dangerous combo
+		// and carves a force-downloaded data: URI back through extractChild at
+		// depth+1), so it is safe on arbitrary child bytes and bounded by the same
+		// shared budget/deadline as every other carrier.
+		fromHTMLSmuggling(data, res, b, depth, deadline)
 	}
 }
