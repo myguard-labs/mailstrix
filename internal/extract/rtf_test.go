@@ -71,6 +71,28 @@ func TestExtractRTFEmbeddedCFB(t *testing.T) {
 	}
 }
 
+// An RTF-embedded CFB must go through the FULL OLE2 surface (fromOLE), not just
+// the macro/package/MSG/MSI subset (audit 2026-06-25). A CFB carrying an
+// ObjectPool storage emits the OLEID-OBJECTPOOL indicator only via
+// fromOLEIndicators, which the old hand-rolled RTF CFB branch never called — so
+// this marker proves the embedded OLE2 now gets the same indicators as a
+// top-level one.
+func TestExtractRTFEmbeddedCFBFullOLESurface(t *testing.T) {
+	cfb := buildCFB(t, []cfbEntry{
+		{name: "Root Entry", mse: 5},
+		{name: "ObjectPool", mse: 1},
+		{name: "WordDocument", mse: 2, data: []byte("body text, no macros")},
+	})
+	buf := wrapRTFObjData(cfb)
+	res := Extract(buf, time.Time{})
+	if !res.IsRTF {
+		t.Fatal("RTF not flagged IsRTF")
+	}
+	if !streamsContain(res, "OLEID-OBJECTPOOL") {
+		t.Errorf("RTF-embedded CFB did not run the full OLE2 indicator surface (no OLEID-OBJECTPOOL); streams=%v", streamsAsStrings(res))
+	}
+}
+
 // An RTF with a leading BOM/whitespace must still be recognised.
 func TestExtractRTFLeadingWhitespace(t *testing.T) {
 	if !isRTF([]byte("  \r\n{\\rtf1}")) {
