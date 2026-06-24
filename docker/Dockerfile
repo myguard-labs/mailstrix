@@ -109,7 +109,10 @@ RUN YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_RE
         /usr/local/bin/fetch-rules.sh /rules/src \
     && cp /usr/local/share/yarad-local-rules/*.yara /rules/src/ \
     && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
-    && rm -rf /rules/src \
+    && mkdir -p /rules/local-src \
+    && cp /usr/local/share/yarad-local-rules/*.yara /rules/local-src/ \
+    && /usr/local/bin/compile-rules.sh /rules/local-src /rules/local.yac \
+    && rm -rf /rules/src /rules/local-src \
     && install -d -o 65532 -g 65532 /var/cache/yarad \
     && yarac --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 > /rules/libyara.version
 
@@ -138,12 +141,19 @@ COPY --from=build /out/yarad /usr/local/bin/yarad
 # rootfs (only /var/cache/yarad is service-writable). No --chown = root:root; the
 # file stays world-readable (0644 from yarac) so nonroot can still read it to seed.
 COPY --from=rules /rules/compiled.yac /usr/share/yarad/compiled.yac
+# local.yac = ONLY the in-repo high-signal local rules, compiled separately. It is
+# the targeted ruleset for the oversized-buffer cost gate (YARAD_BIGFILE_THRESHOLD):
+# a multi-MB buffer scanned against the full ~12k-rule bundle is unbounded and can
+# time out (fail-open => malware MISSED), so over the threshold yarad scans the raw
+# bytes against this small set instead — fast + the local dropper heuristics fire.
+COPY --from=rules /rules/local.yac /usr/share/yarad/local.yac
 COPY --from=rules /rules/sources.json /usr/share/yarad/sources.json
 COPY --from=build /src/NOTICE /usr/share/yarad/NOTICE
 # A writable cache dir owned by nonroot, so yarad can seed even with no bindmount
 # (a bindmount or tmpfs at /var/cache/yarad simply overlays it).
 COPY --from=rules --chown=nonroot:nonroot /var/cache/yarad /var/cache/yarad
 ENV YARAD_SEED_RULES=/usr/share/yarad/compiled.yac \
+    YARAD_BIGFILE_RULES=/usr/share/yarad/local.yac \
     YARAD_CACHE_DIR=/var/cache/yarad \
     YARAD_HOST=0.0.0.0 \
     YARAD_PORT=8079

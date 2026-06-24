@@ -65,6 +65,25 @@ type Config struct {
 	// cannot stall a worker (YARA's own internal timeout, seconds).
 	ScanTimeout time.Duration // YARAD_SCAN_TIMEOUT (default 8s)
 
+	// BigFileThreshold gates an oversized-buffer cost defence. A full-ruleset scan
+	// of a multi-MB buffer is inherently unbounded (size × ~12k rules) and can
+	// time out even at a large ScanTimeout, so the scanner fail-opens and a padded
+	// dropper is MISSED. When a scanned buffer is larger than this threshold, the
+	// scanner runs the small, high-signal "big-file" ruleset (BigFileRules — our
+	// in-repo local rules only) INSTEAD of the full bundle, so the scan completes
+	// fast and the local heuristics still fire. Below it, behaviour is unchanged
+	// (full ruleset). Default 6 MiB (below the 8 MiB MaxBody default so a file
+	// padded toward the body cap hits the gate). 0 disables the gate entirely.
+	BigFileThreshold int64 // YARAD_BIGFILE_THRESHOLD bytes (default 6 MiB; 0 = off)
+
+	// BigFileRules is the targeted ruleset used by the oversized-buffer gate. It is
+	// a path to either a precompiled .yac bundle (loaded directly) or a directory
+	// of *.yar/*.yara source files (compiled at boot, like RulesDir). It should
+	// hold ONLY the in-repo high-signal local rules so the gated scan is cheap.
+	// Empty disables the gate even if BigFileThreshold>0 — Scan then falls back to
+	// the full ruleset for oversized buffers (logged once), never crashing.
+	BigFileRules string // YARAD_BIGFILE_RULES (default = baked local.yac seed)
+
 	// Verdict cache. At high volume mail is heavily duplicated (bulk campaigns,
 	// one body to N recipients, MTA retries), so caching SHA256(body) -> matches
 	// turns most scans into a microsecond lookup. The in-process LRU is always
@@ -143,40 +162,42 @@ type Config struct {
 // then sanitizes invalid numeric values.
 func LoadConfig() *Config {
 	c := &Config{
-		Host:           envStr("YARAD_HOST", "0.0.0.0"),
-		Port:           envInt("YARAD_PORT", 8079),
-		BackendTimeout: envDur("YARAD_BACKEND_TIMEOUT", 1),
-		MaxConcurrent:  envIntAuto("YARAD_MAX_CONCURRENT", runtime.NumCPU()),
-		MaxInflight:    envIntAuto("YARAD_MAX_INFLIGHT", 0), // 0 -> sanitize sets 2×MaxConcurrent
-		MaxBody:        envInt64("YARAD_MAX_BODY", 8*1024*1024),
-		Token:          envOrFile("YARAD_TOKEN"),
-		TokenNext:      envOrFile("YARAD_TOKEN_NEXT"),
-		RulesDir:       envStr("YARAD_RULES_DIR", "/rules"),
-		RulesPath:      strings.TrimSpace(os.Getenv("YARAD_RULES")),
-		CacheDir:       strings.TrimSpace(os.Getenv("YARAD_CACHE_DIR")),
-		SeedRules:      strings.TrimSpace(os.Getenv("YARAD_SEED_RULES")),
-		RulesMaxAge:    envDur("YARAD_RULES_MAX_AGE", 0),
-		ScanTimeout:    envDur("YARAD_SCAN_TIMEOUT", 8),
-		CacheTTL:       envDur("YARAD_CACHE_TTL", 600),
-		CacheSize:      envInt("YARAD_CACHE_SIZE", 65536),
-		RedisURL:       strings.TrimSpace(os.Getenv("YARAD_REDIS_URL")),
-		RedisPrefix:    envStr("YARAD_REDIS_PREFIX", "yara:scan:"),
-		Verbose:        envBool("YARAD_VERBOSE"),
-		LogStdout:      envBool("YARAD_LOG_STDOUT"),
-		MetricsAuth:    envBool("YARAD_METRICS_AUTH"),
-		Pprof:          envBool("YARAD_PPROF"),
-		Canary:         envBool("YARAD_CANARY"),
-		DenylistFile:   envStr("YARAD_DENYLIST_FILE", ""),
-		URLhausKey:     envOrFile("YARAD_URLHAUS_KEY"),
-		URLhausRefresh: envDur("YARAD_URLHAUS_REFRESH", 21600),
-		URLhausMaxURLs: envInt("YARAD_URLHAUS_MAX_URLS", 64),
-		MBazaarKey:     envOrFile("YARAD_MBAZAAR_KEY"),
-		MBazaarRefresh: envDur("YARAD_MBAZAAR_REFRESH", 86400),
-		MBazaarFeed:    strings.TrimSpace(os.Getenv("YARAD_MBAZAAR_FEED")),
-		RuleDenylist:   envSet("YARAD_RULE_DENYLIST", "http"),
-		RuleAllowlist:  envSet("YARAD_RULE_ALLOWLIST", ""),
-		EffortMax:      envInt("YARAD_EFFORT_MAX", defaultEffortMax),
-		Effort:         envInt("YARAD_EFFORT", 0), // 0 -> sanitize sets = EffortMax
+		Host:             envStr("YARAD_HOST", "0.0.0.0"),
+		Port:             envInt("YARAD_PORT", 8079),
+		BackendTimeout:   envDur("YARAD_BACKEND_TIMEOUT", 1),
+		MaxConcurrent:    envIntAuto("YARAD_MAX_CONCURRENT", runtime.NumCPU()),
+		MaxInflight:      envIntAuto("YARAD_MAX_INFLIGHT", 0), // 0 -> sanitize sets 2×MaxConcurrent
+		MaxBody:          envInt64("YARAD_MAX_BODY", 8*1024*1024),
+		Token:            envOrFile("YARAD_TOKEN"),
+		TokenNext:        envOrFile("YARAD_TOKEN_NEXT"),
+		RulesDir:         envStr("YARAD_RULES_DIR", "/rules"),
+		RulesPath:        strings.TrimSpace(os.Getenv("YARAD_RULES")),
+		CacheDir:         strings.TrimSpace(os.Getenv("YARAD_CACHE_DIR")),
+		SeedRules:        strings.TrimSpace(os.Getenv("YARAD_SEED_RULES")),
+		RulesMaxAge:      envDur("YARAD_RULES_MAX_AGE", 0),
+		ScanTimeout:      envDur("YARAD_SCAN_TIMEOUT", 8),
+		BigFileThreshold: envInt64("YARAD_BIGFILE_THRESHOLD", 6*1024*1024),
+		BigFileRules:     strings.TrimSpace(os.Getenv("YARAD_BIGFILE_RULES")),
+		CacheTTL:         envDur("YARAD_CACHE_TTL", 600),
+		CacheSize:        envInt("YARAD_CACHE_SIZE", 65536),
+		RedisURL:         strings.TrimSpace(os.Getenv("YARAD_REDIS_URL")),
+		RedisPrefix:      envStr("YARAD_REDIS_PREFIX", "yara:scan:"),
+		Verbose:          envBool("YARAD_VERBOSE"),
+		LogStdout:        envBool("YARAD_LOG_STDOUT"),
+		MetricsAuth:      envBool("YARAD_METRICS_AUTH"),
+		Pprof:            envBool("YARAD_PPROF"),
+		Canary:           envBool("YARAD_CANARY"),
+		DenylistFile:     envStr("YARAD_DENYLIST_FILE", ""),
+		URLhausKey:       envOrFile("YARAD_URLHAUS_KEY"),
+		URLhausRefresh:   envDur("YARAD_URLHAUS_REFRESH", 21600),
+		URLhausMaxURLs:   envInt("YARAD_URLHAUS_MAX_URLS", 64),
+		MBazaarKey:       envOrFile("YARAD_MBAZAAR_KEY"),
+		MBazaarRefresh:   envDur("YARAD_MBAZAAR_REFRESH", 86400),
+		MBazaarFeed:      strings.TrimSpace(os.Getenv("YARAD_MBAZAAR_FEED")),
+		RuleDenylist:     envSet("YARAD_RULE_DENYLIST", "http"),
+		RuleAllowlist:    envSet("YARAD_RULE_ALLOWLIST", ""),
+		EffortMax:        envInt("YARAD_EFFORT_MAX", defaultEffortMax),
+		Effort:           envInt("YARAD_EFFORT", 0), // 0 -> sanitize sets = EffortMax
 		// YARAD_EFFORT=auto (EFFORT-2) flips auto pressure-shedding. The numeric
 		// Effort above stays the IDLE ceiling for the auto resolver (with "auto" the
 		// Atoi above fails -> Effort==0 -> sanitize sets it = EffortMax, i.e. the
@@ -251,6 +272,9 @@ func (c *Config) sanitize() {
 	}
 	if c.MaxBody <= 0 {
 		c.MaxBody = 8 * 1024 * 1024
+	}
+	if c.BigFileThreshold < 0 {
+		c.BigFileThreshold = 0 // negative is nonsensical; 0 disables the gate
 	}
 	if c.CacheSize < 1 {
 		c.CacheSize = 65536
