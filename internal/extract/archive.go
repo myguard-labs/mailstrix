@@ -103,6 +103,22 @@ func isOfficeZip(buf []byte) bool {
 	return false
 }
 
+// markEncryptedArchive emits the ARCHIVE-ENCRYPTED PURE marker the first time a
+// password-protected member is seen in one input, and no more than once per
+// input (the flag is the signal — repeating it per member is just noise). A
+// password-protected attachment whose password is in the mail body is a strong,
+// FP-safe mail-malware tell on its own: the payload is deliberately hidden from
+// the scanner, so the encryption itself is the indicator. yarad cannot decrypt
+// (no password), so it surfaces the marker instead of silently skipping the
+// member, which is what the unpackers did before.
+func markEncryptedArchive(res *Result) {
+	if res.EncryptedArchive {
+		return
+	}
+	res.EncryptedArchive = true
+	res.Streams = append(res.Streams, []byte("ARCHIVE-ENCRYPTED"))
+}
+
 // isArchive reports whether buf starts with a supported archive magic. zip is
 // intentionally NOT included here: the dispatcher already routes a zip to the
 // OOXML path, which then also calls fromArchive — testing zipMagic here would
@@ -190,6 +206,12 @@ func unpackZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 		if f.FileInfo().IsDir() || strings.HasSuffix(f.Name, "/") {
 			continue
 		}
+		// General-purpose bit 0 set => the member is encrypted (traditional zip
+		// or AE-x AES). yarad has no password, so flag it and skip the member.
+		if f.Flags&0x1 != 0 {
+			markEncryptedArchive(res)
+			continue
+		}
 		if f.UncompressedSize64 > maxBytesPerMember {
 			continue // implausibly large member (zip-bomb guard)
 		}
@@ -275,12 +297,30 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		}
 		rc, err := f.Open()
 		if err != nil {
+			// sevenzip surfaces a password/decrypt error for an AES-encrypted
+			// member (we hold no password); flag those specifically rather than
+			// lumping every member error in with plain corruption.
+			if isEncryptedErr(err) {
+				markEncryptedArchive(res)
+			}
 			continue // encrypted/corrupt member: skip, keep the rest
 		}
 		data := readMember(rc)
 		_ = rc.Close()
 		emitMember(data, res, b, depth, deadline)
 	}
+}
+
+// isEncryptedErr reports whether a member Open error is an encryption/password
+// failure rather than generic corruption. sevenzip's AES coder returns an error
+// mentioning "password"; matching on that keeps a plain-corrupt 7z from being
+// mislabelled as encrypted.
+func isEncryptedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	e := strings.ToLower(err.Error())
+	return strings.Contains(e, "password") || strings.Contains(e, "decrypt")
 }
 
 // unpackRar walks a RAR archive (v4/v5, pure-Go rardecode) and emits each
@@ -300,6 +340,13 @@ func unpackRar(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 			break // EOF, encrypted-header, or corrupt: stop, keep what we have
 		}
 		if h.IsDir {
+			continue
+		}
+		// Encrypted file contents or an encrypted header (whole-archive password):
+		// no password here, so flag and skip. HeaderEncrypted typically also fails
+		// the rr.Next() above, but a per-file Encrypted member is reachable.
+		if h.Encrypted || h.HeaderEncrypted {
+			markEncryptedArchive(res)
 			continue
 		}
 		if h.UnPackedSize > maxBytesPerMember {
