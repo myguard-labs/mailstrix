@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder"
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
 // budget. It is resolved once per scan from the effort level and threaded to the
@@ -856,6 +856,12 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) {
 			break
 		}
 	}
+	// Capture the VBA-extraction result HERE, right after the .bin loop, before any
+	// later extractor (rels/DDE/XLM/docProps) appends to `out`. Measuring
+	// len(out) > parentStreams at the end of the function would falsely report VBA
+	// when a macro-looking .bin yielded nothing but, say, a DDE field or a docProps
+	// string was appended afterwards — a FALSE OLEID-VBA-PRESENT marker.
+	vbaProduced := attempted > 0 && len(out) > parentStreams
 	// Scan every */_rels/*.rels part for external relationships (template
 	// injection, OLE object, frame, externalLink). Each hit appends a synthetic
 	// "OOXML-EXTERNAL-REL <Type> <Target>" stream so YARA rules can match it.
@@ -875,6 +881,11 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) {
 	// Fail-open: any parse error is silently ignored.
 	lenBeforeXLM := len(out)
 	fromOOXMLXLM(zr, &out, deadline)
+	// Capture the hidden-macrosheet result HERE, right after fromOOXMLXLM, before
+	// XLMFold/docProps append. The fold contribution is tracked separately by
+	// res.HasXLMFold below; measuring len(out) > lenBeforeXLM at the END would also
+	// count docProps strings (appended after) → a FALSE OLEID-XLM-PRESENT marker.
+	xlmHidden := len(out) > lenBeforeXLM
 	// Constant-fold XLM formula strings from OOXML macrosheets. Reassembles
 	// obfuscated CHAR()&CHAR()&"..." concatenations into cleartext so
 	// keyword/URL/IOC YARA rules fire. Also emits XLM-DANGEROUS-FUNC markers.
@@ -900,10 +911,10 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) {
 	// is only appended when not already present (dedup guard) and never causes
 	// extraction failure (fail-open). The OLE path (oleid.go) emits OLEID-OBJECTPOOL
 	// and OLEID-FLASH only; these four markers are OOXML-exclusive, no overlap.
-	out = appendOLEIDMarker(out, "OLEID-VBA-PRESENT", attempted > 0 && len(out) > parentStreams)
+	out = appendOLEIDMarker(out, "OLEID-VBA-PRESENT", vbaProduced)
 	out = appendOLEIDMarker(out, "OLEID-EXTREL", hasExtRel)
 	out = appendOLEIDMarker(out, "OLEID-DDE", hasDDE)
-	out = appendOLEIDMarker(out, "OLEID-XLM-PRESENT", len(out) > lenBeforeXLM || res.HasXLMFold)
+	out = appendOLEIDMarker(out, "OLEID-XLM-PRESENT", xlmHidden || res.HasXLMFold)
 	res.Streams = out
 	// Every .bin we tried failed to parse and nothing came out: a document that
 	// looks macro-bearing but yields no usable VBA (obfuscated/corrupt/hostile).

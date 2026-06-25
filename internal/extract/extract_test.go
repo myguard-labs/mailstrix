@@ -211,3 +211,83 @@ func flags(r Result) map[string]any {
 		"Failed": r.Failed, "Panicked": r.Panicked, "streams": len(r.Streams),
 	}
 }
+
+// makeMultiPartZip builds an in-memory zip from name→bytes entries (write order
+// preserved, which zip.Reader walks via the central directory).
+func makeMultiPartZip(t *testing.T, entries [][2]any) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	for _, e := range entries {
+		w, err := zw.Create(e[0].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(e[1].([]byte)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+func hasMarker(res Result, name string) bool {
+	for _, s := range res.Markers {
+		if string(s) == name {
+			return true
+		}
+	}
+	for _, s := range res.Streams {
+		if string(s) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOLEIDVBAPresent_NoFalseMarkerFromLaterStream is the #1 regression for the
+// VBA half: a macro-looking .bin that yields NO VBA codes (unparseable) plus a
+// later DDE field must NOT emit OLEID-VBA-PRESENT. Before the fix, the marker
+// condition measured len(out) > parentStreams at the END of the function, so the
+// DDE-field stream appended after the .bin loop falsely satisfied it.
+func TestOLEIDVBAPresent_NoFalseMarkerFromLaterStream(t *testing.T) {
+	ddeDoc := []byte(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr="DDEAUTO c:\Windows\System32\cmd.exe /k calc"/></w:p></w:body></w:document>`)
+	zipBytes := makeMultiPartZip(t, [][2]any{
+		{"word/vbaProject.bin", []byte("not a real OLE2 vbaProject — oleparse must fail on this")},
+		{"word/document.xml", ddeDoc},
+	})
+	res := Extract(zipBytes, time.Time{})
+
+	if hasMarker(res, "OLEID-VBA-PRESENT") {
+		t.Error("false OLEID-VBA-PRESENT: the .bin produced no VBA codes; only a later DDE stream was appended")
+	}
+	// Sanity: the DDE field itself IS detected (proves the doc was processed, the
+	// test isn't passing because nothing ran).
+	if !hasMarker(res, "OLEID-DDE") {
+		t.Errorf("setup: OLEID-DDE not emitted; markers=%v streams=%d", res.Markers, len(res.Streams))
+	}
+}
+
+// TestOLEIDXLMPresent_NoFalseMarkerFromDocProps is the #1 regression for the XLM
+// half: an OOXML doc with docProps strings (appended AFTER the XLM phase) but NO
+// hidden macrosheet and NO folded XLM must NOT emit OLEID-XLM-PRESENT. Before the
+// fix, len(out) > lenBeforeXLM measured at the END counted the docProps streams.
+func TestOLEIDXLMPresent_NoFalseMarkerFromDocProps(t *testing.T) {
+	core := []byte(`<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>http://payload.example/c2.exe</dc:title></cp:coreProperties>`)
+	zipBytes := makeMultiPartZip(t, [][2]any{
+		{"docProps/core.xml", core},
+		{"word/document.xml", []byte(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>`)},
+	})
+	res := Extract(zipBytes, time.Time{})
+
+	if hasMarker(res, "OLEID-XLM-PRESENT") {
+		t.Error("false OLEID-XLM-PRESENT: no hidden macrosheet and no XLM fold; only docProps strings were appended")
+	}
+	// Sanity: docProps WAS processed (marker present), so the false-XLM path was
+	// actually reachable in this test.
+	if !res.HasDocProps {
+		t.Errorf("setup: docProps not processed; markers=%v", res.Markers)
+	}
+}
