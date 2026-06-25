@@ -396,3 +396,70 @@ func TestEmitMemberPanicRecovery(t *testing.T) {
 		t.Error("partial streams before the panic should be preserved")
 	}
 }
+
+// TestOfficeZipCarrierMemberUnpacked is the #7 fix: an Office-classified zip (a
+// valid .docx with [Content_Types].xml) that also carries a SIBLING dropper
+// member must have that member carrier-unpacked, while its body XML parts are NOT
+// member-dumped. Before the fix, isOfficeZip→true skipped ALL member unpacking,
+// so a dropper riding inside a spoofed/real Office container was invisible.
+func TestOfficeZipCarrierMemberUnpacked(t *testing.T) {
+	// A sibling member that is itself a nested zip hiding a dropper keyword.
+	innerDropper := buildZip(t, map[string][]byte{"payload.bin": []byte("OFFICE_SIBLING_DROPPER_KEYWORD")})
+	docx := buildZip(t, map[string][]byte{
+		"[Content_Types].xml": []byte(`<?xml version="1.0"?><Types/>`),
+		"word/document.xml":   []byte("ordinary harmless document body text"),
+		"_rels/.rels":         []byte("<Relationships/>"),
+		"attachment.zip":      innerDropper, // non-office sibling carrier
+	})
+	res := Extract(docx, time.Time{})
+	if !streamsContain(res, "OFFICE_SIBLING_DROPPER_KEYWORD") {
+		t.Errorf("sibling-zip dropper inside an Office zip not unpacked; streams=%d", len(res.Streams))
+	}
+}
+
+// A sibling PE member of an Office zip must be recognised as a carrier (routed
+// through extractChild) so PE-aware handling applies.
+func TestOfficeZipSiblingPECarrier(t *testing.T) {
+	docx := buildZip(t, map[string][]byte{
+		"[Content_Types].xml": []byte(`<?xml version="1.0"?><Types/>`),
+		"word/document.xml":   []byte("body"),
+		"setup.exe":           minimalPE(),
+	})
+	// isNestedCarrier must classify the PE sibling as a carrier.
+	if !isNestedCarrier(minimalPE()) {
+		t.Fatal("minimal PE not classified as a nested carrier")
+	}
+	res := Extract(docx, time.Time{})
+	if res.Failed {
+		t.Errorf("office zip with PE sibling unexpectedly Failed: %+v", res)
+	}
+}
+
+// TestOfficeZipCleanNoBodyDump is the no-FP guard: a clean Office zip whose only
+// non-office content is ordinary body text must NOT have that body member-dumped
+// — fromOfficeZipCarriers only routes carrier members, never plain text/XML, so a
+// benign document does not gain spurious streams.
+func TestOfficeZipCleanNoBodyDump(t *testing.T) {
+	docx := buildZip(t, map[string][]byte{
+		"[Content_Types].xml": []byte(`<?xml version="1.0"?><Types/>`),
+		"word/document.xml":   []byte("a perfectly ordinary memo with the word powershell in prose"),
+		"docProps/core.xml":   []byte(`<?xml version="1.0"?><cp/>`),
+		"readme.txt":          []byte("plain attached note, not a carrier, mentions cmd.exe in passing"),
+	})
+	res := Extract(docx, time.Time{})
+	// The plain readme.txt is not a carrier → must not be unpacked as a stream.
+	if streamsContain(res, "plain attached note") {
+		t.Error("non-carrier body/text member was member-dumped (body-text FP risk)")
+	}
+}
+
+// isNestedCarrier must reject ordinary text so a benign Office sibling is never
+// member-dumped.
+func TestIsNestedCarrierRejectsText(t *testing.T) {
+	if isNestedCarrier([]byte("just some plain ascii text, definitely not a container")) {
+		t.Error("plain text wrongly classified as a carrier")
+	}
+	if isNestedCarrier(nil) {
+		t.Error("nil wrongly classified as a carrier")
+	}
+}

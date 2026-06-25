@@ -55,6 +55,10 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 			// Extract / tests building Result directly) keeps the prior MAX-cap
 			// behaviour via the opts accessors' nil fallback.
 			fromOOXML(data, res, deadline, res.childOpts)
+			// Also carrier-unpack non-office sibling members of a nested Office zip
+			// (spoofed-container dropper carried inside an archive/.msg). Zero
+			// body-text FP — only carrier members are routed through extractChild.
+			fromOfficeZipCarriers(data, res, b, depth, deadline)
 		} else {
 			fromArchive(data, res, b, depth, deadline)
 		}

@@ -92,15 +92,79 @@ func isOfficeZip(buf []byte) bool {
 		}
 		// OOXML part directories: a zip carrying these is an Office document even
 		// if (in a hand-built test fixture) the [Content_Types].xml is absent.
-		n := f.Name
-		if strings.HasPrefix(n, "word/") || strings.HasPrefix(n, "xl/") ||
-			strings.HasPrefix(n, "ppt/") || strings.HasPrefix(n, "visio/") ||
-			strings.HasPrefix(n, "customXml/") || strings.HasPrefix(n, "_rels/") ||
-			strings.HasPrefix(n, "docProps/") {
+		if isOfficePartName(f.Name) {
 			return true
 		}
 	}
 	return false
+}
+
+// isOfficePartName reports whether a zip entry name is a structural OOXML part
+// (a document body/metadata/relationship part), NOT an arbitrary attached file.
+// Used both to recognise an Office zip and to decide which members of an Office
+// zip are body parts (left to the macro path, never member-dumped → no body-text
+// FP) versus sibling files that should still be carrier-unpacked.
+func isOfficePartName(n string) bool {
+	return strings.HasPrefix(n, "word/") || strings.HasPrefix(n, "xl/") ||
+		strings.HasPrefix(n, "ppt/") || strings.HasPrefix(n, "visio/") ||
+		strings.HasPrefix(n, "customXml/") || strings.HasPrefix(n, "_rels/") ||
+		strings.HasPrefix(n, "docProps/") || n == "[Content_Types].xml" ||
+		n == "mimetype" || strings.HasPrefix(n, "META-INF/")
+}
+
+// fromOfficeZipCarriers closes the spoofed-container gap: an Office-classified zip
+// is handled by the macro path only (its body XML is never member-dumped, to
+// avoid body-text false positives), but an attacker can drop a real dropper as a
+// SIBLING member of an otherwise-valid .docx/.xlsx — e.g. a PE, a nested zip, an
+// OLE2 doc, an RTF, a PDF, a .lnk, or an encoded script. Those members are NOT
+// office body parts, so unpacking only the ones that are themselves a recognised
+// CARRIER (by magic) recovers the dropper with zero body-text FP risk: a plain
+// text/XML body part matches no carrier magic and is left untouched. Bounded by
+// the shared archive budget/depth/deadline and the per-member size cap, exactly
+// like fromArchive.
+func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	if b == nil || depth > maxNestDepth || b.spent() || expired(deadline) {
+		return
+	}
+	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
+	if err != nil {
+		return
+	}
+	for i, f := range zr.File {
+		if i >= maxZipEntries || b.spent() || expired(deadline) || len(res.Streams) >= maxStreams {
+			break
+		}
+		// Skip office body/metadata/relationship parts — the macro path owns those.
+		if isOfficePartName(f.Name) {
+			continue
+		}
+		if f.UncompressedSize64 > maxBytesPerBin {
+			continue // zip-bomb guard, mirrors the .bin cap
+		}
+		data := readZipEntry(f)
+		if len(data) == 0 {
+			continue
+		}
+		// Only route members that are themselves a recognised carrier; a non-carrier
+		// (ordinary attached text/image) matches no magic in extractChild and would
+		// just be appended as a raw stream — which for an Office sibling is exactly
+		// the body-text FP we avoid, so gate on carrier magic here.
+		if !isNestedCarrier(data) {
+			continue
+		}
+		b.members++
+		b.total += len(data)
+		extractChild(data, res, b, depth+1, deadline)
+	}
+}
+
+// isNestedCarrier reports whether data begins with the magic of a container yarad
+// knows how to crack further (so routing it through extractChild adds signal).
+// A buffer that is none of these is left to the raw scan, never member-dumped.
+func isNestedCarrier(data []byte) bool {
+	return bytes.HasPrefix(data, zipMagic) || isArchive(data) ||
+		bytes.HasPrefix(data, oleMagic) || isPDF(data) || isRTF(data) ||
+		isLNK(data) || isOneNote(data) || isValidPEAt(data, 0)
 }
 
 // markEncryptedArchive emits the ARCHIVE-ENCRYPTED PURE marker the first time a
