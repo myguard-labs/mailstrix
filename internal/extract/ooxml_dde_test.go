@@ -20,6 +20,71 @@ func makeOOXMLWithDocument(t *testing.T, documentXML string) []byte {
 	return b.Bytes()
 }
 
+// makeOOXMLWithParts builds an OOXML zip with arbitrary part name → content
+// entries (plus a document.xml so the container is recognised as an Office doc).
+func makeOOXMLWithParts(t *testing.T, parts map[string]string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	addZipEntry(t, zw, "word/document.xml", `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>`)
+	for name, content := range parts {
+		addZipEntry(t, zw, name, content)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// TestIsDDEDocPart pins the part-name glob: the whole field-bearing family
+// (document/header/footer/footnotes/endnotes/comments) matches; non-field parts
+// and non-word parts do not.
+func TestIsDDEDocPart(t *testing.T) {
+	yes := []string{
+		"word/document.xml", "word/document2.xml",
+		"word/header1.xml", "word/header2.xml", "word/header3.xml",
+		"word/footer1.xml", "word/footer2.xml",
+		"word/footnotes.xml", "word/endnotes.xml",
+		"word/comments.xml", "word/commentsExtended.xml",
+		"WORD/HEADER2.XML", // case-insensitive
+	}
+	no := []string{
+		"word/styles.xml", "word/settings.xml", "word/fontTable.xml",
+		"word/theme/theme1.xml", "word/_rels/document.xml.rels",
+		"xl/workbook.xml", "[Content_Types].xml", "word/media/image1.png",
+		"word/document.xml.rels",
+	}
+	for _, n := range yes {
+		if !isDDEDocPart(n) {
+			t.Errorf("isDDEDocPart(%q) = false, want true", n)
+		}
+	}
+	for _, n := range no {
+		if isDDEDocPart(n) {
+			t.Errorf("isDDEDocPart(%q) = true, want false", n)
+		}
+	}
+}
+
+// TestOOXMLDDE_NonDocumentParts is the #6 regression: a DDE field planted in a
+// part other than the old fixed four (header2/footer2/footnotes/endnotes/
+// comments) must still be detected. Before the glob, only document/document2/
+// header1/footer1 were scanned → these were MISSED.
+func TestOOXMLDDE_NonDocumentParts(t *testing.T) {
+	fld := `<?xml version="1.0"?><w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:fldSimple w:instr="DDEAUTO c:\Windows\System32\cmd.exe /k calc"/></w:p>`
+	for _, part := range []string{
+		"word/header2.xml", "word/footer3.xml",
+		"word/footnotes.xml", "word/endnotes.xml", "word/comments.xml",
+	} {
+		buf := makeOOXMLWithParts(t, map[string]string{part: fld})
+		res := Extract(buf, time.Time{})
+		joined := bytes.Join(res.Streams, []byte("\n"))
+		if !bytes.Contains(joined, []byte("OOXML-DDE-FIELD")) {
+			t.Errorf("DDE field in %s not detected; streams=%d", part, len(res.Streams))
+		}
+	}
+}
+
 // TestOOXMLDDE_FldSimple checks that a w:fldSimple with a DDEAUTO instruction
 // emits an OOXML-DDE-FIELD stream.
 func TestOOXMLDDE_FldSimple(t *testing.T) {

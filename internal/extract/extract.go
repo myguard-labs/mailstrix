@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts"
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
 // budget. It is resolved once per scan from the effort level and threaded to the
@@ -1043,14 +1043,39 @@ func countExternalRels(streams [][]byte) int {
 	return n
 }
 
-// ddeDocParts lists the OOXML word-processing parts that may contain field
-// instructions. document.xml is the primary carrier; header/footer parts can
-// also carry DDE fields in booby-trapped documents.
-var ddeDocParts = []string{
-	"word/document.xml",
-	"word/document2.xml",
-	"word/header1.xml",
-	"word/footer1.xml",
+// maxDDEParts bounds how many isDDEDocPart-matched parts we scan for DDE fields,
+// so a crafted document with thousands of headerN.xml parts cannot force
+// unbounded work. Real documents have a handful.
+const maxDDEParts = 64
+
+// isDDEDocPart reports whether an OOXML part name is a word-processing part that
+// may carry a field instruction (DDE/DDEAUTO). document.xml is the primary
+// carrier, but Word also evaluates fields in headers, footers, footnotes,
+// endnotes and comments — a DDE field planted in word/header2.xml or
+// word/footnotes.xml was previously MISSED by the old fixed four-name list
+// (document/document2/header1/footer1 only). Match the whole family by glob:
+//
+//	word/document*.xml  word/header*.xml  word/footer*.xml
+//	word/footnotes.xml  word/endnotes.xml  word/comments*.xml
+//
+// Case-insensitive on the part name (zip names are normally lowercase, but a
+// crafted container may vary case). Bounded by maxDDEParts at the call site.
+func isDDEDocPart(name string) bool {
+	n := strings.ToLower(name)
+	if !strings.HasPrefix(n, "word/") || !strings.HasSuffix(n, ".xml") {
+		return false
+	}
+	base := n[len("word/"):]
+	switch {
+	case strings.HasPrefix(base, "document"),
+		strings.HasPrefix(base, "header"),
+		strings.HasPrefix(base, "footer"),
+		strings.HasPrefix(base, "comments"):
+		return true
+	case base == "footnotes.xml", base == "endnotes.xml":
+		return true
+	}
+	return false
 }
 
 // maxDDEFields caps how many OOXML-DDE-FIELD synthetic streams we emit per
@@ -1062,7 +1087,7 @@ const maxDDEFields = 64
 // Word document body is rarely > 4 MiB; beyond that we skip the part.
 const maxBytesPerDocXML = 4 << 20
 
-// fromOOXMLDDE reads the word-processing parts listed in ddeDocParts from the
+// fromOOXMLDDE reads every isDDEDocPart-matched word-processing part from the
 // already-opened zip, parses their XML, and appends a synthetic
 // "OOXML-DDE-FIELD <instr>" []byte stream to *out for each field instruction
 // that begins with (or contains) "DDE" or "DDEAUTO". Two field instruction
@@ -1077,23 +1102,23 @@ const maxBytesPerDocXML = 4 << 20
 // Fail-open contract: a part that cannot be read or parsed is silently skipped.
 // Bounded by maxDDEFields + maxBytesPerDocXML; respects expired(deadline).
 func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
-	// Build a name→*zip.File index for O(1) lookup of the small fixed part list.
-	idx := make(map[string]*zip.File, len(zr.File))
+	// Walk the directory once, scanning every word-processing part that may carry
+	// a DDE field (isDDEDocPart globs document*/header*/footer*/footnotes/endnotes/
+	// comments*) — not a fixed four-name list that missed header2+, footnotes, etc.
+	// Bounded by maxDDEParts (parts scanned), maxDDEFields/maxStreams (emitted),
+	// the per-part size cap, and the deadline.
+	parts := 0
 	for _, f := range zr.File {
-		idx[f.Name] = f
-	}
-
-	for _, part := range ddeDocParts {
 		if expired(deadline) {
 			break
 		}
-		if countDDEFields(*out) >= maxDDEFields || len(*out) >= maxStreams {
+		if countDDEFields(*out) >= maxDDEFields || len(*out) >= maxStreams || parts >= maxDDEParts {
 			break
 		}
-		f, ok := idx[part]
-		if !ok {
+		if !isDDEDocPart(f.Name) {
 			continue
 		}
+		parts++
 		if f.UncompressedSize64 > maxBytesPerDocXML {
 			continue // anomalously large part — skip
 		}
