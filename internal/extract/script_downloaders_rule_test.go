@@ -43,6 +43,8 @@ func TestScriptDownloadersRule_Present(t *testing.T) {
 		"rule PS1_PSCredential_Password_Spray",       // 9f0a17d4
 		"rule PS1_Defender_Exclusion_Cleanup_Loader", // 3ae711ab
 		"rule VBS_CustomBase64_MSXML_ExecuteGlobal",  // f6438c51
+		// s31 third batch: GitHub-raw random-name dropper family (was generic-only).
+		"rule PS1_RandomName_Temp_Download_Exec_Delete", // 0f21d86b/2033921b/d3fd81d8
 	} {
 		if !bytes.Contains(data, []byte(want)) {
 			t.Errorf("script_downloaders.yara missing %q", want)
@@ -69,6 +71,10 @@ func TestScriptDownloadersRule_Anchors(t *testing.T) {
 		"$MyInvocation.MyCommand.Path", // 3ae711ab self-delete
 		"MSXML2.ServerXMLHTTP",         // f6438c51
 		"ExecuteGlobal",                // f6438c51
+		// s31 random-name dropper family anchors
+		`Get-Random\s+-Min`, // forge random temp filename
+		`\$env:TEMP`,        // temp drop path
+		"-OutFile",          // download to file
 	} {
 		if !bytes.Contains(data, []byte(anchor)) {
 			t.Errorf("script_downloaders.yara missing anchor %q", anchor)

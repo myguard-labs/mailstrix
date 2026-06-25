@@ -149,3 +149,37 @@ rule VBS_CustomBase64_MSXML_ExecuteGlobal : vbs downloader heuristic suspicious
     condition:
         filesize < 32KB and $http and $map and $resp and $exec
 }
+
+/*
+  Third batch (s31): a 3-member PowerShell dropper family the sweep found firing
+  only the generic Sus_CMD_Powershell_Usage heuristic (0f21d86b, 2033921b,
+  d3fd81d8). Same actor (GitHub raw payload host, a split-string GitHub PAT in
+  the Authorization header). Upgrades these from a generic catch-all to a specific,
+  higher-confidence family rule. Mechanic shared by all members:
+    - a `Get-RandomName` builder picking from a scrambled alphabet via
+      `Get-Random -Minimum 0 -Maximum 61` to forge an 8-char temp filename;
+    - the random name is written under `$env:TEMP` via `Join-Path`;
+    - download-execute-delete: `-OutFile` to that path, `& $path`, then
+      `Remove-Item` to clean up.
+  The 4-way conjunction (random-name builder + TEMP path + download-to-file +
+  self-delete) is the FP guard; no benign script combines all four.
+*/
+
+rule PS1_RandomName_Temp_Download_Exec_Delete : powershell loader heuristic suspicious
+{
+    meta:
+        author="yarad"
+        description="PowerShell dropper: Get-RandomName (Get-Random 0-61) temp filename, Join-Path $env:TEMP, Invoke-WebRequest -OutFile, execute, Remove-Item -- GitHub-raw payload family (0f21d86b/2033921b/d3fd81d8)"
+        score="75"
+    strings:
+        // forge a random filename from a scrambled alphabet.
+        $rnd  = /Get-Random\s+-Min(imum)?\s+0\s+-Max(imum)?\s+61/ ascii wide nocase
+        // drop it under the user temp dir.
+        $temp = /Join-Path[^\r\n]{0,40}\$env:TEMP/ ascii wide nocase
+        // download the second stage to that file.
+        $out  = "-OutFile" ascii wide nocase
+        // anti-forensics cleanup of the dropped payload.
+        $rm   = /Remove-Item\b/ ascii wide nocase
+    condition:
+        filesize < 32KB and $rnd and $temp and $out and $rm
+}
