@@ -42,7 +42,9 @@ docker build -f docker/profile/Dockerfile.profile -t yarad-profile \
     --build-arg CACHEBUST="$(date +%s)" . >&2
 
 echo "→ scanning; cost table → $OUT" >&2
-docker run --rm -v "$SAMPLES:/samples:ro" yarad-profile > "$OUT"
+# FAST_MODE=1 in the env mirrors yarad's SCAN_FLAGS_FAST_MODE (PERF-15) so the
+# total cost can be compared with/without the flag.
+docker run --rm -e FAST_MODE="${FAST_MODE:-}" -v "$SAMPLES:/samples:ro" yarad-profile > "$OUT"
 
 echo "→ top 10 by cost:" >&2
 tail -n +2 "$OUT" | sort -t"$(printf '\t')" -k1,1 -nr | head -10 \

@@ -689,3 +689,61 @@ func TestScanPoolSurvivesReload(t *testing.T) {
 		t.Fatalf("new rule did not match after reload: %+v err=%v", m, err)
 	}
 }
+
+// fastModeRule fires when a short string appears anywhere. With a buffer where
+// that string repeats thousands of times, FAST_MODE (PERF-15) stops after the
+// first hit — the rule must still fire exactly once, identically to a buffer
+// where the string appears a single time. yarad reads only the rule-fired SET,
+// never per-string offsets/counts, so the matched-rule result is byte-identical
+// regardless of how many times the underlying string matched.
+const fastModeRule = `
+rule FastMode_Repeat
+{
+    strings:
+        $s = "ZZTOKENZZ"
+    condition:
+        $s
+}
+`
+
+func TestFastModeMatchSetIdentical(t *testing.T) {
+	s := newScanner(t, writeRules(t, fastModeRule))
+
+	single := []byte("prefix ZZTOKENZZ suffix")
+	// Many repeats: pre-FAST_MODE libyara would record every offset; FAST_MODE
+	// records only the first. The rule-fired set must be identical either way.
+	many := bytes.Repeat([]byte("ZZTOKENZZ "), 50000)
+
+	ms, err := scanT(s, single, ScanMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mm, err := scanT(s, many, ScanMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].Rule != "FastMode_Repeat" {
+		t.Fatalf("single-match scan = %+v, want one FastMode_Repeat", ms)
+	}
+	if len(mm) != 1 || mm[0].Rule != "FastMode_Repeat" {
+		t.Fatalf("many-match scan = %+v, want one FastMode_Repeat (FAST_MODE must not change the rule set)", mm)
+	}
+}
+
+// TestFastModeScannerPath exercises the scanner (not bare-rules) branch of
+// scanOne — taken when a scan sets an external variable (here: an extension).
+// FAST_MODE is set on that path too, so a repeat-heavy buffer must still yield
+// the same single rule match.
+func TestFastModeScannerPath(t *testing.T) {
+	s := newScanner(t, writeRules(t, fastModeRule))
+	many := bytes.Repeat([]byte("ZZTOKENZZ "), 50000)
+	// NewScanMeta sets a filename/extension → scanVars.needsScanner() true →
+	// scanner path with SetFlags(FAST_MODE).
+	m, err := scanT(s, many, NewScanMeta("x.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 1 || m[0].Rule != "FastMode_Repeat" {
+		t.Fatalf("scanner-path many-match = %+v, want one FastMode_Repeat", m)
+	}
+}

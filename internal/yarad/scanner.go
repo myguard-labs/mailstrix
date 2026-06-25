@@ -1232,13 +1232,21 @@ func (s *Scanner) scanOne(rules *yara.Rules, buf []byte, vars scanVars, timeout 
 		if err := vars.define(sc); err != nil {
 			return nil, err
 		}
-		sc.SetTimeout(timeout).SetCallback(&mr)
+		// FAST_MODE (PERF-15): stop scanning each string after its first match in
+		// the buffer. yarad consumes only the rule-fired SET below (Rule/Namespace/
+		// Tags/Meta) and never per-string offsets or counts, so the matched-rule set
+		// is byte-identical — FAST_MODE only suppresses redundant duplicate-string
+		// records. The win is on large buffers where a string matches many times
+		// (e.g. a multi-MB script body), exactly where libyara dominates the scan.
+		sc.SetTimeout(timeout).SetFlags(yara.ScanFlagsFastMode).SetCallback(&mr)
 		if err := sc.ScanMem(buf); err != nil {
 			return nil, err
 		}
 	} else {
-		// flags=0 = default scan; all externals keep their compile-time defaults.
-		if err := rules.ScanMem(buf, 0, timeout, &mr); err != nil {
+		// FAST_MODE (PERF-15): same rationale as the scanner path above — detection
+		// set unchanged, only redundant string-match records are dropped. All
+		// externals keep their compile-time defaults.
+		if err := rules.ScanMem(buf, yara.ScanFlagsFastMode, timeout, &mr); err != nil {
 			return nil, err
 		}
 	}

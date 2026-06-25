@@ -84,6 +84,14 @@ int main(int argc, char **argv) {
   YR_SCANNER *sc;
   if (yr_scanner_create(rules, &sc) != ERROR_SUCCESS) { fprintf(stderr, "scanner_create\n"); return 1; }
   yr_scanner_set_callback(sc, cb, NULL);
+  /* PERF-15: mirror yarad's SCAN_FLAGS_FAST_MODE when FAST_MODE=1 in the env, so
+   * the cost table can be compared with/without the flag. Default OFF keeps the
+   * rule-cost numbers (PERF-12) directly comparable across runs. */
+  const char *fm = getenv("FAST_MODE");
+  if (fm && fm[0] == '1') {
+    yr_scanner_set_flags(sc, SCAN_FLAGS_FAST_MODE);
+    fprintf(stderr, "FAST_MODE enabled (SCAN_FLAGS_FAST_MODE)\n");
+  }
   /* match yarad scan-time externals (define on scanner; constant across run) */
   yr_scanner_define_string_variable(sc, "filepath", "");
   yr_scanner_define_string_variable(sc, "filename", "");
