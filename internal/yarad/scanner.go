@@ -886,6 +886,14 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// Phase 2 marker-channel: a PURE-marker rule must NOT fire on raw bytes (the
 	// literal is yarad-synthetic; a match here means an attacker planted it).
 	out = filterMarkerChannel(out, false)
+	// Build the dedup identity set once from the raw matches so that the stream
+	// loop below can update it incrementally instead of rebuilding it on every
+	// stream (O(N) total rather than O(N²) — PERF: mergeMatches-seen).
+	matchID := func(m Match) string { return m.Namespace + "/" + m.Rule }
+	matchSeen := make(map[string]struct{}, len(out)+16)
+	for i := range out {
+		matchSeen[matchID(out[i])] = struct{}{}
+	}
 	// Pre-extract any OLE2/OOXML macro source and account for it. The flags feed
 	// /metrics so this path is observable; the streams are scanned below. The
 	// same overall deadline bounds extraction time, not just the libyara scans.
@@ -989,10 +997,20 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 		// Phase 2 marker-channel: real content streams reject marker-tagged hits;
 		// the out-of-band Markers channel keeps ONLY marker-tagged hits.
 		m = filterMarkerChannel(m, markerChannel)
+		// Inline incremental dedup: matchSeen is built once before the stream
+		// loop (seeded from raw matches) and updated here, so we never rebuild
+		// the map from scratch on each stream — O(N) total vs O(N²) before.
 		before := len(out)
-		out = mergeMatches(out, m)
-		// Anything mergeMatches appended is a rule that fired on the extracted
-		// stream but NOT on the raw bytes — count it as pre-extraction's payoff.
+		for _, mm := range m {
+			k := matchID(mm)
+			if _, dup := matchSeen[k]; dup {
+				continue
+			}
+			matchSeen[k] = struct{}{}
+			out = append(out, mm)
+		}
+		// Anything appended is a rule that fired on the extracted stream but NOT
+		// on the raw bytes — count it as pre-extraction's payoff.
 		if added := len(out) - before; added > 0 {
 			s.exStreamMatches.Add(uint64(added))
 		}
