@@ -81,6 +81,55 @@ func carveStrings(src []byte) [][]byte {
 		copy(run, src[start:])
 		out = append(out, run)
 	}
+	// Also carve UTF-16 runs: an OLE UserForm caption/tag or an OLE SummaryInfo
+	// VT_LPWSTR property is stored wide (UTF-16LE), so the ASCII walk above sees
+	// each char as a length-1 run separated by NULs and recovers nothing — a real
+	// miss for wide captions/URLs. carveWideStrings strips the NUL bytes from wide
+	// runs and appends the ASCII text so the same keyword/URL rules fire.
+	out = append(out, carveWideStrings(src)...)
+	return out
+}
+
+// carveWideStrings returns the ASCII text of every UTF-16 run (LE or BE) of at
+// least minPrintRun characters in src, with the NUL bytes stripped. It looks for
+// sequences of (printable, 0x00) pairs (UTF-16LE) or (0x00, printable) pairs
+// (UTF-16BE). Only ASCII-range characters are recovered, which is all the
+// keyword/URL rules need; non-ASCII wide chars terminate a run. Bounded by
+// maxCarveInput like carveStrings.
+func carveWideStrings(src []byte) [][]byte {
+	if len(src) > maxCarveInput {
+		src = src[:maxCarveInput]
+	}
+	carve := func(hiNulOdd bool) [][]byte {
+		// hiNulOdd=true → UTF-16LE: char byte at even offset, 0x00 at odd.
+		var out [][]byte
+		var run []byte
+		flush := func() {
+			if len(run) >= minPrintRun {
+				cp := make([]byte, len(run))
+				copy(cp, run)
+				out = append(out, cp)
+			}
+			run = run[:0]
+		}
+		for i := 0; i+1 < len(src); i += 2 {
+			var ch, nul byte
+			if hiNulOdd {
+				ch, nul = src[i], src[i+1]
+			} else {
+				nul, ch = src[i], src[i+1]
+			}
+			if nul == 0x00 && isPrintable(ch) {
+				run = append(run, ch)
+			} else {
+				flush()
+			}
+		}
+		flush()
+		return out
+	}
+	out := carve(true)                 // UTF-16LE
+	out = append(out, carve(false)...) // UTF-16BE
 	return out
 }
 

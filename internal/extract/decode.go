@@ -125,6 +125,17 @@ const (
 	// streams the format extractors already surfaced.
 	textSample       = 4096
 	textPrintablePct = 90
+
+	// UTF-16 BOM-less detection (transcodeUTF16). utf16MinSample is the minimum
+	// byte count before the alternating-NUL heuristic is trusted (too-short
+	// buffers give noisy parity stats). utf16NULHighPct is the minimum NUL fraction
+	// required on the "high" parity (the byte that is 0x00 for ASCII-range wide
+	// text); utf16NULLowPct is the maximum NUL fraction tolerated on the other
+	// parity. The gap between them is what separates real wide text from a binary
+	// blob whose NULs fall on both parities.
+	utf16MinSample  = 16
+	utf16NULHighPct = 60
+	utf16NULLowPct  = 20
 )
 
 var (
@@ -462,6 +473,37 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 	sources = append(sources, res.Streams...)
 
 	total := 0
+
+	// UTF-16 recovery: a wide (UTF-16LE/BE) PowerShell/VBScript/JScript payload is
+	// ~50% NUL bytes, so mostlyText rejects it as binary and neither the decoders
+	// nor the keyword rules ever see the cleartext. Transcode each UTF-16 source to
+	// UTF-8 up front, emit the UTF-8 form as a scannable stream (so wide-script
+	// keyword rules fire directly on it) AND add it as an extra decode source (so a
+	// wide-then-base64 nested payload is still unwrapped). Bounded by the same
+	// per-blob/cumulative/stream caps as every other decoded blob. The snapshot is
+	// taken before this loop, so the appended streams are not themselves re-scanned
+	// for UTF-16 (no recursion).
+	var u16Blobs, u16Cum int
+	for _, src := range append([][]byte(nil), sources...) {
+		if expired(deadline) || len(res.Streams) >= maxStreams {
+			break
+		}
+		u8, ok := transcodeUTF16(src)
+		if !ok || len(u8) < minDecodedLen {
+			continue
+		}
+		if len(u8) > maxBytesPerDecodedBlob {
+			u8 = u8[:maxBytesPerDecodedBlob]
+		}
+		if u16Blobs >= maxDecodedBlobs || u16Cum+len(u8) > maxCumulativeDecoded {
+			break
+		}
+		res.Streams = append(res.Streams, u8)
+		sources = append(sources, u8)
+		u16Blobs++
+		u16Cum += len(u8)
+		total++
+	}
 	// MSD-4 budget: the ingest-time defang emits one extra stream per source
 	// outside decodeSourceTree's own per-source budget, so it needs its own caps
 	// — otherwise N defanged sources × up to 1 MiB each would bypass the
@@ -986,6 +1028,85 @@ func mostlyText(b []byte) bool {
 		}
 	}
 	return printable*100 >= n*textPrintablePct
+}
+
+// utf16LEBOM / utf16BEBOM are the byte-order marks that open a UTF-16 text file.
+var (
+	utf16LEBOM = []byte{0xFF, 0xFE}
+	utf16BEBOM = []byte{0xFE, 0xFF}
+)
+
+// transcodeUTF16 detects a UTF-16-encoded text source and returns its UTF-8
+// transcoding plus true; otherwise (nil, false). A wide (UTF-16) PowerShell /
+// VBScript / JScript payload is ~50% NUL bytes, so mostlyText rejects it as
+// "binary" and the whole decode walk (and the keyword rules) never see the
+// cleartext — a real miss class. We recover it in two cases:
+//
+//   - An explicit UTF-16 BOM (FF FE little-endian, FE FF big-endian).
+//   - No BOM but a strong alternating-NUL signature: in ASCII-range UTF-16LE the
+//     odd bytes are 0x00 (and in UTF-16BE the even bytes are), which a binary
+//     blob does not exhibit. We require a high NUL fraction at the right parity
+//     AND a low NUL fraction at the other parity, so a genuinely binary buffer
+//     (NULs scattered across both parities) is NOT misread as text.
+//
+// Bounded: only a leading sample drives detection; the transcode itself is capped
+// by the caller. Decoding is lossy-tolerant (unpaired surrogates → U+FFFD via
+// utf16.Decode), which is fine — we only need the ASCII keywords to surface.
+func transcodeUTF16(b []byte) ([]byte, bool) {
+	switch {
+	case bytes.HasPrefix(b, utf16LEBOM):
+		return decodeUTF16(b[2:], false), true
+	case bytes.HasPrefix(b, utf16BEBOM):
+		return decodeUTF16(b[2:], true), true
+	}
+	// BOM-less heuristic over a leading sample (odd trailing byte ignored).
+	n := len(b)
+	if n > textSample {
+		n = textSample
+	}
+	if n < utf16MinSample {
+		return nil, false
+	}
+	var evenNUL, oddNUL, pairs int
+	for i := 0; i+1 < n; i += 2 {
+		pairs++
+		if b[i] == 0x00 {
+			evenNUL++
+		}
+		if b[i+1] == 0x00 {
+			oddNUL++
+		}
+	}
+	if pairs == 0 {
+		return nil, false
+	}
+	// UTF-16LE ASCII text: high odd-byte NUL, low even-byte NUL (the visible char).
+	if oddNUL*100 >= pairs*utf16NULHighPct && evenNUL*100 <= pairs*utf16NULLowPct {
+		return decodeUTF16(b, false), true
+	}
+	// UTF-16BE ASCII text: high even-byte NUL, low odd-byte NUL.
+	if evenNUL*100 >= pairs*utf16NULHighPct && oddNUL*100 <= pairs*utf16NULLowPct {
+		return decodeUTF16(b, true), true
+	}
+	return nil, false
+}
+
+// decodeUTF16 transcodes raw UTF-16 bytes (no BOM) to UTF-8. bigEndian selects
+// the byte order. An odd trailing byte is dropped. Capped at maxBytesPerDecodedBlob
+// of input so a multi-MB wide buffer cannot blow the per-blob budget.
+func decodeUTF16(b []byte, bigEndian bool) []byte {
+	if len(b) > maxBytesPerDecodedBlob*2 {
+		b = b[:maxBytesPerDecodedBlob*2]
+	}
+	units := make([]uint16, 0, len(b)/2)
+	for i := 0; i+1 < len(b); i += 2 {
+		if bigEndian {
+			units = append(units, uint16(b[i])<<8|uint16(b[i+1]))
+		} else {
+			units = append(units, uint16(b[i+1])<<8|uint16(b[i]))
+		}
+	}
+	return []byte(string(utf16.Decode(units)))
 }
 
 // decodeBase64Runs decodes each long base64 run in src. Returns false if a global
