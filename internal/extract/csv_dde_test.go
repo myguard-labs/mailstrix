@@ -85,6 +85,51 @@ func TestFromCSVDDE_CommaPreferredOverTab(t *testing.T) {
 	}
 }
 
+func TestNextCSVDelim(t *testing.T) {
+	cases := []struct {
+		line  string
+		delim byte
+		want  int
+	}{
+		{"a,b", ',', 1},
+		{`"a,b",c`, ',', 5},             // comma inside quotes skipped → boundary at the 2nd
+		{`"a,b"`, ',', -1},              // whole line is one quoted field
+		{`"a""b,c",d`, ',', 8},          // doubled-quote "" inside stays quoted; boundary after closing quote
+		{`=cmd|'/c x,y'!A1`, ',', 10},   // single-quoted DDE arg is NOT CSV-quoted → comma splits
+		{`"=cmd|'/c x,y'!A1"`, ',', -1}, // CSV-quoted → comma stays inside, no split
+		{"a\tb", '\t', 1},
+		{"plain", ',', -1},
+	}
+	for _, c := range cases {
+		if got := nextCSVDelim([]byte(c.line), c.delim); got != c.want {
+			t.Errorf("nextCSVDelim(%q,%q) = %d, want %d", c.line, c.delim, got, c.want)
+		}
+	}
+}
+
+// TestFromCSVDDE_DelimiterInsideQuotedPayload is the #3 regression: a DDE cell
+// whose command argument carries the active delimiter, inside a CSV-quoted
+// field, must still be detected. A quote-blind split cut it mid-payload →
+// neither half matched the DDE form → the attack was MISSED.
+func TestFromCSVDDE_DelimiterInsideQuotedPayload(t *testing.T) {
+	for _, doc := range []string{
+		`a,"=cmd|'/c calc.exe,extra'!A1",d` + "\n", // comma inside the quoted DDE arg
+		`"=cmd|'/c calc.exe,extra'!A1",b` + "\n",   // quoted DDE cell first, then a field
+	} {
+		var res Result
+		fromCSVDDE([]byte(doc), &res, time.Time{})
+		var saw bool
+		for _, s := range res.Streams {
+			if strings.HasPrefix(string(s), "CSV-DDE ") && strings.Contains(string(s), "calc.exe") {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("quote-aware split missed a DDE cell with delimiter in the quoted arg: %q; streams=%q", doc, res.Streams)
+		}
+	}
+}
+
 func TestFromCSVDDE_BenignNoMarker(t *testing.T) {
 	doc := "name,total,formula\nfoo,3,=SUM(A1:A9)\nbar,4,plain\n" +
 		"baz,5,\"=HYPERLINK(\"\"http://x|y!\"\")\"\n"

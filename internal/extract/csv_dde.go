@@ -132,8 +132,7 @@ func scanCSVLine(line []byte, res *Result, deadline time.Time) {
 	// Delimiter: comma is the CSV default; fall back to tab only for a genuine TSV
 	// (a line with tabs but no comma). Preferring comma avoids mis-splitting a
 	// comma-CSV row that merely contains a tab inside a quoted field (which would
-	// otherwise hide a comma-separated DDE cell). A real DDE payload cell never
-	// embeds the active delimiter, so a quote-unaware split is enough.
+	// otherwise hide a comma-separated DDE cell).
 	delim := byte(',')
 	if bytes.IndexByte(line, ',') < 0 && bytes.IndexByte(line, '\t') >= 0 {
 		delim = '\t'
@@ -145,14 +144,46 @@ func scanCSVLine(line []byte, res *Result, deadline time.Time) {
 			return
 		}
 		cells++
+		// Quote-aware split (RFC4180): a delimiter inside a "..." field is literal,
+		// not a cell boundary. A DDE payload whose command argument carries the
+		// delimiter — e.g. `"=cmd|'/c calc,exe'!A1"` in a comma-CSV — would be cut
+		// mid-payload by a quote-blind split, so neither half matches the DDE form
+		// and the attack is MISSED. nextCSVDelim returns the index of the next
+		// UNQUOTED delimiter (or -1), so a quoted field stays whole for normCSVCell.
 		var cell []byte
-		if idx := bytes.IndexByte(line, delim); idx >= 0 {
+		if idx := nextCSVDelim(line, delim); idx >= 0 {
 			cell, line = line[:idx], line[idx+1:]
 		} else {
 			cell, line = line, nil
 		}
 		emitIfCSVDDE(cell, res)
 	}
+}
+
+// nextCSVDelim returns the index of the first delim that lies OUTSIDE a CSV
+// double-quoted field, or -1 if none. Quoting follows RFC4180: a '"' toggles
+// quote state, and a doubled '""' inside a quoted field is an escaped quote (it
+// stays quoted, so it must not toggle state). Leading whitespace before the
+// opening quote (" =...") is tolerated — a field is treated as quoted once a '"'
+// is seen with no preceding unquoted content, matching how normCSVCell trims then
+// unquotes. Bytes outside any quote are scanned for the delimiter.
+func nextCSVDelim(line []byte, delim byte) int {
+	inQuote := false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '"':
+			if inQuote && i+1 < len(line) && line[i+1] == '"' {
+				i++ // skip the escaped "" pair, stay quoted
+				continue
+			}
+			inQuote = !inQuote
+		case delim:
+			if !inQuote {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // emitIfCSVDDE tests one cell for the formula-injection DDE form and appends a
