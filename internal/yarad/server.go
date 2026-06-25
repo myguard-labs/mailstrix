@@ -753,6 +753,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_xlm_fold_total", "documents with XLM formula constant-folding (CHAR/string reassembly) applied", ex.XLMFold)
 	fm("extract_stream_matches_total", "rule hits attributable only to an extracted stream (not raw bytes)", ex.StreamMatches)
 	fm("extract_deduped_total", "extracted streams skipped before YARA scan (content-hash duplicate of a prior stream or raw buf)", ex.Deduped)
+	fm("extract_ext_mismatch_total", "attachments whose real container type contradicts a benign-looking extension (renamed dropper)", ex.ExtMismatch)
 
 	// Rule-reload activity — so a SIGHUP that silently fails to compile is visible
 	// to alerting, not just buried in logs.

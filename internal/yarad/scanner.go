@@ -116,6 +116,7 @@ type Scanner struct {
 	exDeduped                                                         atomic.Uint64 // extracted streams skipped as duplicates (content hash matched a prior stream or raw buf)
 	exDocProps                                                        atomic.Uint64 // documents with doc-property strings extracted
 	exXLMFold                                                         atomic.Uint64 // documents with XLM formula constant-folding applied
+	exExtMismatch                                                     atomic.Uint64 // attachments whose real container type contradicts a benign-looking extension (renamed dropper)
 
 	// Rule-reload observability (see ReloadMetrics).
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
@@ -290,9 +291,10 @@ type ExtractMetrics struct {
 	StreamMatches uint64
 	// Deduped counts extracted streams skipped before YARA scanning because their
 	// SHA256 matched a previously scanned stream (or the raw input buffer itself).
-	Deduped  uint64
-	DocProps uint64 // documents with doc-property strings extracted
-	XLMFold  uint64 // documents with XLM formula constant-folding applied
+	Deduped     uint64
+	DocProps    uint64 // documents with doc-property strings extracted
+	XLMFold     uint64 // documents with XLM formula constant-folding applied
+	ExtMismatch uint64 // attachments whose real container type contradicts a benign-looking extension (renamed dropper)
 }
 
 // ExtractMetrics returns the current pre-extraction counters.
@@ -319,6 +321,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		Deduped:       s.exDeduped.Load(),
 		DocProps:      s.exDocProps.Load(),
 		XLMFold:       s.exXLMFold.Load(),
+		ExtMismatch:   s.exExtMismatch.Load(),
 	}
 }
 
@@ -999,6 +1002,16 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 		if scanExtracted(stream, false) {
 			break
 		}
+	}
+	// Renamed-container check (yarad analog of SpamAssassin OLEMACRO_RENAME /
+	// MIME_BAD_EXTENSION): the extractor recovered the REAL type, so compare it to
+	// the claimed extension. A high-signal container under a benign coat
+	// (OLE/OOXML/RTF/archive/LNK/MSI/OneNote named .txt/.jpg/.pdf/…) is a classic
+	// rename evasion. Emitted on the out-of-band marker channel so the rule fires
+	// zero-FP on the synthetic literal only (never on attacker-controlled bytes).
+	if d := extMismatch(res, meta.Extension); d != "" {
+		s.exExtMismatch.Add(1)
+		scanExtracted([]byte(extMismatchMarkerPrefix+" "+d), true)
 	}
 	// PLAN-marker-channel Phase 2: the out-of-band PURE markers are still scanned
 	// against the full ruleset, but filterMarkerChannel now keeps ONLY

@@ -48,3 +48,17 @@ rule XLL_AddIn : xll office heuristic suspicious marker
     condition:
         filesize < 16MB and $marker
 }
+
+rule Renamed_Container : evasion heuristic suspicious marker
+{
+    meta:
+        author      = "yarad"
+        description = "Renamed container: the real parsed type (OLE/OOXML/RTF/archive/LNK/MSI/OneNote) contradicts a benign-looking attachment extension — a classic dropper rename evasion. yarad analog of SpamAssassin OLEMACRO_RENAME / MIME_BAD_EXTENSION, driven by the actual extracted type, not a magic-byte grep"
+        reference   = "https://attack.mitre.org/techniques/T1036/008/"
+        tier        = "suspicious"
+        score       = "55"
+    strings:
+        $marker = "EXT-MISMATCH " ascii
+    condition:
+        filesize < 16MB and $marker
+}
