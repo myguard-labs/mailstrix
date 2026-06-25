@@ -1,6 +1,7 @@
 package urlhaus
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,63 @@ func TestNewDisabledNoKey(t *testing.T) {
 	if New("", 0, "", func(string, ...any) {}) != nil {
 		t.Error("empty key must disable the checker (nil)")
 	}
+}
+
+// BenchmarkCheckNoDefang measures Check() on a buffer that does NOT trigger
+// defanging. defang()'s gate is bytes.ContainsAny(data, "[({xX") — the buffer
+// must contain none of those bytes anywhere, including in embedded URLs.
+// b.ReportAllocs() shows the alloc drop from avoiding the full-buffer
+// []byte→string copy that the old check(string(data),...) call paid.
+func BenchmarkCheckNoDefang(b *testing.B) {
+	c := testCheckerB(b)
+	// ~256 KB buffer. Noise + embedded URLs are crafted to contain none of the
+	// defang gate bytes ("[({xX") so bytes.ContainsAny returns false and
+	// defang() skips its internal string(data) copy entirely — isolating the
+	// FindAll zero-copy win.
+	//
+	// Note: "evil.example/malware.exe" contains 'x' (exe), so we use alternate
+	// hostnames and paths that are ASCII-clean w.r.t. the trigger set.
+	const (
+		bodySize = 256 * 1024
+		// Alphabet: no 'x', no 'X', no '[', '(', '{'
+		noise = "abcdefghijklmnopqrstuvwyz0123456789 "
+	)
+	buf := make([]byte, bodySize)
+	for i := range buf {
+		buf[i] = noise[i%len(noise)]
+	}
+	// URLs chosen to contain no trigger chars: no 'x'/'X'/'['/'('/'{'
+	// "http://evil.host/malware.bin"  — 'b','i','n' safe; no 'x'
+	// "https://safe.host/not-bad"     — clean
+	// The feed has "evil.example/malware.exe" but a different path on
+	// evil.example still triggers the host-level hit.
+	copy(buf[512:], []byte("http://evil.host/malware.bin"))
+	copy(buf[bodySize-200:], []byte("https://safe.host/not-bad"))
+	// Guard: ensure the full buffer (noise + URLs) has no defang trigger bytes.
+	if bytes.ContainsAny(buf, "[({xX") {
+		b.Fatal("bench buffer contains defang trigger bytes — fix URLs or noise")
+	}
+	// Confirm defang truly skips its string() copy path.
+	if defang(buf) != "" {
+		b.Fatal("bench buffer unexpectedly triggers defang output")
+	}
+	b.SetBytes(int64(bodySize))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = c.Check(buf, 64)
+	}
+}
+
+func testCheckerB(b *testing.B) *Checker {
+	b.Helper()
+	rs, err := parseFeed(strings.NewReader(sampleCSV))
+	if err != nil {
+		b.Fatal(err)
+	}
+	c := &Checker{logf: func(string, ...any) {}}
+	c.rs.Store(rs)
+	return c
 }
 
 // TestCloseNilSafeAndIdempotent: Close on a nil *Checker (disabled feature) and

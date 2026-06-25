@@ -292,13 +292,13 @@ func (c *Checker) Check(data []byte, maxURLs int) []Hit {
 
 	var out []Hit
 	seen := make(map[string]struct{})
-	check := func(text string, deobf bool, budget *int) {
-		for _, m := range urlRe.FindAllString(text, *budget) {
+	check := func(text []byte, deobf bool, budget *int) {
+		for _, m := range urlRe.FindAll(text, *budget) {
 			if *budget <= 0 {
 				return
 			}
 			*budget--
-			norm, host := normalizeURL(m)
+			norm, host := normalizeURL(string(m))
 			if norm == "" {
 				continue
 			}
@@ -317,10 +317,10 @@ func (c *Checker) Check(data []byte, maxURLs int) []Hit {
 	}
 
 	budget := maxURLs
-	check(string(data), false, &budget)
+	check(data, false, &budget)
 	// Defanged copy: surface URLs written as hxxp://, host[.]tld, host(dot)tld.
 	if defanged := defang(data); defanged != "" {
-		check(defanged, true, &budget)
+		check([]byte(defanged), true, &budget)
 	}
 	if len(out) > 0 {
 		c.hits.Add(1)
