@@ -516,3 +516,88 @@ func TestDridexRejectsPlainHex(t *testing.T) {
 		t.Skip("primitive may decode digits; gating is done by dridexNotHex at the call site")
 	}
 }
+
+// encodeUTF16 returns the UTF-16 (LE or BE, with optional BOM) encoding of s, for
+// building wide-script test fixtures.
+func encodeUTF16(s string, bigEndian, bom bool) []byte {
+	var b []byte
+	if bom {
+		if bigEndian {
+			b = append(b, 0xFE, 0xFF)
+		} else {
+			b = append(b, 0xFF, 0xFE)
+		}
+	}
+	for _, r := range s {
+		u := uint16(r) // test strings are BMP/ASCII
+		if bigEndian {
+			b = append(b, byte(u>>8), byte(u))
+		} else {
+			b = append(b, byte(u), byte(u>>8))
+		}
+	}
+	return b
+}
+
+// TestDecodeUTF16WideScriptRecovered is the #4 regression: a wide (UTF-16)
+// PowerShell/VBScript payload — which mostlyText rejects as binary (~50% NUL) —
+// must be transcoded to UTF-8 and surfaced so the keyword rules see the
+// cleartext. Covers LE+BOM, BE+BOM, and BOM-less LE (alternating-NUL heuristic).
+func TestDecodeUTF16WideScriptRecovered(t *testing.T) {
+	const payload = "powershell -enc SQBFAFgA cmd /c calc.exe"
+	cases := []struct {
+		name      string
+		bigEndian bool
+		bom       bool
+	}{
+		{"LE+BOM", false, true},
+		{"BE+BOM", true, true},
+		{"LE-noBOM", false, false},
+		{"BE-noBOM", true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			buf := encodeUTF16(payload, c.bigEndian, c.bom)
+			res := Extract(buf, time.Time{})
+			if !streamsContain(res, "powershell") {
+				t.Errorf("wide-script %q: 'powershell' not surfaced; streams=%d", c.name, len(res.Streams))
+			}
+		})
+	}
+}
+
+// TestTranscodeUTF16NegativeNoMisread asserts the heuristic does NOT misread a
+// genuinely binary buffer (NULs on both parities) or plain ASCII as UTF-16 — a
+// false transcode would corrupt content and could mask a real ASCII keyword.
+func TestTranscodeUTF16NegativeNoMisread(t *testing.T) {
+	// Plain ASCII text: no NULs at all → not UTF-16.
+	if _, ok := transcodeUTF16([]byte("plain ascii powershell script content here")); ok {
+		t.Error("plain ASCII misread as UTF-16")
+	}
+	// Binary blob with NULs scattered on BOTH parities → not UTF-16 ASCII text.
+	bin := make([]byte, 256)
+	for i := range bin {
+		if i%3 == 0 {
+			bin[i] = 0x00
+		} else {
+			bin[i] = byte(0x80 + i%64)
+		}
+	}
+	if _, ok := transcodeUTF16(bin); ok {
+		t.Error("binary blob (NULs on both parities) misread as UTF-16")
+	}
+	// Too-short buffer → not trusted.
+	if _, ok := transcodeUTF16([]byte{'a', 0x00}); ok {
+		t.Error("too-short buffer misread as UTF-16")
+	}
+}
+
+// TestDecodeUTF16DifferentialASCIIUnchanged: a plain ASCII source must behave
+// exactly as before (no spurious transcoded stream).
+func TestDecodeUTF16DifferentialASCIIUnchanged(t *testing.T) {
+	buf := []byte("just an ordinary ASCII email body, nothing encoded at all")
+	res := Extract(buf, time.Time{})
+	if len(res.Streams) != 0 {
+		t.Errorf("plain ASCII produced %d streams (UTF-16 path should not fire): %q", len(res.Streams), res.Streams)
+	}
+}

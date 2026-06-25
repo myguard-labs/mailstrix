@@ -201,3 +201,44 @@ func TestCarveInputClamp(t *testing.T) {
 		t.Fatalf("value past clamp boundary was extracted: %d", len(got))
 	}
 }
+
+// TestCarveWideStrings is the #4 regression for the carve sites (UserForm
+// captions, OLE SummaryInfo VT_LPWSTR): a UTF-16-encoded string must be carved
+// to its ASCII text. The plain carveStrings ASCII walk recovers nothing from
+// wide text because every char is a length-1 run separated by NULs.
+func TestCarveWideStrings(t *testing.T) {
+	// UTF-16LE "http://evil.example.com/x.exe"
+	le := encodeUTF16("http://evil.example.com/x.exe", false, false)
+	got := carveStrings(le)
+	if !containsRun(got, "http://evil.example.com/x.exe") {
+		t.Errorf("UTF-16LE wide URL not carved; got %q", got)
+	}
+	// UTF-16BE caption.
+	be := encodeUTF16("WScript.Shell.Run calc.exe", true, false)
+	got = carveStrings(be)
+	if !containsRun(got, "WScript.Shell.Run calc.exe") {
+		t.Errorf("UTF-16BE wide caption not carved; got %q", got)
+	}
+	// Mixed ASCII + wide in one stream: both recovered.
+	mixed := append([]byte("plain-ascii-cmd.exe-token\x00\x00"), encodeUTF16("powershell-wide-payload", false, false)...)
+	got = carveStrings(mixed)
+	if !containsRun(got, "plain-ascii-cmd.exe-token") {
+		t.Errorf("ASCII run lost after adding wide carve; got %q", got)
+	}
+	if !containsRun(got, "powershell-wide-payload") {
+		t.Errorf("wide run not carved from mixed stream; got %q", got)
+	}
+	// Plain ASCII must NOT spuriously produce wide runs (no interleaved NULs).
+	if w := carveWideStrings([]byte("just plain ascii text with no nul bytes at all here")); len(w) != 0 {
+		t.Errorf("plain ASCII produced %d spurious wide runs: %q", len(w), w)
+	}
+}
+
+func containsRun(runs [][]byte, want string) bool {
+	for _, r := range runs {
+		if string(r) == want {
+			return true
+		}
+	}
+	return false
+}
