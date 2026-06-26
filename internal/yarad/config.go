@@ -132,6 +132,8 @@ type Config struct {
 	FeodoEnabled bool          // YARAD_FEODO (0/1, default 0 = disabled)
 	FeodoRefresh time.Duration // YARAD_FEODO_REFRESH (default 360m, floor 5m)
 
+	ICAPAddr string // YARAD_ICAP_ADDR (empty = disabled; e.g. ":1344")
+
 	// RuleDenylist suppresses matches for these rule names (case-insensitive).
 	// Public rulesets ship demo/noise rules that are pure false positives for
 	// mail — e.g. Didier Stevens' `http` rule (rtf.yara) is `$="http" nocase`,
@@ -213,6 +215,7 @@ func LoadConfig() *Config {
 		ThreatFoxMaxURLs: envInt("YARAD_THREATFOX_MAX_URLS", 64),
 		FeodoEnabled:     envBool("YARAD_FEODO"),
 		FeodoRefresh:     envDur("YARAD_FEODO_REFRESH", 21600),
+		ICAPAddr:         strings.TrimSpace(os.Getenv("YARAD_ICAP_ADDR")),
 		RuleDenylist:     envSet("YARAD_RULE_DENYLIST", "http"),
 		RuleAllowlist:    envSet("YARAD_RULE_ALLOWLIST", ""),
 		EffortMax:        envInt("YARAD_EFFORT_MAX", defaultEffortMax),

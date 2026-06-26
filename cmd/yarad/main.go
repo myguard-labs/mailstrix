@@ -196,6 +196,22 @@ func cmdServe(args []string) int {
 
 	srv := yarad.NewServer(cfg, scanner)
 
+	// Optional ICAP listener — disabled when ICAPAddr is empty.
+	icapShutdown := func(_ context.Context) {}
+	if cfg.ICAPAddr != "" {
+		icapCtx, icapCancel := context.WithCancel(context.Background())
+		defer icapCancel() // belt-and-suspenders; icapShutdown below calls it first on SIGTERM
+		go func() {
+			if err := srv.ListenAndServeICAP(icapCtx); err != nil {
+				logf("ICAP listener error: %v", err)
+			}
+		}()
+		icapShutdown = func(ctx context.Context) {
+			icapCancel()
+			srv.ShutdownICAP(ctx)
+		}
+	}
+
 	// SIGHUP -> recompile rules in place, then flush the verdict cache (old
 	// verdicts were computed against the previous rule set). A failed reload
 	// keeps the old set active and leaves the cache intact (Reload logs and
@@ -236,6 +252,7 @@ func cmdServe(args []string) int {
 		logf("%s: draining (graceful shutdown)", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.ScanTimeout+5*time.Second)
 		defer cancel()
+		icapShutdown(ctx)
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("[yarad] shutdown error: %v", err)
 			return 1

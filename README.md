@@ -253,6 +253,7 @@ Every setting is an env var and a `serve` CLI flag (flag > env > default).
 | `YARAD_MBAZAAR_FEED` | full dump | override the feed URL (e.g. the lighter "recent" export) |
 | `YARAD_RULE_DENYLIST` | `http` | comma-sep rule names to suppress (case-insensitive); set empty to disable |
 | `YARAD_RULE_ALLOWLIST` | — | comma-sep rule names to force log-only (kept + tagged `yarad_allow`); deny wins if in both |
+| `YARAD_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `:1344`. When set, yarad also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. |
 | `YARAD_VERBOSE` | off | log one line per request |
 | `YARAD_LOG_STDOUT` | off | info/access logs to stdout (errors always stderr) |
 | `YARAD_PPROF` | off | enable `/debug/pprof` profiling endpoints (off by default; auth-gated when `YARAD_METRICS_AUTH` is set) |
@@ -495,6 +496,61 @@ per-message API call); a failed refresh keeps the previous set. MalwareBazaar's
 full dump adds ~40 MiB resident + a ~100–150 MiB transient spike on refresh —
 raise the container `mem_limit` (~768m) when enabling it.
 
+## ICAP mode (optional)
+
+yarad can run as an ICAP server alongside the HTTP `/scan` endpoint, making it
+usable as a drop-in content-scanning service for ICAP-aware proxies (Squid,
+c-icap, traffic proxies, MTA content-filters).
+
+### Enabling
+
+```bash
+docker run ... -e YARAD_ICAP_ADDR=:1344 ...
+```
+
+The ICAP listener starts on `:1344` (IANA ICAP port). The HTTP `/scan` server
+continues to run on `YARAD_PORT` alongside it. Both share the same scan engine,
+verdict cache, and concurrency budget (`YARAD_MAX_INFLIGHT`).
+
+**No ICAP-level authentication.** Gate the port by firewall/network; only
+trusted proxies should reach it (a startup warning is emitted when enabled,
+mirroring the `/scan` open-mode warning).
+
+### Supported methods
+
+| Method | Support |
+|--------|---------|
+| `OPTIONS` | returns `Methods: REQMOD, RESPMOD`, `Allow: 204`, `Preview: 0`, `ISTag` (from ruleset fingerprint — changes on SIGHUP reload) |
+| `RESPMOD` | scans the encapsulated response body |
+| `REQMOD` | scans the encapsulated request body |
+
+### Verdicts
+
+| Verdict | ICAP response |
+|---------|--------------|
+| Clean (0 matches) + `Allow: 204` sent by proxy | `204 No Modification` (proxy serves original) |
+| Clean (0 matches), no `Allow: 204` | `200 OK` with echo-back of original |
+| Infected (≥1 match) | `200 OK` with replacement `403 Forbidden` body + `X-Infection-Found` and `X-Violations-Found` headers naming the matched rules |
+| Body exceeds `YARAD_MAX_BODY` | `413 Request Entity Too Large` |
+| Scan engine error | fail-open → `204 No Modification` (mirrors `/scan` fail-open) |
+
+### Squid example
+
+```
+icap_enable on
+icap_service yarad_req reqmod_precache bypass=1 icap://yarad:1344/scan
+icap_service yarad_resp respmod_precache bypass=1 icap://yarad:1344/scan
+adaptation_access yarad_req allow all
+adaptation_access yarad_resp allow all
+```
+
+### Metrics
+
+When `YARAD_ICAP_ADDR` is set, three additional counters appear in `/metrics`:
+- `yarad_icap_requests_total` — REQMOD/RESPMOD requests served
+- `yarad_icap_infected_total` — requests with ≥1 rule match (403 sent)
+- `yarad_icap_options_total` — OPTIONS requests served
+
 ## Wiring it into rspamd
 
 The [`rspamd/`](rspamd/) directory has everything the rspamd side needs:
@@ -576,6 +632,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] abuse.ch reputation feeds: URLhaus, MalwareBazaar hash, **ThreatFox** IOC (url/domain), **Feodo** C&C IP blocklist (cached, fail-open)
 - [x] Curated CAPEv2 family rules (Guloader/Formbook/AgentTesla/Obfuscar) as an 8th rule source; build-time `SLOW_RULE_DENYLIST` with a bundle guard (never unloads a shared multi-rule file)
 - [x] Distroless, non-root, read-only rootfs (~89 MB)
+- [x] **ICAP server** (RFC 3507) — optional `YARAD_ICAP_ADDR` listener; REQMOD+RESPMOD; shares engine, cache, and concurrency gate with `/scan`; ISTag tracks ruleset fingerprint; fail-open on scan error; `icap_*` Prometheus counters
 
 ### Planned
 

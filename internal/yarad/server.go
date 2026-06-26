@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -93,15 +94,19 @@ type Server struct {
 	// most one scan old and self-corrects next scan).
 	autoEffort atomic.Int64
 	metrics    struct {
-		scans, matches, errors, busy        atomic.Uint64
-		canceled                            atomic.Uint64
-		cacheHit, cacheMiss, cacheCoalesced atomic.Uint64
+		scans, matches, errors, busy            atomic.Uint64
+		canceled                                atomic.Uint64
+		cacheHit, cacheMiss, cacheCoalesced     atomic.Uint64
+		icapRequests, icapInfected, icapOptions atomic.Uint64
 	}
 	info *log.Logger // access/info — stdout when YARAD_LOG_STDOUT, else stderr
 	errl *log.Logger // errors/warnings — always stderr
 
 	httpSrv  atomic.Pointer[http.Server] // set by ListenAndServe; used by Shutdown
 	draining atomic.Bool                 // true once Shutdown begins -> /ready 503s
+
+	icapLn atomic.Pointer[net.Listener]
+	icapWg sync.WaitGroup
 }
 
 func newLoggers(cfg *Config) (info, errl *log.Logger) {
@@ -237,6 +242,11 @@ func (s *Server) logStartup(addr string) {
 			s.cfg.MaxConcurrent, quota, float64(s.cfg.MaxConcurrent)/quota)
 	}
 	s.logf("repo: %s", RepoURL)
+	if s.cfg.ICAPAddr != "" {
+		s.errf("WARNING: ICAP listener on %s has no built-in authentication. "+
+			"Gate by network/firewall; only trusted proxies should reach this port.", s.cfg.ICAPAddr)
+		s.logf("ICAP listener: %s (REQMOD+RESPMOD, Preview:0, Allow:204)", s.cfg.ICAPAddr)
+	}
 }
 
 // RepoURL is the project's source, logged at startup when log-stdout is on.
@@ -846,6 +856,11 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 		fm("feodo_refresh_failures_total", "Feodo Tracker feed refresh failures", fd.RefreshFailures)
 		gauge("feodo_feed_ips", "C&C IPs in the loaded Feodo Tracker blocklist", fd.FeedIPs)
 		gauge("feodo_last_refresh_timestamp_seconds", "unix time of the last successful feed refresh", fd.LastRefreshUnix)
+	}
+	if s.cfg.ICAPAddr != "" {
+		fm("icap_requests_total", "total ICAP REQMOD/RESPMOD requests served", s.metrics.icapRequests.Load())
+		fm("icap_infected_total", "ICAP requests with >=1 rule match (403 replacement sent)", s.metrics.icapInfected.Load())
+		fm("icap_options_total", "ICAP OPTIONS requests served", s.metrics.icapOptions.Load())
 	}
 	writeRaw(w, http.StatusOK, "text/plain; version=0.0.4", []byte(b.String()))
 }
