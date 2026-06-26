@@ -141,6 +141,66 @@ func TestNoRedirectTokenLeak(t *testing.T) {
 	}
 }
 
+// countingYarad records whether /scan was ever called, so the oversize tests can
+// prove the client never POSTs a truncated prefix.
+func countingYarad(t *testing.T, called *bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"matches":[]}`))
+	}))
+}
+
+// An input over -max-body must NOT be scanned as a truncated prefix. Default
+// fail-open: exit 0 (clean) with a warning, and /scan is never called — a dropper
+// past the cap would otherwise be silently missed.
+func TestOversizeFailOpenDoesNotScan(t *testing.T) {
+	var called bool
+	srv := countingYarad(t, &called)
+	defer srv.Close()
+	f := writeTemp(t, strings.Repeat("A", 100))
+	code := run([]string{"-url", srv.URL, "-max-body", "10", f})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (oversize fail-open)", code)
+	}
+	if called {
+		t.Fatal("/scan was called on an oversized input; truncated prefix posted")
+	}
+}
+
+// Fail-closed: an oversize input exits 2 (visible error for interactive triage)
+// and still never posts a truncated prefix.
+func TestOversizeFailClosedErrors(t *testing.T) {
+	var called bool
+	srv := countingYarad(t, &called)
+	defer srv.Close()
+	f := writeTemp(t, strings.Repeat("A", 100))
+	code := run([]string{"-url", srv.URL, "-max-body", "10", "-fail-open=false", f})
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (oversize fail-closed)", code)
+	}
+	if called {
+		t.Fatal("/scan was called on an oversized input; truncated prefix posted")
+	}
+}
+
+// An input exactly at -max-body is scanned normally (boundary: the +1 read must
+// not false-positive on a message that fits).
+func TestExactlyMaxBodyScans(t *testing.T) {
+	var called bool
+	srv := countingYarad(t, &called)
+	defer srv.Close()
+	f := writeTemp(t, strings.Repeat("A", 10))
+	code := run([]string{"-url", srv.URL, "-max-body", "10", f})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (clean)", code)
+	}
+	if !called {
+		t.Fatal("/scan was not called for an input exactly at the cap")
+	}
+}
+
 func TestStdin(t *testing.T) {
 	srv := fakeYarad(t, nil, nil)
 	defer srv.Close()

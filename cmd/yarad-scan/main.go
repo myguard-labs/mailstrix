@@ -103,9 +103,25 @@ func run(args []string) int {
 		in = f
 	}
 
-	buf, err := io.ReadAll(io.LimitReader(in, *maxBody))
+	// Read one byte past the cap so an oversized input is DETECTED rather than
+	// silently truncated. Posting only the first max-body bytes would turn a
+	// message whose dropper sits after the cap into a clean-looking scan — a silent
+	// miss. The server already rejects oversized requests before reading; the client
+	// must not paper over that with a truncated prefix.
+	buf, err := io.ReadAll(io.LimitReader(in, *maxBody+1))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "yarad-scan: read:", err)
+		return 2
+	}
+	if int64(len(buf)) > *maxBody {
+		// Fail-open (delivery default): never block mail on an over-cap message, but
+		// say so loudly so it is visible — DO NOT post the truncated prefix.
+		if *failOpen {
+			fmt.Fprintf(os.Stderr, "yarad-scan: input exceeds -max-body=%d bytes, failing open (clean) without scanning a truncated prefix\n", *maxBody)
+			return 0
+		}
+		// Fail-closed (interactive triage): a silent miss is worse than a visible error.
+		fmt.Fprintf(os.Stderr, "yarad-scan: input exceeds -max-body=%d bytes; refusing to scan a truncated prefix\n", *maxBody)
 		return 2
 	}
 
