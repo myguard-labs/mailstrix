@@ -41,6 +41,12 @@ type ScanEngine interface {
 	// BigFileStreamScans reports how many oversized extracted streams were scanned
 	// against the targeted big-file ruleset instead of the full set, for /metrics.
 	BigFileStreamScans() uint64
+	// RawChannelScans / StreamChannelScans / MarkerChannelScans report per-channel
+	// libyara scan counts (raw body / real-content stream / marker channel), for
+	// /metrics (PERF-17).
+	RawChannelScans() uint64
+	StreamChannelScans() uint64
+	MarkerChannelScans() uint64
 	// RawScanErrs reports raw-scan failures that fell through to extraction
 	// instead of aborting the request, for /metrics.
 	RawScanErrs() uint64
@@ -724,6 +730,9 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("cache_coalesced_total", "scans coalesced onto an in-flight identical scan", s.metrics.cacheCoalesced.Load())
 	fm("bigfile_scans_total", "oversized buffers scanned against the targeted big-file ruleset instead of the full set (YARAD_BIGFILE_THRESHOLD gate)", s.engine.BigFileScans())
 	fm("bigfile_stream_scans_total", "oversized extracted streams scanned against the targeted big-file ruleset instead of the full set (YARAD_BIGFILE_THRESHOLD gate)", s.engine.BigFileStreamScans())
+	fm("raw_channel_scans_total", "libyara scans run on the raw message/attachment body (includes the big-file subset)", s.engine.RawChannelScans())
+	fm("stream_channel_scans_total", "libyara scans run on real-content extracted streams (macros/archives/PDF/decoded; includes the big-file subset)", s.engine.StreamChannelScans())
+	fm("marker_channel_scans_total", "libyara scans run on the out-of-band marker channel", s.engine.MarkerChannelScans())
 	fm("raw_scan_errs_total", "raw scans that failed (timeout/libyara error) and fell through to extraction instead of aborting the request", s.engine.RawScanErrs())
 	if lru, ok := s.cache.(*lruCache); ok {
 		fm("cache_evictions_total", "L1 LRU evictions (capacity-driven; not TTL expiry)", lru.Evictions())

@@ -323,6 +323,9 @@ func (f *fakeEngine) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, 
 func (f *fakeEngine) RuleCount() int64                    { return f.count }
 func (f *fakeEngine) BigFileScans() uint64                { return 0 }
 func (f *fakeEngine) BigFileStreamScans() uint64          { return 0 }
+func (f *fakeEngine) RawChannelScans() uint64             { return 0 }
+func (f *fakeEngine) StreamChannelScans() uint64          { return 0 }
+func (f *fakeEngine) MarkerChannelScans() uint64          { return 0 }
 func (f *fakeEngine) RawScanErrs() uint64                 { return 0 }
 func (f *fakeEngine) Fingerprint() string                 { return f.fp }
 func (f *fakeEngine) ExtractMetrics() ExtractMetrics      { return ExtractMetrics{} }

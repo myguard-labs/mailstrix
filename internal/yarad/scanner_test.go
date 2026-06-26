@@ -181,6 +181,39 @@ func TestExtractStreamMatchesMetric(t *testing.T) {
 	}
 }
 
+// TestPerChannelScanCounts (PERF-17) verifies the raw / real-stream / marker
+// per-channel scan counters increment on the right channel.
+func TestPerChannelScanCounts(t *testing.T) {
+	s := newScanner(t, writeRules(t, eicarRule))
+
+	// A plain (non-document) buffer is scanned on the raw channel only.
+	if _, err := scanT(s, eicar(), ScanMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.RawChannelScans(); got != 1 {
+		t.Errorf("raw channel: got %d want 1 after one plain scan", got)
+	}
+	if got := s.StreamChannelScans(); got != 0 {
+		t.Errorf("stream channel: got %d want 0 for a non-document buffer", got)
+	}
+
+	// A macro document fans out into extracted streams, adding a raw scan plus at
+	// least one real-content stream scan.
+	doc, err := os.ReadFile(filepath.Join("..", "extract", "testdata", "xlswithmacro.xlsm"))
+	if err != nil {
+		t.Skipf("fixture unavailable: %v", err)
+	}
+	if _, err := scanT(s, doc, ScanMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.RawChannelScans(); got != 2 {
+		t.Errorf("raw channel: got %d want 2 after a second (document) scan", got)
+	}
+	if got := s.StreamChannelScans(); got == 0 {
+		t.Error("stream channel: expected >=1 real-content stream scan from the macro document")
+	}
+}
+
 func TestScannerNoMatch(t *testing.T) {
 	s := newScanner(t, writeRules(t, eicarRule))
 	m, err := scanT(s, []byte("a perfectly innocent email body"), ScanMeta{})

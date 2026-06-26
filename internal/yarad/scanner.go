@@ -87,6 +87,12 @@ type Scanner struct {
 	bigFileScans       atomic.Uint64 // oversized raw buffers scanned against bigRules
 	bigFileStreamScans atomic.Uint64 // oversized extracted streams scanned against bigRules
 	rawScanErrs        atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
+	// Per-channel scanOne counts (PERF-17): which channel each libyara scan ran on,
+	// so /metrics shows where scan cost goes. Totals INCLUDE the big-file subset
+	// (bigFileScans ⊆ rawChannelScans, bigFileStreamScans ⊆ streamChannelScans).
+	rawChannelScans    atomic.Uint64 // raw-body scans (every Scan call that scans the raw buffer)
+	streamChannelScans atomic.Uint64 // real-content extracted-stream scans
+	markerChannelScans atomic.Uint64 // out-of-band marker-channel scans
 
 	// scanners pools yara.Scanner objects so a scan that overrides external
 	// variables (VBA/filename — every macro stream) doesn't allocate and
@@ -417,6 +423,17 @@ func (s *Scanner) BigFileScans() uint64 { return s.bigFileScans.Load() }
 // child and exhaust the shared budget even though the raw body was protected.
 // Surfaced on /metrics so the extracted-stream gate's firing rate is observable.
 func (s *Scanner) BigFileStreamScans() uint64 { return s.bigFileStreamScans.Load() }
+
+// RawChannelScans, StreamChannelScans, and MarkerChannelScans report the number of
+// libyara scans run on each channel (PERF-17): the raw body, real-content extracted
+// streams, and the out-of-band marker channel. Surfaced on /metrics so an operator
+// can see where scan cost goes — e.g. a container family that fans out into many
+// streams shows a high stream:raw ratio. Totals include the big-file subset (a
+// big-file-routed scan still counts on its channel), so bigfile_*_scans_total is a
+// breakdown WITHIN these, not a separate bucket.
+func (s *Scanner) RawChannelScans() uint64    { return s.rawChannelScans.Load() }
+func (s *Scanner) StreamChannelScans() uint64 { return s.streamChannelScans.Load() }
+func (s *Scanner) MarkerChannelScans() uint64 { return s.markerChannelScans.Load() }
 
 // RawScanErrs reports how many raw scans failed (timeout/libyara error) and fell
 // through to extraction instead of aborting the request. Surfaced on /metrics so
@@ -978,6 +995,7 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// fail-open at the server) — unchanged behaviour for non-documents. Over the
 	// big-file threshold, rawRules is the targeted set (see the gate above);
 	// otherwise it is the full set.
+	s.rawChannelScans.Add(1)
 	out, rawErr := s.scanOne(rawRules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, profile.ScanTimeout)
 	// A raw-scan failure (timeout on a pathologically slow buffer, or a libyara
 	// error) must NOT short-circuit extraction: a hostile outer container can be
@@ -1133,6 +1151,11 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 			} else if s.bigNilWarned.CompareAndSwap(false, true) {
 				s.logf("WARNING: oversized extracted stream (%dB) but no big-file ruleset loaded; using full set (may time out)", len(stream))
 			}
+		}
+		if markerChannel {
+			s.markerChannelScans.Add(1)
+		} else {
+			s.streamChannelScans.Add(1)
 		}
 		m, serr := s.scanOne(streamRules, stream, scanVars{vba: isVBA, filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, budget)
 		if serr != nil {
