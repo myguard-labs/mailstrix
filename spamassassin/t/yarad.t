@@ -128,6 +128,82 @@ sub fake_scan {
     is($ok, undef, 'shellout missing binary returns undef');
 }
 
+# ---- part mode: _message_part_buffers returns each leaf part's DECODED body ----
+# Build a real Mail::SpamAssassin::Message from a multipart MIME string so we
+# exercise find_parts/decode, not a mock. Base64-encode an attachment so the
+# decoded body must differ from the wrapped wire bytes.
+{
+    my $have_msg = eval { require Mail::SpamAssassin; require Mail::SpamAssassin::Message; 1 };
+    if (!$have_msg) {
+        # base class loaded (BEGIN above) but full SA not importable — skip these.
+        diag('Mail::SpamAssassin::Message not importable, skipping part-mode body tests');
+    } else {
+        my $sa = Mail::SpamAssassin->new({
+            dont_copy_prefs   => 1,
+            local_tests_only  => 1,
+            use_bayes         => 0,
+            use_dcc           => 0,
+            use_razor2        => 0,
+            use_pyzor         => 0,
+        });
+        my $raw = join("\r\n",
+            'From: a@b',
+            'Subject: t',
+            'MIME-Version: 1.0',
+            'Content-Type: multipart/mixed; boundary="BND"',
+            '',
+            '--BND',
+            'Content-Type: text/plain',
+            '',
+            'hello world',
+            '--BND',
+            'Content-Type: application/octet-stream',
+            'Content-Transfer-Encoding: base64',
+            '',
+            'TUFMV0FSRV9CWVRFUw==',   # "MALWARE_BYTES"
+            '--BND--',
+            '');
+        my $msg = $sa->parse(\$raw, 1);
+        my $pms = fresh_pms();
+        $pms->{msg} = $msg;
+        my @bufs = $self->_message_part_buffers($pms);
+        ok(scalar(@bufs) >= 2, 'part bufs: at least the two leaf parts');
+        ok((grep { /hello world/ } @bufs), 'part bufs: text part body present');
+        ok((grep { /MALWARE_BYTES/ } @bufs), 'part bufs: base64 attachment decoded to real bytes');
+        ok(!(grep { /TUFMV0FSRV9CWVRFUw/ } @bufs), 'part bufs: wrapped base64 text not present (was decoded)');
+        $msg->finish() if $msg->can('finish');
+        $sa->finish() if $sa->can('finish');
+    }
+}
+
+# ---- part mode: scans every buffer, accumulating matches across parts ----
+# Drive _scan_http through a mocked HTTP::Tiny::post that returns a different
+# match per call, and a fake _message_part_buffers via a subclass override, to
+# prove parsed_metadata fans the scan across parts. We test the aggregation loop
+# directly to stay hermetic (no SA Message needed).
+{
+    no warnings 'redefine';
+    my @posted;
+    local *HTTP::Tiny::post = sub {
+        my ($h, $url, $args) = @_;
+        push @posted, $args->{content};
+        # Echo a rule named after the (decoded) content so we can assert per-part.
+        my $rule = $args->{content} =~ /(\w+)/ ? $1 : 'X';
+        return { success => 1, status => 200,
+                 content => qq({"matches":[{"rule":"$rule","meta":{"score":5}}]}) };
+    };
+    my $pms  = fresh_pms();
+    my $conf = { yarad_url => 'http://x', yarad_high_score => 75 };
+    # Two part buffers; scan each through the http helper, as parsed_metadata does.
+    for my $buf ('partone', 'parttwo') {
+        $self->_scan_http($pms, $conf, \$buf);
+    }
+    is(scalar(@posted), 2, 'part mode: one POST per part buffer');
+    is($pms->{yarad_matched}, 1, 'part mode: matched across parts');
+    is_deeply([sort @{$pms->{yarad_rules}}], ['partone', 'parttwo'],
+        'part mode: rule names accumulate from every part');
+}
+
 # ---- _token: reads + trims a token file; undef when unset ----
 {
     my $tf = "$dir/tok";

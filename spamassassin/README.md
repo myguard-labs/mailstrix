@@ -56,6 +56,18 @@ transport for both Sieve and SpamAssassin.
    amavis user). For shellout mode set `yarad_mode shellout` and install the
    [`yarad-scan`](../sieve/) binary.
 
+   **Optional — part mode.** Set `yarad_part_mode 1` to scan each leaf MIME
+   part's *decoded* body as its own request instead of the whole pristine
+   message once. This sends an attachment as its real bytes (base64/QP undone)
+   and keeps each request under `yarad_max_size`, at the cost of one backend
+   round-trip per part. The yarad backend already does its own container/MIME
+   extraction, so whole-message mode (`0`, default) is the right choice for most
+   deployments — reach for part mode only when large attachments push the whole
+   message past `yarad_max_size`, or you want the smaller per-part payloads. An
+   oversized individual part is skipped (the rest still scan); a part that
+   errors is treated under the same `yarad_fail_open` policy as a whole-message
+   error.
+
 4. **Test the config and lint the rules:**
 
    ```sh

@@ -122,6 +122,18 @@ sub set_config {
         type    => $Mail::SpamAssassin::Conf::CONF_TYPE_NUMERIC,
     };
 
+    # Part mode (0, default): scan the whole pristine message in one request, as
+    # before. 1: scan each leaf MIME part's DECODED body as its own request,
+    # accumulating matches. Per-part decoding lets a base64 attachment be scanned
+    # as its real bytes and keeps each request under yarad_max_size; the trade is
+    # one backend round-trip per part. The yarad backend still does its own
+    # container/MIME extraction, so whole-message mode is the right default.
+    push @cmds, {
+        setting => 'yarad_part_mode',
+        default => 0,
+        type    => $Mail::SpamAssassin::Conf::CONF_TYPE_BOOL,
+    };
+
     $conf->{parser}->register_commands(\@cmds);
 }
 
@@ -139,22 +151,41 @@ sub parsed_metadata {
     $pms->{yarad_error}   = 0;
     $pms->{yarad_rules}   = [];
 
-    my $msg = $pms->{msg}->get_pristine();
-    my $max = $conf->{yarad_max_size} || 0;
-    if ($max > 0 && length($msg) > $max) {
-        dbg("yarad: message %d bytes > yarad_max_size %d, not scanning", length($msg), $max);
-        return;
-    }
-
+    my $max  = $conf->{yarad_max_size} || 0;
     my $mode = lc($conf->{yarad_mode} || 'http');
-    my $ok;
-    if ($mode eq 'shellout') {
-        $ok = $self->_scan_shellout($pms, $conf, \$msg);
+    my $helper = $mode eq 'shellout' ? '_scan_shellout' : '_scan_http';
+
+    # Build the list of buffers to scan. Whole-message mode (default) scans the
+    # pristine message once; part mode scans each decoded leaf MIME part. Part
+    # mode falls back to the pristine message when no leaf part yields a body.
+    my @bufs;
+    if ($conf->{yarad_part_mode}) {
+        @bufs = $self->_message_part_buffers($pms);
+        if (!@bufs) {
+            dbg("yarad: part mode found no part bodies, falling back to whole message");
+            @bufs = ($pms->{msg}->get_pristine());
+        } else {
+            dbg("yarad: part mode scanning %d part(s)", scalar @bufs);
+        }
     } else {
-        $ok = $self->_scan_http($pms, $conf, \$msg);
+        @bufs = ($pms->{msg}->get_pristine());
     }
 
-    # $ok is undef on a backend error. Honour fail-open.
+    # Scan each buffer through the chosen helper. A buffer over yarad_max_size is
+    # skipped (continue), not fatal. $ok aggregates to defined if ANY buffer
+    # completed a scan; it stays undef only when every buffer errored (or all
+    # were skipped for size) so fail-open is honoured exactly as in single-scan.
+    my $ok;
+    for my $buf (@bufs) {
+        if ($max > 0 && length($buf) > $max) {
+            dbg("yarad: buffer %d bytes > yarad_max_size %d, skipping", length($buf), $max);
+            next;
+        }
+        my $r = $self->$helper($pms, $conf, \$buf);
+        $ok = $r if defined $r;   # any completed scan makes the aggregate defined
+    }
+
+    # $ok is undef on a backend error (no buffer completed). Honour fail-open.
     if (!defined $ok) {
         if ($conf->{yarad_fail_open}) {
             dbg("yarad: backend error, failing open (clean)");
@@ -295,6 +326,28 @@ sub _scan_shellout {
     # exit 2 = the client's own error (we set -fail-open=false). Treat as backend error.
     info("yarad: shellout client exit %d", $code);
     return undef;
+}
+
+# _message_part_buffers returns the DECODED body of each leaf MIME part, in
+# message order, skipping parts with no body. find_parts(qr/./, 1) walks leaf
+# parts only (onlyleaves=1); ->decode() returns the part body with transfer
+# encoding (base64/quoted-printable) undone, so a base64 attachment is scanned
+# as its real bytes rather than its wrapped text. Returns an empty list when the
+# message has no leaf bodies (caller falls back to the pristine message).
+sub _message_part_buffers {
+    my ($self, $pms) = @_;
+    my @bufs;
+    my @parts = eval { $pms->{msg}->find_parts(qr/./, 1) };
+    if ($@) {
+        info("yarad: find_parts failed: %s", $@);
+        return ();
+    }
+    for my $part (@parts) {
+        my $body = eval { $part->decode() };
+        next unless defined $body && length $body;
+        push @bufs, $body;
+    }
+    return @bufs;
 }
 
 # _token reads the shared secret from yarad_token_file, trimmed. Returns undef
