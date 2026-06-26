@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc"
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
 // budget. It is resolved once per scan from the effort level and threaded to the
@@ -546,6 +546,8 @@ func fromOLE(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 		fromOLEOrphans(ole, res, deadline)
 		fromOLETimes(ole, res, deadline)
 		fromOLEEncType(ole, res, deadline)
+		fromWordFibEncryption(ole, res)   // Word 97-2003 FibBase fEncrypted bit
+		fromPPTEncryptedSummary(ole, res) // legacy PPT EncryptedSummary storage
 		// Attempt to decrypt BIFF8 streams protected with default passwords
 		// (XOR Method 1 and RC4) so hidden XLM macros are not missed.
 		fromDefaultPWXOR(ole, res, deadline)
@@ -581,6 +583,8 @@ func fromOLE(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	fromOLEOrphans(ole, res, deadline)
 	fromOLETimes(ole, res, deadline)
 	fromOLEEncType(ole, res, deadline)
+	fromWordFibEncryption(ole, res)   // Word 97-2003 FibBase fEncrypted bit
+	fromPPTEncryptedSummary(ole, res) // legacy PPT EncryptedSummary storage
 	// Attempt to decrypt BIFF8 streams protected with default passwords
 	// (XOR Method 1 and RC4) so hidden XLM macros are not missed.
 	fromDefaultPWXOR(ole, res, deadline)

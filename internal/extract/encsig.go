@@ -96,6 +96,48 @@ func fromOLEEncInfo(ole *oleparse.OLEFile, res *Result) {
 	res.Streams = append(res.Streams, []byte("ENCRYPTION-AES"))
 }
 
+// fromWordFibEncryption reads the FibBase (MS-DOC 2.5.1) from the WordDocument
+// stream and emits ENCRYPTION-RC4 when bit 0x0100 of the flags word (offset 10)
+// is set — indicating a password-protected (RC4-family) Word 97-2003 document.
+// Complement to fromOLEEncType (which handles BIFF8 FILEPASS for spreadsheets).
+// O(1) reads; fail-open on malformed/missing stream.
+func fromWordFibEncryption(ole *oleparse.OLEFile, res *Result) {
+	if ole == nil {
+		return
+	}
+	s := ole.FindStreamByName("WordDocument")
+	if s == nil {
+		return
+	}
+	wd := ole.GetStream(s.Index)
+	// FibBase starts at offset 0; need 12 bytes for flags at offset 10.
+	if len(wd) < 12 {
+		return
+	}
+	// wIdent must be 0xA5EC for a Word 97-2003 FIB (MS-DOC 2.5.1).
+	if binary.LittleEndian.Uint16(wd[0:]) != 0xA5EC {
+		return
+	}
+	if binary.LittleEndian.Uint16(wd[10:])&0x0100 != 0 { // fEncrypted
+		res.Encrypted = true
+		res.Streams = append(res.Streams, []byte("ENCRYPTION-RC4"))
+	}
+}
+
+// fromPPTEncryptedSummary emits ENCRYPTION-RC4 for a legacy PowerPoint file
+// that carries an EncryptedSummary storage. The presence of this OLE2 storage
+// signals RC4/RC4-CryptoAPI encryption (the same family as BIFF8 FILEPASS RC4).
+// Fail-open: missing storage → no marker, no side effects.
+func fromPPTEncryptedSummary(ole *oleparse.OLEFile, res *Result) {
+	if ole == nil {
+		return
+	}
+	if ole.FindStreamByName("EncryptedSummary") != nil {
+		res.Encrypted = true
+		res.Streams = append(res.Streams, []byte("ENCRYPTION-RC4"))
+	}
+}
+
 // fromOLEDigSig emits DIGITAL-SIGNATURE when the OLE2 carries a signature
 // storage (_signatures or _xmlsignatures — ClamAV ole2_extract.c:1073). Office
 // stores Authenticode/XML-DSIG material there; on a macro-bearing document it
