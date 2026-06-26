@@ -7,3 +7,6 @@ coverage.txt
 secrets/
 *.token
 .claude/worktrees/
+
+# live malware sample corpus — local only, never publish
+testdata/live-samples/

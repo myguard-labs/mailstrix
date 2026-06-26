@@ -436,41 +436,6 @@ XLM/Excel-4.0 *emulation* — still belongs to `olevba`, which is why
 [`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) stays as a parallel
 deep-scan scorer.
 
-### oletools parity matrix
-
-Capability-by-capability against `oletools`. **lead** = yarad does more than the
-oletools equivalent; **parity** = equivalent coverage; **SKIP (defensible)** =
-intentionally not built, with the rationale recorded in
-[`memory/.../history.md`](https://github.com/eilandert/rspamd-yarad) and covered
-another way. Every emitted marker in this table is asserted to have a scoring
-rule by `internal/extract/parity_doc_test.go` (CI fails if a carve goes unscored
-or a new marker is added without classification).
-
-| oletools capability | yarad status |
-|---|---|
-| `olevba` Chr/Replace/Array-Xor/StrReverse fold | lead |
-| `olevba` Environ → marker | parity (`VBA-ENVIRON`) |
-| `olevba` Dridex string decode | parity (`DridexUrlDecode`) |
-| `olevba` keyword/IOC taxonomy (AutoExec/Suspicious/IOC/Hex/Base64) | parity (`intent.yara` + `maldoc_suspicious.yara`) |
-| `olevba` multi-layer deobf (Dridex N-layer) | **lead** — depth-4 bounded (`MSD-DEEPDECODE`) |
-| `olevba` defang-normalise before decode | parity (ingest-time) |
-| `olevba` VBA-stomping detection | parity — **heuristic** (p-code ≥256 + src <32, `VBA-STOMPED`), *not* pcodedmp opcode decompilation |
-| `olevba`/`pcodedmp` P-code disassembly | **SKIP (defensible)** — stomping heuristic instead of opcode decompile |
-| XLM — OOXML macrosheet fold | lead |
-| XLM — BIFF8 `.xls` / `.xlsb` (BIFF12) / SLK fold | parity (`XLM-DANGEROUS-FUNC`, `XLM-HIDDEN-MACROSHEET`) |
-| XLM — cell-ref/SET.VALUE resolve | parity — bounded 1-level (not full interpreter) |
-| `oleid` — ObjectPool + Flash indicators | parity+ (`OLEID-OBJECTPOOL`, `OLEID-FLASH` markers + rules) |
-| `oleid` — encrypted / ext-rels / vba indicators | parity (`ENCRYPTION-AES`, `OOXML-EXTERNAL-REL`) |
-| `oleid` — encryption TYPE (RC4/XOR/AES) | parity+ — typed (`ENCRYPTION-XOR`/`-RC4`/`-AES`) |
-| `oleid` — DOC_SECURITY property flag | parity+ (`OLE-DOC-SECURITY-<n>` marker + rule) |
-| `oletimes` — timestamp anomaly | **lead** — anomaly heuristic, not raw dump (`OLETIMES-FUTURE`/`-SYNTHETIC`) |
-| `oledir` — orphaned/unreferenced streams | **lead** — carves+scans, not just lists |
-| `olemap` — sector/FAT layout dump | **SKIP (defensible)** — covered by oledir carve + Failed/Panicked metrics |
-| DDE / DDEAUTO (OOXML / RTF / SLK / CSV / Excel-2003-XML) | parity+ (`OOXML-DDE-FIELD`, `RTF-DDE-FIELD`, `SLK-DDE`, `CSV-DDE`) |
-| OLE2Link URL moniker (CVE-2017-0199) | parity (`OLE2LINK-URL`) |
-| digital-signature streams | **lead** — beyond oletools (`DIGITAL-SIGNATURE`) |
-| PDF action/JS droppers | **lead** — oletools has no PDF triage (`PDF-*` family) |
-
 ## abuse.ch feeds (optional)
 
 Set a free [abuse.ch Auth-Key](https://auth.abuse.ch/) to add live reputation,
@@ -651,7 +616,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - [x] CFB orphan/timestamp indicators (`oledir`/`oletimes`: unreferenced dir entries carved + scanned, FILETIME anomalies)
 - [x] Encryption-type + digital-signature markers (`ENCRYPTION-<RC4|XOR|AES>`, `DIGITAL-SIGNATURE`); plus default-password decryption (VelvetSweatshop XOR, BIFF8 RC4, OOXML agile/standard AES) so encrypted-but-default payloads are decrypted and re-scanned
 - [x] Parse-robustness hardening (CFB block-bounds / chain-loop / recursion / module-count guards; `oleparse` decompress-bomb 32 MiB cap + 4096-module guard; pathological-input fuzz)
-- [x] `olevba`-parity matrix doc + CI check ([oletools parity matrix](#oletools-parity-matrix) above; `internal/extract/parity_doc_test.go` asserts every CONTRACT marker has a scoring rule and that the inventory is exhaustive)
+- [x] `olevba`-parity CI check (`internal/extract/parity_doc_test.go` asserts every CONTRACT marker has a scoring rule and that the inventory is exhaustive)
 
 **Performance / operations**
 
