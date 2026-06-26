@@ -253,3 +253,71 @@ func TestXLSBFold_WorksheetFPGated(t *testing.T) {
 		t.Fatalf("worksheet .bin must not fold; got %q", out)
 	}
 }
+
+// xlNullableWideString builds an [MS-XLSB] XLNullableWideString: 4-byte cch + UTF-16LE.
+func xlNullableWideString(s string) []byte {
+	var b []byte
+	b = binary.LittleEndian.AppendUint32(b, uint32(len([]rune(s))))
+	for _, r := range s { // UTF-16LE, no terminator (cch is explicit)
+		b = append(b, byte(r), byte(r>>8))
+	}
+	return b
+}
+
+// buildXLSBExternalDDE makes an OOXML zip with an externalLink .bin holding a
+// BrtBeginSupBook record (sbt as given) + server/topic strings.
+func buildXLSBExternalDDE(t *testing.T, sbt uint16, server, topic string) []byte {
+	t.Helper()
+	var body []byte
+	body = binary.LittleEndian.AppendUint16(body, sbt)
+	body = append(body, xlNullableWideString(server)...)
+	body = append(body, xlNullableWideString(topic)...)
+	rec := biff12Record(biff12BrtBeginSupBook, body)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("xl/externalLinks/externalLink1.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func ddeStreams(t *testing.T, data []byte) [][]byte {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out [][]byte
+	fromXLSBExternalDDE(zr, &out, time.Time{})
+	return out
+}
+
+// TestXLSBExternalDDE_Sbt1 verifies a DDE supporting book (sbt=1) surfaces an
+// XLSB-DDE marker carrying the command server|topic — the strings live as
+// UTF-16LE in a binary record and are invisible to a plain-text scan.
+func TestXLSBExternalDDE_Sbt1(t *testing.T) {
+	data := buildXLSBExternalDDE(t, 1, "cmd", "/c calc.exe")
+	out := ddeStreams(t, data)
+	joined := bytes.Join(out, []byte("\n"))
+	if !bytes.Contains(joined, []byte("XLSB-DDE cmd|/c calc.exe")) {
+		t.Fatalf("DDE supbook not surfaced; got %q", joined)
+	}
+}
+
+// TestXLSBExternalDDE_WorkbookSbt0NoMarker is the FP gate: a normal workbook
+// supporting book (sbt=0) must NOT emit a DDE marker.
+func TestXLSBExternalDDE_WorkbookSbt0NoMarker(t *testing.T) {
+	data := buildXLSBExternalDDE(t, 0, "C:\\refs\\book.xlsb", "")
+	out := ddeStreams(t, data)
+	if bytes.Contains(bytes.Join(out, []byte("\n")), []byte("XLSB-DDE")) {
+		t.Fatalf("workbook supbook (sbt=0) wrongly emitted a DDE marker; got %q", out)
+	}
+}

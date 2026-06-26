@@ -49,6 +49,7 @@ const (
 var parityMarkers = map[string]markerKind{
 	// --- structural / intent indicators (must have a scoring rule) ---
 	"CSV-DDE":                     contractMarker, // ooxml_dde.yara CSV_DDE_Command
+	"XLSB-DDE":                    contractMarker, // ooxml_dde.yara XLSB_DDE_SupBook
 	"SLK-DDE":                     contractMarker, // ooxml_dde.yara SLK_DDE_Command
 	"OOXML-DDE-FIELD":             contractMarker, // ooxml_dde.yara Maldoc_DDE_Field
 	"OOXML-EXTERNAL-REL":          contractMarker, // ooxml_template_injection.yara

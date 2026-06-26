@@ -32,6 +32,7 @@ package extract
 
 import (
 	"archive/zip"
+	"bytes"
 	"io"
 	"strconv"
 	"strings"
@@ -92,6 +93,131 @@ func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Op
 		}
 		processXLSBSheet(sf, out, &totalOutput, deadline, formulaCap)
 	}
+}
+
+// CSV-DDE-XLSB: a DDE-bearing supporting book in an .xlsb lives as a BrtBeginSupBook
+// (record id 0x0163) inside xl/externalLinks/externalLink*.bin whose sbt field = 1
+// (DDE). It carries a DDE server + topic (e.g. cmd | "/c calc") that runs a command
+// on external-link refresh (MITRE T1559.002) — the xlsb-binary analogue of the
+// CSV-DDE / OOXML-DDE command form. The server/topic are UTF-16LE inside a binary
+// record, so a plain-text scan never sees them.
+const (
+	biff12BrtBeginSupBook = 0x0163 // [MS-XLSB] 2.4.297
+	maxXLSBExternalBins   = 16
+	maxXLSBSupBookDDE     = 32
+)
+
+// fromXLSBExternalDDE walks the xl/externalLinks/externalLink*.bin parts for a
+// DDE supporting book (BrtBeginSupBook, sbt=1) and emits an "XLSB-DDE
+// <server>|<topic>" marker for each. Bounded + fail-open: a malformed record
+// stream yields whatever was found so far and never panics.
+func fromXLSBExternalDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+	if expired(deadline) {
+		return
+	}
+	bins := 0
+	for _, f := range zr.File {
+		if expired(deadline) || bins >= maxXLSBExternalBins {
+			return
+		}
+		lname := strings.ToLower(f.Name)
+		if !strings.HasPrefix(lname, "xl/externallinks/") || !strings.HasSuffix(lname, ".bin") {
+			continue
+		}
+		bins++
+		if f.UncompressedSize64 > maxBytesWorkbookXML {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesWorkbookXML))
+		rc.Close() // #nosec G104 -- zip entry close
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		scanXLSBSupBookDDE(raw, out)
+	}
+}
+
+// scanXLSBSupBookDDE walks one externalLink .bin BIFF12 record stream and emits
+// a DDE marker for every BrtBeginSupBook with sbt=1.
+func scanXLSBSupBookDDE(raw []byte, out *[][]byte) {
+	records := 0
+	pos := 0
+	for pos < len(raw) {
+		if records >= maxBIFF12Records || countXLSBDDE(*out) >= maxXLSBSupBookDDE {
+			return
+		}
+		records++
+
+		recID, n := readVarint(raw[pos:])
+		if n == 0 {
+			return
+		}
+		pos += n
+		recLen, n := readVarint(raw[pos:])
+		if n == 0 || recLen < 0 || recLen > maxBIFF12RecordLen {
+			return
+		}
+		pos += n
+		if pos+recLen > len(raw) {
+			return
+		}
+		body := raw[pos : pos+recLen]
+		pos += recLen
+
+		if recID != biff12BrtBeginSupBook || len(body) < 2 {
+			continue
+		}
+		// sbt (2 bytes): 0=workbook, 1=DDE, 2=OLE.
+		if uint16(body[0])|uint16(body[1])<<8 != 1 {
+			continue
+		}
+		server, off := readXLNullableWideString(body, 2)
+		topic, _ := readXLNullableWideString(body, off)
+		if server == "" && topic == "" {
+			continue
+		}
+		marker := "XLSB-DDE " + server + "|" + topic
+		if len(marker) > maxBIFF12RecordLen {
+			marker = marker[:maxBIFF12RecordLen]
+		}
+		*out = append(*out, []byte(marker))
+	}
+}
+
+// readXLNullableWideString reads an [MS-XLSB] XLNullableWideString at off: a
+// 4-byte character count (0xFFFFFFFF = null → empty string) followed by cch
+// UTF-16LE characters. Returns the decoded string and the offset past it.
+// Bounds-checked; on truncation returns "" and an offset at end-of-buffer.
+func readXLNullableWideString(p []byte, off int) (string, int) {
+	if off < 0 || off+4 > len(p) {
+		return "", len(p)
+	}
+	cch := uint32(p[off]) | uint32(p[off+1])<<8 | uint32(p[off+2])<<16 | uint32(p[off+3])<<24
+	off += 4
+	if cch == 0xFFFFFFFF || cch == 0 { // null or empty
+		return "", off
+	}
+	need := int(cch) * 2
+	if need < 0 || off+need > len(p) {
+		return "", len(p)
+	}
+	s := decodeUTF16LE(p[off : off+need])
+	return s, off + need
+}
+
+// countXLSBDDE counts XLSB-DDE markers already emitted (bounds the per-file fan-out).
+func countXLSBDDE(out [][]byte) int {
+	c := 0
+	for _, s := range out {
+		if bytes.HasPrefix(s, []byte("XLSB-DDE ")) {
+			c++
+		}
+	}
+	return c
 }
 
 // biff12FormulaCollected holds the decoded coordinate and raw ptg bytes of

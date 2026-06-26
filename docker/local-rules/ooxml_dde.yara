@@ -128,3 +128,33 @@ rule CSV_DDE_Command : maldoc heuristic suspicious
     condition:
         filesize < 16MB and $marker
 }
+
+/*
+  XLSB binary DDE supporting book (XLSB-DDE).
+
+  An .xlsb stores external links as BIFF12 records in xl/externalLinks/*.bin. A
+  BrtBeginSupBook record whose sbt field = 1 is a DDE supporting book: it carries
+  a DDE server + topic (e.g. cmd | "/c calc.exe") as UTF-16LE strings inside the
+  binary record, so refreshing the link runs a command (MITRE T1559.002) — the
+  binary-xlsb analogue of CSV-DDE / OOXML-DDE, invisible to a plain-text scan.
+  The yarad extractor (extract.fromXLSBExternalDDE) parses the supbook and emits
+  a synthetic "XLSB-DDE <server>|<topic>" stream only for sbt=1.
+
+  FP mitigation: requires the literal "XLSB-DDE " prefix, only ever emitted by
+  yarad's extractor (never raw file bytes) — and only for a DDE-type supbook
+  (a normal workbook reference sbt=0 emits nothing). Zero-FP by construction.
+*/
+rule XLSB_DDE_SupBook : maldoc heuristic suspicious
+{
+    meta:
+        author      = "yarad"
+        description = "XLSB external-link supporting book is a DDE command-execution link"
+        reference   = "https://attack.mitre.org/techniques/T1559/002/"
+        date        = "2026-06-26"
+        score       = "70"
+        tags        = "maldoc heuristic suspicious"
+    strings:
+        $marker = "XLSB-DDE " ascii
+    condition:
+        filesize < 16MB and $marker
+}
