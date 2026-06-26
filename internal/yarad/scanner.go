@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"os"
 	"path/filepath"
 	"sort"
@@ -98,7 +99,14 @@ type Scanner struct {
 	srcDir  string
 	srcFile string // precompiled bundle; wins over srcDir when set
 	count   atomic.Int64
-	fp      atomic.Pointer[string] // ruleset fingerprint, changes on reload
+	fp      atomic.Pointer[string] // ruleset identity fingerprint (namespace+identifier), changes on reload
+	// contentFP hashes the loaded ruleset SOURCE bytes (main + big-file set), so a
+	// rule body edit that keeps the same namespace+identifier (condition/meta/string
+	// change), or a big-file-set-only edit, still changes the verdict cache key. It
+	// is deterministic across replicas that loaded the same bundle (unlike an mtime),
+	// so the shared Redis L2 stays correctly partitioned without breaking cross-replica
+	// cache sharing. Changes on every reload that alters the rule sources.
+	contentFP atomic.Pointer[string]
 
 	// Observability for the OLE/OOXML pre-extract path (see ExtractMetrics).
 	// Without these the document-extraction code is invisible in /metrics.
@@ -524,6 +532,15 @@ func (s *Scanner) Reload() error {
 		}
 	}
 
+	// Fold a content hash of the loaded ruleset SOURCE (main + big-file set) into the
+	// fingerprint. Identity (namespace+identifier) alone cannot see a condition/meta/
+	// string edit that reuses the same rule name, nor a big-file-set-only change, so
+	// without this an edited-but-same-named rule would keep its old verdict-cache key
+	// and serve stale verdicts (especially the shared Redis L2) until TTL. Computed
+	// from source bytes so it is identical across replicas that loaded the same bundle.
+	ch := rulesetContentHash(s.srcFile, s.srcDir, s.bigSrcFile, s.bigSrcDir)
+	s.contentFP.Store(&ch)
+
 	// Reset the top-matches counter so counts reflect the current rule set only,
 	// not a mix of old and new rule names that may have been renamed/removed.
 	s.topMatches.Reset()
@@ -544,7 +561,11 @@ func (s *Scanner) Fingerprint() string {
 	if p := s.fp.Load(); p != nil {
 		fp = *p
 	}
-	return extract.Version + ":" + fp
+	ch := ""
+	if p := s.contentFP.Load(); p != nil {
+		ch = *p
+	}
+	return extract.Version + ":" + fp + ":" + ch
 }
 
 // fingerprint hashes the sorted rule identities (namespace + identifier) so the
@@ -558,6 +579,69 @@ func fingerprint(rules []yara.Rule) string {
 	sort.Strings(ids)
 	h := sha256.Sum256([]byte(strings.Join(ids, "\n")))
 	return hex.EncodeToString(h[:8]) // 16 hex chars is plenty to distinguish rule sets
+}
+
+// rulesetContentHash returns a deterministic hash of the loaded ruleset SOURCE
+// bytes — the precompiled bundle file(s) when set, otherwise the *.yar/*.yara
+// sources in the rules dir(s). Main set and big-file set are both folded in (in a
+// fixed order) so a body edit reusing a rule name, OR a big-file-set-only edit,
+// changes the value. It is a pure function of the source bytes, so two replicas
+// that loaded the same bundle produce the same hash (an mtime would not) — keeping
+// the shared verdict cache correctly partitioned without breaking cross-replica
+// sharing. Best-effort: an unreadable source contributes nothing rather than
+// failing the reload; identity fingerprint + extract.Version still guard the key.
+func rulesetContentHash(srcFile, srcDir, bigSrcFile, bigSrcDir string) string {
+	h := sha256.New()
+	addSource(h, srcFile, srcDir)
+	_, _ = h.Write([]byte("\x00big\x00"))
+	addSource(h, bigSrcFile, bigSrcDir)
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:8])
+}
+
+// addSource feeds one ruleset's source bytes into h: the bundle file when set,
+// else every *.yar/*.yara file in dir read in sorted-name order (deterministic
+// regardless of directory iteration order). Each chunk is length-prefixed so two
+// different file boundaries can't hash to the same stream.
+func addSource(h hash.Hash, file, dir string) {
+	writeChunk := func(name string, b []byte) {
+		var n [8]byte
+		binary.LittleEndian.PutUint64(n[:], uint64(len(name)))
+		_, _ = h.Write(n[:])
+		_, _ = h.Write([]byte(name))
+		binary.LittleEndian.PutUint64(n[:], uint64(len(b)))
+		_, _ = h.Write(n[:])
+		_, _ = h.Write(b)
+	}
+	if file != "" {
+		if b, err := os.ReadFile(file); err == nil {
+			writeChunk(filepath.Base(file), b)
+		}
+		return
+	}
+	if dir == "" {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".yar", ".yara", ".yac":
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+			writeChunk(name, b)
+		}
+	}
 }
 
 // rulesetModUnix returns the mtime (unix seconds) of the loaded ruleset: the
