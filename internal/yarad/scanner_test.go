@@ -238,6 +238,100 @@ func TestScannerBrokenRuleKeepsOld(t *testing.T) {
 	}
 }
 
+// TestFingerprintFoldsRuleBody proves the verdict-cache fingerprint changes when a
+// rule's BODY changes while its namespace+identifier stay the same — the gap the
+// identity-only fingerprint missed (stale Redis L2 verdicts across rolling
+// replicas). Each edit (string, meta, condition) must move Fingerprint().
+func TestFingerprintFoldsRuleBody(t *testing.T) {
+	const base = `rule SameName {
+    strings:
+        $a = "alpha"
+    condition:
+        $a
+}
+`
+	// Same rule name, but each variant differs in exactly one body section.
+	variants := map[string]string{
+		"string-changed": `rule SameName {
+    strings:
+        $a = "BETA"
+    condition:
+        $a
+}
+`,
+		"meta-changed": `rule SameName {
+    meta:
+        author = "x"
+    strings:
+        $a = "alpha"
+    condition:
+        $a
+}
+`,
+		"condition-changed": `rule SameName {
+    strings:
+        $a = "alpha"
+        $b = "alpha"
+    condition:
+        $a and $b
+}
+`,
+	}
+
+	dir := writeRules(t, base)
+	s := newScanner(t, dir)
+	want := s.Fingerprint()
+
+	// Identity is unchanged across every variant (same namespace+identifier), so any
+	// movement in Fingerprint() comes from the content hash.
+	idBase := func() string { p := s.fp.Load(); return *p }()
+
+	for name, body := range variants {
+		if err := os.WriteFile(filepath.Join(dir, "eicar.yar"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Reload(); err != nil {
+			t.Fatalf("%s: reload: %v", name, err)
+		}
+		if got := s.Fingerprint(); got == want {
+			t.Errorf("%s: fingerprint unchanged after rule-body edit: %s", name, got)
+		}
+		if id := func() string { p := s.fp.Load(); return *p }(); id != idBase {
+			t.Logf("%s: note identity also changed (%s->%s) — content hash still required for string/meta edits", name, idBase, id)
+		}
+		// Restore base and confirm the fingerprint returns to its original value —
+		// the hash is a pure function of the source, deterministic across reloads.
+		if err := os.WriteFile(filepath.Join(dir, "eicar.yar"), []byte(base), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Reload(); err != nil {
+			t.Fatalf("%s: restore reload: %v", name, err)
+		}
+		if got := s.Fingerprint(); got != want {
+			t.Errorf("%s: fingerprint not restored after reverting to base: got %s want %s", name, got, want)
+		}
+	}
+}
+
+// TestRulesetContentHashDeterministic confirms the content hash depends only on the
+// source bytes (not directory iteration order or mtime) so replicas that loaded the
+// same bundle share verdict-cache keys.
+func TestRulesetContentHashDeterministic(t *testing.T) {
+	dir := writeRules(t, eicarRule)
+	a := rulesetContentHash("", dir, "", "")
+	b := rulesetContentHash("", dir, "", "")
+	if a != b {
+		t.Fatalf("content hash not stable: %s != %s", a, b)
+	}
+	// A big-file-set-only change must move the combined hash even when the main set
+	// is identical (the bypass the issue called out).
+	bigDir := writeRules(t, vbaRule)
+	withBig := rulesetContentHash("", dir, "", bigDir)
+	if withBig == a {
+		t.Fatal("big-file-set-only change did not move the content hash")
+	}
+}
+
 // vbaRule matches the per-module "Attribute VB_Name" header that appears ONLY in
 // decompressed VBA source — never in the raw .xlsm bytes (MS-OVBA + zip
 // compressed). So a match can only arrive via the pre-extract path.
