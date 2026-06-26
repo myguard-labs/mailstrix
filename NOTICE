@@ -32,7 +32,15 @@ at image build time. Each source retains its own license:
    URL:     https://github.com/InQuest/yara-rules-vt
    License: MIT
 
-7. Local rules (yarad)
+7. abuse.ch YARAify / YARAhub
+   URL:     https://yaraify.abuse.ch/yarahub/
+   License: CC0 1.0 Universal (public-domain dedication)
+
+8. kevoreilly/CAPEv2 (curated mail-relevant family rules)
+   URL:     https://github.com/kevoreilly/CAPEv2
+   License: BSD 3-Clause License
+
+9. Local rules (yarad)
    URL:     https://github.com/eilandert/rspamd-yarad
    License: MIT (same as this project)
 
