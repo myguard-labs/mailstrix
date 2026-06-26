@@ -43,6 +43,12 @@ const (
 	// A macrosheet substream is dominated by FORMULA records, so the per-sheet
 	// cap (maxXLMSheets) does not bound the walk; this does.
 	maxBIFFRecords = 1 << 18
+
+	// biff-continue caps: a FORMULA ptg array split across CONTINUE (0x003C)
+	// records is reassembled up to maxFormulaReassembled bytes across at most
+	// maxContinueRecs records, so a hostile chain can't drive unbounded reads.
+	maxContinueRecs       = 64
+	maxFormulaReassembled = 1 << 16 // 64 KiB
 )
 
 // xlmHiddenStateLabel maps BIFF hidden-state bit values (grbit byte 0, bits 0–1)
@@ -325,6 +331,14 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 				}
 				cce := int(binary.LittleEndian.Uint16(payload[20:]))
 				rgce := payload[22:]
+				// biff-continue: a FORMULA whose ptg array (cce bytes) exceeds the
+				// ~8 KB BIFF record cap spills its tail into the immediately
+				// following CONTINUE (0x003C) records. Reassemble before parsing,
+				// or the folded formula is truncated mid-ptg and a dangerous
+				// trailing verb (=…EXEC/CALL) is silently lost.
+				if cce > len(rgce) {
+					rgce = readBiffFormulaContinue(r, rgce, cce)
+				}
 				if cce > len(rgce) {
 					cce = len(rgce)
 				}
@@ -412,6 +426,46 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 	flushMacroSheet()
 
 	_ = sheetIndex // used only for disambiguation; suppress unused warning
+}
+
+// readBiffFormulaContinue reassembles a FORMULA ptg array that was split across
+// the BIFF ~8 KB record boundary into one or more following CONTINUE (0x003C)
+// records. rgce holds the bytes already read from the FORMULA record; need is
+// the declared cce. It appends each immediately-following CONTINUE payload until
+// need bytes are available, a non-CONTINUE record is reached (the reader is
+// rewound to that record's header so the main walk re-reads it), or a safety cap
+// is hit. Bounded and fail-open — never reads unbounded and never panics.
+func readBiffFormulaContinue(r *bytes.Reader, rgce []byte, need int) []byte {
+	// Copy out of the FORMULA payload's backing array before growing, so a later
+	// append can't alias it.
+	out := make([]byte, len(rgce), need)
+	copy(out, rgce)
+
+	for i := 0; i < maxContinueRecs && len(out) < need; i++ {
+		pos, _ := r.Seek(0, io.SeekCurrent)
+		var typ, length uint16
+		if err := binary.Read(r, binary.LittleEndian, &typ); err != nil {
+			break
+		}
+		if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
+			_, _ = r.Seek(pos, io.SeekStart)
+			break
+		}
+		if typ != 0x003C { // not a CONTINUE — rewind so the main loop handles it
+			_, _ = r.Seek(pos, io.SeekStart)
+			break
+		}
+		body := make([]byte, length)
+		if _, err := io.ReadFull(r, body); err != nil {
+			break
+		}
+		out = append(out, body...)
+		if len(out) > maxFormulaReassembled {
+			out = out[:maxFormulaReassembled]
+			break
+		}
+	}
+	return out
 }
 
 // biffSheetName decodes the name field from a BOUNDSHEET8 payload slice starting

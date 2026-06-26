@@ -258,6 +258,56 @@ func TestXLMBIFF_FormulaFoldsInMacrosheet(t *testing.T) {
 	}
 }
 
+// buildBIFFFormulaContinueWorkbook emits a macrosheet (dt 0x0040) whose single
+// FORMULA record declares cce = len(rgce) but physically carries only the first
+// `split` bytes; the remainder is placed in a following CONTINUE (0x003C)
+// record. Exercises the biff-continue reassembly path.
+func buildBIFFFormulaContinueWorkbook(t *testing.T, rgce []byte, split int) []byte {
+	t.Helper()
+	var wb bytes.Buffer
+	put16 := func(v uint16) { b := make([]byte, 2); binary.LittleEndian.PutUint16(b, v); wb.Write(b) }
+	rec := func(typ uint16, payload []byte) { put16(typ); put16(uint16(len(payload))); wb.Write(payload) }
+
+	bof := make([]byte, 4)
+	binary.LittleEndian.PutUint16(bof[2:], 0x0040) // macrosheet
+	rec(0x0809, bof)
+
+	// FORMULA carries cce=full but only rgce[:split] bytes.
+	fp := make([]byte, 22+split)
+	binary.LittleEndian.PutUint16(fp[20:], uint16(len(rgce))) // cce = full length
+	copy(fp[22:], rgce[:split])
+	rec(0x0006, fp)
+	// CONTINUE carries the remaining ptg bytes.
+	rec(0x003C, rgce[split:])
+
+	return buildCFB(t, []cfbEntry{
+		{name: "Root Entry", mse: 5},
+		{name: "Workbook", mse: 2, data: wb.Bytes()},
+	})
+}
+
+// TestXLMBIFF_FormulaContinueReassembly: a ptg array split across the FORMULA
+// record and a following CONTINUE must be reassembled before folding, so the
+// trailing =EXEC verb (which lives entirely in the CONTINUE half) is recovered.
+// FAILS against the pre-biff-continue code (cce was capped to the FORMULA half,
+// truncating the stream before the EXEC token).
+func TestXLMBIFF_FormulaContinueReassembly(t *testing.T) {
+	// push "calc.exe payload", then ptgFunc EXEC (id 110).
+	rgce := append(biffStr8("calc.exe payload"), 0x21, 110, 0)
+	// Split mid-string: the FORMULA half holds only part of the pushed literal,
+	// the EXEC token sits wholly in the CONTINUE half.
+	split := 10
+	buf := buildBIFFFormulaContinueWorkbook(t, rgce, split)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("\n"))
+	if !bytes.Contains(joined, []byte("XLM-DANGEROUS-FUNC EXEC")) {
+		t.Fatalf("CONTINUE not reassembled — EXEC lost; got %q", joined)
+	}
+	if !bytes.Contains(joined, []byte("calc.exe payload")) {
+		t.Fatalf("CONTINUE not reassembled — literal truncated; got %q", joined)
+	}
+}
+
 // TestXLMBIFF_FormulaNotFoldedInWorksheet checks the FP gate: a FORMULA in an
 // ordinary worksheet substream (BOF dt 0x0010) must NOT be folded/surfaced, so
 // benign worksheet formulas can't fabricate streams.
