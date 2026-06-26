@@ -601,3 +601,81 @@ func TestDecodeUTF16DifferentialASCIIUnchanged(t *testing.T) {
 		t.Errorf("plain ASCII produced %d streams (UTF-16 path should not fire): %q", len(res.Streams), res.Streams)
 	}
 }
+
+// TestFoldVBAVarReplaceBasic verifies the core var-Replace fold: payload bytes
+// interleaved with a junk token are stripped when Replace is called with variable
+// arguments that resolve to known literals. This mirrors the d78bc974 sample shape:
+//
+//	x = "Asidesmanb"   ' payload with junk interleaved
+//	m = "sidesman"     ' the junk marker
+//	result = Replace(x, m, "")
+//
+// The fold must emit "Ab" so downstream keyword/base64 rules see the deobfuscated
+// content.
+func TestFoldVBAVarReplaceBasic(t *testing.T) {
+	// Synthetic input mirroring the sample: junk token "JUNK" interleaved.
+	// Replace(payload, junkVar, "") → stripped cleartext.
+	vbs := `
+payload = "AJUNKbJUNKcJUNKdJUNKeJUNKfJUNKgJUNKh"
+junk = "JUNK"
+result = Replace(payload, junk, "")
+`
+	buf := []byte(vbs)
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "Abcdefgh") {
+		t.Fatalf("var-Replace fold not emitted; streams: %v", streamsAsStrings(res))
+	}
+}
+
+// TestFoldVBAVarReplaceAlias verifies one-level alias resolution: when the payload
+// variable is itself assigned from another variable, the fold still resolves it.
+func TestFoldVBAVarReplaceAlias(t *testing.T) {
+	// cyanean holds the interleaved payload; outboard is an alias for cyanean.
+	// The Replace call uses the alias, as in the real sample.
+	// Result "powershell" is 10 chars — well above the minDecodedLen=8 floor.
+	vbs := `
+cyanean = "pXoXwXeXrXsXhXeXlXl"
+outboard = cyanean
+Southsea = "X"
+result = Replace(outboard, Southsea, "")
+`
+	buf := []byte(vbs)
+	res := Extract(buf, time.Time{})
+	if !streamsContain(res, "powershell") {
+		t.Fatalf("alias-resolved var-Replace fold not emitted; streams: %v", streamsAsStrings(res))
+	}
+}
+
+// TestFoldVBAVarReplaceNoEmitOnUnresolved verifies FP safety: when one Replace arg
+// is an identifier that was never assigned a literal value, the call is skipped
+// entirely — no garbage emitted.
+func TestFoldVBAVarReplaceNoEmitOnUnresolved(t *testing.T) {
+	// "marker" is never assigned; Replace(payload, marker, "") must be skipped.
+	vbs := `
+payload = "AmarkerB"
+result = Replace(payload, marker, "")
+`
+	buf := []byte(vbs)
+	var emitted [][]byte
+	foldVBAVarReplace(buf, time.Time{}, func(b []byte) bool {
+		emitted = append(emitted, append([]byte(nil), b...))
+		return true
+	})
+	for _, e := range emitted {
+		if strings.Contains(string(e), "marker") || string(e) == "AB" {
+			t.Fatalf("unresolved-arg Replace emitted garbage: %q", e)
+		}
+	}
+}
+
+// TestFoldVBAVarReplaceNoBehaviorChange confirms no extra streams are emitted for
+// input that has no var-Replace pattern at all: a plain base64 email body.
+func TestFoldVBAVarReplaceNoBehaviorChange(t *testing.T) {
+	// Plain text with no VBA — must produce zero streams from the var-Replace path.
+	buf := []byte("just an ordinary ASCII email body, nothing encoded at all")
+	var emitted int
+	foldVBAVarReplace(buf, time.Time{}, func([]byte) bool { emitted++; return true })
+	if emitted != 0 {
+		t.Fatalf("foldVBAVarReplace emitted %d streams on plain-text input", emitted)
+	}
+}

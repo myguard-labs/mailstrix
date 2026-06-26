@@ -180,6 +180,23 @@ var (
 	reDridex     = regexp.MustCompile(`"[0-9A-Za-z]{20,}"`)
 	dridexNotHex = regexp.MustCompile(`[G-Zg-z]`)
 
+	// VBA simple string-variable assignment: identifier = "literal"
+	// (case-insensitive; identifier must start with a letter).
+	reVBAStrAssign = regexp.MustCompile(`(?im)^[ \t]*([A-Za-z]\w{0,63})\s*=\s*"((?:[^"]|"")*)"`)
+
+	// VBA trivial alias: identifier = otherIdentifier (no quotes, no operators).
+	reVBAAlias = regexp.MustCompile(`(?im)^[ \t]*([A-Za-z]\w{0,63})\s*=\s*([A-Za-z]\w{0,63})\s*$`)
+
+	// Replace() call where each arg is EITHER a string literal OR an identifier.
+	// Capture groups: 1=arg1, 2=arg1-is-lit, 3=arg1-id,
+	//                 4=arg2, 5=arg2-is-lit, 6=arg2-id,
+	//                 7=arg3, 8=arg3-is-lit, 9=arg3-id.
+	// Simplified: three groups, each matching "lit" or ident.
+	reVBAVarReplace = regexp.MustCompile(`(?i)Replace\(\s*` +
+		`(?:"((?:[^"]|"")*)"|([A-Za-z]\w{0,63}))\s*,\s*` +
+		`(?:"((?:[^"]|"")*)"|([A-Za-z]\w{0,63}))\s*,\s*` +
+		`(?:"((?:[^"]|"")*)"|([A-Za-z]\w{0,63}))\s*\)`)
+
 	// MSD-encodings: compiled regexes for the 6 new encoding patterns.
 
 	// \xHH hex-escape sequences: literal \x followed by two hex digits, repeated min minXEscRun times.
@@ -329,6 +346,16 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 		}
 	}
 
+	// Replace(var/lit, var/lit, var/lit) with variable-resolved args — handles
+	// the pattern where the payload is assembled as a variable then junk is
+	// stripped with Replace(payloadVar, junkVar, ""). Collect assignments first,
+	// resolve each arg, then evaluate. Pure all-literal calls are already
+	// covered by reReplace above; this path fires when at least one arg is a
+	// variable reference.
+	if !foldVBAVarReplace(src, deadline, emit) {
+		return false
+	}
+
 	// Dridex-obfuscated string literals (olevba pass 4). A quoted >=20-char
 	// alphanumeric run that is NOT plain hex is run through dridexURLDecode.
 	dridexMatches := reDridex.FindAll(src, maxMatches)
@@ -358,6 +385,129 @@ func reverseString(s string) string {
 		r[i], r[j] = r[j], r[i]
 	}
 	return string(r)
+}
+
+// foldVBAVarReplace collects simple string-variable assignments from src,
+// resolves one level of alias, then matches Replace() calls whose args are
+// either string literals or variables from that map. When all three args
+// resolve, it emits strings.ReplaceAll(subject, old, new). Returns false on
+// deadline/budget hit, true otherwise.
+//
+// FP-safety: only args that fully resolve to known literal values are folded.
+// Any unresolved identifier (not in the collected map) causes the Replace call
+// to be skipped entirely — no garbage emitted.
+func foldVBAVarReplace(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	// Caps: bound memory and work in linear passes.
+	const (
+		maxVarEntries = 256  // max identifier→literal map entries
+		maxLiteralLen = 4096 // max per-value length stored in the map
+		maxVarMatches = 64   // max Replace() calls evaluated
+		maxAliasDepth = 1    // single alias resolution level
+	)
+
+	// Phase 1 — collect identifier = "literal" assignments.
+	varMap := make(map[string]string, 32)
+	for _, m := range reVBAStrAssign.FindAllSubmatch(src, -1) {
+		if len(varMap) >= maxVarEntries {
+			break
+		}
+		name := string(m[1])
+		val := strings.ReplaceAll(string(m[2]), `""`, `"`)
+		if len(val) > maxLiteralLen {
+			continue // skip oversized literals to bound memory
+		}
+		// Keep the FIRST (earliest) assignment for a given name — matches VBA
+		// sequential execution order for simple scripts.
+		if _, exists := varMap[name]; !exists {
+			varMap[name] = val
+		}
+	}
+
+	// Phase 2 — resolve one level of trivial alias: identifier = otherIdentifier.
+	for _, m := range reVBAAlias.FindAllSubmatch(src, -1) {
+		name := string(m[1])
+		src2 := string(m[2])
+		if _, exists := varMap[name]; exists {
+			continue // already have a literal binding — don't overwrite
+		}
+		if val, ok := varMap[src2]; ok {
+			varMap[name] = val
+		}
+	}
+
+	// Phase 3 — find and evaluate Replace() calls with at least one var arg.
+	// reVBAVarReplace capture layout per match (7 groups):
+	//   m[1] lit-arg1, m[2] id-arg1
+	//   m[3] lit-arg2, m[4] id-arg2
+	//   m[5] lit-arg3, m[6] id-arg3
+	resolve := func(lit, id []byte) (string, bool) {
+		if len(lit) > 0 || (len(id) == 0 && len(lit) == 0) {
+			// literal branch: m[N] is non-empty for a quoted arg (even empty
+			// string "" matches as zero-length lit group).
+			// But we must distinguish "present quoted literal" from "absent".
+			// reVBAVarReplace uses alternation: if lit group matched, id is "".
+			return strings.ReplaceAll(string(lit), `""`, `"`), true
+		}
+		// identifier branch
+		name := string(id)
+		val, ok := varMap[name]
+		return val, ok
+	}
+
+	replMatches := reVBAVarReplace.FindAllSubmatch(src, maxVarMatches)
+	for _, m := range replMatches {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return false
+		}
+		// Determine which branch fired for each arg position.
+		// m[1]/m[2]: arg1 (lit / id); m[3]/m[4]: arg2; m[5]/m[6]: arg3.
+		//
+		// The regex alternation fires exactly one of lit/id per arg.
+		// When the lit group matched, m[2*i-1] is present; id group m[2*i] is "".
+		// When the id group matched, m[2*i-1] is ""; m[2*i] is the identifier.
+		//
+		// Special case: empty literal "" — lit group is present but zero-length,
+		// and id group is also zero-length. Discriminate: if the full match
+		// contains a quoted segment for that arg we landed in the lit branch.
+		// The simplest discriminant is: if id bytes are empty after the alternation
+		// consumed an identifier, then lit won (and vice versa). In RE2, exactly
+		// one of the two alternation branches inside (?:...|...) captures — the
+		// other sub-group is nil (zero-length in FindAllSubmatch). We rely on the
+		// fact that a non-empty identifier always produces a non-empty m[2i] byte
+		// slice; an empty literal produces a zero-length but non-nil m[2i-1] slice
+		// while m[2i] is zero-length. We cannot distinguish nil vs zero-length via
+		// []byte comparison alone; instead, check whether the id bytes are non-empty
+		// to decide which branch.
+		arg1lit, arg1id := m[1], m[2]
+		arg2lit, arg2id := m[3], m[4]
+		arg3lit, arg3id := m[5], m[6]
+
+		// If ALL three args are pure literals this call was already handled by
+		// the all-literal reReplace pass above — skip to avoid double-emit.
+		if len(arg1id) == 0 && len(arg2id) == 0 && len(arg3id) == 0 {
+			continue
+		}
+
+		subj, ok1 := resolve(arg1lit, arg1id)
+		if !ok1 {
+			continue // unresolved — skip, no emit
+		}
+		old, ok2 := resolve(arg2lit, arg2id)
+		if !ok2 {
+			continue
+		}
+		newVal, ok3 := resolve(arg3lit, arg3id)
+		if !ok3 {
+			continue
+		}
+
+		result := strings.ReplaceAll(subj, old, newVal)
+		if !emit([]byte(result)) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // stripDigits returns the integer formed by the digit characters of s (other
