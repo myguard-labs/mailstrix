@@ -1,0 +1,74 @@
+# yarad.cf — SpamAssassin rules + config for the Yarad plugin.
+#
+# Project: https://github.com/eilandert/rspamd-yarad
+# Plugin:  Yarad.pm (loaded via yarad.pre)
+#
+# Copy into SpamAssassin's config dir and edit the connection settings below.
+
+# ---------------------------------------------------------------------------
+# Connection / behaviour (see Yarad.pm for every knob and its default).
+# ---------------------------------------------------------------------------
+
+# Transport: 'http' (the plugin POSTs the message itself — rich verdict, fires
+# YARAD_HIGH on a confident hit) or 'shellout' (pipe to the yarad-scan client —
+# hit/no-hit only, reuses one audited binary).
+yarad_mode              http
+
+# Central `yarad serve` (http mode).
+yarad_url               http://yarad.internal:8079
+
+# Shared secret file. chmod 0440, owned by the SpamAssassin/amavis user. Leave
+# unset for a token-less yarad.
+# yarad_token_file      /etc/spamassassin/yarad.token
+
+# shellout mode: the lean CGO-free client (same binary the Sieve path ships).
+# yarad_scan_bin        /usr/local/bin/yarad-scan
+
+# Per-request timeout (seconds) and the largest message we bother sending.
+yarad_timeout           10
+yarad_max_size          8388608
+
+# Fail open (1): a yarad outage is treated as clean, never tagging mail. Set 0
+# to fire YARAD_ERROR on a backend failure instead.
+yarad_fail_open         1
+
+# http mode: a matched rule whose meta.score (0..100) is >= this also fires
+# YARAD_HIGH, so a confident malware hit can score harder than a soft one.
+yarad_high_score        75
+
+# ---------------------------------------------------------------------------
+# Rules. Tune the scores to taste; YARA malware hits are high-confidence, so a
+# match alone should normally push a message well over the spam threshold.
+# ---------------------------------------------------------------------------
+
+# Any YARA rule fired on the message.
+header   YARAD            eval:check_yarad()
+describe YARAD            Message matched a YARA malware rule (yarad)
+score    YARAD            5.0
+
+# A high-confidence hit (meta.score >= yarad_high_score). http mode only —
+# stacks on top of YARAD, so a confident match scores YARAD + YARAD_HIGH.
+header   YARAD_HIGH       eval:check_yarad_high()
+describe YARAD_HIGH       High-confidence YARA malware rule matched (yarad)
+score    YARAD_HIGH       5.0
+
+# The yarad backend was unreachable and fail-open is off. Score it low/zero —
+# this is an operational signal, not a spam signal.
+header   YARAD_ERROR      eval:check_yarad_error()
+describe YARAD_ERROR      yarad backend unreachable (fail-closed)
+score    YARAD_ERROR      0.01
+
+# Record which YARA rules fired in a header (handy for triage / quarantine
+# routing). _YARADRULES_ is a comma-separated list set by the plugin.
+add_header all Yara _YARADRULES_
+
+# ---------------------------------------------------------------------------
+# Optional: per-rule scoring. To bump a specific YARA rule, match the header the
+# plugin adds. Example — treat a base64-stuffed PE carve as outright malware:
+#
+#   header   YARAD_B64PE  X-Spam-Yara =~ /\bBase64_Stuffed_PE\b/
+#   describe YARAD_B64PE  yarad carved a base64-stuffed PE
+#   score    YARAD_B64PE  3.0
+#
+# (Requires `add_header all Yara` above so the X-Spam-Yara header exists.)
+# ---------------------------------------------------------------------------

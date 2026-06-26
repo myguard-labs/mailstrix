@@ -20,6 +20,9 @@ Two ways to plug it in (both shipped here):
 
 - **rspamd** — an async `yara.lua` plugin ([`rspamd/`](rspamd/)) POSTs each
   message/part to yarad at SMTP time and turns the hits into a spam-score symbol.
+- **SpamAssassin** — the [`Yarad.pm`](spamassassin/) plugin scans each message
+  through the same central service and turns a YARA match into a spam-score hit
+  ([`spamassassin/`](spamassassin/)).
 - **Dovecot / Sieve** — the lean [`yarad-scan`](#thin-client-for-dovecot--sieve-yarad-scan)
   client scans at *delivery* and a Sieve rule quarantines a match
   ([`sieve/`](sieve/)).
@@ -606,6 +609,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 
 - **[gozer](https://github.com/eilandert/gozer)** — the DCC/Razor/Pyzor sibling backend this mirrors.
 - **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
+- **[SpamAssassin plugin](spamassassin/)** — scan each message through yarad and score a YARA match.
 - **[Dovecot/Sieve example](sieve/)** — quarantine a match with the `yarad-scan` client.
 - **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/2026/06/yara-malware-scanning-rspamd-yarad/) — the why and how, on deb.myguard.nl.
 - **Docker Hub:** [`eilandert/rspamd-yarad`](https://hub.docker.com/r/eilandert/rspamd-yarad).

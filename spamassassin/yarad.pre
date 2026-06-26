@@ -1,0 +1,9 @@
+# Load the yarad SpamAssassin plugin.
+#
+# Copy this file into SpamAssassin's config dir (e.g. /etc/spamassassin/ or
+# /etc/mail/spamassassin/) and point the path at wherever you installed
+# Yarad.pm. The path is relative to the SpamAssassin site rules dir or absolute.
+#
+#   loadplugin Mail::SpamAssassin::Plugin::Yarad /etc/spamassassin/Yarad.pm
+#
+loadplugin Mail::SpamAssassin::Plugin::Yarad Yarad.pm
