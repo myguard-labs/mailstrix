@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef"
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
 // budget. It is resolved once per scan from the effort level and threaded to the
@@ -268,6 +268,9 @@ type Result struct {
 	// (.one/.onetoc2) and its embedded FileDataStoreObject payloads were carved
 	// out for scanning.
 	IsOneNote bool
+	// IsTNEF is true when buf was recognised as a TNEF (winmail.dat) blob and its
+	// attachment/body parts were unwrapped for scanning.
+	IsTNEF bool
 	// EncodedScript is true when >=1 MS Script Encoder block (#@~^...^#~@,
 	// i.e. an encoded VBScript/JScript, as in .vbe/.jse or embedded in a
 	// .wsf/.hta/.html/.sct) was found and decoded to cleartext for scanning.
@@ -396,6 +399,11 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// embedded FileDataStoreObject payloads (the maldoc delivery vector).
 		res.IsDoc = true
 		fromOneNote(buf, &res, b, 0, deadline)
+	case isTNEF(buf):
+		// A TNEF (winmail.dat) blob — Outlook/Exchange wraps the real attachment
+		// payload here; unwrap each attachment/body part for scanning.
+		res.IsDoc = true
+		fromTNEF(buf, &res, b, 0, deadline)
 	case isSLK(buf):
 		// A SYLK (.slk) spreadsheet — plain text, but Excel executes its XLM/DDE
 		// cell formulas, so it's a macro-dropper carrier. Fold the C-record

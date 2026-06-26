@@ -164,7 +164,7 @@ func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int,
 func isNestedCarrier(data []byte) bool {
 	return bytes.HasPrefix(data, zipMagic) || isArchive(data) ||
 		bytes.HasPrefix(data, oleMagic) || isPDF(data) || isRTF(data) ||
-		isLNK(data) || isOneNote(data) || isValidPEAt(data, 0)
+		isLNK(data) || isOneNote(data) || isTNEF(data) || isValidPEAt(data, 0)
 }
 
 // markEncryptedArchive emits the ARCHIVE-ENCRYPTED PURE marker the first time a

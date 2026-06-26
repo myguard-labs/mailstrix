@@ -3,6 +3,7 @@ module github.com/eilandert/rspamd-yarad
 go 1.25.0
 
 require (
+	github.com/Teamwork/tnef v0.0.0-20200108124832-7deabccfdb32
 	github.com/bodgit/sevenzip v1.6.4
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/hillu/go-yara/v4 v4.3.3
@@ -21,6 +22,8 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/stangelandcl/ppmd v0.1.0 // indirect
+	github.com/teamwork/test v0.0.0-20200108114543-02621bae84ad // indirect
+	github.com/teamwork/utils v1.0.0 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
