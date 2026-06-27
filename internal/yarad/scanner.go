@@ -1085,11 +1085,16 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	out = filterMarkerChannel(out, false)
 	// Build the dedup identity set once from the raw matches so that the stream
 	// loop below can update it incrementally instead of rebuilding it on every
-	// stream (O(N) total rather than O(N²) — PERF: mergeMatches-seen).
-	matchID := func(m Match) string { return m.Namespace + "/" + m.Rule }
-	matchSeen := make(map[string]struct{}, len(out)+16)
+	// stream (O(N) total rather than O(N²) — PERF: mergeMatches-seen). Use a
+	// struct key instead of "namespace/rule" concatenation so stream merges do
+	// not allocate one synthetic key string per match.
+	type matchKey struct {
+		namespace string
+		rule      string
+	}
+	matchSeen := make(map[matchKey]struct{}, len(out)+16)
 	for i := range out {
-		matchSeen[matchID(out[i])] = struct{}{}
+		matchSeen[matchKey{namespace: out[i].Namespace, rule: out[i].Rule}] = struct{}{}
 	}
 	// Pre-extract any OLE2/OOXML macro source and account for it. The flags feed
 	// /metrics so this path is observable; the streams are scanned below. The
@@ -1161,16 +1166,19 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// would otherwise each spend a full libyara scan budget for no added signal.
 	// The raw input buffer is seeded into seen first so a stream byte-identical to
 	// the raw bytes is also skipped (it can't add new matches).
-	seen := make(map[[16]byte]struct{})
+	seen := make(map[[16]byte]struct{}, len(res.Streams)+len(res.Markers)+3)
 	seen[streamDedupKey(buf)] = struct{}{} // xxhash the body once so a stream byte-identical to the raw body is skipped (PERF-3)
 	// vbaKeys identifies the genuine VBA macro-source streams (the extractor's
 	// codes() output) by content hash, so the VBA external is set ONLY for those.
 	// Previously every extracted stream scanned with VBA=true, over-firing
 	// VBA-gated rules (`VBA and any of(...)`) on PDF/archive/script/marker/decoded
 	// content (false positives). Markers are never VBA.
-	vbaKeys := make(map[[16]byte]struct{}, len(res.VBAStreams))
-	for _, vs := range res.VBAStreams {
-		vbaKeys[streamDedupKey(vs)] = struct{}{}
+	var vbaKeys map[[16]byte]struct{}
+	if len(res.VBAStreams) > 0 {
+		vbaKeys = make(map[[16]byte]struct{}, len(res.VBAStreams))
+		for _, vs := range res.VBAStreams {
+			vbaKeys[streamDedupKey(vs)] = struct{}{}
+		}
 	}
 	// scanExtracted runs one extracted entry (real content stream OR an out-of-band
 	// marker) through dedup, the shared scan budget, and merge. Returns true when
@@ -1199,7 +1207,7 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 		// through so a name-keyed rule fires the same on the container's decompressed
 		// macros as on its raw bytes.
 		isVBA := false
-		if !markerChannel {
+		if !markerChannel && len(vbaKeys) > 0 {
 			_, isVBA = vbaKeys[h]
 		}
 		// Oversized-stream cost gate (BIGFILE, extracted side): an extractor can emit
@@ -1248,7 +1256,7 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 		// the map from scratch on each stream — O(N) total vs O(N²) before.
 		before := len(out)
 		for _, mm := range m {
-			k := matchID(mm)
+			k := matchKey{namespace: mm.Namespace, rule: mm.Rule}
 			if _, dup := matchSeen[k]; dup {
 				continue
 			}

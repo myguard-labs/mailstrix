@@ -646,6 +646,18 @@ result = Replace(outboard, Southsea, "")
 	}
 }
 
+func TestFoldVBAVarReplaceCaseInsensitiveGate(t *testing.T) {
+	vbs := `
+payload = "pXoXwXeXrXsXhXeXlXl"
+junk = "X"
+result = rEpLaCe(payload, junk, "")
+`
+	res := Extract([]byte(vbs), time.Time{})
+	if !streamsContain(res, "powershell") {
+		t.Fatalf("mixed-case Replace gate skipped var-Replace fold; streams: %v", streamsAsStrings(res))
+	}
+}
+
 // TestFoldVBAVarReplaceNoEmitOnUnresolved verifies FP safety: when one Replace arg
 // is an identifier that was never assigned a literal value, the call is skipped
 // entirely — no garbage emitted.
