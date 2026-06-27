@@ -196,6 +196,7 @@ var (
 		`(?:"((?:[^"]|"")*)"|([A-Za-z]\w{0,63}))\s*,\s*` +
 		`(?:"((?:[^"]|"")*)"|([A-Za-z]\w{0,63}))\s*,\s*` +
 		`(?:"((?:[^"]|"")*)"|([A-Za-z]\w{0,63}))\s*\)`)
+	vbaReplaceNeedle = []byte("replace(")
 
 	// MSD-encodings: compiled regexes for the 6 new encoding patterns.
 
@@ -275,18 +276,25 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 		}
 	}
 
-	// Replace("str","old","new")
-	replMatches := reReplace.FindAllSubmatch(src, maxMatches)
-	for _, m := range replMatches {
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return false
-		}
-		subject := strings.ReplaceAll(string(m[1]), `""`, `"`)
-		old := strings.ReplaceAll(string(m[2]), `""`, `"`)
-		new := strings.ReplaceAll(string(m[3]), `""`, `"`)
-		result := strings.ReplaceAll(subject, old, new)
-		if !emit([]byte(result)) {
-			return false
+	// Replace("str","old","new") and the variable-resolved Replace fold below
+	// both require the literal token "Replace(" with no intervening whitespace
+	// (case-insensitive, matching the regexes). Most script/text buffers do not
+	// contain it; one cheap scalar scan avoids the literal Replace regex plus the
+	// three whole-buffer var-resolution regex passes in that common case.
+	hasReplaceCall := containsASCIIFold(src, vbaReplaceNeedle)
+	if hasReplaceCall {
+		replMatches := reReplace.FindAllSubmatch(src, maxMatches)
+		for _, m := range replMatches {
+			if !deadline.IsZero() && time.Now().After(deadline) {
+				return false
+			}
+			subject := strings.ReplaceAll(string(m[1]), `""`, `"`)
+			old := strings.ReplaceAll(string(m[2]), `""`, `"`)
+			new := strings.ReplaceAll(string(m[3]), `""`, `"`)
+			result := strings.ReplaceAll(subject, old, new)
+			if !emit([]byte(result)) {
+				return false
+			}
 		}
 	}
 
@@ -352,7 +360,7 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 	// resolve each arg, then evaluate. Pure all-literal calls are already
 	// covered by reReplace above; this path fires when at least one arg is a
 	// variable reference.
-	if !foldVBAVarReplace(src, deadline, emit) {
+	if hasReplaceCall && !foldVBAVarReplaceMatched(src, deadline, emit) {
 		return false
 	}
 
@@ -387,6 +395,39 @@ func reverseString(s string) string {
 	return string(r)
 }
 
+func containsASCIIFold(b, needle []byte) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(needle) > len(b) {
+		return false
+	}
+	first := asciiLower(needle[0])
+	last := len(b) - len(needle)
+	for i := 0; i <= last; i++ {
+		if asciiLower(b[i]) != first {
+			continue
+		}
+		j := 1
+		for ; j < len(needle); j++ {
+			if asciiLower(b[i+j]) != asciiLower(needle[j]) {
+				break
+			}
+		}
+		if j == len(needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func asciiLower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
 // foldVBAVarReplace collects simple string-variable assignments from src,
 // resolves one level of alias, then matches Replace() calls whose args are
 // either string literals or variables from that map. When all three args
@@ -397,6 +438,13 @@ func reverseString(s string) string {
 // Any unresolved identifier (not in the collected map) causes the Replace call
 // to be skipped entirely — no garbage emitted.
 func foldVBAVarReplace(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	if !containsASCIIFold(src, vbaReplaceNeedle) {
+		return true
+	}
+	return foldVBAVarReplaceMatched(src, deadline, emit)
+}
+
+func foldVBAVarReplaceMatched(src []byte, deadline time.Time, emit func([]byte) bool) bool {
 	// Caps: bound memory and work in linear passes.
 	const (
 		maxVarEntries = 256  // max identifier→literal map entries
@@ -421,6 +469,9 @@ func foldVBAVarReplace(src []byte, deadline time.Time, emit func([]byte) bool) b
 		if _, exists := varMap[name]; !exists {
 			varMap[name] = val
 		}
+	}
+	if len(varMap) == 0 {
+		return true
 	}
 
 	// Phase 2 — resolve one level of trivial alias: identifier = otherIdentifier.

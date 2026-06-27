@@ -79,32 +79,20 @@ func fromOOXMLXLM(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		return
 	}
 
-	// Build a name-set of all zip entries for fast membership tests.
-	names := make(map[string]struct{}, len(zr.File))
-	for _, f := range zr.File {
-		names[f.Name] = struct{}{}
-	}
-
 	// Check whether any xl/macrosheets/ part exists — required to avoid FPs on
 	// ordinary hidden sheets in workbooks that have no macro content at all.
+	var wbFile *zip.File
 	hasMacrosheet := false
-	for name := range names {
-		if strings.HasPrefix(name, "xl/macrosheets/") {
+	for _, f := range zr.File {
+		if f.Name == "xl/workbook.xml" && wbFile == nil {
+			wbFile = f
+		}
+		if strings.HasPrefix(f.Name, "xl/macrosheets/") {
 			hasMacrosheet = true
-			break
 		}
 	}
 	if !hasMacrosheet {
 		return
-	}
-
-	// Locate xl/workbook.xml.
-	var wbFile *zip.File
-	for _, f := range zr.File {
-		if f.Name == "xl/workbook.xml" {
-			wbFile = f
-			break
-		}
 	}
 	if wbFile == nil {
 		return
@@ -127,11 +115,12 @@ func fromOOXMLXLM(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 	// Relevant attributes: name="…" state="hidden|veryHidden".
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	dec.Strict = false
+	markers := countXLMMarkers(*out)
 	for {
 		if expired(deadline) {
 			break
 		}
-		if countXLMMarkers(*out) >= maxXLMMarkers || len(*out) >= maxStreams {
+		if markers >= maxXLMMarkers || len(*out) >= maxStreams {
 			break
 		}
 		tok, err := dec.Token()
@@ -156,6 +145,7 @@ func fromOOXMLXLM(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		}
 		// Emit marker — we already confirmed xl/macrosheets/ exists.
 		*out = append(*out, []byte("XLM-HIDDEN-MACROSHEET "+state+" "+sheetName))
+		markers++
 	}
 }
 
@@ -281,6 +271,9 @@ func hasPtgExp(rgce []byte) (row, col uint16, ok bool) {
 // The function modifies the slice in place (updates the rgce field of elements
 // whose ptgExp pointer resolved). The slice header itself is not modified.
 func resolveSharedFormulas(cells []biffFormulaCell, table map[shrfmlaKey][]byte) {
+	if len(table) == 0 {
+		return
+	}
 	for i := range cells {
 		row, col, ok := hasPtgExp(cells[i].rgce)
 		if !ok {
@@ -328,12 +321,13 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 	r := bytes.NewReader(workbookData)
 	scanned := 0
 	records := 0
+	xlmMarkers := countXLMMarkers(res.Streams)
 	inMacroSheet := false // set by BOF; gates FORMULA folding to macro substreams
 	xlmOutput := 0        // folded-formula byte budget, separate from markers
 	sheetIndex := 0       // monotonic counter for synthetic sheet names
 
-	var macroSheetCells []biffFormulaCell       // accumulator for current macrosheet
-	shrfmlaTable := make(map[shrfmlaKey][]byte) // shared-formula table for current substream
+	var macroSheetCells []biffFormulaCell  // accumulator for current macrosheet
+	var shrfmlaTable map[shrfmlaKey][]byte // shared-formula table for current substream, allocated lazily
 
 	// flushMacroSheet emits output for the cells collected from the current
 	// macrosheet substream. It tries the emulator first; if that produces no
@@ -389,7 +383,7 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 			break
 		}
 		records++
-		if countXLMMarkers(res.Streams) >= maxXLMMarkers || len(res.Streams) >= maxStreams {
+		if xlmMarkers >= maxXLMMarkers || len(res.Streams) >= maxStreams {
 			break
 		}
 
@@ -413,10 +407,10 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 			inMacroSheet = false
 			// Reset the shared-formula table for the new substream; SHRFMLA
 			// entries from one macrosheet are not valid in another.
-			shrfmlaTable = make(map[shrfmlaKey][]byte)
+			shrfmlaTable = nil
 			if recLen >= 4 {
-				payload := make([]byte, recLen)
-				if _, err := io.ReadFull(r, payload); err != nil {
+				payload, ok := readBIFFRecordPrefix(r, recLen, 4)
+				if !ok {
 					break
 				}
 				dt := binary.LittleEndian.Uint16(payload[2:])
@@ -424,8 +418,10 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 					inMacroSheet = true
 					sheetIndex++
 				}
-			} else if _, err := r.Seek(int64(recLen), io.SeekCurrent); err != nil {
-				break
+			} else {
+				if _, err := r.Seek(int64(recLen), io.SeekCurrent); err != nil {
+					break
+				}
 			}
 			continue
 		}
@@ -441,11 +437,14 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 		// worksheet cannot carry XLM macro verbs and we don't want to store it.
 		if recType == 0x00BC {
 			if inMacroSheet && recLen >= 9 && len(shrfmlaTable) < maxSHRFMLAEntries {
-				payload := make([]byte, recLen)
-				if _, err := io.ReadFull(r, payload); err != nil {
+				payload, ok := readBIFFRecordPrefix(r, recLen, 9+maxSHRFMLACce)
+				if !ok {
 					break // malformed — fail-open
 				}
 				if key, body, ok := parseSHRFMLARecord(payload); ok {
+					if shrfmlaTable == nil {
+						shrfmlaTable = make(map[shrfmlaKey][]byte, 4)
+					}
 					shrfmlaTable[key] = body
 				}
 			} else {
@@ -508,8 +507,8 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 		//   [14]    rgch   first byte = builtin name code (0x01=Auto_Open, 0x02=Auto_Close)
 		if recType == 0x0018 {
 			if recLen >= 15 {
-				payload := make([]byte, recLen)
-				if _, err := io.ReadFull(r, payload); err != nil {
+				payload, ok := readBIFFRecordPrefix(r, recLen, 15)
+				if !ok {
 					break // malformed — fail-open
 				}
 				grbit := binary.LittleEndian.Uint16(payload[0:])
@@ -569,12 +568,33 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 		// Decode the sheet name.
 		name := biffSheetName(payload[6:])
 		res.Streams = append(res.Streams, []byte("XLM-HIDDEN-MACROSHEET "+stateLabel+" "+name))
+		xlmMarkers++
 	}
 
 	// Flush any cells accumulated from the final macrosheet substream.
 	flushMacroSheet()
 
 	_ = sheetIndex // used only for disambiguation; suppress unused warning
+}
+
+func readBIFFRecordPrefix(r *bytes.Reader, recLen uint16, max int) ([]byte, bool) {
+	n := int(recLen)
+	if n > max {
+		n = max
+	}
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, false
+	}
+	if skip := int(recLen) - n; skip > 0 {
+		if skip > r.Len() {
+			return nil, false
+		}
+		if _, err := r.Seek(int64(skip), io.SeekCurrent); err != nil {
+			return nil, false
+		}
+	}
+	return payload, true
 }
 
 // readBiffFormulaContinue reassembles a FORMULA ptg array that was split across
