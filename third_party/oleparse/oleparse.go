@@ -99,6 +99,17 @@ func NewDirectory(data []byte, index uint32) (*Directory, error) {
 	return self, nil
 }
 
+// streamCacheMaxSize is the upper bound on a stream's byte length for it to
+// be stored in the per-OLEFile stream cache.  Streams at or below this size
+// are the ones that callers read repeatedly (Workbook, WordDocument, dir, …).
+// Value equals the default MiniSectorCutoff (4096 bytes) so control streams
+// that live in the mini-stream are always eligible.
+const streamCacheMaxSize = 4096
+
+// streamCacheMaxEntries caps the total number of cached streams so that a
+// pathological OLE with many small streams cannot exhaust memory.
+const streamCacheMaxEntries = 32
+
 type OLEFile struct {
 	data           []byte
 	ministream     []byte
@@ -110,6 +121,16 @@ type OLEFile struct {
 	Fat            []uint32
 	MiniFat        []uint32
 	Directory      []*Directory
+
+	// nameIdx is a keep-first name→Directory index built eagerly in NewOLEFile.
+	// FindStreamByName uses it for O(1) lookup instead of a linear scan.
+	nameIdx map[string]*Directory
+
+	// streamCache is a bounded cache of materialised stream bytes keyed by
+	// Directory index.  Only streams whose final size is ≤ streamCacheMaxSize
+	// are stored, and at most streamCacheMaxEntries entries are kept.
+	// GetStream populates it; callers MUST NOT mutate the returned slice.
+	streamCache map[uint32][]byte
 }
 
 type VBAModule struct {
@@ -228,6 +249,12 @@ func (self *OLEFile) GetStream(index uint32) []byte {
 		return nil
 	}
 
+	// Cache hit: return the pre-materialised slice directly.
+	// Callers must not mutate the returned []byte.
+	if cached, ok := self.streamCache[index]; ok {
+		return cached
+	}
+
 	var data []byte
 
 	d := self.Directory[index]
@@ -237,16 +264,25 @@ func (self *OLEFile) GetStream(index uint32) []byte {
 		data = self.ReadChain(d.Header.SectStart)
 	}
 
-	return data[:uint32_min(d.Header.Size, uint32(len(data)))]
+	result := data[:uint32_min(d.Header.Size, uint32(len(data)))]
+
+	// Cache small streams (≤ streamCacheMaxSize) up to streamCacheMaxEntries.
+	// Large or rarely-read streams are returned uncached.
+	if uint32(len(result)) <= streamCacheMaxSize &&
+		len(self.streamCache) < streamCacheMaxEntries {
+		if self.streamCache == nil {
+			self.streamCache = make(map[uint32][]byte, streamCacheMaxEntries)
+		}
+		self.streamCache[index] = result
+	}
+
+	return result
 }
 
 func (self *OLEFile) FindStreamByName(name string) *Directory {
-	for _, d := range self.Directory {
-		if d.Name == name {
-			return d
-		}
+	if d, ok := self.nameIdx[name]; ok {
+		return d
 	}
-
 	return nil
 }
 
@@ -376,6 +412,16 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 
 	if len(self.Directory) == 0 {
 		return nil, errors.New("Directory not found")
+	}
+
+	// Build the name index eagerly (keep-first: same as the former linear
+	// scan which returned the first matching entry).  Building eagerly avoids
+	// any write-race if callers ever access the OLEFile concurrently.
+	self.nameIdx = make(map[string]*Directory, len(self.Directory))
+	for _, d := range self.Directory {
+		if _, exists := self.nameIdx[d.Name]; !exists {
+			self.nameIdx[d.Name] = d
+		}
 	}
 
 	// load the ministream
