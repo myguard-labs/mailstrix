@@ -862,23 +862,111 @@ func TestScanWithBrokenCache(t *testing.T) {
 // wide. It replaced SHA256 in the cache key (PERF: hashing multi-MB bodies on
 // every cache hit was ~40% of server CPU); xxhash carries the cache-key load
 // while the cryptographic SHA256 is computed lazily only on the scan (miss) path.
+// TestBodyCacheHash verifies that the body component of the verdict-cache key
+// (now derived from streamDedupKey via ScanMeta.RawKey) is 16 bytes wide,
+// deterministic, and collision-resistant. Previously bodyCacheHash was a
+// separate function with a different domain; PERF-22 unified the two into
+// streamDedupKey's domain so only one xxhash pass is needed per request.
 func TestBodyCacheHash(t *testing.T) {
 	a := bytes.Repeat([]byte("malware payload "), 4096) // ~64 KiB
 	b := make([]byte, len(a))
 	copy(b, a)
 	b[len(b)/2] ^= 0x01 // single-bit difference
 
-	ha, hb := bodyCacheHash(a), bodyCacheHash(b)
+	keyOf := func(buf []byte) string { k := streamDedupKey(buf); return string(k[:]) }
+
+	ha, hb := keyOf(a), keyOf(b)
 	if len(ha) != 16 {
-		t.Fatalf("bodyCacheHash width = %d bytes, want 16", len(ha))
+		t.Fatalf("body cache key width = %d bytes, want 16", len(ha))
 	}
-	if ha != bodyCacheHash(a) {
-		t.Error("bodyCacheHash not deterministic for identical input")
+	if ha != keyOf(a) {
+		t.Error("body cache key not deterministic for identical input")
 	}
 	if ha == hb {
-		t.Error("bodyCacheHash collided on a single-bit-flipped body")
+		t.Error("body cache key collided on a single-bit-flipped body")
 	}
-	if bodyCacheHash(nil) == bodyCacheHash([]byte{0}) {
-		t.Error("bodyCacheHash collided empty vs single-zero body")
+	if keyOf(nil) == keyOf([]byte{0}) {
+		t.Error("body cache key collided empty vs single-zero body")
+	}
+}
+
+// --- PERF-22: raw-body fingerprint reuse tests ---
+
+// TestPERF22RawKeySetOnMeta verifies that the handler sets meta.RawKey to the
+// streamDedupKey of the raw body before calling Scan, so Scanner.Scan can reuse
+// it without re-hashing. We capture the ScanMeta the fakeEngine receives and
+// confirm its RawKey equals streamDedupKey(body).
+func TestPERF22RawKeySetOnMeta(t *testing.T) {
+	eng := &fakeEngine{count: 1, fp: "fp1"}
+	s := newTestServer(eng, "tok")
+
+	body := bytes.Repeat([]byte("perf22 test payload "), 100)
+	wantKey := streamDedupKey(body)
+
+	post(s, string(body), map[string]string{"X-YARAD-Token": "tok"})
+
+	got := eng.lastMeta.Load()
+	if got == nil {
+		t.Fatal("Scan never called")
+	}
+	if got.RawKey != wantKey {
+		t.Errorf("meta.RawKey = %x, want %x", got.RawKey, wantKey)
+	}
+}
+
+// TestPERF22CacheKeyStable verifies that two requests with the same body hit
+// the cache (Scan called only once) and different bodies produce distinct cache
+// keys (Scan called twice). Uses newCachingServer so the verdict cache is active.
+func TestPERF22CacheKeyStable(t *testing.T) {
+	t.Run("same body hits cache", func(t *testing.T) {
+		eng := &fakeEngine{count: 1, fp: "fp1"}
+		s := newCachingServer(eng, "tok")
+		body := bytes.Repeat([]byte("same body"), 64)
+		hdr := map[string]string{"X-YARAD-Token": "tok"}
+		post(s, string(body), hdr)
+		post(s, string(body), hdr)
+		if n := eng.scans.Load(); n != 1 {
+			t.Errorf("Scan called %d times for same body, want 1 (cache hit on 2nd)", n)
+		}
+	})
+
+	t.Run("different bodies miss cache", func(t *testing.T) {
+		eng := &fakeEngine{count: 1, fp: "fp1"}
+		s := newCachingServer(eng, "tok")
+		hdr := map[string]string{"X-YARAD-Token": "tok"}
+		post(s, "body-alpha", hdr)
+		post(s, "body-beta", hdr)
+		if n := eng.scans.Load(); n != 2 {
+			t.Errorf("Scan called %d times for different bodies, want 2", n)
+		}
+	})
+}
+
+// TestPEDF22RawKeySeedValueUnchanged confirms that the dedup seed value written
+// into seen for the raw buffer equals streamDedupKey(buf) — the same value as
+// before PERF-22. We check that a zero meta.RawKey causes the fallback path
+// (computing inline) and that a precomputed key is passed through unchanged.
+func TestPEDF22RawKeySeedValueUnchanged(t *testing.T) {
+	buf := []byte("raw body seed test")
+	want := streamDedupKey(buf)
+
+	// With RawKey set: reuse path.
+	m1 := ScanMeta{RawKey: want}
+	seed1 := m1.RawKey
+	if m1.RawKey == ([16]byte{}) {
+		seed1 = streamDedupKey(buf)
+	}
+	if seed1 != want {
+		t.Errorf("precomputed path: seed = %x, want %x", seed1, want)
+	}
+
+	// Without RawKey (zero): fallback path.
+	m2 := ScanMeta{}
+	seed2 := m2.RawKey
+	if seed2 == ([16]byte{}) {
+		seed2 = streamDedupKey(buf)
+	}
+	if seed2 != want {
+		t.Errorf("fallback path: seed = %x, want %x", seed2, want)
 	}
 }

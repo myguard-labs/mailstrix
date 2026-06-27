@@ -248,8 +248,9 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 
 	t0 := time.Now()
 	fp := s.engine.Fingerprint()
-	key := fp + ":icap:" + bodyCacheHash(buf)
-	matches, cacheStatus := s.lookupOrScan(ctx, key, buf, ScanMeta{})
+	icapMeta := ScanMeta{RawKey: streamDedupKey(buf)}
+	key := fp + ":icap:" + string(icapMeta.RawKey[:])
+	matches, cacheStatus := s.lookupOrScan(ctx, key, buf, icapMeta)
 
 	if len(matches) > 0 {
 		s.metrics.icapInfected.Add(1)

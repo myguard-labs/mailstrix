@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,8 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/cespare/xxhash/v2"
 
 	"github.com/eilandert/rspamd-yarad/internal/extract"
 	"github.com/eilandert/rspamd-yarad/internal/feodo"
@@ -535,7 +532,17 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// needs (mbazaar lookup key + extracted-stream dedup seed) is computed LAZILY,
 	// only on a cache MISS, inside lookupOrScan — so a cache hit never hashes the
 	// body cryptographically at all.
-	key := s.engine.Fingerprint() + ":" + meta.cacheKey() + ":" + bodyCacheHash(buf)
+	// Compute the raw-body fingerprint ONCE in streamDedupKey's domain (PERF-22).
+	// This [16]byte is stored on meta so Scanner.Scan can seed the per-stream dedup
+	// set without re-hashing buf, and its string form replaces bodyCacheHash(buf)
+	// as the body component of the verdict-cache key. The domain change from
+	// bodyCacheHash (prefix 0x9e,0x37,0x79,0xb9) to streamDedupKey (prefix 0x01)
+	// alters the cache-key bytes for existing entries, but the verdict cache is
+	// ephemeral and already invalidated by any Fingerprint change — a domain-change
+	// cold-start is equivalent and safe (L2/Redis keys are also per-Fingerprint so
+	// no cross-version collision).
+	meta.RawKey = streamDedupKey(buf)
+	key := s.engine.Fingerprint() + ":" + meta.cacheKey() + ":" + string(meta.RawKey[:])
 	matches, cacheStatus := s.lookupOrScan(ctx, key, buf, meta)
 
 	if len(matches) > 0 {
@@ -566,27 +573,6 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 // in-flight identical scan, or a fresh scan whose result is cached. At high
 // volume the cache + coalescing collapse a bulk campaign's N identical messages
 // into a single scan. Returns the matches and a cache-status label for logs.
-// bodyCacheHash returns a fast, non-cryptographic 128-bit fingerprint of the
-// request body for use as a verdict-cache key component. It deliberately does
-// NOT use SHA256: under bulk-campaign load most requests are cache hits, and
-// hashing a multi-MB body with SHA256 just to build the lookup key dominated
-// server CPU. xxhash is allocation-free; the 128-bit width (two xxhash64 passes
-// over the body and its bit-inverted self) makes an accidental collision between
-// two distinct bodies sharing the same fingerprint+metadata negligible. This is
-// a cache key, not a security identity — the cryptographic SHA256 used for the
-// MalwareBazaar lookup is still computed on the miss path.
-func bodyCacheHash(buf []byte) string {
-	lo := xxhash.Sum64(buf)
-	d := xxhash.New()
-	_, _ = d.Write([]byte{0x9e, 0x37, 0x79, 0xb9}) // domain-separate the second pass
-	_, _ = d.Write(buf)
-	hi := d.Sum64()
-	var b [16]byte
-	binary.LittleEndian.PutUint64(b[0:], lo)
-	binary.LittleEndian.PutUint64(b[8:], hi)
-	return string(b[:])
-}
-
 func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta ScanMeta) ([]Match, string) {
 	// Cache lookup (L1 + Redis L2) runs OUTSIDE the scan-CPU gate, so a slow Redis
 	// can't hold a scan slot; the L2 circuit breaker bounds it further.

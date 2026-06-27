@@ -34,6 +34,11 @@ import (
 // Two independent 64-bit passes (second pass domain-separated with 0x01) give
 // a 128-bit key so the map can use a [16]byte array — allocation-free and
 // faster than a string key.
+// StreamDedupKey is the exported form of streamDedupKey for callers outside the
+// package (e.g. the CLI scan command) that need to precompute the raw-body key
+// for ScanMeta.RawKey (PERF-22).
+func StreamDedupKey(b []byte) [16]byte { return streamDedupKey(b) }
+
 func streamDedupKey(b []byte) [16]byte {
 	lo := xxhash.Sum64(b)
 	d := xxhash.New()
@@ -994,6 +999,13 @@ type ScanMeta struct {
 	// resolved default identically only when both produce the same key string, so
 	// resolution always fills a concrete level before Scan.
 	Effort int
+	// RawKey is the precomputed streamDedupKey([16]byte) of the raw request body,
+	// set by the handler on the miss path so Scanner.Scan can seed the per-stream
+	// dedup set without re-hashing the (potentially multi-MB) buffer (PERF-22).
+	// Zero value signals "not precomputed"; Scan falls back to computing it inline.
+	// The handler also uses string(RawKey[:]) as the body component of the
+	// verdict-cache key (same domain as streamDedupKey, replaces bodyCacheHash).
+	RawKey [16]byte
 }
 
 // cacheKey renders the metadata for the verdict cache key. The verdict depends on
@@ -1269,7 +1281,15 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// The raw input buffer is seeded into seen first so a stream byte-identical to
 	// the raw bytes is also skipped (it can't add new matches).
 	seen := make(map[[16]byte]struct{}, len(res.Streams)+len(res.Markers)+3)
-	seen[streamDedupKey(buf)] = struct{}{} // xxhash the body once so a stream byte-identical to the raw body is skipped (PERF-3)
+	// Seed the dedup set with the raw-body key so a stream byte-identical to the
+	// raw body is skipped (PERF-3). Reuse the precomputed key from ScanMeta when
+	// the handler already computed it (PERF-22); fall back to computing it here
+	// for callers (e.g. CLI) that do not set meta.RawKey.
+	rawSeed := meta.RawKey
+	if rawSeed == ([16]byte{}) {
+		rawSeed = streamDedupKey(buf)
+	}
+	seen[rawSeed] = struct{}{}
 	// vbaKeys identifies the genuine VBA macro-source streams (the extractor's
 	// codes() output) by content hash, so the VBA external is set ONLY for those.
 	// Previously every extracted stream scanned with VBA=true, over-firing

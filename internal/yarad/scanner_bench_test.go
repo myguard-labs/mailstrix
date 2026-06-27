@@ -207,3 +207,35 @@ func encodeUTF16LE(s string) []byte {
 	}
 	return out
 }
+
+// BenchmarkScanMissRawKeyReuse measures the miss-path scan of a large buffer
+// using a precomputed RawKey (PERF-22). Compare with BenchmarkScanMissNoKey to
+// confirm the xxhash pass is eliminated: the miss path should hash the buffer
+// exactly ONCE (for the streamDedupKey in handleScan) instead of twice.
+func BenchmarkScanMissRawKeyReuse(b *testing.B) {
+	s := newScannerBench(b, writeRulesBench(b, eicarRule))
+	buf := bytes.Repeat([]byte{0xAB}, 512*1024) // 512 KiB
+	rawKey := streamDedupKey(buf)
+	b.SetBytes(int64(len(buf)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := scanT(s, buf, ScanMeta{RawKey: rawKey}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkScanMissNoKey measures the fallback path where RawKey is not
+// precomputed (e.g. CLI callers that don't set it). The dedup seed is computed
+// inline by Scanner.Scan, identical to pre-PERF-22 behavior.
+func BenchmarkScanMissNoKey(b *testing.B) {
+	s := newScannerBench(b, writeRulesBench(b, eicarRule))
+	buf := bytes.Repeat([]byte{0xAB}, 512*1024) // 512 KiB
+	b.SetBytes(int64(len(buf)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := scanT(s, buf, ScanMeta{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

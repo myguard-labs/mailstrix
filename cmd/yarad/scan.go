@@ -215,7 +215,9 @@ func scanItemFromReader(path string, r io.Reader, scanner *yarad.Scanner, maxBod
 			return scanItem{Path: path, Err: err.Error()}
 		}
 	}
-	matches, err := scanner.Scan(buf, sha256.Sum256(buf), yarad.NewScanMeta(name))
+	meta := yarad.NewScanMeta(name)
+	meta.RawKey = yarad.StreamDedupKey(buf)
+	matches, err := scanner.Scan(buf, sha256.Sum256(buf), meta)
 	if err != nil {
 		return scanItem{Path: path, Err: err.Error()}
 	}
