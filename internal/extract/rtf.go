@@ -63,6 +63,99 @@ func isRTF(buf []byte) bool {
 // .msg); for a bare OLENativeStream it carves the native file via
 // carveOle10Native. Sets res.IsRTF whenever the buffer is RTF (whether or not any
 // object decoded). Bounded by the maxRTF* caps.
+// rtfJunkDests is the set of known junk/skip RTF destinations that carry no
+// hex payload data (obfuscators may inject these groups to break decoders).
+var rtfJunkDests = map[string]bool{
+	"blipuid":            true,
+	"nonshppict":         true,
+	"objclass":           true,
+	"objtime":            true,
+	"oleclsid":           true,
+	"themedata":          true,
+	"colorschememapping": true,
+	"datastore":          true,
+	"latentstyles":       true,
+	"pntext":             true,
+	"xmlnstbl":           true,
+}
+
+// decodeRTFInstr decodes RTF obfuscated field instruction text.
+// It handles \uN Unicode escapes and \'HH hex-byte escapes, copying all other
+// bytes verbatim. Input is capped at 4096 bytes. This lets detectRTFDDE see
+// through obfuscated DDE/DDEAUTO field instructions.
+func decodeRTFInstr(s string) string {
+	b := []byte(s)
+	if len(b) > 4096 {
+		b = b[:4096]
+	}
+	var out []byte
+	i := 0
+	for i < len(b) {
+		if b[i] != '\\' {
+			out = append(out, b[i])
+			i++
+			continue
+		}
+		i++ // consume '\'
+		if i >= len(b) {
+			break
+		}
+		// \'HH — explicit hex byte (latin-1)
+		if b[i] == '\'' {
+			i++
+			if i+1 >= len(b) {
+				// not enough digits
+				continue
+			}
+			h1, ok1 := rtfHexNibble(b, i)
+			h2, ok2 := rtfHexNibble(b, i+1)
+			if ok1 && ok2 {
+				out = append(out, h1<<4|h2)
+				i += 2
+			}
+			continue
+		}
+		// \uN — Unicode escape
+		if b[i] == 'u' {
+			i++
+			// parse signed decimal
+			neg := false
+			if i < len(b) && b[i] == '-' {
+				neg = true
+				i++
+			}
+			numStart := i
+			for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+				i++
+			}
+			if i == numStart {
+				continue
+			}
+			n, err := strconv.Atoi(string(b[numStart:i]))
+			if err != nil {
+				continue
+			}
+			if neg {
+				n = -n
+			}
+			if n < 0 {
+				n += 65536
+			}
+			n &= 0xFFFF
+			out = append(out, []byte(string(rune(n)))...)
+			// Skip the ANSI fallback byte (one non-brace, non-backslash byte)
+			if i < len(b) && b[i] != '\\' && b[i] != '{' && b[i] != '}' {
+				i++
+			}
+			continue
+		}
+		// Any other control word/symbol — copy backslash and current byte as-is
+		out = append(out, '\\', b[i])
+		i++
+	}
+	return string(out)
+}
+
 // detectRTFDDE scans buf for DDE/DDEAUTO field instructions inside RTF \fldinst
 // groups and for bare \ddeauto / \dde control words. Each match emits a synthetic
 // stream "RTF-DDE-FIELD <instruction>" so YARA rules can match the payload.
@@ -96,6 +189,7 @@ func detectRTFDDE(buf []byte, res *Result, deadline time.Time) {
 			i++
 		}
 		instr := strings.TrimSpace(string(rest[start:i]))
+		instr = decodeRTFInstr(instr)
 		upper := strings.ToUpper(instr)
 		if (strings.HasPrefix(upper, "DDEAUTO ") || strings.HasPrefix(upper, "DDE ") ||
 			upper == "DDEAUTO" || upper == "DDE") && len(res.Streams) < maxStreams {
@@ -200,11 +294,43 @@ func rtfHexNibble(b []byte, i int) (val byte, ok bool) {
 // inject to break naive hex decoders), \binN binary runs, and backslash control
 // words. An odd trailing nibble is dropped. Bounded by maxBytesPerRTFObject so a
 // hostile multi-MiB hex run can't exhaust memory.
+// rtfPeekSkipGroup peeks at b[i:] (after a `{`) and returns true if the group
+// should be skipped: either it starts with \* (ignore destination) or with a
+// known junk destination control word.
+func rtfPeekSkipGroup(b []byte, i int) bool {
+	// Skip optional whitespace
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n') {
+		i++
+	}
+	if i >= len(b) || b[i] != '\\' {
+		return false
+	}
+	i++ // consume '\'
+	if i >= len(b) {
+		return false
+	}
+	// \* prefix — classic ignore-destination marker
+	if b[i] == '*' {
+		return true
+	}
+	// Read the control word name
+	start := i
+	for i < len(b) && b[i] >= 'a' && b[i] <= 'z' {
+		i++
+	}
+	if i == start {
+		return false
+	}
+	return rtfJunkDests[string(b[start:i])]
+}
+
 func decodeRTFHex(b []byte) []byte {
 	out := make([]byte, 0, 256)
 	var hi byte
 	var haveHi bool
-	depth := 0
+	var skipStack [64]bool
+	stackDepth := 0
+	overflow := 0 // groups past the 64-deep stack cap; counted so '}' pops stay balanced
 	i := 0
 	for i < len(b) {
 		c := b[i]
@@ -212,21 +338,38 @@ func decodeRTFHex(b []byte) []byte {
 		// Track nested groups — objdata can contain nested RTF groups
 		// that obfuscators insert to break hex decoders.
 		if c == '{' {
-			depth++
 			i++
+			if stackDepth >= 64 {
+				// Past the stack cap: count the group so its matching '}' stays
+				// balanced, and treat as skip (fail-safe — don't decode hex from
+				// a pathologically deep nest).
+				overflow++
+			} else {
+				skipStack[stackDepth] = rtfPeekSkipGroup(b, i) // #nosec G602 -- guarded by stackDepth < 64 == len(skipStack)
+				stackDepth++
+			}
 			continue
 		}
 		if c == '}' {
-			if depth > 0 {
-				depth--
+			if overflow > 0 {
+				overflow--
 				i++
 				continue
 			}
-			// depth 0 closing brace = end of objdata group
-			break
+			if stackDepth == 0 {
+				// depth 0 closing brace = end of objdata group
+				break
+			}
+			stackDepth--
+			i++
+			continue
 		}
-		// Skip everything inside nested groups
-		if depth > 0 {
+		// Skip everything inside skip groups (or an overflow-deep nest).
+		inSkipGroup := overflow > 0
+		if !inSkipGroup && stackDepth > 0 {
+			inSkipGroup = skipStack[stackDepth-1] // #nosec G602 -- stackDepth in (0,64], so index in [0,63]
+		}
+		if inSkipGroup {
 			i++
 			continue
 		}
