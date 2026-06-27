@@ -536,10 +536,13 @@ jobs:
       - name: actionlint (workflow syntax + embedded shell)
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
       - name: shellcheck (rule + packaging maintainer scripts)
-        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 docker/fetch-rules.sh docker/compile-rules.sh docker/generate-rules.sh docker/pprof-capture.sh docker/profile/run-profile.sh packaging/deb/preremove.sh packaging/deb/postinstall.sh packaging/deb/maintscript_test.sh
+        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 docker/fetch-rules.sh docker/compile-rules.sh docker/generate-rules.sh docker/pprof-capture.sh docker/profile/run-profile.sh packaging/deb/preremove.sh packaging/deb/postinstall.sh packaging/deb/maintscript_test.sh packaging/deb/env_keys_test.sh
 
       - name: deb maintainer-script behaviour (upgrade must not disable)
         run: sh packaging/deb/maintscript_test.sh
+
+      - name: deb env sample keys match the code
+        run: sh packaging/deb/env_keys_test.sh
       - name: hadolint (Dockerfile; .hadolint.yaml ignores)
         run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile
       - name: osv-scanner (go.mod/go.sum dependency CVEs)
