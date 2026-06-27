@@ -357,3 +357,54 @@ func TestMarkerChannelScansCounter(t *testing.T) {
 		t.Logf("MarkerChannelScans after EICAR scan = %d (may be non-zero if extMismatch fired)", got)
 	}
 }
+
+// TestPerf41MarkerScanZeroExternals (PERF-41) guards the precondition for scanning
+// the marker channel with zero scanVars (the cheap rules.ScanMem path): a marker
+// rule must fire on its synthetic literal WITHOUT any external being defined, and
+// a hypothetical marker rule that DID read the `filename` external would NOT fire
+// when externals are zeroed — which is exactly why dropping them is only safe
+// because no real marker rule references those externals (verified by audit).
+func TestPerf41MarkerScanZeroExternals(t *testing.T) {
+	// A literal-only marker rule (the real shape) + an external-reading control.
+	const src = `
+rule Marker_Literal : marker
+{
+    strings:
+        $m = "OLEID-OBJECTPOOL"
+    condition:
+        $m
+}
+
+rule Marker_UsesFilename : marker
+{
+    strings:
+        $m = "OLEID-OBJECTPOOL"
+    condition:
+        $m and filename matches /evil/
+}
+`
+	dir := writeRules(t, src)
+	bundle, err := buildMarkerBundle("", dir, nil, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("buildMarkerBundle: %v", err)
+	}
+	// Marker-channel scan = zero scanVars (the PERF-41 path). scanOneRules already
+	// scans with scanVars{}.
+	m := scanOneRules(t, bundle, []byte("junk OLEID-OBJECTPOOL junk"))
+	names := matchRuleNames(m)
+	var sawLiteral, sawFilename bool
+	for _, n := range names {
+		switch n {
+		case "Marker_Literal":
+			sawLiteral = true
+		case "Marker_UsesFilename":
+			sawFilename = true
+		}
+	}
+	if !sawLiteral {
+		t.Error("literal marker rule must fire with zero externals (PERF-41 marker path)")
+	}
+	if sawFilename {
+		t.Error("filename-external marker rule fired with zero externals — would mean dropping externals changes behaviour; real marker rules must never read externals")
+	}
+}

@@ -1373,7 +1373,19 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		} else {
 			s.streamChannelScans.Add(1)
 		}
-		m, serr := s.scanOne(streamRules, stream, scanVars{vba: isVBA, filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, budget)
+		// PERF-41: the out-of-band marker channel scans synthetic literal markers
+		// against the marker-only bundle, whose rules carry their whole condition in
+		// the marker bytes and do NOT reference the filename/extension/file_type/VBA
+		// externals (the rename/type signal is encoded IN the marker string, not read
+		// from a var). Passing the attachment externals would force the expensive
+		// per-scan yara.Scanner (DefineVariable) path; with zero scanVars the marker
+		// scan takes the cheap rules.ScanMem path with compile-time defaults. Real
+		// content streams keep the externals (a name/type-keyed rule must still fire).
+		vars := scanVars{vba: isVBA, filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}
+		if markerChannel {
+			vars = scanVars{}
+		}
+		m, serr := s.scanOne(streamRules, stream, vars, budget)
 		if serr != nil {
 			s.logf("scan of extracted stream failed (raw verdict kept): %v", serr)
 			return false
