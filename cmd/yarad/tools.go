@@ -27,11 +27,21 @@ func cmdCheckRules(args []string) int {
 	fs := flag.NewFlagSet("check-rules", flag.ContinueOnError)
 	fs.StringVar(&cfg.RulesDir, "rules-dir", cfg.RulesDir, "dir of *.yar/*.yara to compile (YARAD_RULES_DIR)")
 	fs.StringVar(&cfg.RulesPath, "rules", cfg.RulesPath, "precompiled .yac bundle, wins over -rules-dir (YARAD_RULES)")
+	fs.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "writable dir for the live rule bundle (YARAD_CACHE_DIR)")
+	fs.StringVar(&cfg.SeedRules, "seed-rules", cfg.SeedRules, "baked read-only .yac used to (re)seed the cache (YARAD_SEED_RULES)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
 	logf := func(format string, a ...any) { log.Printf("[yarad] "+format, a...) }
+
+	// Mirror cmdServe: seed the rule cache from YARAD_SEED_RULES when the cache
+	// is missing/unreadable, so `yarad check-rules` works in the Docker final
+	// image without extra operator env. No-op when CacheDir is empty.
+	if err := yarad.EnsureCachedRules(cfg, logf); err != nil {
+		logf("rules cache unavailable, falling back to baked rules: %v", err)
+	}
+
 	scanner, err := yarad.NewScanner(cfg, logf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "check-rules: FAILED: %v\n", err)

@@ -3,9 +3,33 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	yara "github.com/hillu/go-yara/v4"
 )
+
+// makeCompiledYac compiles rule into a real .yac bundle at path so it can be
+// used as a SeedRules / cache fixture (yara.LoadRules validates the format).
+func makeCompiledYac(t *testing.T, path, rule string) {
+	t.Helper()
+	c, err := yara.NewCompiler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddString(rule, ""); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.GetRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Destroy()
+	if err := r.Save(path); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // eicarRule is a minimal compilable YARA rule; eicarPayload is the string it
 // matches. Reused across the scan/check-rules tests so a match is deterministic.
@@ -264,5 +288,120 @@ func TestScanMaxBodyZeroStillBounded(t *testing.T) {
 	}
 	if !strings.Contains(out, "MATCH") {
 		t.Errorf("output = %q", out)
+	}
+}
+
+// TestScanOversizedIsError guards Bug 1: a file whose first maxBody bytes are
+// clean but which has a match AFTER the cap must NOT return CLEAN/exit-0. The
+// input must instead be reported as an oversized error (exit 2). An exactly-at-cap
+// input that contains the match at the cap boundary must still scan and match.
+func TestScanOversizedIsError(t *testing.T) {
+	withRules(t, eicarRule)
+	dir := t.TempDir()
+
+	// limit = len(eicarPayload) - 1: the first (limit) bytes are benign padding;
+	// the EICAR match is at the very end, starting after the cap.
+	limit := int64(len(eicarPayload) - 1)
+	maxBodyFlag := "-max-body=" + strconv.FormatInt(limit, 10)
+	padding := strings.Repeat("A", int(limit))
+
+	// oversized: prefix (all-A, clean) + EICAR payload. Total > limit.
+	oversized := filepath.Join(dir, "oversized.txt")
+	if err := os.WriteFile(oversized, []byte(padding+eicarPayload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() {
+		code = cmdScan([]string{maxBodyFlag, oversized})
+	})
+	if code != 2 {
+		t.Fatalf("oversized input: exit = %d, want 2 (error, not clean)", code)
+	}
+	if strings.Contains(out, "CLEAN") {
+		t.Errorf("oversized input must not be reported CLEAN: %q", out)
+	}
+	if !strings.Contains(out, "oversized") && !strings.Contains(out, "ERROR") {
+		t.Errorf("oversized input must produce an error line: %q", out)
+	}
+
+	// exactly-at-cap: a file that is EXACTLY limit bytes and clean must scan
+	// normally — the important assertion is that it is NOT refused as oversized
+	// (exit 2). It scans and comes back clean.
+	atCapClean := filepath.Join(dir, "atcap-clean.txt")
+	if err := os.WriteFile(atCapClean, []byte(strings.Repeat("B", int(limit))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var codeAtCap int
+	captureStdout(t, func() {
+		codeAtCap = cmdScan([]string{maxBodyFlag, atCapClean})
+	})
+	if codeAtCap == 2 {
+		t.Fatalf("exactly-at-cap clean input: exit = 2 (refused as oversized), want 0")
+	}
+}
+
+// TestScanSeedRulesSeeding guards Bug 2 for cmdScan: with a compiled .yac seed,
+// a temp cache dir, and NO YARAD_RULES/YARAD_RULES_DIR, `yarad scan` must seed
+// the cache from the seed (exactly as `serve` does) so the daemon's Docker-image
+// env — YARAD_SEED_RULES + YARAD_CACHE_DIR set, YARAD_RULES unset — works without
+// extra operator env. The proof is that the cache bundle is created from the seed
+// and is loadable; before the fix cmdScan never called EnsureCachedRules so the
+// cache stayed empty.
+func TestScanSeedRulesSeeding(t *testing.T) {
+	// Clear any dir/path rules so the only source is the seed.
+	t.Setenv("YARAD_RULES_DIR", "")
+	t.Setenv("YARAD_RULES", "")
+
+	dir := t.TempDir()
+	seedPath := filepath.Join(dir, "seed.yac")
+	makeCompiledYac(t, seedPath, eicarRule)
+
+	cacheDir := filepath.Join(dir, "cache")
+	cachePath := filepath.Join(cacheDir, "compiled.yac")
+	t.Setenv("YARAD_SEED_RULES", seedPath)
+	t.Setenv("YARAD_CACHE_DIR", cacheDir)
+
+	f := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(f, []byte(eicarPayload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	captureStdout(t, func() { _ = cmdScan([]string{f}) })
+
+	// The cache must have been seeded from the baked seed and be loadable. Without
+	// the EnsureCachedRules call in cmdScan this file is never written.
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("cmdScan did not seed the rule cache %s: %v", cachePath, err)
+	}
+	if r, err := yara.LoadRules(cachePath); err != nil {
+		t.Fatalf("seeded cache %s is not loadable: %v", cachePath, err)
+	} else {
+		r.Destroy()
+	}
+}
+
+// TestCheckRulesSeedRulesSeeding guards Bug 2 for cmdCheckRules: with a compiled
+// .yac seed, a temp cache dir, and NO YARAD_RULES/YARAD_RULES_DIR, `check-rules`
+// must seed from the seed and exit 0 (not fail "no rules").
+func TestCheckRulesSeedRulesSeeding(t *testing.T) {
+	t.Setenv("YARAD_RULES_DIR", "")
+	t.Setenv("YARAD_RULES", "")
+
+	dir := t.TempDir()
+	seedPath := filepath.Join(dir, "seed.yac")
+	makeCompiledYac(t, seedPath, eicarRule)
+
+	cacheDir := filepath.Join(dir, "cache")
+	t.Setenv("YARAD_SEED_RULES", seedPath)
+	t.Setenv("YARAD_CACHE_DIR", cacheDir)
+
+	var code int
+	out := captureStdout(t, func() { code = cmdCheckRules(nil) })
+	if code != 0 {
+		t.Fatalf("seeded check-rules: exit = %d, want 0; output: %q", code, out)
+	}
+	if !strings.Contains(out, "OK") {
+		t.Errorf("seeded check-rules output = %q, want OK line", out)
 	}
 }

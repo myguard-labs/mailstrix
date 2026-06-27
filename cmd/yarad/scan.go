@@ -40,7 +40,9 @@ func cmdScan(args []string) int {
 	fs.StringVar(&cfg.RulesDir, "rules-dir", cfg.RulesDir, "dir of *.yar/*.yara to compile (YARAD_RULES_DIR)")
 	fs.StringVar(&cfg.RulesPath, "rules", cfg.RulesPath, "precompiled .yac bundle, wins over -rules-dir (YARAD_RULES)")
 	fs.DurationVar(&cfg.ScanTimeout, "scan-timeout", cfg.ScanTimeout, "per-scan libyara timeout (YARAD_SCAN_TIMEOUT)")
-	fs.Int64Var(&cfg.MaxBody, "max-body", cfg.MaxBody, "max bytes read per file (YARAD_MAX_BODY); larger files are truncated")
+	fs.Int64Var(&cfg.MaxBody, "max-body", cfg.MaxBody, "max bytes read per file (YARAD_MAX_BODY); larger files are refused, not silently truncated")
+	fs.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "writable dir for the live rule bundle (YARAD_CACHE_DIR)")
+	fs.StringVar(&cfg.SeedRules, "seed-rules", cfg.SeedRules, "baked read-only .yac used to (re)seed the cache (YARAD_SEED_RULES)")
 	asJSON := fs.Bool("json", false, "emit a JSON array of {path,matches,error} instead of text")
 	quiet := fs.Bool("quiet", false, "text mode: print only files that matched (skip CLEAN lines)")
 	nameOverride := fs.String("filename", "", "override the name used for rule metadata (filename/extension/file_type) for ALL inputs; needed for stdin/piped maildir files that carry no name, so name/extension-keyed rules can still fire")
@@ -56,6 +58,15 @@ func cmdScan(args []string) int {
 	}
 
 	logf := func(format string, a ...any) { log.Printf("[yarad] "+format, a...) }
+
+	// Mirror cmdServe: seed the rule cache from YARAD_SEED_RULES when the cache
+	// is missing/unreadable, so `yarad scan` works in the Docker final image
+	// (YARAD_SEED_RULES + YARAD_CACHE_DIR set, YARAD_RULES unset) without extra
+	// operator env. No-op when CacheDir is empty (direct RulesPath/RulesDir use).
+	if err := yarad.EnsureCachedRules(cfg, logf); err != nil {
+		logf("rules cache unavailable, falling back to baked rules: %v", err)
+	}
+
 	scanner, err := yarad.NewScanner(cfg, logf)
 	if err != nil {
 		log.Printf("[yarad] FATAL: cannot load rules: %v", err)
@@ -181,14 +192,30 @@ func scanFile(path string, scanner *yarad.Scanner, maxBody int64, nameOverride s
 
 // scanItemFromReader reads up to maxBody bytes from r and scans them. name is the
 // basename used for scan metadata (empty for stdin, where no filename is known).
+//
+// When maxBody > 0, the function reads up to maxBody+1 bytes to detect overrun.
+// If the input exceeds maxBody, the item is returned as an error (not scanned as
+// clean) so the caller's hadErr path forces exit 2. Exactly-at-cap inputs scan
+// normally. This mirrors the overrun detection in the yarad-scan client (PR #246).
 func scanItemFromReader(path string, r io.Reader, scanner *yarad.Scanner, maxBody int64, name string) scanItem {
-	var rd io.Reader = r
+	var buf []byte
 	if maxBody > 0 {
-		rd = io.LimitReader(r, maxBody)
-	}
-	buf, err := io.ReadAll(rd)
-	if err != nil {
-		return scanItem{Path: path, Err: err.Error()}
+		// Read one byte beyond the cap so we can distinguish "exactly at cap" from
+		// "exceeds cap" without consuming the whole stream.
+		limited, err := io.ReadAll(io.LimitReader(r, maxBody+1))
+		if err != nil {
+			return scanItem{Path: path, Err: err.Error()}
+		}
+		if int64(len(limited)) > maxBody {
+			return scanItem{Path: path, Err: fmt.Sprintf("oversized: exceeds max-body %d bytes; not scanned", maxBody)}
+		}
+		buf = limited
+	} else {
+		var err error
+		buf, err = io.ReadAll(r)
+		if err != nil {
+			return scanItem{Path: path, Err: err.Error()}
+		}
 	}
 	matches, err := scanner.Scan(buf, sha256.Sum256(buf), yarad.NewScanMeta(name))
 	if err != nil {
