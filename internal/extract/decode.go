@@ -499,9 +499,8 @@ func foldVBAVarReplaceMatched(src []byte, deadline time.Time, emit func([]byte) 
 			// reVBAVarReplace uses alternation: if lit group matched, id is "".
 			return strings.ReplaceAll(string(lit), `""`, `"`), true
 		}
-		// identifier branch
-		name := string(id)
-		val, ok := varMap[name]
+		// identifier branch (m[string(id)] avoids the temp-string alloc — SA6001)
+		val, ok := varMap[string(id)]
 		return val, ok
 	}
 
