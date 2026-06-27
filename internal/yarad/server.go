@@ -3,7 +3,6 @@ package yarad
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -31,7 +30,7 @@ import (
 // production implementation; tests inject a fake to exercise the HTTP layer
 // without libyara.
 type ScanEngine interface {
-	Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, error)
+	Scan(buf []byte, meta ScanMeta) ([]Match, error)
 	RuleCount() int64
 	// BigFileScans reports how many oversized buffers were scanned against the
 	// targeted big-file ruleset (YARAD_BIGFILE_THRESHOLD gate), for /metrics.
@@ -587,10 +586,6 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta 
 			return m, false
 		}
 		s.metrics.cacheMiss.Add(1)
-		// MISS path only: now compute the cryptographic SHA256 the scan needs (the
-		// MalwareBazaar lookup key + the extracted-stream dedup seed). A cache hit
-		// returned above without ever hashing the body with SHA256.
-		digest := sha256.Sum256(buf)
 		// Take the scan-CPU slot only for the actual libyara scan. If it can't be
 		// had within the budget (or the client is gone), fail open as "no match"
 		// — never block mail — and do NOT cache (no real verdict was computed). This
@@ -604,7 +599,7 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta 
 		}
 		scanned, scanErr := func() ([]Match, error) {
 			defer func() { <-s.sem }()
-			return s.dispatch(buf, digest, meta)
+			return s.dispatch(buf, meta)
 		}()
 		if scanErr != nil {
 			// Fail open: a scan error is "no match" to the plugin so a scanner
@@ -642,14 +637,14 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta 
 // deliberate — the caller treats errors as fail-open "no match" but does NOT
 // cache them, so a panicking input is rescanned next time instead of being
 // pinned as a clean verdict for the whole cache TTL.
-func (s *Server) dispatch(buf []byte, digest [32]byte, meta ScanMeta) (matches []Match, err error) {
+func (s *Server) dispatch(buf []byte, meta ScanMeta) (matches []Match, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			s.errf("scan panic: %v", rec)
 			matches, err = nil, fmt.Errorf("scan panic: %v", rec)
 		}
 	}()
-	return s.engine.Scan(buf, digest, meta)
+	return s.engine.Scan(buf, meta)
 }
 
 // acquireOn takes a slot from sem within BackendTimeout, returning early (false)

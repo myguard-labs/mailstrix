@@ -311,7 +311,7 @@ type fakeEngine struct {
 	modUnix  int64           // returned as ReloadMetrics.ModUnix (rules mtime)
 }
 
-func (f *fakeEngine) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, error) {
+func (f *fakeEngine) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	f.scans.Add(1)
 	m := meta
 	f.lastMeta.Store(&m)

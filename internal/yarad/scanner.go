@@ -1120,7 +1120,7 @@ func (v scanVars) define(sc *yara.Scanner) error {
 // scanned and its matches merged in. Extraction is best-effort and fail-open:
 // for a non-document, or on any extract/sub-scan failure, the raw verdict stands
 // and nothing is lost.
-func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, error) {
+func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	rules := s.rules.Load()
 	if rules == nil {
 		return nil, fmt.Errorf("no rules loaded")
@@ -1441,6 +1441,11 @@ func (s *Scanner) Scan(buf []byte, digest [32]byte, meta ScanMeta) ([]Match, err
 	// verdict-cache key, so a cheap-tier (feeds-off) verdict never masks a later
 	// full-tier (feeds-on) one for the same bytes.
 	if profile.ReputationFeeds && s.mbazaar != nil {
+		// PERF-34: the cryptographic SHA256 is the MalwareBazaar lookup key and
+		// nothing else needs it, so it is computed HERE — only when the feed is
+		// actually consulted (effort tier kept the feeds AND a checker is wired).
+		// A scan with feeds shed (low effort) or MBazaar disabled never hashes.
+		digest := sha256.Sum256(buf)
 		for _, h := range s.mbazaar.CheckDigest(digest) {
 			out = append(out, Match{Rule: h.Rule(), Tags: []string{"malwarebazaar"}, Meta: map[string]string{"sha256": h.SHA256}})
 		}

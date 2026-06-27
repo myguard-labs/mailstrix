@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,10 +13,10 @@ import (
 	"time"
 )
 
-// scanT calls Scan with the body's digest (PERF-3 threaded the hash); test
-// helper so a body that is a function call isn't evaluated twice.
+// scanT is a thin test alias for Scan (kept so existing call sites read clearly;
+// PERF-34 made the digest internal/lazy so no hash is threaded here anymore).
 func scanT(s *Scanner, buf []byte, meta ScanMeta) ([]Match, error) {
-	return s.Scan(buf, sha256.Sum256(buf), meta)
+	return s.Scan(buf, meta)
 }
 
 // eicar reconstructs the standard EICAR antivirus test string from fragments so
@@ -59,6 +58,34 @@ func newScanner(t *testing.T, dir string) *Scanner {
 		t.Fatalf("NewScanner: %v", err)
 	}
 	return s
+}
+
+// TestScanNoMBazaarDigestPath (PERF-34) pins the refactor where the cryptographic
+// SHA256 of the body is computed LAZILY inside the MalwareBazaar branch instead of
+// by every caller. newScanner wires no MBazaarKey, so s.mbazaar is nil and the
+// digest branch is never entered: Scan must still run the local rules to a verdict
+// (EICAR fires) and must not panic or error on the now-internal-digest path. The
+// whole suite already exercises this nil-mbazaar path; this test names the contract
+// so a future change that reintroduces an eager per-scan hash is caught here.
+func TestScanNoMBazaarDigestPath(t *testing.T) {
+	s := newScanner(t, writeRules(t, eicarRule))
+	if s.mbazaar != nil {
+		t.Fatal("test precondition: newScanner must leave mbazaar disabled")
+	}
+	m, err := s.Scan(eicar(), ScanMeta{})
+	if err != nil {
+		t.Fatalf("Scan (mbazaar disabled): %v", err)
+	}
+	if len(m) == 0 {
+		t.Fatal("EICAR not detected — digest-independent local-rule path regressed")
+	}
+	clean, err := s.Scan([]byte("a perfectly innocent body"), ScanMeta{})
+	if err != nil {
+		t.Fatalf("Scan clean (mbazaar disabled): %v", err)
+	}
+	if len(clean) != 0 {
+		t.Fatalf("clean body matched %d rules, want 0", len(clean))
+	}
 }
 
 func TestScannerCompileAndCount(t *testing.T) {
@@ -689,7 +716,6 @@ func TestMergeMatches(t *testing.T) {
 func TestScanRaceReload(t *testing.T) {
 	s := newScanner(t, writeRules(t, eicarRule))
 	benign := []byte("a perfectly innocent email body")
-	benignDigest := sha256.Sum256(benign)
 
 	n := runtime.NumCPU()
 	if n < 2 {
@@ -712,7 +738,7 @@ func TestScanRaceReload(t *testing.T) {
 					return
 				default:
 				}
-				_, err := s.Scan(benign, benignDigest, ScanMeta{})
+				_, err := s.Scan(benign, ScanMeta{})
 				if err != nil {
 					// Transient errors (pool exhaustion, rules reloading) are
 					// expected under concurrent reload pressure — skip them.

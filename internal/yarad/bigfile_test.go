@@ -3,7 +3,6 @@ package yarad
 import (
 	"archive/zip"
 	"bytes"
-	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,7 +96,7 @@ func has(ss []string, want string) bool {
 func TestBigFileGateSelectsBigRulesOverThreshold(t *testing.T) {
 	s := newBigScanner(t, 100)
 	buf := bothMarkers(512) // > 100 byte threshold
-	m, err := s.Scan(buf, sha256.Sum256(buf), ScanMeta{})
+	m, err := s.Scan(buf, ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +117,7 @@ func TestBigFileGateSelectsBigRulesOverThreshold(t *testing.T) {
 func TestBigFileGateUsesFullSetBelowThreshold(t *testing.T) {
 	s := newBigScanner(t, 1000)
 	buf := bothMarkers(64) // < 1000 byte threshold
-	m, err := s.Scan(buf, sha256.Sum256(buf), ScanMeta{})
+	m, err := s.Scan(buf, ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +137,7 @@ func TestBigFileGateUsesFullSetBelowThreshold(t *testing.T) {
 func TestBigFileGateDisabledWhenThresholdZero(t *testing.T) {
 	s := newBigScanner(t, 0)
 	buf := bothMarkers(4096)
-	m, err := s.Scan(buf, sha256.Sum256(buf), ScanMeta{})
+	m, err := s.Scan(buf, ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +169,7 @@ func TestBigFileGateNilBigRulesFallsBack(t *testing.T) {
 		t.Fatal("expected nil bigRules when BigFileRules unset")
 	}
 	buf := bothMarkers(512)
-	m, err := s.Scan(buf, sha256.Sum256(buf), ScanMeta{})
+	m, err := s.Scan(buf, ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +216,7 @@ func TestBigFileGateRedirectsOversizedExtractedStream(t *testing.T) {
 	if int64(len(z)) > 100*1024 {
 		t.Fatalf("raw zip %dB unexpectedly over threshold; test cannot isolate the stream path", len(z))
 	}
-	m, err := s.Scan(z, sha256.Sum256(z), ScanMeta{Filename: "x.zip"})
+	m, err := s.Scan(z, ScanMeta{Filename: "x.zip"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +244,7 @@ func TestBigFileGateKeepsFullSetForSmallExtractedStream(t *testing.T) {
 	s := newBigScanner(t, 100*1024)
 	member := bothMarkers(1024) // < 100 KiB
 	z := zipWithMember(t, "payload.bin", member)
-	m, err := s.Scan(z, sha256.Sum256(z), ScanMeta{Filename: "x.zip"})
+	m, err := s.Scan(z, ScanMeta{Filename: "x.zip"})
 	if err != nil {
 		t.Fatal(err)
 	}
