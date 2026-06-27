@@ -5,18 +5,21 @@
 [![Release](https://github.com/eilandert/rspamd-yarad/actions/workflows/release.yml/badge.svg)](https://github.com/eilandert/rspamd-yarad/actions/workflows/release.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/eilandert/rspamd-yarad.svg)](https://pkg.go.dev/github.com/eilandert/rspamd-yarad)
 
-**yarad is a small HTTP service that scans mail with [YARA](https://virustotal.github.io/yara/)** —
-the malware-detection rule engine — against ~10,000 curated public rules. Put a
-message (or one attachment) on `POST /scan`; get back the rules that matched.
+**yarad is a small HTTP service that scans email for malware with
+[YARA](https://virustotal.github.io/yara/).** You hand it a message (or one
+attachment) on `POST /scan`; it runs ~10,000 curated public YARA rules over it
+and tells you which ones matched. It ships as a ready-to-run Docker image with
+the rules already baked in — see **[Quick start](#quick-start)** below or pull it
+straight from **[Docker Hub](https://hub.docker.com/r/eilandert/rspamd-yarad)**.
 
-YARA is the engine malware analysts use to recognise *families* of malicious
-files — booby-trapped Office docs, packed executables, phishing kits, script
-droppers. A literal-string signature dies the moment the author edits a byte; a
-YARA rule matches the *shape* of a file (PE imports, section entropy, embedded
-magic) and survives the next variant. yarad compiles those rules — libyara
-modules and all — and runs them over your mail.
+**Why YARA, in one paragraph.** YARA is the rule engine malware analysts use to
+recognise *families* of malicious files — booby-trapped Office docs, packed
+executables, phishing kits, script droppers. A plain string signature dies the
+moment the author edits one byte; a YARA rule matches the *shape* of a file (PE
+imports, section entropy, embedded magic) and survives the next variant. yarad
+compiles those rules — libyara modules and all — and runs them over your mail.
 
-Two ways to plug it in (both shipped here):
+**Three ways to plug it into a mail server, all shipped in this repo:**
 
 - **rspamd** — an async `yara.lua` plugin ([`rspamd/`](rspamd/)) POSTs each
   message/part to yarad at SMTP time and turns the hits into a spam-score symbol.
@@ -72,7 +75,8 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Uses the attachment name** — `filename`/`extension` YARA vars from the
   plugin's `X-YARAD-Filename`, so name-keyed (THOR/Loki) rules fire.
 - **Checks abuse.ch feeds (optional)** — URLhaus malware-URL/host lookup (with
-  URL defanging) and MalwareBazaar attachment-SHA256 lookup; cached, fail-open.
+  URL defanging), MalwareBazaar attachment-SHA256 lookup, ThreatFox URL/domain
+  IOCs, and the Feodo Tracker C&C IP blocklist; all cached, fail-open.
 - **Drops/demotes noisy rules** — `YARAD_RULE_DENYLIST` (suppress) and
   `YARAD_RULE_ALLOWLIST` (keep but score log-only) without patching upstream.
 - **Caches verdicts** — `SHA256(body)` → matches (LRU+TTL), plus request
@@ -251,6 +255,13 @@ Every setting is an env var and a `serve` CLI flag (flag > env > default).
 | `YARAD_MBAZAAR_KEY[_FILE]` | — | abuse.ch Auth-Key (same key); enables the MalwareBazaar hash lookup |
 | `YARAD_MBAZAAR_REFRESH` | `86400` (24 h) | MalwareBazaar feed refresh (floor 5 min) |
 | `YARAD_MBAZAAR_FEED` | full dump | override the feed URL (e.g. the lighter "recent" export) |
+| `YARAD_THREATFOX_KEY[_FILE]` | — | abuse.ch Auth-Key (same key); enables the ThreatFox URL/domain IOC lookup |
+| `YARAD_THREATFOX_REFRESH` | `21600` (6 h) | ThreatFox feed refresh (floor 5 min) |
+| `YARAD_THREATFOX_MAX_URLS` | `64` | max URLs/domains examined per message |
+| `YARAD_FEODO` | off | set `1` to enable the Feodo Tracker C&C IP-blocklist lookup (no key needed) |
+| `YARAD_FEODO_REFRESH` | `21600` (6 h) | Feodo feed refresh (floor 5 min) |
+| `YARAD_BIGFILE_THRESHOLD` | `6291456` (6 MiB) | buffers larger than this scan against the smaller `BIGFILE_RULES` set, not the full bundle (cost gate); markers always use the full set; `0` disables the gate |
+| `YARAD_BIGFILE_RULES` | baked seed | optional `.yac` bundle scanned for oversized buffers; unset ⇒ the baked `local.yac` seed set |
 | `YARAD_RULE_DENYLIST` | `http` | comma-sep rule names to suppress (case-insensitive); set empty to disable |
 | `YARAD_RULE_ALLOWLIST` | — | comma-sep rule names to force log-only (kept + tagged `yarad_allow`); deny wins if in both |
 | `YARAD_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `:1344`. When set, yarad also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. |
@@ -561,7 +572,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 ### Already in
 
 - [x] Out-of-process Go scanner over HTTP (`/scan`); rspamd never blocks on libyara
-- [x] ~10k+ public rules baked in (YARA-Forge, signature-base, ANY.RUN, Didier, bartblaze, InQuest), daily refresh, precompiled `.yac`
+- [x] ~10k+ public rules baked in (YARA-Forge, signature-base, ANY.RUN, Didier, bartblaze, InQuest, CAPEv2, YARAify), daily refresh, precompiled `.yac`
 - [x] libyara modules `pe`/`elf`/`macho`/`dotnet`/`hash`/`math`/`dex` (no magic/cuckoo)
 - [x] `/health`, `/ready`, `/version`, `/metrics` (Prometheus); graceful drain on SIGTERM
 - [x] Verdict cache (LRU+TTL) + request coalescing; optional Redis/Valkey L2 with circuit breaker
@@ -647,7 +658,7 @@ docker build --target final -f docker/Dockerfile -t eilandert/rspamd-yarad \
 - **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
 - **[SpamAssassin plugin](spamassassin/)** — scan each message through yarad and score a YARA match.
 - **[Dovecot/Sieve example](sieve/)** — quarantine a match with the `yarad-scan` client.
-- **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/2026/06/yara-malware-scanning-rspamd-yarad/) — the why and how, on deb.myguard.nl.
+- **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/articles/yara-malware-scanning-rspamd-yarad/) — the why and how, on deb.myguard.nl.
 - **Docker Hub:** [`eilandert/rspamd-yarad`](https://hub.docker.com/r/eilandert/rspamd-yarad).
 
 ## License
