@@ -1160,15 +1160,17 @@ func mayBeEncoded(b []byte) bool {
 	if hasQuote && hasConcatOp {
 		return true
 	}
-	// No long run — fall back to the cheap structural-marker scan. Lowercase once.
-	low := bytes.ToLower(scan)
+	// No long run — fall back to the cheap structural-marker scan. PERF-38: fold
+	// the ASCII case in-place via asciiContainsFold instead of allocating a
+	// full-window bytes.ToLower copy of scan. Every marker is lowercase ASCII, so
+	// the result is identical to bytes.Contains(bytes.ToLower(scan), m).
 	for _, m := range prefilterMarkers {
-		if bytes.Contains(low, m) {
+		if asciiContainsFold(scan, m) {
 			return true
 		}
 	}
 	for _, m := range reversedMarkers {
-		if bytes.Contains(low, m) {
+		if asciiContainsFold(scan, m) {
 			return true
 		}
 	}
@@ -1199,9 +1201,10 @@ func looksEncoded(b []byte) bool {
 	if reBase64.Match(scan) || reHex.Match(scan) {
 		return true
 	}
-	low := bytes.ToLower(scan)
+	// PERF-38: asciiContainsFold avoids a full-window ToLower copy; markers are
+	// lowercase ASCII so the result matches the old bytes.ToLower path exactly.
 	for _, m := range reversedMarkers {
-		if bytes.Contains(low, m) {
+		if asciiContainsFold(scan, m) {
 			return true
 		}
 	}
@@ -1770,10 +1773,12 @@ func emitReversed(src []byte, emit func([]byte) bool) bool {
 	if len(src) == 0 || len(src) > maxReverseInput {
 		return true
 	}
-	low := bytes.ToLower(src)
+	// PERF-38: asciiContainsFold folds the ASCII case in place instead of
+	// allocating a full-length bytes.ToLower copy of src; reversedMarkers are
+	// lowercase ASCII so this is identical to the old bytes.ToLower path.
 	hit := false
 	for _, m := range reversedMarkers {
-		if bytes.Contains(low, m) {
+		if asciiContainsFold(src, m) {
 			hit = true
 			break
 		}

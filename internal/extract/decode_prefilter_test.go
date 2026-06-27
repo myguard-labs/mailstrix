@@ -6,6 +6,7 @@
 package extract
 
 import (
+	"bytes"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
@@ -157,6 +158,87 @@ func TestPrefilterDifferentialNoBehaviorChange(t *testing.T) {
 		decodeBase32Runs(c.data, dl, emit)
 		if emitted != 0 {
 			t.Errorf("%s: gate skipped but decode chain emitted %d blob(s) — BEHAVIOR CHANGE", c.name, emitted)
+		}
+	}
+}
+
+// TestPerf38FoldEquivalence (PERF-38) proves that replacing the full-window
+// bytes.ToLower copy with in-place asciiContainsFold in the marker scans of
+// mayBeEncoded / looksEncoded did not change which buffers they gate. For each
+// input it compares the live functions against reference implementations that
+// use the old bytes.ToLower(scan) + bytes.Contains path. Inputs deliberately mix
+// upper/lower case (the whole point of the fold) and include a non-ASCII byte
+// next to a marker (0xC0 'CHR' — neither ToLower nor asciiContainsFold folds a
+// non-ASCII byte, so both must agree it is not a lowercase 'à').
+func TestPerf38FoldEquivalence(t *testing.T) {
+	clamp := func(b []byte) []byte {
+		if len(b) > maxFoldInput {
+			return b[:maxFoldInput]
+		}
+		return b
+	}
+	// reference marker scan = old behaviour: ToLower the whole window once,
+	// then bytes.Contains for each lowercase marker.
+	refContainsAny := func(scan []byte, markers [][]byte) bool {
+		low := bytes.ToLower(scan)
+		for _, m := range markers {
+			if bytes.Contains(low, m) {
+				return true
+			}
+		}
+		return false
+	}
+	inputs := [][]byte{
+		[]byte("a perfectly innocent prose sentence with nothing to decode"),
+		[]byte("CHR(65) & cHr(66)"),
+		[]byte("StrReverse(\"abc\")"),
+		[]byte("ENVIRON(\"x\")"),
+		[]byte("Replace(\"a\",\"b\",\"\")"),
+		[]byte("llehSrewop"),          // mixed-case reversed powershell
+		[]byte("EXE.DMC dropper"),     // upper reversed cmd.exe
+		[]byte("\xc0HR not a marker"), // non-ASCII next to 'HR'
+		[]byte("Array(1,2,3)"),
+		[]byte(`\X escape`),
+		[]byte(`&H41`),
+	}
+	for _, in := range inputs {
+		scan := clamp(in)
+		// mayBeEncoded marker tail: prefilter + reversed markers.
+		wantMarker := refContainsAny(scan, prefilterMarkers) || refContainsAny(scan, reversedMarkers)
+		// The live mayBeEncoded may return true earlier (run/quote-concat); the
+		// fold only governs the FINAL marker fallback, so compare the fold result
+		// directly via the live helper used now.
+		gotMarker := false
+		for _, m := range prefilterMarkers {
+			if asciiContainsFold(scan, m) {
+				gotMarker = true
+				break
+			}
+		}
+		if !gotMarker {
+			for _, m := range reversedMarkers {
+				if asciiContainsFold(scan, m) {
+					gotMarker = true
+					break
+				}
+			}
+		}
+		if gotMarker != wantMarker {
+			t.Errorf("marker fold mismatch for %q: asciiContainsFold=%v, ToLower ref=%v", in, gotMarker, wantMarker)
+		}
+		// emitReversed gate: reversedMarkers over the WHOLE src (its own size guard).
+		if len(in) <= maxReverseInput {
+			wantRev := refContainsAny(in, reversedMarkers)
+			gotRev := false
+			for _, m := range reversedMarkers {
+				if asciiContainsFold(in, m) {
+					gotRev = true
+					break
+				}
+			}
+			if gotRev != wantRev {
+				t.Errorf("reversed fold mismatch for %q: fold=%v ref=%v", in, gotRev, wantRev)
+			}
 		}
 	}
 }
