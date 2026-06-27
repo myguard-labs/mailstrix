@@ -13,3 +13,7 @@ secrets/
 
 # live malware sample corpus — local only, never publish
 testdata/live-samples/
+
+# transient smoke-suite rule dirs (scripts/smoke.sh creates rules*/ in the tree)
+/rules/
+/rules-*/
