@@ -171,6 +171,47 @@ func TestExtractRTFDDE_BareControlWord(t *testing.T) {
 	}
 }
 
+func TestExtractRTFDDE_UnicodeDDE(t *testing.T) {
+	// \u68 \u68 \u69 \u65 \u85 \u84 \u79 = D D E A U T O (68=D,68=D,69=E,65=A,85=U,84=T,79=O)
+	// Each \uN is followed by a literal '?' as ANSI fallback (gets skipped).
+	buf := []byte(`{\rtf1{\field{\*\fldinst \u68?\u68?\u69?\u65?\u85?\u84?\u79? c:\\cmd.exe}{\fldrslt}}}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if !bytes.Contains(joined, []byte("RTF-DDE-FIELD")) {
+		t.Fatalf("unicode-encoded DDEAUTO not detected; streams=%d joined=%q", len(res.Streams), joined)
+	}
+}
+
+func TestExtractRTFDDE_HexEncodedDDE(t *testing.T) {
+	// \'44\'44\'45\'41\'55\'54\'4f = DDEAUTO (0x44=D, 0x44=D, 0x45=E, 0x41=A, 0x55=U, 0x54=T, 0x4F=O)
+	buf := []byte(`{\rtf1{\field{\*\fldinst \'44\'44\'45\'41\'55\'54\'4f c:\\cmd.exe}{\fldrslt}}}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if !bytes.Contains(joined, []byte("RTF-DDE-FIELD")) {
+		t.Fatalf("hex-encoded DDE not detected; streams=%d joined=%q", len(res.Streams), joined)
+	}
+}
+
+func TestExtractRTFDDE_UnicodeNegative(t *testing.T) {
+	// \u-28672 = -28672 + 65536 = 36864 = 0x9000, not a DDE letter — no false positive
+	buf := []byte(`{\rtf1{\field{\*\fldinst \u-28672? something}{\fldrslt}}}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if bytes.Contains(joined, []byte("RTF-DDE-FIELD")) {
+		t.Fatalf("negative unicode should not trigger DDE false positive; got %q", joined)
+	}
+}
+
+func TestExtractRTFDDE_UnicodeNotDDE(t *testing.T) {
+	// \u72?\u101?\u108?\u108?\u111? = "Hello" — not DDE
+	buf := []byte(`{\rtf1{\field{\*\fldinst \u72?\u101?\u108?\u108?\u111? world}{\fldrslt}}}`)
+	res := Extract(buf, time.Time{})
+	joined := bytes.Join(res.Streams, []byte("|"))
+	if bytes.Contains(joined, []byte("RTF-DDE-FIELD")) {
+		t.Fatalf("non-DDE unicode should not trigger; got %q", joined)
+	}
+}
+
 func TestExtractRTFObjUpdate(t *testing.T) {
 	buf := []byte(`{\rtf1{\object\objupdate{\*\objdata d0cf11e0}}}`)
 	res := Extract(buf, time.Time{})
@@ -248,6 +289,57 @@ func TestExtractRTFNoDDE(t *testing.T) {
 	joined := bytes.Join(res.Streams, []byte("|"))
 	if bytes.Contains(joined, []byte("RTF-DDE-FIELD")) || bytes.Contains(joined, []byte("RTF-OBJUPDATE")) {
 		t.Fatalf("benign RTF produced markers; got %q", joined)
+	}
+}
+
+func TestDecodeRTFHexPlainGroup(t *testing.T) {
+	// Plain {} group is transparent — hex inside it must be decoded
+	got := decodeRTFHex([]byte("4d5a{6162}9000"))
+	want := []byte{0x4d, 0x5a, 0x61, 0x62, 0x90, 0x00}
+	if !bytes.Equal(got, want) {
+		t.Errorf("plain group not transparent: got %x, want %x", got, want)
+	}
+}
+
+func TestDecodeRTFHexSkipDestGroup(t *testing.T) {
+	// {\*\objclass foo} is a skip group — bytes inside must NOT be decoded
+	got := decodeRTFHex([]byte(`4d5a{\*\objclass foo}9000`))
+	want := []byte{0x4d, 0x5a, 0x90, 0x00}
+	if !bytes.Equal(got, want) {
+		t.Errorf("star-dest skip group not skipped: got %x, want %x", got, want)
+	}
+}
+
+func TestDecodeRTFHexSkipBlipuid(t *testing.T) {
+	// {\blipuid abcd} is a skip group — blipuid is in junk list
+	got := decodeRTFHex([]byte(`4d5a{\blipuid abcd}9000`))
+	want := []byte{0x4d, 0x5a, 0x90, 0x00}
+	if !bytes.Equal(got, want) {
+		t.Errorf("blipuid group not skipped: got %x, want %x", got, want)
+	}
+}
+
+func TestExtractRTFHexInsidePlainGroup(t *testing.T) {
+	// Build an Ole10Native payload and embed part of the hex inside a plain {} group.
+	// Plain groups are transparent, so the full hex run must be decoded.
+	payload := []byte("MZ\x90\x00 rtf-plain-group-hex payload marker")
+	stream := buildOle10Native("pg.exe", "C:\\pg.exe", "C:\\Temp\\pg.exe", payload, 0)
+	raw := hex.EncodeToString(stream)
+	if len(raw) < 60 {
+		t.Skip("stream too short")
+	}
+	// Wrap bytes 20:40 (hex chars) inside a plain {} group
+	obfuscated := raw[:20] + "{" + raw[20:40] + "}" + raw[40:]
+	buf := []byte("{\\rtf1{\\object{\\*\\objdata " + obfuscated + "}}}")
+	res := Extract(buf, time.Time{})
+	if !res.IsRTF {
+		t.Fatal("RTF not flagged IsRTF")
+	}
+	if !res.IsOLEPackage {
+		t.Fatalf("plain-group hex not decoded; streams=%d", len(res.Streams))
+	}
+	if !streamsContain(res, "rtf-plain-group-hex payload marker") {
+		t.Errorf("payload not found; streams=%d", len(res.Streams))
 	}
 }
 
