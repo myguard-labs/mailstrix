@@ -1,3 +1,11 @@
+<p align="center">
+  <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="640"></a>
+</p>
+
+<p align="center">
+  <strong><a href="https://mailstrix.com">mailstrix.com</a></strong> — the owl that finds malware hiding in your mail
+</p>
+
 # strixd — YARA malware scanning for rspamd
 
 [![CI](https://github.com/eilandert/mailstrix/actions/workflows/ci.yml/badge.svg)](https://github.com/eilandert/mailstrix/actions/workflows/ci.yml)
@@ -263,7 +271,7 @@ bundle is published by `docker/generate-rules.sh` (run from cron); point `-url` 
 the rule set on the host that runs it — fine on the scanner box, too heavy for a
 mail-delivery box that should stay thin. **`strix-scan`** is the answer: a
 separate, tiny client that links **no CGO / libyara and embeds no rules** — pure
-Go, a ~5 MB static binary you can drop on any mail host. It just reads the
+Go, a ~6 MB static binary you can drop on any mail host. It just reads the
 message (stdin or a file), POSTs it to a central `strixd serve`, and exits on the
 verdict — so all the CPU-heavy scanning stays on the central service.
 
@@ -676,7 +684,7 @@ detector) — CI fails on a bad commit before any image is published:
 # unit tests + go vet, against the same statically-linked libyara as production:
 docker build --target test -f docker/Dockerfile -t strixd-test .
 
-# the production image (distroless, nonroot, ~89 MB):
+# the production image (distroless, nonroot, ~100 MB):
 docker build --target final -f docker/Dockerfile -t eilandert/mailstrix \
     --build-arg CACHEBUST=$(date +%s) .
 ```
@@ -730,7 +738,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] Legacy-encryption markers (`ENCRYPTION-RC4` from Word FibBase fEncrypted + PPT EncryptedSummary); Shell.Explorer CLSID content rule (`OLE_ShellExplorer_CLSID`, CVE-2026-21509)
 - [x] abuse.ch reputation feeds: URLhaus, MalwareBazaar hash, **ThreatFox** IOC (url/domain), **Feodo** C&C IP blocklist (cached, fail-open)
 - [x] Curated CAPEv2 family rules (Guloader/Formbook/AgentTesla/Obfuscar) as an 8th rule source; build-time `SLOW_RULE_DENYLIST` with a bundle guard (never unloads a shared multi-rule file)
-- [x] Distroless, non-root, read-only rootfs (~89 MB)
+- [x] Distroless, non-root, read-only rootfs (~100 MB)
 - [x] **ICAP server** (RFC 3507) — optional `MAILSTRIX_ICAP_ADDR` listener; REQMOD+RESPMOD; shares engine, cache, and concurrency gate with `/scan`; ISTag tracks ruleset fingerprint; fail-open on scan error; `icap_*` Prometheus counters
 - [x] **Batch echo-redirect dropper carving** — reconstructs VBS/JS/PS1 payloads hidden inside `.bat` echo-redirect droppers (`>"FILE" ( echo … )` / `>>"FILE" echo …`) so existing script keyword rules reach the plaintext; caret-escape unescaping; shared budget/depth bounds; self-gating prefilter (no cost on non-batch input)
 - [x] **JAR / APK member unpacking** — a zip carrying only `META-INF/MANIFEST.MF` (Java `.jar` / Android `.apk`: Adwind/jRAT/STRRAT mail vectors) is now member-unpacked as a plain archive, so its `.class`/`.dex`/nested-jar payloads are scanned instead of being mistaken for an Office document and routed to the macro path; genuine OOXML/ODF (which always carry `[Content_Types].xml`/`mimetype`/`word|xl|ppt/`) are unaffected — zero body-text FP
@@ -781,6 +789,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 ## See also
 
+- **[mailstrix.com](https://mailstrix.com)** — the project home page (the owl that finds malware hiding in your mail).
 - **[gozer](https://github.com/eilandert/gozer)** — the DCC/Razor/Pyzor sibling backend this mirrors.
 - **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
 - **[SpamAssassin plugin](contrib/spamassassin/)** — scan each message through strixd and score a YARA match.
