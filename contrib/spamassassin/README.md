@@ -111,4 +111,4 @@ spam threshold on their own. Tune in `strixd.cf`; per-rule scoring via the
 - **[rspamd plugin](../rspamd/)** — the async `yara.lua` scorer for rspamd.
 - **[Dovecot/Sieve example](../sieve/)** — quarantine a match at delivery with
   the `strix-scan` client (the binary the shellout mode reuses).
-- **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/articles/yara-malware-scanning-rspamd-yarad/).
+- **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/articles/yara-malware-scanning-mailstrix/).
