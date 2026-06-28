@@ -2,10 +2,6 @@
   <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="100%"></a>
 </p>
 
-<p align="center">
-  <strong><a href="https://mailstrix.com">mailstrix.com</a></strong> — the owl that finds malware hiding in your mail
-</p>
-
 # strixd — YARA malware scanning for rspamd
 
 [![CI](https://github.com/eilandert/mailstrix/actions/workflows/ci.yml/badge.svg)](https://github.com/eilandert/mailstrix/actions/workflows/ci.yml)
