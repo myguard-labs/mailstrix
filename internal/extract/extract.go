@@ -515,6 +515,15 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		res.Streams = append(res.Streams, xb)
 	}
 
+	// olevba-style "weight of evidence": when several independent LOW-confidence
+	// structural markers co-occur, emit one aggregate MALDOC-BEHAVIOR-SCORE marker
+	// so a novel maldoc that trips multiple weak signals (with no single strong
+	// rule) still scores. Source markers stay in Streams — this only adds a
+	// stacking verdict. Built AFTER the XLM stacker so XLM presence can count.
+	if bs := joinBehaviorScore(res.Streams); bs != nil {
+		res.Streams = append(res.Streams, bs)
+	}
+
 	content, markers, decodeMoved := splitPureMarkers(res.Streams)
 	res.Streams = content
 	res.Markers = markers

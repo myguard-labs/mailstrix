@@ -169,6 +169,63 @@ func TestJoinXLMStackerMarkers_Colocates(t *testing.T) {
 	}
 }
 
+// TestJoinBehaviorScore_AggregatesAndRoutes pins the behavioral tier: when at
+// least behaviorScoreMin DISTINCT weak-marker classes co-occur, one aggregate
+// MALDOC-BEHAVIOR-SCORE buffer is emitted, carries the distinct count + each
+// class co-located, and routes to the Markers channel. Source markers are NOT
+// consumed (this only adds a stacking verdict).
+func TestJoinBehaviorScore_AggregatesAndRoutes(t *testing.T) {
+	streams := [][]byte{
+		[]byte("real macro source"),
+		[]byte("OLEID-VBA-PRESENT"),
+		[]byte("OLEID-EXTREL"),
+		[]byte("DIGITAL-SIGNATURE"),
+		[]byte("OLE-DOC-SECURITY-1"), // value-carrying, collapses to its class
+		[]byte("OLEID-VBA-PRESENT"),  // duplicate class — counted once
+	}
+	buf := joinBehaviorScore(streams)
+	if buf == nil {
+		t.Fatal("expected aggregate buffer for >=3 distinct weak markers, got nil")
+	}
+	if !bytes.HasPrefix(buf, []byte(behaviorScorePrefix)) {
+		t.Fatalf("aggregate buffer missing prefix: %q", buf)
+	}
+	if !isPureMarker(buf) {
+		t.Fatal("aggregate buffer not routed to Markers channel (isPureMarker=false)")
+	}
+	// 4 distinct classes (VBA-PRESENT, EXTREL, DIGITAL-SIGNATURE, DOC-SECURITY).
+	if !bytes.Contains(buf, []byte("n=4\n")) {
+		t.Fatalf("aggregate buffer wrong distinct count: %q", buf)
+	}
+	for _, want := range []string{"OLEID-VBA-PRESENT", "OLEID-EXTREL", "DIGITAL-SIGNATURE", "OLE-DOC-SECURITY-"} {
+		if !bytes.Contains(buf, []byte(want)) {
+			t.Fatalf("aggregate buffer missing co-located class %q: %q", want, buf)
+		}
+	}
+}
+
+// TestJoinBehaviorScore_BelowThreshold: fewer than behaviorScoreMin distinct
+// classes -> nil (no aggregate signal; the individual marker rules still fire).
+func TestJoinBehaviorScore_BelowThreshold(t *testing.T) {
+	if buf := joinBehaviorScore([][]byte{
+		[]byte("OLEID-VBA-PRESENT"), []byte("DIGITAL-SIGNATURE"), []byte("plain content"),
+	}); buf != nil {
+		t.Fatalf("2 distinct weak markers: want nil, got %q", buf)
+	}
+	if buf := joinBehaviorScore([][]byte{[]byte("no markers here")}); buf != nil {
+		t.Fatalf("no weak markers: want nil, got %q", buf)
+	}
+}
+
+// TestItoa exercises the small-int renderer used for the distinct count.
+func TestItoa(t *testing.T) {
+	for v, want := range map[int]string{0: "0", 3: "3", 9: "9", 10: "10", 16: "16"} {
+		if got := itoa(v); got != want {
+			t.Fatalf("itoa(%d) = %q, want %q", v, got, want)
+		}
+	}
+}
+
 // TestJoinXLMStackerMarkers_SingleNil: a single stacker marker can never satisfy
 // a conjunction, so no buffer is built (nil).
 func TestJoinXLMStackerMarkers_SingleNil(t *testing.T) {

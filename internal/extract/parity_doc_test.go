@@ -109,6 +109,10 @@ var parityMarkers = map[string]markerKind{
 	// D8: emulation-depth class marker for YARA depth-correlated rules.
 	"XLM-EMUL-DEPTH": contractMarker, // xlm_macrosheet.yara XLM_Emulator_Deep_Exec
 
+	// Behavioral-score tier: olevba weight-of-evidence aggregate emitted by
+	// joinBehaviorScore when >=3 distinct weak markers co-occur.
+	"MALDOC-BEHAVIOR-SCORE": contractMarker, // maldoc_behavior_score.yara Maldoc_Behavior_Score
+
 	// --- carved-payload labels (scanned by existing keyword/IOC rules; no own rule) ---
 	"DOCPROPS-STRINGS": internalMarker,
 	"OLE-META":         internalMarker, // combined OLE-META wrapper tag; sub-markers carry the scoring rules
@@ -189,6 +193,58 @@ func TestParityContractMarkersHaveRules(t *testing.T) {
 		// counts.
 		if !strings.Contains(corpus, prefix+" ") && !strings.Contains(corpus, prefix) {
 			t.Errorf("CONTRACT marker %q has no referencing rule in docker/local-rules/*.yara — carve is unscored", prefix)
+		}
+	}
+}
+
+// oletoolsIndicatorClasses is the durable parity contract: every olevba/oleid
+// indicator CLASS that the 2026-06-28 empirical parity test (761 real malware
+// samples, gap=0) confirmed Mailstrix already covers, mapped to the Mailstrix
+// marker prefix that carries it. This is the anti-pruning artifact: if a future
+// rule/marker cleanup removes the marker that backs an indicator class, this test
+// fails — the gap olevba would reopen is caught at build time, not in production.
+// See memory/eilandert/mailstrix/parity-2026-06-28/RESULT.md.
+var oletoolsIndicatorClasses = map[string]string{
+	// olevba "AutoExec" — auto-running macro entry points.
+	"olevba:AutoExec":       "XLM-AUTO-OPEN",
+	"olevba:AutoExec/Close": "XLM-AUTO-CLOSE",
+	"olevba:VBA-macros":     "OLEID-VBA-PRESENT",
+	"olevba:VBA-stomping":   "VBA-STOMPED",
+	"olevba:Environ":        "VBA-ENVIRON",
+	// olevba "Suspicious" structural — DDE, template injection, OLE objects.
+	"olevba:DDE":            "OLEID-DDE",
+	"olevba:DDE/field":      "OOXML-DDE-FIELD",
+	"olevba:ExternalRel":    "OLEID-EXTREL",
+	"olevba:TemplateInject": "OOXML-EXTERNAL-REL",
+	"olevba:XLM-macrosheet": "OLEID-XLM-PRESENT",
+	"olevba:XLM-dangerous":  "XLM-DANGEROUS-FUNC",
+	"olevba:Multilayer-enc": "MSD-DEEPDECODE",
+	// oleid structural indicators.
+	"oleid:ObjectPool":       "OLEID-OBJECTPOOL",
+	"oleid:Flash":            "OLEID-FLASH",
+	"oleid:Encrypted":        "ENCRYPTION-AES",
+	"oleid:XOR-obfusc":       "ENCRYPTION-XOR",
+	"oleid:DigitalSignature": "DIGITAL-SIGNATURE",
+	"oleid:OLE2Link":         "OLE2LINK-URL",
+	"oleid:DefaultPassword":  "DEFAULTPW-DECRYPTED",
+	// oletimes / weight-of-evidence.
+	"oletimes:Anomaly":        "OLETIMES-SYNTHETIC",
+	"olevba:WeightOfEvidence": "MALDOC-BEHAVIOR-SCORE",
+}
+
+// TestParityOletoolsClassesCovered asserts every olevba/oleid indicator class in
+// the parity contract maps to a marker that (a) is emitted by the extractor and
+// (b) is a known parityMarkers entry. Together with TestParityContractMarkersHaveRules
+// (marker -> rule), this pins the full olevba-indicator -> marker -> rule chain so
+// rule-pruning can never silently reopen the empirically-closed gap.
+func TestParityOletoolsClassesCovered(t *testing.T) {
+	emitted := discoverEmittedMarkers(t)
+	for class, marker := range oletoolsIndicatorClasses {
+		if _, ok := parityMarkers[marker]; !ok {
+			t.Errorf("indicator class %q maps to marker %q which is absent from parityMarkers", class, marker)
+		}
+		if _, ok := emitted[marker]; !ok {
+			t.Errorf("indicator class %q maps to marker %q which is no longer emitted by the extractor — gap reopened", class, marker)
 		}
 	}
 }

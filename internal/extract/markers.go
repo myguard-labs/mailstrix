@@ -65,6 +65,7 @@ var pureMarkerPrefixes = []string{
 	docPropsMarker + "\n", // docprops.go combined buffer
 	userFormMarker + "\n", // userform.go combined buffer
 	xlmStackerPrefix,      // joinXLMStackerMarkers combined buffer
+	behaviorScorePrefix,   // joinBehaviorScore combined buffer
 }
 
 // xlmStackerPrefix tags the document-level combined XLM-marker buffer built by
@@ -142,6 +143,105 @@ func joinMarkerPayload(marker string, carved [][]byte) []byte {
 		b = append(b, c...)
 	}
 	return b
+}
+
+// behaviorScorePrefix tags the document-level "weight of evidence" buffer built
+// by joinBehaviorScore. It is a Mailstrix-synthetic literal, so the buffer routes
+// to the out-of-band Markers channel like the other PURE markers. The trailing
+// "n=N" count is a Mailstrix-derived integer, not attacker bytes.
+const behaviorScorePrefix = "MALDOC-BEHAVIOR-SCORE n="
+
+// behaviorWeakMarkers are the LOW-confidence structural "stacking" indicators
+// (each scored <=25 on its own, presence-only — see oleid_indicators.yara). Any
+// single one is benign noise; olevba's "weight of evidence" model treats a
+// CO-OCCURRENCE of several independent weak markers as suspicious even when no
+// single rule fires. joinBehaviorScore emits an aggregate marker when at least
+// behaviorScoreMin DISTINCT classes are present in one document, so a novel
+// maldoc that trips several weak markers with no strong rule still gets scored.
+//
+// Each entry is matched as a prefix so the value-carrying ones (OLE-DOC-SECURITY-,
+// OLETIMES-*) collapse to their class. Strong/exploit markers (OLE2LINK-URL,
+// PPT-VBA-EXTRACTED, ENCRYPTION-XOR, the XLM stacker set) are deliberately NOT
+// here — they already fire a high-score rule, so counting them would double-count
+// and is unnecessary for the weak-evidence tier.
+var behaviorWeakMarkers = []string{
+	"OLEID-OBJECTPOOL",
+	"OLEID-FLASH",
+	"OLEID-VBA-PRESENT",
+	"OLEID-EXTREL",
+	"OLEID-DDE",
+	"OLEID-XLM-PRESENT",
+	"DIGITAL-SIGNATURE",
+	"ENCRYPTION-RC4",
+	"ENCRYPTION-AES",
+	"DEFAULTPW-DECRYPTED",
+	"OLE-DOC-SECURITY-",
+	"OLETIMES-FUTURE ",
+	"OLETIMES-SYNTHETIC ",
+	"OLE2-EXTRA-DATA",
+	"USERFORM-STRINGS",
+	"DOCPROPS-STRINGS",
+}
+
+// behaviorScoreMin is the minimum number of DISTINCT weak-marker classes that
+// must co-occur in one document before joinBehaviorScore emits the aggregate
+// marker. Chosen at 3: the parity corpus (761 real malware samples) surfaced no
+// benign document tripping three independent structural indicators at once, so
+// this is a low-FP "novel maldoc" backstop, not a tuned detector.
+const behaviorScoreMin = 3
+
+// joinBehaviorScore counts how many DISTINCT behaviorWeakMarkers classes appear
+// across streams and, when at least behaviorScoreMin are present, returns ONE
+// aggregate buffer "MALDOC-BEHAVIOR-SCORE n=<count>\n<class>\n<class>..." for the
+// Markers channel. Returns nil below the threshold (no aggregate signal). The
+// source entries are NOT moved — they stay in Streams for their own marker rules,
+// so this only ADDS a stacking verdict, never removes one. Each class is counted
+// at most once even if its marker appears in several streams.
+func joinBehaviorScore(streams [][]byte) []byte {
+	seen := make(map[string]struct{}, len(behaviorWeakMarkers))
+	var present []string // preserve behaviorWeakMarkers order for deterministic output
+	for _, p := range behaviorWeakMarkers {
+		for _, s := range streams {
+			if bytes.HasPrefix(s, []byte(p)) {
+				if _, dup := seen[p]; !dup {
+					seen[p] = struct{}{}
+					present = append(present, p)
+				}
+				break
+			}
+		}
+	}
+	if len(present) < behaviorScoreMin {
+		return nil
+	}
+	head := behaviorScorePrefix + smallItoa(len(present)) + "\n"
+	n := len(head)
+	for _, p := range present {
+		n += len(p) + 1
+	}
+	b := make([]byte, 0, n)
+	b = append(b, head...)
+	for _, p := range present {
+		b = append(b, p...)
+		b = append(b, '\n')
+	}
+	return b
+}
+
+// smallItoa renders a small non-negative int without importing strconv into this
+// hot-path file (counts here are bounded by len(behaviorWeakMarkers)).
+func smallItoa(v int) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [4]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
 }
 
 // isPureMarker reports whether s is a yarad-emitted PURE marker entry.
