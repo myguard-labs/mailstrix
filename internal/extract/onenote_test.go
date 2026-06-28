@@ -96,6 +96,44 @@ func TestExtractOneNoteMultiple(t *testing.T) {
 	}
 }
 
+// An embedded child carrier must be recursed AND charged against the shared
+// archive budget; once the budget is spent the raw FileDataStoreObject is still
+// emitted but no further recursion happens (cross-carrier DoS bound).
+func TestExtractOneNoteChargesBudgetAndStopsWhenSpent(t *testing.T) {
+	innerZip := buildZip(t, map[string][]byte{
+		"run.bat": []byte("@echo off & powershell -enc ONENOTE_BUDGET_RECURSE_MARKER"),
+	})
+	buf := buildOneNote(buildFDSO(innerZip, 0))
+
+	// Budget with room: embedded zip recursed, inner payload unpacked, budget charged.
+	var res Result
+	bud := &archiveBudget{}
+	fromOneNote(buf, &res, bud, 0, time.Time{})
+	if !streamsContain(res, "ONENOTE_BUDGET_RECURSE_MARKER") {
+		t.Errorf("embedded zip not recursed under a fresh budget; got %d streams", len(res.Streams))
+	}
+	if bud.members < 1 {
+		t.Errorf("archive budget members not charged for the embedded file: %d", bud.members)
+	}
+	if bud.total < len(innerZip) {
+		t.Errorf("archive budget total %d < member len %d", bud.total, len(innerZip))
+	}
+
+	// Already-spent budget: raw FileDataStoreObject still emitted, but no recursion.
+	var res2 Result
+	spent := &archiveBudget{members: maxArchiveMembers}
+	fromOneNote(buf, &res2, spent, 0, time.Time{})
+	if len(res2.Streams) == 0 {
+		t.Fatal("raw embedded file must still be emitted when the budget is spent")
+	}
+	if streamsContain(res2, "ONENOTE_BUDGET_RECURSE_MARKER") {
+		t.Error("recursion ran despite a spent budget")
+	}
+	if spent.members != maxArchiveMembers {
+		t.Errorf("spent budget mutated (members=%d, want %d)", spent.members, maxArchiveMembers)
+	}
+}
+
 // A hostile cbLength far larger than the bytes present must clamp to what's
 // available, never over-read or panic.
 func TestExtractOneNoteOversizedLen(t *testing.T) {

@@ -120,8 +120,13 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 			// Recurse the embedded file as a child carrier so a nested
 			// zip/pdf/OOXML/OLE2/lnk payload is unpacked, not just raw-scanned.
 			// nil bud (direct fromOneNote callers / tests) → skip recursion, the
-			// raw stream above still carries the keyword/PE signal.
-			if bud != nil {
+			// raw stream above still carries the keyword/PE signal. Charge the
+			// shared archive budget for this member (like fromArchive/
+			// fromOfficeZipCarriers) and stop recursing once it is spent, so a
+			// chain of OneNote carriers can't outrun the cross-carrier cap.
+			if bud != nil && !bud.spent() {
+				bud.members++
+				bud.total += len(b)
 				extractChild(b, res, bud, depth+1, deadline)
 			}
 		}

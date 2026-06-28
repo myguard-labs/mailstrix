@@ -72,6 +72,44 @@ func TestFromTNEF_CarvesAttachment(t *testing.T) {
 	}
 }
 
+// A child-carrier attachment must be recursed AND charged against the shared
+// archive budget; once the budget is spent, the raw attachment is still emitted
+// but no further recursion happens (cross-carrier DoS bound).
+func TestFromTNEF_ChargesBudgetAndStopsWhenSpent(t *testing.T) {
+	innerZip := buildZip(t, map[string][]byte{
+		"run.bat": []byte("@echo off & powershell -enc TNEF_BUDGET_RECURSE_MARKER"),
+	})
+	blob := buildTNEF(innerZip)
+
+	// Budget with room: attachment recursed, inner payload unpacked, budget charged.
+	var res Result
+	bud := &archiveBudget{}
+	fromTNEF(blob, &res, bud, 0, time.Time{})
+	if !streamsContain(res, "TNEF_BUDGET_RECURSE_MARKER") {
+		t.Errorf("child zip not recursed under a fresh budget; got %d streams", len(res.Streams))
+	}
+	if bud.members < 1 {
+		t.Errorf("archive budget members not charged for the attachment: %d", bud.members)
+	}
+	if bud.total < len(innerZip) {
+		t.Errorf("archive budget total %d < attachment len %d", bud.total, len(innerZip))
+	}
+
+	// Already-spent budget: raw attachment still emitted, but no recursion.
+	var res2 Result
+	spent := &archiveBudget{members: maxArchiveMembers}
+	fromTNEF(blob, &res2, spent, 0, time.Time{})
+	if len(res2.Streams) == 0 {
+		t.Fatal("raw attachment must still be emitted when the budget is spent")
+	}
+	if streamsContain(res2, "TNEF_BUDGET_RECURSE_MARKER") {
+		t.Error("recursion ran despite a spent budget")
+	}
+	if spent.members != maxArchiveMembers {
+		t.Errorf("spent budget mutated (members=%d, want %d)", spent.members, maxArchiveMembers)
+	}
+}
+
 // A blob with the signature but a truncated/garbage body must not crash the
 // extractor (Extract's recover and fromTNEF's own recover cover it).
 func TestFromTNEF_MalformedNoPanic(t *testing.T) {
