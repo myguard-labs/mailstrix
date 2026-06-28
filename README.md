@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="640"></a>
+  <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="100%"></a>
 </p>
 
 <p align="center">
