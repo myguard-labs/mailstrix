@@ -2,11 +2,13 @@
   <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="100%"></a>
 </p>
 
-<p align="center">
-  <strong><a href="https://mailstrix.com">mailstrix.com</a></strong> — the owl that finds malware hiding in your mail
-</p>
-
 # strixd — YARA malware scanning for rspamd
+
+**Mailstrix is the owl that finds malware hiding in your mail.** It takes hostile
+attachments apart — unwrapping OLE2/OOXML, VBA, RTF objects, PDFs, archives and
+nested carriers — until YARA detection rules can finally see the dangerous bits.
+It runs out-of-process behind Rspamd (async HTTP), SpamAssassin, an ICAP server,
+Dovecot Sieve, or standalone.
 
 [![CI](https://github.com/eilandert/mailstrix/actions/workflows/ci.yml/badge.svg)](https://github.com/eilandert/mailstrix/actions/workflows/ci.yml)
 [![Release](https://github.com/eilandert/mailstrix/actions/workflows/release.yml/badge.svg)](https://github.com/eilandert/mailstrix/actions/workflows/release.yml)
@@ -41,10 +43,10 @@ compiles those rules — libyara modules and all — and runs them over your mai
   through the same engine ([ICAP mode](#icap-mode-optional)).
 
 ```
- ┌──────────────────────┐  POST /scan ┌────────────┐    ┌──────────────┐
- │ rspamd  (mailstrix.lua)   │ ─────────▶ │   strixd    │ ─▶ │   libyara    │
- │  SpamAssassin / Sieve│ ◀───────── │(Go service)│    │compiled rules│
- │  (strix-scan) / ICAP │  {matches}  └────────────┘    └──────────────┘
+ ┌──────────────────────┐  POST /scan  ┌──────────────┐    ┌──────────────┐
+ │ rspamd (mailstrix.lua)│ ───────────▶ │    strixd    │ ─▶ │   libyara    │
+ │ SpamAssassin / Sieve  │ ◀─────────── │ (Go service) │    │compiled rules│
+ │ (strix-scan) / ICAP   │   {matches}  └──────────────┘    └──────────────┘
  └──────────────────────┘
 ```
 
