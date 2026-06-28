@@ -15,7 +15,7 @@
   once; that is exactly mraptor's low-FP premise.
 
   Heuristic, not family/exploit attribution -> tagged `suspicious heuristic`
-  so yara.lua's classify() routes it to YARA_SUSPICIOUS (operator-tunable in
+  so mailstrix.lua's classify() routes it to STRIX_SUSPICIOUS (operator-tunable in
   groups.conf), and meta.score is a mid-confidence 0..100 value.
   Reference: https://github.com/decalage2/oletools/wiki/mraptor
 */

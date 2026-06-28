@@ -1,5 +1,5 @@
 // Command strixd is the standalone YARA scanner backend for rspamd. rspamd has
-// no native YARA module (as of 4.1.0), so the yara.lua plugin POSTs message or
+// no native YARA module (as of 4.1.0), so the mailstrix.lua plugin POSTs message or
 // MIME-part bytes here over HTTP and strixd scans them against a compiled YARA
 // rule set, returning the matched rule names. It mirrors the gozer backend's
 // shape: one authenticated HTTP endpoint (/scan), /health and /metrics, every

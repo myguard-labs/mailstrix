@@ -28,7 +28,7 @@ compiles those rules — libyara modules and all — and runs them over your mai
 
 **Four ways to plug it into a mail server, all shipped in this repo:**
 
-- **rspamd** — an async `yara.lua` plugin ([`contrib/rspamd/`](contrib/rspamd/)) POSTs each
+- **rspamd** — an async `mailstrix.lua` plugin ([`contrib/rspamd/`](contrib/rspamd/)) POSTs each
   message/part to strixd at SMTP time and turns the hits into a spam-score symbol.
 - **SpamAssassin** — the [`Mailstrix.pm`](contrib/spamassassin/) plugin scans each message
   through the same central service and turns a YARA match into a spam-score hit
@@ -42,7 +42,7 @@ compiles those rules — libyara modules and all — and runs them over your mai
 
 ```
  ┌──────────────────────┐  POST /scan ┌────────────┐    ┌──────────────┐
- │ rspamd  (yara.lua)   │ ─────────▶ │   strixd    │ ─▶ │   libyara    │
+ │ rspamd  (mailstrix.lua)   │ ─────────▶ │   strixd    │ ─▶ │   libyara    │
  │  SpamAssassin / Sieve│ ◀───────── │(Go service)│    │compiled rules│
  │  (strix-scan) / ICAP │  {matches}  └────────────┘    └──────────────┘
  └──────────────────────┘
@@ -70,7 +70,7 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 ## Exactly what it does
 
 - **Scans mail with YARA** — `POST /scan` raw message bytes (or one MIME part),
-  get back the matched rules as JSON; the rspamd `yara.lua` plugin
+  get back the matched rules as JSON; the rspamd `mailstrix.lua` plugin
   ([`contrib/rspamd/`](contrib/rspamd/)) wires the hits into the spam score, or the `strix-scan`
   client scans at delivery from Dovecot/Sieve ([`contrib/sieve/`](contrib/sieve/)).
 - **Ships ~10k public rules baked in** — YARA-Forge, signature-base, ANY.RUN,
@@ -436,7 +436,7 @@ On top of the public sets, strixd bakes its own local heuristics from
   `https://`, `smb://`, or UNC target. This rule matches that stream, covering
   CVE-2017-0199-style attacks (Word fetches a remote `.dotm`/`.dotx` at open time
   and executes its macros — no embedded macro in the original document). Score 50,
-  tagged `suspicious`, routes to `YARA_SUSPICIOUS`.
+  tagged `suspicious`, routes to `STRIX_SUSPICIOUS`.
 - `Maldoc_DDE_Field` (`ooxml_dde.yara`) — **DDE/DDEAUTO field injection**
   heuristic. The extractor reads `word/document.xml` (and header/footer parts),
   extracts field instructions from `w:fldSimple/@w:instr` attributes and from
@@ -444,7 +444,7 @@ On top of the public sets, strixd bakes its own local heuristics from
   caught), and emits a synthetic `OOXML-DDE-FIELD <instr>` stream for any
   instruction that begins with `DDE` or `DDEAUTO`. This rule matches that stream,
   covering macro-free command execution via DDE fields (T1559.002). Score 55,
-  tagged `suspicious`, routes to `YARA_SUSPICIOUS`.
+  tagged `suspicious`, routes to `STRIX_SUSPICIOUS`.
 - `XLM_Hidden_Macrosheet` (`xlm_macrosheet.yara`) — **hidden Excel-4.0 macrosheet**
   detection. The extractor performs structural-only (zero execution) detection in
   two paths: for OOXML workbooks it checks `xl/workbook.xml` for sheets with
@@ -459,9 +459,9 @@ On top of the public sets, strixd bakes its own local heuristics from
   doesn't fire: a LOLBin with a download/execute arg (`regsvr32 /i:http…`,
   `certutil -decode`, `mshta http…`), `winmgmts:`+`Win32_Process`+`.Create`,
   `powershell` with an encoded/hidden/download flag, or two-or-more
-  sandbox-evasion primitives together. Scores 30–55, `YARA_SUSPICIOUS`.
+  sandbox-evasion primitives together. Scores 30–55, `STRIX_SUSPICIOUS`.
 
-These are all tagged `suspicious`, so they score in the `YARA_SUSPICIOUS` tier
+These are all tagged `suspicious`, so they score in the `STRIX_SUSPICIOUS` tier
 (tunable), run over the decompressed VBA cleartext (and body / decoded blobs),
 and are keyword/behaviour heuristics — not emulation (Chr() chains / XLM
 execution stay with `olevba`).
@@ -653,16 +653,16 @@ helm install strixd ./contrib/deploy/helm/strixd --set token.value=$(openssl ran
 
 The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd side needs:
 
-- [`plugins/yara.lua`](contrib/rspamd/plugins/yara.lua) — the async plugin that POSTs to
+- [`plugins/mailstrix.lua`](contrib/rspamd/plugins/mailstrix.lua) — the async plugin that POSTs to
   strixd and classifies each matched rule into a scoring tier:
 
   | symbol | tier | default weight |
   |--------|------|----------------|
-  | `YARA_MALWARE` | malware family / webshell / RAT / APT / ransomware | `8.0` |
-  | `YARA_EXPLOIT` | exploit / CVE / maldoc exploit | `7.0` |
-  | `YARA_PHISHING` | phishing kit / document | `5.0` |
+  | `STRIX_MALWARE` | malware family / webshell / RAT / APT / ransomware | `8.0` |
+  | `STRIX_EXPLOIT` | exploit / CVE / maldoc exploit | `7.0` |
+  | `STRIX_PHISHING` | phishing kit / document | `5.0` |
   | `YARA` | uncategorized match (default) | `4.0` |
-  | `YARA_SUSPICIOUS` | heuristic / anomaly (FP-prone) | `2.0` |
+  | `STRIX_SUSPICIOUS` | heuristic / anomaly (FP-prone) | `2.0` |
   | `URLHAUS_MALWARE_URL` | known malware URL (options = the URLs) | `8.0` |
   | `MALWAREBAZAAR_MALWARE` | attachment SHA256 = known sample (option = digest) | `10.0` |
   | `THREATFOX_IOC` | ThreatFox URL/domain IOC (options = the URLs) | `7.0` |
@@ -726,7 +726,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] Filename/extension externals (name-keyed rules) via `X-MAILSTRIX-Filename`
 - [x] URL defang + URLhaus URL/host lookup; MalwareBazaar attachment-hash lookup (cached feeds, fail-open)
 - [x] `MAILSTRIX_RULE_DENYLIST` (drop) + `MAILSTRIX_RULE_ALLOWLIST` (log-only)
-- [x] Tiered scoring (`YARA_MALWARE`/`_EXPLOIT`/`_PHISHING`/`YARA`/`_SUSPICIOUS` + `URLHAUS_MALWARE_URL`)
+- [x] Tiered scoring (`STRIX_MALWARE`/`_EXPLOIT`/`_PHISHING`/`YARA`/`_SUSPICIOUS` + `URLHAUS_MALWARE_URL`)
 - [x] SIGHUP rule reload (atomic swap, keeps old rules on a bad edit); `fetch-rules` out-of-image updates
 - [x] `strix-scan` lean CGO-free Sieve/LDA client ([`contrib/sieve/`](contrib/sieve/))
 - [x] UserForm hidden-string extraction (carves payload strings from VBA UserForm `o`/`f`/`\x03VBFrame` OLE2 streams; `Maldoc_UserForm_Payload` rule)

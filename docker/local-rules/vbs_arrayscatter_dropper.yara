@@ -15,8 +15,8 @@
   The rule pairs the SPECIFIC offset-indexed decode shape (`& tbl(idx(i) - N`)
   with a large COUNT of single-char table-cell assignments and a `.Run`
   execution primitive, so ordinary VBS that assigns a few array elements never
-  fires. Tagged `suspicious heuristic` so yara.lua classify() routes to
-  YARA_SUSPICIOUS. Heuristic, NOT family attribution.
+  fires. Tagged `suspicious heuristic` so mailstrix.lua classify() routes to
+  STRIX_SUSPICIOUS. Heuristic, NOT family attribution.
 
   References:
     MalwareBazaar live .vbs corpus 2026 (420b9bc8… MassLogger — 0-hit miss

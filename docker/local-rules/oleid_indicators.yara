@@ -17,8 +17,8 @@
   keywords) the same scan already surfaces. Matching the marker prefix is
   zero-FP by construction (the literal is only ever emitted by mailstrix).
 
-  Heuristic, tagged `suspicious heuristic` so yara.lua routes them to
-  YARA_SUSPICIOUS (operator-tunable).
+  Heuristic, tagged `suspicious heuristic` so mailstrix.lua routes them to
+  STRIX_SUSPICIOUS (operator-tunable).
 
   Reference: https://github.com/decalage2/oletools/wiki/oleid
 */

@@ -13,7 +13,7 @@
   16-byte sequences with no benign analogue.
 
   Heuristic confidence varies per CLSID; scored relative to exploit impact.
-  Tagged `exploit maldoc` so yara.lua routes to the YARA_MALWARE tier.
+  Tagged `exploit maldoc` so mailstrix.lua routes to the STRIX_MALWARE tier.
 */
 
 /*

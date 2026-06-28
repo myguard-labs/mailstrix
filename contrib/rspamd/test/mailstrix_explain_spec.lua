@@ -1,7 +1,7 @@
 #!/usr/bin/env lua
 --[[
-yara_explain_spec.lua — standalone test (plain lua5.4, no rspamd) for the
-verdict-explainability change in rspamd/plugins/yara.lua:
+mailstrix_explain_spec.lua — standalone test (plain lua5.4, no rspamd) for the
+verdict-explainability change in rspamd/plugins/mailstrix.lua:
 
   1. classify() honours an explicit meta.tier ("malware"/"exploit"/"phishing"/
      "suspicious") as an AUTHORITATIVE override, before the name/namespace/tag
@@ -12,23 +12,23 @@ verdict-explainability change in rspamd/plugins/yara.lua:
      80 chars. Non-strixd (baked corpus) rules keep the bare "rule (namespace)".
 
 The plugin can't be unit-loaded here (it require()s rspamd globals at load), so
-these mirror the EXACT logic blocks in yara.lua. If the plugin's classify()
+these mirror the EXACT logic blocks in mailstrix.lua. If the plugin's classify()
 override or option-build is changed incompatibly, the asserts below fail.
 
-Run: lua5.4 rspamd/test/yara_explain_spec.lua   (exit 0 = pass, 1 = fail)
+Run: lua5.4 rspamd/test/mailstrix_explain_spec.lua   (exit 0 = pass, 1 = fail)
 --]]
 
 -- Symbol names mirror the plugin defaults (settings.symbol_*).
 local SYM = {
-  default    = "YARA",
-  malware    = "YARA_MALWARE",
-  exploit    = "YARA_EXPLOIT",
-  phishing   = "YARA_PHISHING",
-  suspicious = "YARA_SUSPICIOUS",
+  default    = "STRIX",
+  malware    = "STRIX_MALWARE",
+  exploit    = "STRIX_EXPLOIT",
+  phishing   = "STRIX_PHISHING",
+  suspicious = "STRIX_SUSPICIOUS",
 }
 
 -- tier_from_meta MUST stay byte-identical to the meta.tier override block at the
--- top of classify() in yara.lua. Returns a symbol, or nil to fall through to the
+-- top of classify() in mailstrix.lua. Returns a symbol, or nil to fall through to the
 -- keyword heuristic.
 local function tier_from_meta(m)
   if type(m.meta) == "table" and m.meta.tier then
@@ -41,7 +41,7 @@ local function tier_from_meta(m)
   return nil -- "info"/"default"/unknown/absent → heuristic path
 end
 
--- build_option MUST stay byte-identical to the option-build block in yara.lua's
+-- build_option MUST stay byte-identical to the option-build block in mailstrix.lua's
 -- process_results (the else branch for normal rule hits).
 local function build_option(m)
   local opt = m.rule
@@ -66,10 +66,10 @@ local function check(cond, msg)
 end
 
 -- 1. meta.tier is authoritative for each known value.
-check(tier_from_meta({ meta = { tier = "malware" } }) == SYM.malware, "tier=malware → YARA_MALWARE")
-check(tier_from_meta({ meta = { tier = "Exploit" } }) == SYM.exploit, "tier is case-insensitive (Exploit → YARA_EXPLOIT)")
-check(tier_from_meta({ meta = { tier = "phishing" } }) == SYM.phishing, "tier=phishing → YARA_PHISHING")
-check(tier_from_meta({ meta = { tier = "suspicious" } }) == SYM.suspicious, "tier=suspicious → YARA_SUSPICIOUS")
+check(tier_from_meta({ meta = { tier = "malware" } }) == SYM.malware, "tier=malware → STRIX_MALWARE")
+check(tier_from_meta({ meta = { tier = "Exploit" } }) == SYM.exploit, "tier is case-insensitive (Exploit → STRIX_EXPLOIT)")
+check(tier_from_meta({ meta = { tier = "phishing" } }) == SYM.phishing, "tier=phishing → STRIX_PHISHING")
+check(tier_from_meta({ meta = { tier = "suspicious" } }) == SYM.suspicious, "tier=suspicious → STRIX_SUSPICIOUS")
 
 -- 2. Unknown / info / absent tier → nil (fall through to heuristic, no override).
 check(tier_from_meta({ meta = { tier = "info" } }) == nil, "tier=info falls through to heuristic")
@@ -79,7 +79,7 @@ check(tier_from_meta({ rule = "x" }) == nil, "no meta table falls through")
 
 -- 3. tier override escalates a hit the keyword heuristic would have under-scored:
 --    a rule named/tagged only "suspicious" but declaring tier=malware lands in
---    YARA_MALWARE, not YARA_SUSPICIOUS.
+--    STRIX_MALWARE, not STRIX_SUSPICIOUS.
 check(tier_from_meta({ rule = "Susp_Generic", meta = { tier = "malware" } }) == SYM.malware,
   "explicit tier overrides what the name heuristic would pick")
 
@@ -119,4 +119,4 @@ if failures > 0 then
   io.stderr:write(failures .. " assertion(s) failed\n")
   os.exit(1)
 end
-print("yara_explain_spec: all assertions passed")
+print("mailstrix_explain_spec: all assertions passed")

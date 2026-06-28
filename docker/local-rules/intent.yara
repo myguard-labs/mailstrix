@@ -5,7 +5,7 @@
   blobs from decode.go. Each rule pairs a tool/keyword with a SPECIFIC abusive
   argument so a bare mention (security docs, newsletters) does not fire — the
   combination is what keeps the false-positive rate low. All tagged `suspicious
-  heuristic` so yara.lua classify() routes them to YARA_SUSPICIOUS (tunable).
+  heuristic` so mailstrix.lua classify() routes them to STRIX_SUSPICIOUS (tunable).
   Heuristics, NOT family attribution; NOT emulation.
   Reference: https://lolbas-project.github.io/ , https://github.com/decalage2/oletools/wiki/olevba
 */

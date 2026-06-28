@@ -1,7 +1,7 @@
 # Reference compose for strixd. In the mailscreen stack this service is added to
 # /opt/docker/mailscreen/docker-compose.yml with a static IPv4 on the shared
 # internal network (rspamd's RBL-only resolver can't resolve docker names, so
-# the yara.lua plugin targets the IPv4 directly).
+# the mailstrix.lua plugin targets the IPv4 directly).
 services:
   strixd:
     image: eilandert/mailstrix:latest

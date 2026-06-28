@@ -18,8 +18,8 @@
     PDF-HEXOBFUSC      -- a name token used #XX hex-escape obfuscation (evasion).
 
   Presence indicators STACK with other signals (inflated JS, suspicious
-  keywords) the same scan surfaces. Tagged `suspicious heuristic` so yara.lua
-  routes them to YARA_SUSPICIOUS (operator-tunable); the auto-run/launch ones
+  keywords) the same scan surfaces. Tagged `suspicious heuristic` so mailstrix.lua
+  routes them to STRIX_SUSPICIOUS (operator-tunable); the auto-run/launch ones
   are scored higher.
 
   Reference: https://github.com/DidierStevens/DidierStevensSuite (pdfid.py)

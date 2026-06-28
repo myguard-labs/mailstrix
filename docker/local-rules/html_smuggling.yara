@@ -4,8 +4,8 @@
 // when the extractor's gated combo (blob-reconstruct + forced download, a
 // force-downloaded base64 data: URI, or a scripted <svg>) was satisfied.
 //
-// meta.tier is honoured authoritatively by the rspamd yara.lua plugin
-// (classify()): these self-declare "suspicious" so they score in YARA_SUSPICIOUS
+// meta.tier is honoured authoritatively by the rspamd mailstrix.lua plugin
+// (classify()): these self-declare "suspicious" so they score in STRIX_SUSPICIOUS
 // regardless of name/tag heuristics.
 
 rule HTML_Smuggling_Blob : html smuggling heuristic suspicious marker

@@ -4,7 +4,7 @@ This directory wires **SpamAssassin** to a central
 [`strixd serve`](../../README.md): every message SpamAssassin filters is handed to
 strixd, and a YARA malware match becomes a SpamAssassin rule hit that lands in the
 spam score next to everything else. It is the SpamAssassin sibling of the rspamd
-[`yara.lua`](../rspamd/) plugin and the Dovecot/Sieve [`strix-scan`](../sieve/)
+[`mailstrix.lua`](../rspamd/) plugin and the Dovecot/Sieve [`strix-scan`](../sieve/)
 client.
 
 ```
@@ -108,7 +108,7 @@ spam threshold on their own. Tune in `strixd.cf`; per-rule scoring via the
 ## See also
 
 - **[Main README](../../README.md)** — the `strixd serve` scanner this talks to.
-- **[rspamd plugin](../rspamd/)** — the async `yara.lua` scorer for rspamd.
+- **[rspamd plugin](../rspamd/)** — the async `mailstrix.lua` scorer for rspamd.
 - **[Dovecot/Sieve example](../sieve/)** — quarantine a match at delivery with
   the `strix-scan` client (the binary the shellout mode reuses).
 - **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/articles/yara-malware-scanning-mailstrix/).

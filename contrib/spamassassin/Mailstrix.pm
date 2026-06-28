@@ -3,7 +3,7 @@
 # Project:  https://github.com/eilandert/mailstrix
 # Write-up: https://deb.myguard.nl/2026/06/yara-malware-scanning-mailstrix/
 #
-# This is the SpamAssassin sibling of the rspamd `yara.lua` plugin and the
+# This is the SpamAssassin sibling of the rspamd `mailstrix.lua` plugin and the
 # Dovecot/Sieve `strix-scan` client: it hands the raw message to a central
 # `strixd serve` and turns the YARA verdict into SpamAssassin rule hits, so the
 # malware signal lands in the spam score alongside everything else.
@@ -245,7 +245,7 @@ sub _scan_http {
     my $tok = $self->_token($conf);
     $headers{'X-MAILSTRIX-Token'} = $tok if defined $tok && length $tok;
     # Forward the attachment filename so name/extension-keyed YARA rules can fire.
-    # Base64-encode (same wire format as yara.lua) to keep embedded newlines / control
+    # Base64-encode (same wire format as mailstrix.lua) to keep embedded newlines / control
     # bytes from injecting HTTP headers. Omit the header entirely when no name.
     if (defined $fname && length $fname) {
         $headers{'X-MAILSTRIX-Filename'} = MIME::Base64::encode_base64($fname, '');

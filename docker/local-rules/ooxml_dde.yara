@@ -24,7 +24,7 @@
   - filesize cap keeps it off large binaries that cannot be OOXML.
 
   Heuristic, not family attribution — tagged `suspicious heuristic` so
-  yara.lua classify() routes it to YARA_SUSPICIOUS (operator-tunable).
+  mailstrix.lua classify() routes it to STRIX_SUSPICIOUS (operator-tunable).
   score 55 = mid-high confidence (DDE fields are rarely benign; legitimate
   linked spreadsheet data uses OLE objects, not DDE field codes).
 

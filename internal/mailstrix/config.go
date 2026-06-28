@@ -1,6 +1,6 @@
 // Package yarad is the out-of-process YARA scanner backend for rspamd. rspamd
 // (as of 4.1.0) has no native YARA module, so this service plays the same role
-// the gozer DCC/Razor/Pyzor backend does: rspamd's yara.lua plugin POSTs a
+// the gozer DCC/Razor/Pyzor backend does: rspamd's mailstrix.lua plugin POSTs a
 // message (or a MIME part) over HTTP, yarad scans the bytes against a set of
 // compiled YARA rules and returns the matching rule names as JSON. Scanning out
 // of process keeps the rspamd event loop non-blocking and keeps libyara (a CGO
