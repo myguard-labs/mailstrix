@@ -40,6 +40,8 @@ var (
 	sevenZMagic = []byte{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C}
 	// RAR4 ("Rar!\x1a\x07\x00") and RAR5 ("Rar!\x1a\x07\x01\x00") share this prefix.
 	rarMagic = []byte{0x52, 0x61, 0x72, 0x21, 0x1A, 0x07}
+	// Microsoft Cabinet
+	cabMagic = []byte("MSCF")
 )
 
 const (
@@ -164,7 +166,8 @@ func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int,
 func isNestedCarrier(data []byte) bool {
 	return bytes.HasPrefix(data, zipMagic) || isArchive(data) ||
 		bytes.HasPrefix(data, oleMagic) || isPDF(data) || isRTF(data) ||
-		isLNK(data) || isOneNote(data) || isTNEF(data) || isValidPEAt(data, 0)
+		isLNK(data) || isOneNote(data) || isTNEF(data) || isValidPEAt(data, 0) ||
+		bytes.HasPrefix(data, cabMagic)
 }
 
 // markEncryptedArchive emits the ARCHIVE-ENCRYPTED PURE marker the first time a
@@ -190,7 +193,8 @@ func markEncryptedArchive(res *Result) {
 func isArchive(buf []byte) bool {
 	return bytes.HasPrefix(buf, gzipMagic) ||
 		bytes.HasPrefix(buf, sevenZMagic) ||
-		bytes.HasPrefix(buf, rarMagic)
+		bytes.HasPrefix(buf, rarMagic) ||
+		bytes.HasPrefix(buf, cabMagic)
 }
 
 // fromArchive recognises a supported archive and appends each member's bytes to
@@ -213,6 +217,9 @@ func fromArchive(buf []byte, res *Result, b *archiveBudget, depth int, deadline 
 		return true
 	case bytes.HasPrefix(buf, rarMagic):
 		unpackRar(buf, res, b, depth, deadline)
+		return true
+	case bytes.HasPrefix(buf, cabMagic):
+		unpackCab(buf, res, b, depth, deadline)
 		return true
 	default:
 		return false

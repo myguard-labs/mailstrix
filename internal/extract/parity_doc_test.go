@@ -114,6 +114,9 @@ var parityMarkers = map[string]markerKind{
 	"OLE-META":         internalMarker, // combined OLE-META wrapper tag; sub-markers carry the scoring rules
 	"USERFORM-STRINGS": internalMarker,
 	"OLE2-EXTRA-DATA":  internalMarker, // label on data appended past FAT coverage; carved tail scanned by content rules
+	// CAB folder used LZX/Quantum (yarad decompresses only MSZIP/store); diagnostic
+	// label, not inherently malicious — the raw outer bytes are still scanned.
+	"CAB-COMPRESSION-UNSUPPORTED": internalMarker,
 }
 
 // markerEmitRe matches a synthetic marker prefix inside a Go string or []byte

@@ -72,7 +72,7 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Cracks open containers** — pulls the hidden payload out of: OLE2/OOXML,
   RTF `\objdata`, OLE Package (`Ole10Native`), MSI, Outlook `.msg`, TNEF
   (`winmail.dat`), OneNote `.one`, PDF (FlateDecode streams), `.lnk` shortcuts,
-  VBE/JSE encoded scripts, and nested archives (zip/7z/rar/gz/tar.gz, recursive)
+  VBE/JSE encoded scripts, and nested archives (zip/7z/rar/gz/tar.gz/cab, recursive)
   — then scans each.
 - **Deobfuscates before matching** — decodes long base64/hex runs, undoes
   `StrReverse`, and folds the olevba string set (`Chr`/`ChrW` concat,
