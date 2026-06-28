@@ -1,21 +1,21 @@
 # Append to /etc/rspamd/rspamd.conf.local on the host.
 #
-# Two things rspamd needs for a CUSTOM lua module like strixd's yara.lua:
+# Two things rspamd needs for a CUSTOM lua module like strixd's mailstrix.lua:
 #   1. an explicit `lua = "..."` include to load the plugin file. rspamd only
-#      auto-loads plugins.d/*.lua for module names it already knows; "yara" is
-#      not one, so it must be included by hand (same as kam.lua).
-#   2. the module's config as an INLINE `yara { }` block HERE, not in
-#      local.d/yara.conf. local.d/<name>.conf is only auto-merged for known
-#      modules; for a custom module rspamd never reads it, logs "module yara is
-#      enabled but has not been configured", and DISABLES the module. (This is
+#      auto-loads plugins.d/*.lua for module names it already knows; "mailstrix"
+#      is not one, so it must be included by hand (same as kam.lua).
+#   2. the module's config as an INLINE `mailstrix { }` block HERE, not in
+#      local.d/mailstrix.conf. local.d/<name>.conf is only auto-merged for known
+#      modules; for a custom module rspamd never reads it, logs "module mailstrix
+#      is enabled but has not been configured", and DISABLES the module. (This is
 #      exactly how the DRP backend's config lives inline here too.)
 #
 # Scoring stays in local.d/groups.conf (groups.conf IS a known core file and is
 # auto-included from local.d).
 
-lua = "/etc/rspamd/plugins.d/yara.lua";
+lua = "/etc/rspamd/plugins.d/mailstrix.lua";
 
-yara {
+mailstrix {
   # strixd endpoint — IPv4, not a docker name (rspamd's RBL-only resolver can't
   # resolve container names). Match the address strixd binds on the shared net.
   url = "http://172.30.0.43:8079/scan";
@@ -29,7 +29,7 @@ yara {
   # little HTTP/JSON overhead before this timeout expires.
   timeout = 10.0;
   max_size = 8388608;
-  symbol = "YARA_MATCH";
+  symbol = "STRIX_MATCH";
   scan_message = true;
   scan_parts = true;
   min_part_size = 64;

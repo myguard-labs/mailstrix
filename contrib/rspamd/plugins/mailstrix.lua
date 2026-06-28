@@ -1,5 +1,5 @@
 --[[
-yara.lua — rspamd plugin that scans a message (and optionally each MIME part)
+mailstrix.lua — rspamd plugin that scans a message (and optionally each MIME part)
 against a set of YARA rules through the strixd HTTP backend.
 
 Project:  https://github.com/eilandert/mailstrix
@@ -16,12 +16,12 @@ strixd returns JSON:
   { "matches": [ { "rule": "<name>", "namespace": "<file>", "tags": [..], "meta": {..} }, ... ] }
 
 Each matched rule is classified (see classify()) into one scoring-tier symbol —
-YARA_MALWARE / YARA_EXPLOIT / YARA_PHISHING / YARA_SUSPICIOUS, or YARA for an
+STRIX_MALWARE / STRIX_EXPLOIT / STRIX_PHISHING / STRIX_SUSPICIOUS, or YARA for an
 uncategorized hit — with the matched rules as that symbol's options, shown as
 "rule (source-file.yar)" (traceable, and actionable by force_actions/multimap).
 URLhaus malware-URL hits go to URLHAUS_MALWARE_URL; MalwareBazaar exact
 attachment-hash hits go to MALWAREBAZAAR_MALWARE. Per-tier weights live in
-groups.conf (group "YARA").
+groups.conf (group "STRIX").
 
 Scope is configurable (scan_message / scan_parts): the full rfc822 message,
 each attachment part, or both.
@@ -31,9 +31,9 @@ local rspamd_logger = require "rspamd_logger"
 local rspamd_http = require "rspamd_http"
 local rspamd_util = require "rspamd_util"
 local lua_util = require "lua_util"
-local N = "yara"
+local N = "mailstrix"
 
--- Defaults; overridden by the matching section in local.d/yara.conf.
+-- Defaults; overridden by the matching section in local.d/mailstrix.conf.
 local settings = {
   url = "http://127.0.0.1:8079/scan",
   token = "",                  -- shared secret; must equal strixd's MAILSTRIX_TOKEN
@@ -50,11 +50,11 @@ local settings = {
   -- these symbols by its name/source-file/tags/meta.score, so different kinds of
   -- hit score differently in groups.conf instead of one flat weight for every
   -- rule. `symbol` is the default/uncategorized bucket (and the callback symbol).
-  symbol            = "YARA",             -- uncategorized rule match (default)
-  symbol_malware    = "YARA_MALWARE",     -- malware family / webshell / RAT / APT
-  symbol_exploit    = "YARA_EXPLOIT",     -- exploit / CVE / maldoc exploit
-  symbol_phishing   = "YARA_PHISHING",    -- phishing kit / phishing document
-  symbol_suspicious = "YARA_SUSPICIOUS",  -- heuristic / suspicious / anomaly
+  symbol            = "STRIX",             -- uncategorized rule match (default)
+  symbol_malware    = "STRIX_MALWARE",     -- malware family / webshell / RAT / APT
+  symbol_exploit    = "STRIX_EXPLOIT",     -- exploit / CVE / maldoc exploit
+  symbol_phishing   = "STRIX_PHISHING",    -- phishing kit / phishing document
+  symbol_suspicious = "STRIX_SUSPICIOUS",  -- heuristic / suspicious / anomaly
   -- Separate symbol for strixd's URLhaus malware-URL hits (rule names start
   -- "URLHAUS_"), so they score independently of YARA rule matches.
   urlhaus_symbol = "URLHAUS_MALWARE_URL",
@@ -74,7 +74,7 @@ local settings = {
   -- by MAILSTRIX_RULE_ALLOWLIST): the match is still surfaced (visible in history)
   -- but routed here so groups.conf can score it 0 — a known-FP rule demoted
   -- without dropping it or patching the source.
-  allow_symbol = "YARA_ALLOWLISTED",
+  allow_symbol = "STRIX_ALLOWLISTED",
   -- What to scan. At least one must be true or the plugin does nothing.
   scan_message = true,         -- the whole rfc822 message in one scan
   scan_parts = true,          -- each MIME part (attachment) separately

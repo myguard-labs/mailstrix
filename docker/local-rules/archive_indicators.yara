@@ -3,8 +3,8 @@
 // Markers channel, so the rule is zero-FP by construction: it fires only when
 // the extractor positively identified the condition while unpacking.
 //
-// meta.tier is honoured authoritatively by the rspamd yara.lua plugin
-// (classify()): this self-declares "suspicious" so it scores in YARA_SUSPICIOUS
+// meta.tier is honoured authoritatively by the rspamd mailstrix.lua plugin
+// (classify()): this self-declares "suspicious" so it scores in STRIX_SUSPICIOUS
 // regardless of name/tag heuristics.
 
 rule Archive_Encrypted : archive evasion heuristic suspicious marker

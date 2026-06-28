@@ -2,7 +2,7 @@
 
 A Helm v3 chart for [mailstrix](https://github.com/eilandert/mailstrix) — a single
 Go HTTP daemon that scans mail content with YARA rules (plus optional abuse.ch
-threat-intel feeds) as an internal backend for the rspamd `yara.lua` plugin.
+threat-intel feeds) as an internal backend for the rspamd `mailstrix.lua` plugin.
 
 It mirrors the security posture and configuration surface of the reference
 [`docker/docker-compose.yml`](../../../docker/docker-compose.yml): distroless

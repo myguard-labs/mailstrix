@@ -1,7 +1,7 @@
 strixd has been deployed as Service {{ include "mailstrix.fullname" . }} (ClusterIP, port {{ .Values.service.port }}).
 
 It is an INTERNAL scan backend — there is no Ingress and the Service is
-ClusterIP by design. Point your rspamd yara.lua plugin at:
+ClusterIP by design. Point your rspamd mailstrix.lua plugin at:
 
     http://{{ include "mailstrix.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
 

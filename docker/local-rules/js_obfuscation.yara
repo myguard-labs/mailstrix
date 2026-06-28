@@ -16,7 +16,7 @@
 
   Each rule pairs a SPECIFIC obfuscation mechanic with a count or second
   indicator so ordinary minified/packed-but-benign JS does not fire. Tagged
-  `suspicious heuristic` so yara.lua classify() routes to YARA_SUSPICIOUS.
+  `suspicious heuristic` so mailstrix.lua classify() routes to STRIX_SUSPICIOUS.
   Heuristics, NOT family attribution.
 
   References:

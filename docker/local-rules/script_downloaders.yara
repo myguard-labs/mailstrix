@@ -4,8 +4,8 @@
   upstream feeds (yaraforge / signature-base / anyrun / yaraify) miss on the live
   mail stream: no obfuscation, just one or two lines that fetch+run a second
   stage. Each rule pins a SPECIFIC malicious construct (not a lone keyword) so
-  benign admin one-liners do not fire. Tagged `suspicious heuristic` so yara.lua
-  classify() routes to YARA_SUSPICIOUS. Heuristics, NOT family attribution.
+  benign admin one-liners do not fire. Tagged `suspicious heuristic` so mailstrix.lua
+  classify() routes to STRIX_SUSPICIOUS. Heuristics, NOT family attribution.
 
   Closed live MalwareBazaar 0-hit misses (.ps1/.vbs corpus 2026):
     f9bfd95b (iex irm cradle); 846a1b1c/8a588666/81a5042f/b4d94ab1 (GetObject

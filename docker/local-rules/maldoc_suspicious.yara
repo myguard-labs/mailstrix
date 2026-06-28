@@ -29,8 +29,8 @@
   emulation — Chr() concat chains, XLM/Excel-4.0 execution and multi-stage
   unpacking stay with olevba / ViperMonkey (rspamd-olefy).
 
-  Tagged `suspicious heuristic` so yara.lua classify() routes them to
-  YARA_SUSPICIOUS (operator-tunable in groups.conf).
+  Tagged `suspicious heuristic` so mailstrix.lua classify() routes them to
+  STRIX_SUSPICIOUS (operator-tunable in groups.conf).
   Reference: https://github.com/decalage2/oletools/wiki/olevba
 */
 

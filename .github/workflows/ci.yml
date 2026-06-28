@@ -162,10 +162,10 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -c '
             apk add --no-cache lua5.4 >/dev/null 2>&1
-            lua5.4 contrib/rspamd/test/yara_dedup_spec.lua
-            lua5.4 contrib/rspamd/test/yara_effort_spec.lua
-            lua5.4 contrib/rspamd/test/yara_explain_spec.lua
-            lua5.4 contrib/rspamd/test/yara_feed_routing_spec.lua
+            lua5.4 contrib/rspamd/test/mailstrix_dedup_spec.lua
+            lua5.4 contrib/rspamd/test/mailstrix_effort_spec.lua
+            lua5.4 contrib/rspamd/test/mailstrix_explain_spec.lua
+            lua5.4 contrib/rspamd/test/mailstrix_feed_routing_spec.lua
           '
 
       - name: spamassassin plugin (perl -c + http/shellout unit tests)

@@ -14,7 +14,7 @@
   `switch ($v)`) with a large COUNT of the char-surgery primitive so ordinary
   hand-written or minified-but-benign PowerShell (which uses a stray Insert/
   switch but never thousands) does not fire. Tagged `suspicious heuristic` so
-  yara.lua classify() routes to YARA_SUSPICIOUS. Heuristic, NOT family attribution.
+  mailstrix.lua classify() routes to STRIX_SUSPICIOUS. Heuristic, NOT family attribution.
 
   References:
     MalwareBazaar live .ps1 corpus 2026 (1eb89fbb…, 77525609… — both 0-hit

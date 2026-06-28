@@ -1,7 +1,7 @@
 #!/usr/bin/env lua
 --[[
-yara_effort_spec.lua — standalone test (plain lua5.4, no rspamd) for the
-EFFORT-3 X-MAILSTRIX-Effort tier computation in rspamd/plugins/yara.lua.
+mailstrix_effort_spec.lua — standalone test (plain lua5.4, no rspamd) for the
+EFFORT-3 X-MAILSTRIX-Effort tier computation in rspamd/plugins/mailstrix.lua.
 
 The plugin can't be unit-loaded here (it `require`s rspamd_* at load and
 registers against rspamd_config). So this mirrors the exact math of
@@ -10,10 +10,10 @@ between effort_score_low/high; a forcing symbol pins to max; result clamped.
 If the plugin's mapping ever drifts (rounding, clamp order, force precedence),
 these assertions fail.
 
-Run: lua5.4 rspamd/test/yara_effort_spec.lua   (exit 0 = pass, 1 = fail)
+Run: lua5.4 rspamd/test/mailstrix_effort_spec.lua   (exit 0 = pass, 1 = fail)
 --]]
 
--- effort_of MUST stay byte-equivalent to compute_effort's body in yara.lua.
+-- effort_of MUST stay byte-equivalent to compute_effort's body in mailstrix.lua.
 -- score: prior rspamd metric score (number or nil). forced: a forcing symbol present.
 local function effort_of(cfg, score, forced)
   local lo, hi = cfg.effort_min, cfg.effort_max
@@ -69,4 +69,4 @@ local inv = { effort_min = 1, effort_max = 5, effort_score_low = 8, effort_score
 eq(effort_of(inv, 8, false),     5, "inverted band, score>=high -> max")
 eq(effort_of(inv, 7, false),     1, "inverted band, score<high -> min")
 
-if fails == 0 then print("yara_effort_spec: OK") os.exit(0) else os.exit(1) end
+if fails == 0 then print("mailstrix_effort_spec: OK") os.exit(0) else os.exit(1) end

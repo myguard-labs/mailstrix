@@ -1,6 +1,6 @@
 #!/usr/bin/env lua
 --[[
-yara_feed_routing_spec.lua — standalone test (plain lua5.4, no rspamd) that the
+mailstrix_feed_routing_spec.lua — standalone test (plain lua5.4, no rspamd) that the
 strixd synthetic feed rules route to their own dedicated scoring symbols instead
 of falling through the generic YARA tier classification.
 
@@ -19,7 +19,7 @@ regress:
       THREATFOX_/FEODO_ branches exist, the symbols are registered, and
       groups.conf defines a weight for each.
 
-Run: lua5.4 rspamd/test/yara_feed_routing_spec.lua   (exit 0 = pass, 1 = fail)
+Run: lua5.4 rspamd/test/mailstrix_feed_routing_spec.lua   (exit 0 = pass, 1 = fail)
 --]]
 
 local failures = 0
@@ -31,13 +31,13 @@ local function check(cond, msg)
 end
 
 -- (1) Contract mirror. MUST stay in lockstep with the prefix dispatch in
--- yara.lua process_results (sub(1,N) comparisons). Generic = default tier.
+-- mailstrix.lua process_results (sub(1,N) comparisons). Generic = default tier.
 local SYM = {
   urlhaus   = "URLHAUS_MALWARE_URL",
   mbazaar   = "MALWAREBAZAAR_MALWARE",
   threatfox = "THREATFOX_IOC",
   feodo     = "FEODO_CC_IP",
-  default   = "YARA",
+  default   = "STRIX",
 }
 local function route(rule)
   if rule:sub(1, 8) == "URLHAUS_" then return SYM.urlhaus end
@@ -71,8 +71,8 @@ local function slurp(path)
   local s = f:read("*a"); f:close(); return s
 end
 
-local plugin = slurp(here .. "/../plugins/yara.lua")
-check(plugin ~= nil, "yara.lua plugin readable")
+local plugin = slurp(here .. "/../plugins/mailstrix.lua")
+check(plugin ~= nil, "mailstrix.lua plugin readable")
 if plugin then
   check(plugin:find('"THREATFOX_"', 1, true) ~= nil, "plugin has a THREATFOX_ routing branch")
   check(plugin:find('"FEODO_"', 1, true) ~= nil, "plugin has a FEODO_ routing branch")
@@ -99,4 +99,4 @@ if failures > 0 then
   io.stderr:write(failures .. " assertion(s) failed\n")
   os.exit(1)
 end
-print("yara_feed_routing_spec: all assertions passed")
+print("mailstrix_feed_routing_spec: all assertions passed")

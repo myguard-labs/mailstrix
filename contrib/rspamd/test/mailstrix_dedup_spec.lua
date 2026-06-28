@@ -1,7 +1,7 @@
 #!/usr/bin/env lua
 --[[
-yara_dedup_spec.lua — standalone test (plain lua5.4, no rspamd) for the
-AUDIT-LUA-NAMESPACE-DEDUPE fix in rspamd/plugins/yara.lua.
+mailstrix_dedup_spec.lua — standalone test (plain lua5.4, no rspamd) for the
+AUDIT-LUA-NAMESPACE-DEDUPE fix in rspamd/plugins/mailstrix.lua.
 
 The plugin can't be unit-loaded here (it `require`s rspamd_logger/_http/_util at
 load and registers symbols against the rspamd_config global). So this mirrors the
@@ -13,10 +13,10 @@ second and let it inherit the first's tier/weight (twin of the fixed Go
 mergeMatches namespace bug). If the plugin's key expression is ever reverted to
 rule-only, the "different namespace" assertion below fails.
 
-Run: lua5.4 rspamd/test/yara_dedup_spec.lua   (exit 0 = pass, 1 = fail)
+Run: lua5.4 rspamd/test/mailstrix_dedup_spec.lua   (exit 0 = pass, 1 = fail)
 --]]
 
--- dedup_key MUST stay byte-identical to the key built in yara.lua process_results.
+-- dedup_key MUST stay byte-identical to the key built in mailstrix.lua process_results.
 local function dedup_key(m)
   return "y:" .. (m.namespace or "") .. "\31" .. m.rule
 end
@@ -54,11 +54,11 @@ do
   local add, buckets = new_collector()
   local a = { rule = "http", namespace = "rulesA.yar" }
   local b = { rule = "http", namespace = "rulesB.yar" }
-  add("YARA", a.rule, dedup_key(a), 1.0)
-  add("YARA", b.rule, dedup_key(b), 1.0)
-  check(#buckets["YARA"].opts == 2,
+  add("STRIX", a.rule, dedup_key(a), 1.0)
+  add("STRIX", b.rule, dedup_key(b), 1.0)
+  check(#buckets["STRIX"].opts == 2,
     "same rule from two namespaces must NOT collapse (got " ..
-    #buckets["YARA"].opts .. " opt(s), want 2)")
+    #buckets["STRIX"].opts .. " opt(s), want 2)")
 end
 
 -- 2. Identical (namespace, rule) seen twice (e.g. matched in two scanned buffers)
@@ -66,11 +66,11 @@ end
 do
   local add, buckets = new_collector()
   local m = { rule = "Cobalt_Strike", namespace = "apt.yar" }
-  add("YARA_MALWARE", m.rule, dedup_key(m), 5.0)
-  add("YARA_MALWARE", m.rule, dedup_key(m), 5.0)
-  check(#buckets["YARA_MALWARE"].opts == 1,
+  add("STRIX_MALWARE", m.rule, dedup_key(m), 5.0)
+  add("STRIX_MALWARE", m.rule, dedup_key(m), 5.0)
+  check(#buckets["STRIX_MALWARE"].opts == 1,
     "identical namespace+rule must dedup to 1 (got " ..
-    #buckets["YARA_MALWARE"].opts .. ")")
+    #buckets["STRIX_MALWARE"].opts .. ")")
 end
 
 -- 3. Different rule, same namespace → distinct.
@@ -78,9 +78,9 @@ do
   local add, buckets = new_collector()
   local a = { rule = "foo", namespace = "x.yar" }
   local b = { rule = "bar", namespace = "x.yar" }
-  add("YARA", a.rule, dedup_key(a), 1.0)
-  add("YARA", b.rule, dedup_key(b), 1.0)
-  check(#buckets["YARA"].opts == 2, "distinct rules in one namespace must both survive")
+  add("STRIX", a.rule, dedup_key(a), 1.0)
+  add("STRIX", b.rule, dedup_key(b), 1.0)
+  check(#buckets["STRIX"].opts == 2, "distinct rules in one namespace must both survive")
 end
 
 -- 4. The pre-fix key (rule alone) WOULD have collapsed case 1 — assert the new
@@ -98,4 +98,4 @@ if failures > 0 then
   io.stderr:write(failures .. " assertion(s) failed\n")
   os.exit(1)
 end
-print("yara_dedup_spec: all assertions passed")
+print("mailstrix_dedup_spec: all assertions passed")

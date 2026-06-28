@@ -22,7 +22,7 @@
   - filesize cap keeps it off large binaries that cannot be OOXML.
 
   Heuristic, not family attribution -- tagged `suspicious heuristic` so
-  yara.lua classify() routes it to YARA_SUSPICIOUS (operator-tunable).
+  mailstrix.lua classify() routes it to STRIX_SUSPICIOUS (operator-tunable).
   score 50 = mid-high confidence (external template is very rarely benign).
 
   Reference: https://attack.mitre.org/techniques/T1221/
