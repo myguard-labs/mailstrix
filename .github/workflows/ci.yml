@@ -143,7 +143,7 @@ jobs:
       - name: smoke matrix is a shared script invoked by ci.yml
         run: sh packaging/deb/smoke_shared_test.sh
       - name: hadolint (Dockerfile; .hadolint.yaml ignores)
-        run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile
+        run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile docker/Dockerfile.release
       - name: osv-scanner (go.mod/go.sum dependency CVEs)
         run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v1.9.2 --lockfile=go.mod
 

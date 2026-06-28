@@ -1,0 +1,130 @@
+# strixd — release-binary image (multi-arch, no Go/libyara compile).
+#
+# Unlike docker/Dockerfile (which compiles strixd from source with CGO against a
+# statically-linked libyara), this variant ADDs the per-arch binaries straight
+# from the GitHub v<VERSION> release. That removes the heavy Go+libyara compile
+# from the per-arch path, so a multi-arch buildx bake doesn't QEMU-emulate the
+# slow Go build — it only emulates the (much lighter) native `yarac` rules
+# compile, which is unavoidable because a .yac is architecture-specific.
+#
+# Used by the dockerized daily bake (target debian-mailstrix). The source-compile
+# Dockerfile stays the source of truth for CI (release.yml builds the binaries
+# this file then consumes).
+#
+# Requires VERSION to name a published release whose assets include
+# strixd-linux-${TARGETARCH} and strix-scan-linux-${TARGETARCH}.
+
+ARG YARA_VERSION=4.5.2
+
+# ---- fetch release binaries (arch-neutral; runs on the build host) ----------
+# This stage does NOT execute target-arch code, so it is not QEMU-emulated. ADD
+# pulls the per-arch asset selected by the build platform's TARGETARCH.
+FROM debian:bookworm-slim AS fetch
+ARG VERSION
+ARG TARGETARCH
+RUN test -n "${VERSION}" || (echo "VERSION build-arg is required (e.g. 1.0.0)" >&2; exit 1)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# Strip a leading v if the caller passed a tag-style version.
+# Download both binaries + the release SHA256SUMS and verify before trusting the
+# assets (the source-compile Dockerfile builds from trusted source; this variant
+# pulls prebuilt artifacts, so checksum-gate them). SHA256SUMS lists every asset;
+# filter to just the two we fetched and check.
+WORKDIR /out
+RUN VER="${VERSION#v}" \
+    && base="https://github.com/eilandert/mailstrix/releases/download/v${VER}" \
+    && curl -fsSL "${base}/strixd-linux-${TARGETARCH}"      -o "strixd-linux-${TARGETARCH}" \
+    && curl -fsSL "${base}/strix-scan-linux-${TARGETARCH}" -o "strix-scan-linux-${TARGETARCH}" \
+    && curl -fsSL "${base}/SHA256SUMS"                      -o SHA256SUMS \
+    && grep -E "  (strixd|strix-scan)-linux-${TARGETARCH}\$" SHA256SUMS > SHA256SUMS.arch \
+    && test -s SHA256SUMS.arch \
+    && sha256sum -c SHA256SUMS.arch \
+    && mv "strixd-linux-${TARGETARCH}"      strixd \
+    && mv "strix-scan-linux-${TARGETARCH}" strix-scan \
+    && rm -f SHA256SUMS SHA256SUMS.arch \
+    && chmod +x strixd strix-scan
+# Ship the NOTICE alongside the binary (final image parity with docker/Dockerfile).
+COPY NOTICE /out/NOTICE
+
+# ---- libyara (static) — only needed to get a matching `yarac` for the rules
+#      stage; the final image carries no libyara (binaries are prelinked). ------
+FROM debian:bookworm-slim AS yara
+ARG YARA_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential automake libtool make pkg-config \
+        libssl-dev curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
+        | tar -xz -C /tmp
+WORKDIR /tmp/yara-${YARA_VERSION}
+RUN ./bootstrap.sh \
+    && CFLAGS="-O2 -flto -DNDEBUG" LDFLAGS="-flto" \
+       ./configure --disable-shared --enable-static --with-crypto \
+    && make -j"$(nproc)" && make install && ldconfig
+
+# ---- rules ------------------------------------------------------------------
+# Identical to docker/Dockerfile: compile the seed .yac with the exact libyara's
+# yarac (a .yac is version- AND arch-locked to its compiler). This is the one
+# stage that runs target-arch code under a multi-arch bake.
+FROM yara AS rules
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates unzip \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/
+COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
+RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh
+ARG CACHEBUST=unset
+ARG LOCAL_ONLY=0
+ARG YARAFORGE_SET=core
+ARG YARAFORGE_URL=
+ARG SIGBASE_REF=master
+ARG ANYRUN_REF=main
+ARG ANYRUN=1
+ARG DIDIER_REF=master
+ARG DIDIER=1
+ARG BARTBLAZE_REF=master
+ARG BARTBLAZE=1
+ARG INQUEST_REF=main
+ARG INQUEST=1
+ARG CAPE=1
+ARG CAPE_REF=master
+ARG YARAIFY=1
+ARG YARAIFY_URL=
+RUN LOCAL_ONLY="${LOCAL_ONLY}" \
+        YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
+        ANYRUN="${ANYRUN}" ANYRUN_REF="${ANYRUN_REF}" \
+        DIDIER="${DIDIER}" DIDIER_REF="${DIDIER_REF}" \
+        BARTBLAZE="${BARTBLAZE}" BARTBLAZE_REF="${BARTBLAZE_REF}" \
+        INQUEST="${INQUEST}" INQUEST_REF="${INQUEST_REF}" \
+        CAPE="${CAPE}" CAPE_REF="${CAPE_REF}" \
+        YARAIFY="${YARAIFY}" YARAIFY_URL="${YARAIFY_URL}" \
+        /usr/local/bin/fetch-rules.sh /rules/src \
+    && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/src/ \
+    && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
+    && mkdir -p /rules/local-src \
+    && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/local-src/ \
+    && /usr/local/bin/compile-rules.sh /rules/local-src /rules/local.yac \
+    && rm -rf /rules/src /rules/local-src \
+    && install -d -o 65532 -g 65532 /var/cache/mailstrix \
+    && yarac --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 > /rules/libyara.version
+
+# ---- final (distroless, nonroot) -------------------------------------------
+FROM gcr.io/distroless/base-debian12:nonroot AS final
+COPY --from=fetch /out/strixd /usr/local/bin/strixd
+COPY --from=rules /rules/compiled.yac /usr/share/mailstrix/compiled.yac
+COPY --from=rules /rules/local.yac /usr/share/mailstrix/local.yac
+COPY --from=rules /rules/sources.json /usr/share/mailstrix/sources.json
+COPY --from=fetch /out/NOTICE /usr/share/mailstrix/NOTICE
+COPY --from=rules --chown=nonroot:nonroot /var/cache/mailstrix /var/cache/mailstrix
+ENV MAILSTRIX_SEED_RULES=/usr/share/mailstrix/compiled.yac \
+    MAILSTRIX_BIGFILE_RULES=/usr/share/mailstrix/local.yac \
+    MAILSTRIX_CACHE_DIR=/var/cache/mailstrix \
+    MAILSTRIX_HOST=0.0.0.0 \
+    MAILSTRIX_PORT=8079
+EXPOSE 8079
+USER nonroot
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/usr/local/bin/strixd", "health"]
+ENTRYPOINT ["/usr/local/bin/strixd"]
+CMD ["serve"]
