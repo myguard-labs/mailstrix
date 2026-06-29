@@ -163,6 +163,9 @@ func TestLazySeenAllocsCleanProse(t *testing.T) {
 		t.Errorf("prose allocs (%g) >= decode allocs (%g): lazy seen-map optimisation may be missing",
 			proseAllocs, decodeAllocs)
 	}
+	if proseAllocs > 8 {
+		t.Errorf("prose allocs = %g, want <=8 after filtering non-decodable BFS sources", proseAllocs)
+	}
 }
 
 // ---------------------------------------------------------------------------

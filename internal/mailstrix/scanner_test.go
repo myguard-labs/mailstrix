@@ -526,6 +526,20 @@ func TestScanOneVBAExternalVariable(t *testing.T) {
 	}
 }
 
+func TestScanOneMetaLessMatchHasNilMeta(t *testing.T) {
+	s := newScanner(t, writeRules(t, `rule No_Meta { strings: $x = "TOKEN" condition: $x }`))
+	m, err := s.scanOne(s.rules.Load(), []byte("TOKEN"), scanVars{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 1 {
+		t.Fatalf("matches = %+v, want one", m)
+	}
+	if m[0].Meta != nil {
+		t.Fatalf("meta-less rule allocated/populated Meta: %+v", m[0].Meta)
+	}
+}
+
 // A rule whose ONLY condition is the filename external variable must be inert
 // with no filename and fire when ScanMeta carries a matching name — the whole
 // point of the feature (THOR/Loki name-keyed rules). The body bytes are clean,

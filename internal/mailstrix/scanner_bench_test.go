@@ -55,6 +55,19 @@ func BenchmarkScanEICAR(b *testing.B) {
 	}
 }
 
+func BenchmarkScanOneMetaLessMatch(b *testing.B) {
+	s := newScannerBench(b, writeRulesBench(b, `rule No_Meta { strings: $x = "TOKEN" condition: $x }`))
+	rules := s.rules.Load()
+	buf := []byte("TOKEN")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if m, err := s.scanOne(rules, buf, scanVars{}, 0); err != nil || len(m) != 1 {
+			b.Fatalf("scanOne = %+v, %v", m, err)
+		}
+	}
+}
+
 // BenchmarkScan8KiB benchmarks scanning an 8 KiB buffer with no matches.
 func BenchmarkScan8KiB(b *testing.B) {
 	s := newScannerBench(b, writeRulesBench(b, eicarRule))

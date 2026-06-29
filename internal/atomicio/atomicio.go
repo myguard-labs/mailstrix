@@ -5,6 +5,7 @@
 package atomicio
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -56,14 +57,23 @@ func WriteWithBackup(path string, data []byte, perm os.FileMode) (err error) {
 	// existed. Copying leaves `path` present continuously; the single rename below
 	// then atomically replaces it. A backup-copy failure is non-fatal (the verified
 	// new file still installs) — we just lose the rollback copy.
-	if cur, err := os.ReadFile(path); err == nil { // #nosec G304 -- caller-owned path
+	if cur, err := os.Open(path); err == nil { // #nosec G304 -- caller-owned path
 		bakTmp, e := os.CreateTemp(dir, ".atomicio-bak-*.tmp")
 		if e == nil {
-			_, _ = bakTmp.Write(cur)
-			_ = bakTmp.Close()
-			_ = os.Chmod(bakTmp.Name(), perm)
-			_ = os.Rename(bakTmp.Name(), path+BackupSuffix)
+			bakName := bakTmp.Name()
+			if _, e = io.Copy(bakTmp, cur); e == nil {
+				e = bakTmp.Close()
+			} else {
+				_ = bakTmp.Close()
+			}
+			if e == nil {
+				_ = os.Chmod(bakName, perm)
+				_ = os.Rename(bakName, path+BackupSuffix)
+			} else {
+				_ = os.Remove(bakName)
+			}
 		}
+		_ = cur.Close()
 	}
 	return os.Rename(tmpName, path)
 }

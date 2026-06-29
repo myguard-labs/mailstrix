@@ -58,7 +58,7 @@ func fromOLE2Link(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if d == nil || d.Header.Mse != 2 || d.Header.Size == 0 || d.Header.Size > maxOLE2LinkStream {
 			continue
 		}
-		data := ole.GetStream(d.Index)
+		data := ole.GetStreamView(d.Index)
 		url := monikerURL(data)
 		if url == nil {
 			continue

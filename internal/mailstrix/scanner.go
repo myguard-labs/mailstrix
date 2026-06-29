@@ -507,13 +507,17 @@ func (s *Scanner) Reload() error {
 	defer func() { s.reloadLastMillis.Store(time.Since(start).Milliseconds()) }()
 
 	var (
-		rules *yara.Rules
-		err   error
+		rules         *yara.Rules
+		mainRuleFiles []string
+		err           error
 	)
 	if s.srcFile != "" {
 		rules, err = yara.LoadRules(s.srcFile)
 	} else {
-		rules, err = compileDir(s.srcDir, s.logf)
+		mainRuleFiles, err = validatedRuleFiles(s.srcDir, s.logf)
+		if err == nil {
+			rules, err = compileRuleFiles(s.srcDir, mainRuleFiles, s.logf)
+		}
 	}
 	if err != nil {
 		s.reloadFail.Add(1)
@@ -594,7 +598,7 @@ func (s *Scanner) Reload() error {
 	// good load.
 	// PERF-30: pass the deny map so denied marker rules are also pre-disabled;
 	// a denied rule that happens to carry the "marker" tag should still be skipped.
-	if mb, mbErr := buildMarkerBundle(s.srcFile, s.srcDir, deny, s.logf); mbErr != nil {
+	if mb, mbErr := buildMarkerBundleFromFiles(s.srcFile, s.srcDir, mainRuleFiles, deny, s.logf); mbErr != nil {
 		s.logf("WARNING: PERF-18 marker bundle build failed, marker channel will use full ruleset: %v", mbErr)
 	} else if mb != nil {
 		s.markerRules.Swap(mb)
@@ -833,7 +837,7 @@ func rulesetModUnix(srcFile, srcDir string) int64 {
 // throwaway compiler first and only added to the real set if it compiles
 // clean; bad files are logged and skipped. It is an error only if NOTHING
 // compiles (a misconfigured rules dir, not a single rotten rule).
-func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
+func ruleFiles(dir string) ([]string, error) {
 	var files []string
 	for _, ext := range []string{"*.yar", "*.yara"} {
 		m, _ := filepath.Glob(filepath.Join(dir, ext))
@@ -843,7 +847,34 @@ func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no *.yar/*.yara files in %s", dir)
 	}
+	return files, nil
+}
 
+func validatedRuleFiles(dir string, logf func(string, ...any)) ([]string, error) {
+	files, err := ruleFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	valid := files[:0]
+	skipped := 0
+	for _, f := range files {
+		if compileErr := validateRuleFile(f); compileErr != nil {
+			skipped++
+			logf("skip unparseable rule file %s: %v", filepath.Base(f), compileErr)
+			continue
+		}
+		valid = append(valid, f)
+	}
+	if len(valid) == 0 {
+		return nil, fmt.Errorf("no compilable *.yar/*.yara files in %s (%d skipped)", dir, skipped)
+	}
+	if skipped > 0 {
+		logf("compiled %d rule files, skipped %d unparseable", len(valid), skipped)
+	}
+	return valid, nil
+}
+
+func compileRuleFiles(dir string, files []string, logf func(string, ...any)) (*yara.Rules, error) {
 	c, err := yara.NewCompiler()
 	if err != nil {
 		return nil, fmt.Errorf("new compiler: %w", err)
@@ -851,11 +882,6 @@ func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 	defineExternals(c)
 	added, skipped := 0, 0
 	for _, f := range files {
-		if compileErr := fileCompiles(f); compileErr != nil {
-			skipped++
-			logf("skip unparseable rule file %s: %v", filepath.Base(f), compileErr)
-			continue
-		}
 		fh, err := os.Open(f) // #nosec G304 -- operator rules dir, not attacker input
 		if err != nil {
 			logf("skip unreadable rule file %s: %v", filepath.Base(f), err)
@@ -879,10 +905,15 @@ func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get rules: %w", err)
 	}
-	if skipped > 0 {
-		logf("compiled %d rule files, skipped %d unparseable", added, skipped)
-	}
 	return rules, nil
+}
+
+func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
+	files, err := validatedRuleFiles(dir, logf)
+	if err != nil {
+		return nil, err
+	}
+	return compileRuleFiles(dir, files, logf)
 }
 
 // buildMarkerBundle compiles the same ruleset as the main set (from srcFile or
@@ -901,6 +932,10 @@ func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 // recompile). Returns an error on compilation failure; the caller falls back to
 // the full ruleset.
 func buildMarkerBundle(srcFile, srcDir string, deny map[string]struct{}, logf func(string, ...any)) (*yara.Rules, error) {
+	return buildMarkerBundleFromFiles(srcFile, srcDir, nil, deny, logf)
+}
+
+func buildMarkerBundleFromFiles(srcFile, srcDir string, validatedFiles []string, deny map[string]struct{}, logf func(string, ...any)) (*yara.Rules, error) {
 	if srcFile == "" && srcDir == "" {
 		return nil, nil
 	}
@@ -910,6 +945,8 @@ func buildMarkerBundle(srcFile, srcDir string, deny map[string]struct{}, logf fu
 	)
 	if srcFile != "" {
 		bundle, err = yara.LoadRules(srcFile)
+	} else if validatedFiles != nil {
+		bundle, err = compileRuleFiles(srcDir, validatedFiles, logf)
 	} else {
 		bundle, err = compileDir(srcDir, logf)
 	}
@@ -935,6 +972,8 @@ func buildMarkerBundle(srcFile, srcDir string, deny map[string]struct{}, logf fu
 		disabled, total-disabled, mbDisabled)
 	return bundle, nil
 }
+
+var validateRuleFile = fileCompiles
 
 // fileCompiles validates one rule file in an isolated compiler so a single bad
 // file (unknown module, bad syntax) can be skipped without poisoning the shared
@@ -1752,12 +1791,12 @@ func (s *Scanner) scanOne(rules *yara.Rules, buf []byte, vars scanVars, timeout 
 	}
 	out := make([]Match, 0, len(mr))
 	for _, m := range mr {
-		meta := make(map[string]string, len(m.Metas))
-		for _, kv := range m.Metas {
-			meta[kv.Identifier] = fmt.Sprintf("%v", kv.Value)
-		}
-		if len(meta) == 0 {
-			meta = nil
+		var meta map[string]string
+		if len(m.Metas) > 0 {
+			meta = make(map[string]string, len(m.Metas))
+			for _, kv := range m.Metas {
+				meta[kv.Identifier] = fmt.Sprintf("%v", kv.Value)
+			}
 		}
 		out = append(out, Match{Rule: m.Rule, Namespace: m.Namespace, Tags: m.Tags, Meta: meta})
 	}

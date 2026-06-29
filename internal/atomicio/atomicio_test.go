@@ -87,3 +87,18 @@ func TestReadCached(t *testing.T) {
 		t.Errorf("ReadCached = %q,%v", b, ok)
 	}
 }
+
+func BenchmarkWriteWithBackupLarge(b *testing.B) {
+	p := filepath.Join(b.TempDir(), "feed.bin")
+	data := make([]byte, 4<<20)
+	if err := WriteWithBackup(p, data, 0o600); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := WriteWithBackup(p, data, 0o600); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

@@ -18,7 +18,11 @@ import (
 // TTL. On a rules reload the whole cache is dropped (Flush) since old verdicts
 // were computed against the previous rule set.
 type Cache interface {
+	// Get returns an immutable match slice owned by the cache. Callers must not
+	// mutate the returned slice or its Match entries.
 	Get(key string) ([]Match, bool)
+	// Put stores matches by reference; callers must treat matches as immutable
+	// after insertion.
 	Put(key string, matches []Match)
 	Flush()
 	// Degraded returns a non-empty human-readable reason when the cache is
@@ -86,13 +90,7 @@ func (c *lruCache) Get(key string) ([]Match, bool) {
 		e := el.Value.(*entry)
 		if time.Now().Before(e.expires) {
 			c.ll.MoveToFront(el)
-			// Return a copy of the slice header so a caller that filters/sorts the
-			// result in place (e.g. an in-place `[:0]` filter) can't corrupt the
-			// shared cached entry for other concurrent goroutines. Match slices are
-			// tiny (usually 0–few hits), so this copy is negligible even on the hot
-			// path. The inner Tags/Meta are still shared but no caller mutates them.
-			m := make([]Match, len(e.matches))
-			copy(m, e.matches)
+			m := e.matches
 			c.mu.Unlock()
 			return m, true
 		}

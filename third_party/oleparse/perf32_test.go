@@ -320,6 +320,35 @@ func TestGetStream_LargeStreamUncached(t *testing.T) {
 	}
 }
 
+func TestGetStreamPrefixDoesNotPoisonFullRead(t *testing.T) {
+	content := bytes.Repeat([]byte("prefix-safe-"), 600)
+	buf := miniOLE(t, map[string][]byte{"Workbook": content})
+	ole, err := NewOLEFile(buf)
+	if err != nil {
+		t.Fatalf("NewOLEFile: %v", err)
+	}
+	d := ole.FindStreamByName("Workbook")
+	if d == nil {
+		t.Fatal("Workbook not found")
+	}
+
+	prefix := ole.GetStreamPrefix(d.Index, 32)
+	if len(prefix) != 32 {
+		t.Fatalf("prefix len = %d, want 32", len(prefix))
+	}
+	if !bytes.Equal(prefix, content[:32]) {
+		t.Fatalf("prefix content = %q, want %q", prefix, content[:32])
+	}
+	if _, cached := ole.streamCache[d.Index]; cached {
+		t.Fatal("prefix-only read populated the full-stream cache")
+	}
+
+	full := ole.GetStream(d.Index)
+	if !bytes.HasPrefix(full, content) {
+		t.Fatalf("full read after prefix lost data: got prefix %q, want %q", full[:min(len(full), len(content))], content)
+	}
+}
+
 // --- Benchmarks ---
 
 // BenchmarkFindStreamByName compares index lookup vs linear scan on an OLE with
@@ -361,5 +390,22 @@ func BenchmarkGetStream_Cached(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = ole.GetStream(d.Index)
+	}
+}
+
+func BenchmarkGetStreamView_Cached(b *testing.B) {
+	buf := miniOLE(b, map[string][]byte{"Workbook": []byte("wb content")})
+	ole, err := NewOLEFile(buf)
+	if err != nil {
+		b.Fatalf("NewOLEFile: %v", err)
+	}
+	d := ole.FindStreamByName("Workbook")
+	if d == nil {
+		b.Fatal("Workbook not found")
+	}
+	_ = ole.GetStream(d.Index)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = ole.GetStreamView(d.Index)
 	}
 }

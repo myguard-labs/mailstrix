@@ -40,7 +40,7 @@ func fromOLEEncType(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 	var wb []byte
 	for _, name := range []string{"Workbook", "Book"} {
 		if s := ole.FindStreamByName(name); s != nil {
-			wb = ole.GetStream(s.Index)
+			wb = ole.GetStreamView(s.Index)
 			break
 		}
 	}
@@ -109,7 +109,7 @@ func fromWordFibEncryption(ole *oleparse.OLEFile, res *Result) {
 	if s == nil {
 		return
 	}
-	wd := ole.GetStream(s.Index)
+	wd := ole.GetStreamPrefix(s.Index, 12)
 	// FibBase starts at offset 0; need 12 bytes for flags at offset 10.
 	if len(wd) < 12 {
 		return

@@ -47,69 +47,43 @@ const (
 	stompSourceThreshold = 32
 )
 
-// detectStomping inspects VBA modules for stomping: substantial p-code but
-// missing/trivial source. It emits "VBA-STOMPED <module> pcode=<n> src=<n>"
-// markers into result.Streams. Respects caps and deadline. Fails open.
-func detectStomping(ole *oleparse.OLEFile, result *Result, deadline time.Time) {
-	if expired(deadline) {
-		return
-	}
+var stompAttributePrefix = []byte("Attribute VB_")
 
-	// Locate the "dir" stream that holds per-module records.
-	dirStream := ole.FindStreamByName("dir")
-	if dirStream == nil {
+// detectStompingModules inspects modules that were already parsed by oleparse.
+// It avoids the old second pass over the "dir" stream and a second decompression
+// of every module's source on the normal macro-extraction path.
+func detectStompingModules(mods []*oleparse.VBAModule, result *Result, deadline time.Time) {
+	if result == nil || expired(deadline) {
 		return
 	}
-	rawDir := ole.GetStream(dirStream.Index)
-	if len(rawDir) == 0 {
-		return
-	}
-
-	// The dir stream is MS-OVBA compressed. Decompress it.
-	decompressed := decompressOVBA(rawDir)
-	if len(decompressed) == 0 {
-		return
-	}
-
-	// Walk the dir stream to get per-module {name, streamName, MODULEOFFSET}.
-	mods, err := walkDirStream(decompressed)
-	if err != nil || len(mods) == 0 {
-		return
-	}
-
 	for _, m := range mods {
-		if expired(deadline) {
+		if expired(deadline) || len(result.Streams) >= maxStreams {
 			break
 		}
-		if len(result.Streams) >= maxStreams {
-			break
+		if m == nil {
+			continue
 		}
-
-		pcodeLen := int(m.offset)
+		pcodeLen := int(m.TextOffset)
 		if pcodeLen < stompPCodeThreshold {
 			continue
 		}
 
-		// Get the raw module stream to verify MODULEOFFSET fits.
-		streamDir := ole.FindStreamByName(m.streamName)
-		if streamDir == nil {
-			continue
+		srcEffective := 0
+		if len(m.CodeBytes) > 0 {
+			srcEffective = effectiveSourceLen(m.CodeBytes)
+		} else if m.Code != "" {
+			srcEffective = effectiveSourceLen([]byte(m.Code))
 		}
-		streamData := ole.GetStream(streamDir.Index)
-		if int(m.offset) > len(streamData) {
-			continue
-		}
-
-		// Decompress the source portion (from MODULEOFFSET onward).
-		sourceBytes := decompressOVBA(streamData[m.offset:])
-		srcEffective := effectiveSourceLen(sourceBytes)
-
 		if srcEffective >= stompSourceThreshold {
-			continue // source looks real — not stomped
+			continue
 		}
 
+		name := m.ModuleName
+		if name == "" {
+			name = m.StreamName
+		}
 		marker := fmt.Sprintf("VBA-STOMPED %s pcode=%d src=%d",
-			m.name, pcodeLen, srcEffective)
+			name, pcodeLen, srcEffective)
 		result.Streams = append(result.Streams, []byte(marker))
 	}
 }
@@ -122,12 +96,16 @@ func effectiveSourceLen(src []byte) int {
 		return 0
 	}
 	var total int
-	for _, line := range strings.Split(string(src), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
+	for len(src) > 0 {
+		line := src
+		if i := bytes.IndexByte(src, '\n'); i >= 0 {
+			line = src[:i]
+			src = src[i+1:]
+		} else {
+			src = nil
 		}
-		if strings.HasPrefix(trimmed, "Attribute VB_") {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 || bytes.HasPrefix(trimmed, stompAttributePrefix) {
 			continue
 		}
 		total += len(trimmed)

@@ -166,7 +166,7 @@ func fromBIFFXLM(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if s == nil {
 			continue
 		}
-		data := ole.GetStream(s.Index)
+		data := ole.GetStreamView(s.Index)
 		if len(data) == 0 {
 			continue
 		}

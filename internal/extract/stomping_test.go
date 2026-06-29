@@ -4,6 +4,9 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
+
+	"www.velocidex.com/golang/oleparse"
 )
 
 // TestEffectiveSourceLen covers the various source shapes that stomping
@@ -55,6 +58,31 @@ func TestStompThresholds(t *testing.T) {
 	below := strings.Repeat("a", stompSourceThreshold-1)
 	if got := effectiveSourceLen([]byte(below)); got >= stompSourceThreshold {
 		t.Errorf("source one below threshold: effective %d >= %d — stomping missed", got, stompSourceThreshold)
+	}
+}
+
+func TestDetectStompingModulesUsesParsedOffsets(t *testing.T) {
+	res := &Result{}
+	mods := []*oleparse.VBAModule{
+		{
+			ModuleName: "Module1",
+			TextOffset: stompPCodeThreshold,
+			CodeBytes:  []byte("Attribute VB_Name = \"Module1\"\n"),
+		},
+		{
+			ModuleName: "Module2",
+			TextOffset: stompPCodeThreshold,
+			CodeBytes:  []byte(strings.Repeat("a", stompSourceThreshold)),
+		},
+	}
+
+	detectStompingModules(mods, res, time.Time{})
+
+	if !streamHasNeedle(res, "VBA-STOMPED Module1") {
+		t.Fatalf("expected stomp marker for trivial-source module, got %q", res.Streams)
+	}
+	if streamHasNeedle(res, "VBA-STOMPED Module2") {
+		t.Fatalf("unexpected stomp marker for real-source module: %q", res.Streams)
 	}
 }
 

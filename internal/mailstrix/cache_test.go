@@ -164,10 +164,9 @@ func TestFlightDistinctKeysDontCoalesce(t *testing.T) {
 	}
 }
 
-// TestCacheGetReturnsIsolatedSlice guards the defensive copy in Get: a caller
-// that mutates the returned matches in place (e.g. an in-place filter) must NOT
-// corrupt the shared cached entry for other concurrent callers.
-func TestCacheGetReturnsIsolatedSlice(t *testing.T) {
+// TestCacheGetReturnsImmutableCachedSlice guards the no-copy cache-hit contract:
+// Get returns the cached slice itself, and callers must treat it as immutable.
+func TestCacheGetReturnsImmutableCachedSlice(t *testing.T) {
 	c := newLRU(t, time.Minute, 16)
 	orig := []Match{{Rule: "A"}, {Rule: "B"}, {Rule: "C"}}
 	c.Put("k", orig)
@@ -176,18 +175,12 @@ func TestCacheGetReturnsIsolatedSlice(t *testing.T) {
 	if !ok || len(got) != 3 {
 		t.Fatalf("first Get: ok=%v len=%d", ok, len(got))
 	}
-	// Mutate the returned slice in place (overwrite + truncate), as an in-place
-	// filter would.
-	got[0] = Match{Rule: "MUTATED"}
-	got = got[:1]
-	_ = got
-
 	again, ok := c.Get("k")
 	if !ok || len(again) != 3 {
-		t.Fatalf("second Get changed: ok=%v len=%d (cache corrupted by caller mutation)", ok, len(again))
+		t.Fatalf("second Get: ok=%v len=%d", ok, len(again))
 	}
-	if again[0].Rule != "A" || again[2].Rule != "C" {
-		t.Errorf("cached entry mutated by caller: %+v", again)
+	if &got[0] != &again[0] {
+		t.Error("cache hit returned a copied slice; immutable hit path should be zero-copy")
 	}
 }
 

@@ -84,11 +84,27 @@ type Directory struct {
 func NewDirectory(data []byte, index uint32) (*Directory, error) {
 	self := &Directory{data: data, Index: index}
 
-	buffer := bytes.NewBuffer(data)
-	err := binary.Read(buffer, binary.LittleEndian, &self.Header)
-	if err != nil {
-		return nil, err
+	if len(data) < 128 {
+		return nil, io.ErrUnexpectedEOF
 	}
+	h := &self.Header
+	for i := 0; i < len(h.AB); i++ {
+		h.AB[i] = binary.LittleEndian.Uint16(data[i*2:])
+	}
+	h.CB = binary.LittleEndian.Uint16(data[64:])
+	h.Mse = data[66]
+	h.Flags = data[67]
+	h.SidLeftSib = binary.LittleEndian.Uint32(data[68:])
+	h.SidRightSib = binary.LittleEndian.Uint32(data[72:])
+	h.SidChild = binary.LittleEndian.Uint32(data[76:])
+	copy(h.ClsId[:], data[80:96])
+	h.UserFlags = binary.LittleEndian.Uint32(data[96:])
+	h.CreateTime = binary.LittleEndian.Uint64(data[100:])
+	h.ModifyTime = binary.LittleEndian.Uint64(data[108:])
+	h.SectStart = binary.LittleEndian.Uint32(data[116:])
+	h.Size = binary.LittleEndian.Uint32(data[120:])
+	h.PropType = binary.LittleEndian.Uint16(data[124:])
+
 	if self.Header.Mse == 0 { // Unallocated
 		return nil, nil
 	}
@@ -135,10 +151,40 @@ type OLEFile struct {
 }
 
 type VBAModule struct {
-	Code       string
+	Code       string // legacy string API; empty when using ExtractMacroBlobs*
+	CodeBytes  []byte // byte API used by Mailstrix to avoid string round-trips
 	ModuleName string
 	StreamName string
+	TextOffset uint32
 	Type       string
+}
+
+func parseOLEHeader(data []byte, h *OLEHeader) error {
+	if len(data) < 512 {
+		return io.ErrUnexpectedEOF
+	}
+	copy(h.AbSig[:], data[0:8])
+	copy(h.Clid[:], data[8:24])
+	h.MinorVersion = binary.LittleEndian.Uint16(data[24:])
+	h.MajorVersion = binary.LittleEndian.Uint16(data[26:])
+	h.ByteOrder = binary.LittleEndian.Uint16(data[28:])
+	h.SectorShift = binary.LittleEndian.Uint16(data[30:])
+	h.MiniSectorShift = binary.LittleEndian.Uint16(data[32:])
+	h.Reserved = binary.LittleEndian.Uint16(data[34:])
+	h.Reserved1 = binary.LittleEndian.Uint32(data[36:])
+	h.CsectDir = binary.LittleEndian.Uint32(data[40:])
+	h.CsectFat = binary.LittleEndian.Uint32(data[44:])
+	h.SectDirStart = binary.LittleEndian.Uint32(data[48:])
+	h.Signature = binary.LittleEndian.Uint32(data[52:])
+	h.MiniSectorCutoff = binary.LittleEndian.Uint32(data[56:])
+	h.SectMiniFatStart = binary.LittleEndian.Uint32(data[60:])
+	h.CsectMiniFat = binary.LittleEndian.Uint32(data[64:])
+	h.SectDifStart = binary.LittleEndian.Uint32(data[68:])
+	h.CsectDif = binary.LittleEndian.Uint32(data[72:])
+	for i := range h.SectFat {
+		h.SectFat[i] = binary.LittleEndian.Uint32(data[76+i*4:])
+	}
+	return nil
 }
 
 func (self *OLEFile) ReadSector(sector uint32) []byte {
@@ -198,6 +244,88 @@ func (self *OLEFile) ReadChain(start uint32) []byte {
 
 func (self *OLEFile) ReadMiniChain(start uint32) []byte {
 	return self._ReadChain(start, self.ReadMiniSector, self.ReadMiniFat)
+}
+
+func boundedInt(n uint64) int {
+	maxInt := int(^uint(0) >> 1)
+	if n > uint64(maxInt) {
+		return maxInt
+	}
+	return int(n)
+}
+
+func (self *OLEFile) ReadChainSize(start uint32, size uint64) []byte {
+	limit := boundedInt(size)
+	if limit > len(self.data) {
+		limit = len(self.data)
+	}
+	return self._ReadChainLimit(start, limit, self.ReadSector, self.ReadFat)
+}
+
+func (self *OLEFile) ReadMiniChainSize(start uint32, size uint64) []byte {
+	limit := boundedInt(size)
+	if limit > len(self.ministream) {
+		limit = len(self.ministream)
+	}
+	return self._ReadChainLimit(start, limit, self.ReadMiniSector, self.ReadMiniFat)
+}
+
+func (self *OLEFile) ReadChainPrefix(start uint32, limit int) []byte {
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > len(self.data) {
+		limit = len(self.data)
+	}
+	return self._ReadChainLimit(start, limit, self.ReadSector, self.ReadFat)
+}
+
+func (self *OLEFile) ReadMiniChainPrefix(start uint32, limit int) []byte {
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > len(self.ministream) {
+		limit = len(self.ministream)
+	}
+	return self._ReadChainLimit(start, limit, self.ReadMiniSector, self.ReadMiniFat)
+}
+
+func (self *OLEFile) _ReadChainLimit(
+	start uint32,
+	limit int,
+	ReadSector func(uint32) []byte,
+	ReadFat func(sector uint32) (uint32, bool),
+) []byte {
+	if limit <= 0 || start == ENDOFCHAIN {
+		return nil
+	}
+
+	result := make([]byte, 0, limit)
+	check := make(map[uint32]struct{})
+	for sector := start; sector != ENDOFCHAIN; {
+		chunk := ReadSector(sector)
+		if len(chunk) > limit-len(result) {
+			chunk = chunk[:limit-len(result)]
+		}
+		result = append(result, chunk...)
+		if len(result) >= limit {
+			return result
+		}
+
+		next, ok := ReadFat(sector)
+		if !ok {
+			DebugPrintf("invalid sector %x in chain", sector)
+			return result
+		}
+		if _, pres := check[next]; pres {
+			DebugPrintf("infinite loop detected at %v to %v starting at %v",
+				sector, next, start)
+			return result
+		}
+		check[next] = struct{}{}
+		sector = next
+	}
+	return result
 }
 
 func (self *OLEFile) _ReadChain(
@@ -261,12 +389,31 @@ func (self *OLEFile) _ReadChain(
 }
 
 func (self *OLEFile) GetStream(index uint32) []byte {
+	return self.getStream(index, true, -1)
+}
+
+func (self *OLEFile) GetStreamView(index uint32) []byte {
+	return self.getStream(index, false, -1)
+}
+
+func (self *OLEFile) GetStreamPrefix(index uint32, limit int) []byte {
+	return self.getStream(index, false, limit)
+}
+
+func (self *OLEFile) getStream(index uint32, copyResult bool, prefixLimit int) []byte {
 	if uint64(index) >= uint64(len(self.Directory)) {
 		return nil
 	}
 
 	if cached, ok := self.streamCache[index]; ok {
-		return append([]byte(nil), cached...)
+		result := cached
+		if prefixLimit >= 0 && len(result) > prefixLimit {
+			result = result[:prefixLimit]
+		}
+		if copyResult {
+			return append([]byte(nil), result...)
+		}
+		return result
 	}
 
 	var data []byte
@@ -275,28 +422,39 @@ func (self *OLEFile) GetStream(index uint32) []byte {
 	if d == nil {
 		return nil
 	}
+	readSize := uint64(d.Header.Size)
+	if prefixLimit >= 0 && uint64(prefixLimit) < readSize {
+		readSize = uint64(prefixLimit)
+	}
 	if d.Header.Size < self.Header.MiniSectorCutoff {
-		data = self.ReadMiniChain(d.Header.SectStart)
+		data = self.ReadMiniChainSize(d.Header.SectStart, readSize)
 	} else {
-		data = self.ReadChain(d.Header.SectStart)
+		data = self.ReadChainSize(d.Header.SectStart, readSize)
 	}
 
 	size := len(data)
-	if uint64(d.Header.Size) < uint64(size) {
-		size = int(d.Header.Size)
+	if readSize < uint64(size) {
+		size = int(readSize)
 	}
 	result := data[:size]
 
 	// Cache small streams (≤ streamCacheMaxSize) up to streamCacheMaxEntries.
 	// Large or rarely-read streams are returned uncached.
-	if len(result) <= streamCacheMaxSize &&
+	if prefixLimit < 0 && len(result) <= streamCacheMaxSize &&
 		len(self.streamCache) < streamCacheMaxEntries {
 		if self.streamCache == nil {
 			self.streamCache = make(map[uint32][]byte, streamCacheMaxEntries)
 		}
-		self.streamCache[index] = append([]byte(nil), result...)
+		if copyResult {
+			self.streamCache[index] = append([]byte(nil), result...)
+		} else {
+			self.streamCache[index] = result
+		}
 	}
 
+	if copyResult && prefixLimit >= 0 {
+		return append([]byte(nil), result...)
+	}
 	return result
 }
 
@@ -326,9 +484,7 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 	}
 
 	self := OLEFile{data: data}
-	buffer := bytes.NewBuffer(data)
-	err := binary.Read(buffer, binary.LittleEndian, &self.Header)
-	if err != nil {
+	if err := parseOLEHeader(data, &self.Header); err != nil {
 		return nil, err
 	}
 
@@ -367,6 +523,7 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 	if self.SectorCount > MAX_SECTORS {
 		return nil, fmt.Errorf("sector count exceeds MAX_SECTORS: %d", self.SectorCount)
 	}
+	self.FatSectors = make([]uint32, 0, min(int(self.Header.CsectFat), len(self.Header.SectFat)))
 	for _, sect := range self.Header.SectFat {
 		if sect != FREESECT {
 			self.FatSectors = append(self.FatSectors, sect)
@@ -378,20 +535,18 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 	seen := make(map[uint32]bool)
 	for sector != FREESECT && sector != ENDOFCHAIN {
 		data := self.ReadSector(sector)
-		dif_values := make([]uint32, self.SectorSize/4)
-		buffer := bytes.NewBuffer(data)
-		err := binary.Read(buffer, binary.LittleEndian, dif_values)
-		if err != nil {
-			return nil, err
+		if len(data) < self.SectorSize {
+			return nil, io.ErrUnexpectedEOF
 		}
-
-		// the last entry is actually a pointer to next DIF
-		if len(dif_values) < 2 {
+		difValues := self.SectorSize / 4
+		if difValues < 2 {
 			return nil, fmt.Errorf("infinite loop detected")
 		}
 
-		next := dif_values[len(dif_values)-1]
-		for _, value := range dif_values[:len(dif_values)-1] {
+		// the last entry is actually a pointer to next DIF
+		next := binary.LittleEndian.Uint32(data[(difValues-1)*4:])
+		for off := 0; off < (difValues-1)*4; off += 4 {
+			value := binary.LittleEndian.Uint32(data[off:])
 			if value != FREESECT {
 				self.FatSectors = append(self.FatSectors, value)
 			}
@@ -409,21 +564,28 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 	}
 
 	// load the FAT
+	fatCap := len(self.FatSectors) * (self.SectorSize / 4)
+	if fatCap > self.SectorCount+(self.SectorSize/4) {
+		fatCap = self.SectorCount + (self.SectorSize / 4)
+	}
+	self.Fat = make([]uint32, 0, fatCap)
 	for _, fat_sect := range self.FatSectors {
 		sect_data := self.ReadSector(fat_sect)
-
-		sect_longs := make([]uint32, self.SectorSize/4)
-		buffer := bytes.NewBuffer(sect_data)
-		err := binary.Read(buffer, binary.LittleEndian, sect_longs)
-		if err != nil {
-			return nil, err
+		if len(sect_data) < self.SectorSize {
+			return nil, io.ErrUnexpectedEOF
 		}
-
-		self.Fat = append(self.Fat, sect_longs...)
+		for off := 0; off < self.SectorSize; off += 4 {
+			self.Fat = append(self.Fat, binary.LittleEndian.Uint32(sect_data[off:]))
+		}
 	}
 
 	// get the list of directory sectors
-	dir_buffer := self.ReadChain(self.Header.SectDirStart)
+	var dir_buffer []byte
+	if self.Header.CsectDir > 0 {
+		dir_buffer = self.ReadChainSize(self.Header.SectDirStart, uint64(self.Header.CsectDir)*uint64(self.SectorSize))
+	} else {
+		dir_buffer = self.ReadChain(self.Header.SectDirStart)
+	}
 	if len(dir_buffer)%128 != 0 {
 		return nil, errors.New("directory stream has a partial entry")
 	}
@@ -462,7 +624,7 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 	// load the ministream
 	root_directory := self.Directory[0]
 	if root_directory.Header.SectStart != ENDOFCHAIN {
-		self.ministream = self.ReadChain(root_directory.Header.SectStart)
+		self.ministream = self.ReadChainSize(root_directory.Header.SectStart, uint64(root_directory.Header.Size))
 		if uint64(len(self.ministream)) < uint64(root_directory.Header.Size) {
 			return nil, fmt.Errorf(
 				"specified size is larger than actual stream length %v\n",
@@ -475,21 +637,20 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 		}
 		self.ministream = self.ministream[:ministreamSize]
 
-		data := self.ReadChain(self.Header.SectMiniFatStart)
+		data := self.ReadChainSize(self.Header.SectMiniFatStart, uint64(self.Header.CsectMiniFat)*uint64(self.SectorSize))
+		if len(data) > 0 {
+			miniFatCap := len(data) / 4
+			self.MiniFat = make([]uint32, 0, miniFatCap)
+		}
 		for i := 0; i < len(data); i += self.SectorSize {
 			if i+self.SectorSize > len(data) {
 				DebugPrintf("encountered EOF while parsing minifat\n")
 				break
 			}
 			chunk_data := data[i:min(i+self.SectorSize, len(data))]
-			chunk := make([]uint32, self.SectorSize/4)
-			buffer := bytes.NewBuffer(chunk_data)
-			err := binary.Read(buffer, binary.LittleEndian, &chunk)
-			if err != nil {
-				return nil, err
+			for off := 0; off < len(chunk_data); off += 4 {
+				self.MiniFat = append(self.MiniFat, binary.LittleEndian.Uint32(chunk_data[off:]))
 			}
-
-			self.MiniFat = append(self.MiniFat, chunk...)
 		}
 
 	}
@@ -502,6 +663,13 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 }
 
 func DecompressStream(compressed_container []byte) []byte {
+	return DecompressStreamLimit(compressed_container, MAX_DECOMPRESSED)
+}
+
+func DecompressStreamLimit(compressed_container []byte, limit int) []byte {
+	if limit <= 0 || limit > MAX_DECOMPRESSED {
+		limit = MAX_DECOMPRESSED
+	}
 	// MS-OVBA
 	// 2.4.1.2
 	var decompressed_container []byte
@@ -523,7 +691,7 @@ func DecompressStream(compressed_container []byte) []byte {
 	compressed_current += 1
 
 	for compressed_current < len(compressed_container) {
-		if len(decompressed_container) >= MAX_DECOMPRESSED {
+		if len(decompressed_container) >= limit {
 			// Decompression-bomb guard: a chunk grows the output by at most
 			// 4096 bytes, so overshoot past the cap is bounded. Return what we
 			// have (fail-open, consistent with the out-of-bound path below).
@@ -557,7 +725,9 @@ func DecompressStream(compressed_container []byte) []byte {
 			DebugPrintf("CompressedChunkSize != 4095 but CompressedChunkFlag == 0")
 		}
 
-		DebugPrintf("chunk size = %v", chunk_size)
+		if DebugEnabled() {
+			DebugPrintf("chunk size = %v", chunk_size)
+		}
 
 		compressed_end := len(compressed_container)
 		if compressed_end > compressed_current+int(chunk_size) {
@@ -566,12 +736,18 @@ func DecompressStream(compressed_container []byte) []byte {
 			DebugPrintf("Chunk exceeds compressed stream length")
 		}
 
+		decompressed_chunk_start = len(decompressed_container)
 		compressed_current += 2
+
+		chunk_output_limit := decompressed_chunk_start + 4096
+		if chunk_output_limit > limit {
+			chunk_output_limit = limit
+		}
 
 		if chunk_is_compressed == 0 { // uncompressed
 			chunk := compressed_container[compressed_current:compressed_end]
-			if len(chunk) > MAX_DECOMPRESSED-len(decompressed_container) {
-				chunk = chunk[:MAX_DECOMPRESSED-len(decompressed_container)]
+			if len(chunk) > chunk_output_limit-len(decompressed_container) {
+				chunk = chunk[:chunk_output_limit-len(decompressed_container)]
 				decompressed_container = append(decompressed_container, chunk...)
 				return decompressed_container
 			}
@@ -580,7 +756,6 @@ func DecompressStream(compressed_container []byte) []byte {
 			continue
 		}
 
-		decompressed_chunk_start = len(decompressed_container)
 		for compressed_current < compressed_end {
 			flag_byte := compressed_container[compressed_current]
 			compressed_current += 1
@@ -590,7 +765,7 @@ func DecompressStream(compressed_container []byte) []byte {
 						DebugPrintf("Compressed stream ended prematurely")
 						break
 					}
-					if len(decompressed_container) >= MAX_DECOMPRESSED {
+					if len(decompressed_container) >= chunk_output_limit {
 						return decompressed_container
 					}
 					decompressed_container = append(decompressed_container,
@@ -617,21 +792,42 @@ func DecompressStream(compressed_container []byte) []byte {
 				temp2 := 16 - bit_count
 				offset := (temp1 >> temp2) + 1
 				copy_source := len(decompressed_container) - int(offset)
-				DebugPrintf("copy_source %v %v", copy_source, length)
+				if DebugEnabled() {
+					DebugPrintf("copy_source %v %v", copy_source, length)
+				}
 
-				for index := copy_source; index < copy_source+int(length); index++ {
-					DebugPrintf("len %v idx %v", len(decompressed_container), index)
-					if index < 0 || index >= len(decompressed_container) {
-						DebugPrintf("Decompression out of bound %v (container length %v)",
-							index, len(decompressed_container))
-						return decompressed_container
-					}
-					if len(decompressed_container) >= MAX_DECOMPRESSED {
-						return decompressed_container
-					}
+				if copy_source < 0 || copy_source >= len(decompressed_container) {
+					DebugPrintf("Decompression out of bound %v (container length %v)",
+						copy_source, len(decompressed_container))
+					return decompressed_container
+				}
 
+				if len(decompressed_container) >= chunk_output_limit {
+					return decompressed_container
+				}
+				if length > chunk_output_limit-len(decompressed_container) {
+					length = chunk_output_limit - len(decompressed_container)
+				}
+				if copy_source+length <= len(decompressed_container) {
 					decompressed_container = append(decompressed_container,
-						decompressed_container[index])
+						decompressed_container[copy_source:copy_source+length]...)
+				} else {
+					for index := copy_source; index < copy_source+int(length); index++ {
+						if DebugEnabled() {
+							DebugPrintf("len %v idx %v", len(decompressed_container), index)
+						}
+						if index < 0 || index >= len(decompressed_container) {
+							DebugPrintf("Decompression out of bound %v (container length %v)",
+								index, len(decompressed_container))
+							return decompressed_container
+						}
+						if len(decompressed_container) >= chunk_output_limit {
+							return decompressed_container
+						}
+
+						decompressed_container = append(decompressed_container,
+							decompressed_container[index])
+					}
 				}
 				compressed_current += 2
 			}
@@ -681,6 +877,18 @@ func getUint32(dir_stream []byte, offset *int) uint32 {
 }
 
 func ExtractMacros(ofdoc *OLEFile) ([]*VBAModule, error) {
+	return extractMacros(ofdoc, true, MAX_DECOMPRESSED, 0)
+}
+
+func ExtractMacroBlobs(ofdoc *OLEFile) ([]*VBAModule, error) {
+	return extractMacros(ofdoc, false, MAX_DECOMPRESSED, 0)
+}
+
+func ExtractMacroBlobsLimited(ofdoc *OLEFile, maxModuleBytes, maxTotalBytes int) ([]*VBAModule, error) {
+	return extractMacros(ofdoc, false, maxModuleBytes, maxTotalBytes)
+}
+
+func extractMacros(ofdoc *OLEFile, stringify bool, maxModuleBytes, maxTotalBytes int) ([]*VBAModule, error) {
 	var result []*VBAModule
 
 	project := ofdoc.FindStreamByName("PROJECT")
@@ -689,31 +897,42 @@ func ExtractMacros(ofdoc *OLEFile) ([]*VBAModule, error) {
 	}
 
 	project_data := ofdoc.GetStream(project.Index)
-	re_keyval := regexp.MustCompile("^([^=]+)=(.*)$")
 	code_modules := make(map[string]string)
-	for _, line := range strings.Split(string(project_data), "\n") {
-		line = strings.TrimSpace(line)
+	for len(project_data) > 0 {
+		line := project_data
+		if before, after, ok := bytes.Cut(project_data, []byte{'\n'}); ok {
+			line = before
+			project_data = after
+		} else {
+			project_data = nil
+		}
+		line = bytes.TrimSpace(line)
 		if len(line) < 1 {
 			break
 		}
 
-		if strings.HasPrefix(line, "[") {
+		if line[0] == '[' {
 			continue
 		}
 
-		m := re_keyval.FindStringSubmatch(line)
-		if m == nil {
+		keyBytes, valueBytes, ok := bytes.Cut(line, []byte{'='})
+		if !ok {
 			continue
 		}
+		key := string(keyBytes)
+		value := string(valueBytes)
 
-		switch m[1] {
+		switch key {
 		case "Document":
-			key := strings.Split(m[2], "/")[0]
-			code_modules[key] = CLASS_EXTENSION
+			docKey := value
+			if before, _, ok := strings.Cut(value, "/"); ok {
+				docKey = before
+			}
+			code_modules[docKey] = CLASS_EXTENSION
 		case "Module":
-			code_modules[m[2]] = MODULE_EXTENSION
+			code_modules[value] = MODULE_EXTENSION
 		case "BaseClass":
-			code_modules[m[2]] = FORM_EXTENSION
+			code_modules[value] = FORM_EXTENSION
 		}
 	}
 
@@ -1100,6 +1319,7 @@ loop:
 	// short function to simplify unicode text output
 	//    uni_out = lambda unicode_text: unicode_text.encode("utf-8", "replace")
 	DebugPrintf("parsing %v modules", projectmodules_count)
+	totalCode := 0
 	for projectmodule_index := 0; projectmodule_index < int(projectmodules_count); projectmodule_index++ {
 		if i >= len(dir_stream)-2 { // At the very least, there must by a 2-byte ID
 			return nil, errors.New("dir_stream index out of range")
@@ -1276,16 +1496,37 @@ loop:
 		}
 		code_data = code_data[int(moduleoffset_textoffset):]
 		if len(code_data) > 0 {
-			result = append(result, &VBAModule{
-				Code: string(DecompressStream(code_data)),
+			limit := maxModuleBytes
+			if limit <= 0 || limit > MAX_DECOMPRESSED {
+				limit = MAX_DECOMPRESSED
+			}
+			if maxTotalBytes > 0 {
+				remaining := maxTotalBytes - totalCode
+				if remaining <= 0 {
+					break
+				}
+				if limit > remaining {
+					limit = remaining
+				}
+			}
+			code := DecompressStreamLimit(code_data, limit)
+			totalCode += len(code)
+			mod := &VBAModule{
 				ModuleName: decodeUnicode(
 					modulename_unicode_modulename_unicode,
 					projectcodepage_codepage),
 				StreamName: decodeUnicode(
 					modulestreamname_streamname_unicode,
 					projectcodepage_codepage),
-				Type: code_modules[modulename_modulename],
-			})
+				TextOffset: moduleoffset_textoffset,
+				Type:       code_modules[modulename_modulename],
+			}
+			if stringify {
+				mod.Code = string(code)
+			} else {
+				mod.CodeBytes = code
+			}
+			result = append(result, mod)
 		}
 	}
 
@@ -1350,6 +1591,34 @@ func ParseBuffer(data []byte) ([]*VBAModule, error) {
 	}
 
 	macros, err := ExtractMacros(olefile)
+	if err != nil {
+		return nil, err
+	}
+
+	return macros, nil
+}
+
+func ParseBufferBlobs(data []byte) ([]*VBAModule, error) {
+	olefile, err := NewOLEFile(data)
+	if err != nil {
+		return nil, err
+	}
+
+	macros, err := ExtractMacroBlobs(olefile)
+	if err != nil {
+		return nil, err
+	}
+
+	return macros, nil
+}
+
+func ParseBufferBlobsLimited(data []byte, maxModuleBytes, maxTotalBytes int) ([]*VBAModule, error) {
+	olefile, err := NewOLEFile(data)
+	if err != nil {
+		return nil, err
+	}
+
+	macros, err := ExtractMacroBlobsLimited(olefile, maxModuleBytes, maxTotalBytes)
 	if err != nil {
 		return nil, err
 	}

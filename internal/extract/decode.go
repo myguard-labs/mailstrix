@@ -769,12 +769,24 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 		}
 	}
 
-	// EFFORT-4 global BFS: seed ALL sources at depth 0 before any depth-1 child
-	// is enqueued, so the global FIFO processes all sources shallowly before any
-	// source deeply. Under maxStreams saturation this means the cut happens by
-	// source ORDER × depth — never by effort — making coverage monotone in effort:
-	// raising DecodeDepth only ADDS deeper layers after all shallower layers of
-	// all sources are emitted.
+	// Keep only sources that can enter the decoder walk. The defang/UTF-16 passes
+	// above already saw every source; a source that is not text or has no encoding
+	// markers would be discarded by the BFS loop without emitting blobs or deep
+	// markers, so dropping it here saves the per-source state and queue slots.
+	decodeSources := sources[:0]
+	for _, src := range sources {
+		if mostlyText(src) && mayBeEncoded(src) {
+			decodeSources = append(decodeSources, src)
+		}
+	}
+	sources = decodeSources
+
+	// EFFORT-4 global BFS: seed all decode-eligible sources at depth 0 before any
+	// depth-1 child is enqueued, so the global FIFO processes all sources shallowly
+	// before any source deeply. Under maxStreams saturation this means the cut
+	// happens by source ORDER × depth — never by effort — making coverage monotone
+	// in effort: raising DecodeDepth only ADDS deeper layers after all shallower
+	// layers of all eligible sources are emitted.
 	//
 	// Per-source state (blobs, cum, iters, seen, maxLayer) is carried in per-index
 	// maps so the per-source budget/dedup/marker semantics (MSD-1, MSD-2,

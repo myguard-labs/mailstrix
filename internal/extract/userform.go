@@ -204,7 +204,7 @@ func fromUserForms(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			break
 		}
 
-		data := ole.GetStream(d.Index)
+		data := ole.GetStreamView(d.Index)
 		if len(data) == 0 {
 			continue
 		}

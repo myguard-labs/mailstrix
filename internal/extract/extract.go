@@ -583,7 +583,7 @@ func fromOLE(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	// .doc/.xls with a second stage appended after its last allocated sector).
 	// Runs on both the macro and no-macro paths below.
 	fromOLEExtraData(ole, buf, res, deadline)
-	mods, err := oleparse.ExtractMacros(ole)
+	mods, err := oleparse.ExtractMacroBlobsLimited(ole, maxBytesPerModule, maxTotalCode)
 	if err != nil {
 		// A macro-extraction error on a real MSI/.msg is expected (no VBA project),
 		// so don't fail outright — fall through to the MSG (Outlook) and MSI paths,
@@ -622,7 +622,7 @@ func fromOLE(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	res.Streams = codes(res, mods, res.Streams)
 	// Detect VBA stomping: substantial p-code but trivial/missing source.
 	// Emits "VBA-STOMPED <name> pcode=<n> src=<n>" markers for YARA matching.
-	detectStomping(ole, res, deadline)
+	detectStompingModules(mods, res, deadline)
 	// Extract strings hidden in VBA UserForm control data (captions, tags, text
 	// values stored in "o"/"f"/"\x03VBFrame" streams). These are invisible to
 	// source-text scanners. Emits "USERFORM-STRINGS" marker + carved strings.
@@ -753,7 +753,7 @@ func fromMSI(ole *oleparse.OLEFile, res *Result, deadline time.Time) bool {
 		if len(res.Streams) >= maxMSIStreams || total >= maxTotalMSI || expired(deadline) {
 			break
 		}
-		b := ole.GetStream(d.Index)
+		b := ole.GetStreamView(d.Index)
 		if len(b) == 0 {
 			continue
 		}
@@ -850,7 +850,7 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		if emitted >= maxMSGAttachments || len(res.Streams) >= maxStreams || total >= maxTotalMSG || expired(deadline) || bud.spent() {
 			break
 		}
-		b := ole.GetStream(d.Index)
+		b := ole.GetStreamView(d.Index)
 		if len(b) == 0 {
 			continue
 		}
@@ -941,7 +941,8 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) (offi
 	// also bound the cumulative (parent-inclusive) total, which is the intent.
 	out := res.Streams
 	parentStreams := len(out) // streams already present (nested child); excluded from the Failed delta
-	var totalCode, totalBin, attempted, failedBins int
+	totalCode := streamBytes(out)
+	var totalBin, attempted, failedBins int
 	for i, f := range zr.File {
 		if i >= maxZipEntries {
 			break
@@ -965,7 +966,11 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) (offi
 		}
 		totalBin += len(bin)
 		attempted++
-		mods, err := oleparse.ParseBuffer(bin)
+		remainingCode := maxTotalCode - totalCode
+		if remainingCode <= 0 {
+			break
+		}
+		mods, err := oleparse.ParseBufferBlobsLimited(bin, maxBytesPerModule, remainingCode)
 		if err != nil {
 			failedBins++ // one unparseable .bin must not lose the others
 			continue
@@ -974,10 +979,7 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) (offi
 		if len(out) >= maxStreams {
 			break
 		}
-		totalCode = 0
-		for _, b := range out {
-			totalCode += len(b)
-		}
+		totalCode = streamBytes(out)
 		if totalCode >= maxTotalCode {
 			break
 		}
@@ -1455,6 +1457,14 @@ func readZipEntry(f *zip.File) []byte {
 	return b.Bytes()
 }
 
+func streamBytes(streams [][]byte) int {
+	total := 0
+	for _, b := range streams {
+		total += len(b)
+	}
+	return total
+}
+
 // codes appends the non-empty decompressed source of each VBA module to out.
 // The Code field is already cleartext (oleparse.ExtractMacros runs the MS-OVBA
 // DecompressStream), which is exactly what the keyword rules need to see.
@@ -1466,12 +1476,9 @@ func readZipEntry(f *zip.File) []byte {
 // across modules). A crafted vbaProject.bin with thousands of modules or a
 // decompression bomb therefore cannot OOM the container through res.Streams.
 func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
-	total := 0
-	for _, b := range out {
-		total += len(b)
-	}
+	total := streamBytes(out)
 	for _, m := range mods {
-		if m == nil || m.Code == "" {
+		if m == nil || (len(m.CodeBytes) == 0 && m.Code == "") {
 			continue
 		}
 		if len(out) >= maxStreams || total >= maxTotalCode {
@@ -1481,14 +1488,26 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 		// MiB (decompression bomb), so converting it whole would itself be the OOM
 		// allocation. Clamp to both the per-module cap and the remaining total
 		// budget so neither maxTotalCode nor the copy can overshoot.
-		n := len(m.Code)
-		if n > maxBytesPerModule {
-			n = maxBytesPerModule
+		var b []byte
+		if len(m.CodeBytes) > 0 {
+			n := len(m.CodeBytes)
+			if n > maxBytesPerModule {
+				n = maxBytesPerModule
+			}
+			if rem := maxTotalCode - total; n > rem {
+				n = rem
+			}
+			b = m.CodeBytes[:n]
+		} else {
+			n := len(m.Code)
+			if n > maxBytesPerModule {
+				n = maxBytesPerModule
+			}
+			if rem := maxTotalCode - total; n > rem {
+				n = rem
+			}
+			b = []byte(m.Code[:n])
 		}
-		if rem := maxTotalCode - total; n > rem {
-			n = rem
-		}
-		b := []byte(m.Code[:n])
 		out = append(out, b)
 		// Record this as genuine VBA macro source so the scanner sets the VBA
 		// external ONLY for these streams. Without it the scanner set VBA=true on
@@ -1497,7 +1516,7 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 		if res != nil {
 			res.VBAStreams = append(res.VBAStreams, b)
 		}
-		total += n
+		total += len(b)
 	}
 	return out
 }

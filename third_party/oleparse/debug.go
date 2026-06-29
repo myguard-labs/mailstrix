@@ -10,7 +10,7 @@ var (
 	OLE_DEBUG *bool
 )
 
-func DebugPrintf(fmt_str string, args ...interface{}) {
+func DebugEnabled() bool {
 	if OLE_DEBUG == nil {
 		value := false
 		OLE_DEBUG = &value
@@ -23,8 +23,11 @@ func DebugPrintf(fmt_str string, args ...interface{}) {
 		}
 
 	}
+	return *OLE_DEBUG
+}
 
-	if *OLE_DEBUG {
+func DebugPrintf(fmt_str string, args ...interface{}) {
+	if DebugEnabled() {
 		if !strings.HasSuffix(fmt_str, "\n") {
 			fmt_str += "\n"
 		}

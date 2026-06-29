@@ -2,6 +2,8 @@ package mailstrix
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -191,6 +193,42 @@ func TestBuildMarkerBundle_DisablesNonMarker(t *testing.T) {
 	}
 	if sawContent {
 		t.Error("Control_Content (non-marker) fired in marker bundle — should be disabled")
+	}
+}
+
+func TestBuildMarkerBundleFromValidatedFilesDoesNotRevalidate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "good.yar"), []byte(perf18Rules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bad.yar"), []byte("rule broken {"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldValidate := validateRuleFile
+	var calls int
+	validateRuleFile = func(path string) error {
+		calls++
+		return oldValidate(path)
+	}
+	defer func() { validateRuleFile = oldValidate }()
+
+	logf := func(string, ...any) {}
+	files, err := validatedRuleFiles(dir, logf)
+	if err != nil {
+		t.Fatalf("validatedRuleFiles: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("validated files = %v, want only the good file", files)
+	}
+	if calls != 2 {
+		t.Fatalf("validation calls after validatedRuleFiles = %d, want 2", calls)
+	}
+	if _, err := buildMarkerBundleFromFiles("", dir, files, nil, logf); err != nil {
+		t.Fatalf("buildMarkerBundleFromFiles: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("marker bundle revalidated files: calls=%d want 2", calls)
 	}
 }
 

@@ -54,7 +54,7 @@ func fromPPTVBA(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		return // not a PPT OLE2
 	}
 
-	data := ole.GetStream(s.Index)
+	data := ole.GetStreamView(s.Index)
 	if len(data) < 8 {
 		return
 	}
@@ -152,13 +152,17 @@ func pptExtractEOS(body []byte, inst uint16, res *Result, deadline time.Time) {
 		return
 	}
 
-	mods, err := oleparse.ExtractMacros(subOLE)
+	remainingCode := maxTotalCode - streamBytes(res.Streams)
+	if remainingCode <= 0 {
+		return
+	}
+	mods, err := oleparse.ExtractMacroBlobsLimited(subOLE, maxBytesPerModule, remainingCode)
 	if err != nil || len(mods) == 0 {
 		return
 	}
 
 	res.Streams = codes(res, mods, res.Streams)
-	detectStomping(subOLE, res, deadline)
+	detectStompingModules(mods, res, deadline)
 }
 
 func inflatePPTCompressedEOS(body []byte) []byte {

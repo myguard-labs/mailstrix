@@ -179,6 +179,27 @@ func TestCodesBounded(t *testing.T) {
 	}
 }
 
+func TestCodesByteBackedModules(t *testing.T) {
+	huge := oleparse.VBAModule{CodeBytes: bytes.Repeat([]byte{'x'}, maxBytesPerModule+4096)}
+	res := &Result{}
+	out := codes(res, []*oleparse.VBAModule{&huge}, nil)
+	if len(out) != 1 {
+		t.Fatalf("want 1 stream, got %d", len(out))
+	}
+	if len(out[0]) != maxBytesPerModule {
+		t.Fatalf("byte-backed module not clamped: got %d, want %d", len(out[0]), maxBytesPerModule)
+	}
+	if len(res.VBAStreams) != 1 || len(res.VBAStreams[0]) != maxBytesPerModule {
+		t.Fatalf("byte-backed module not recorded as VBA stream: got %d streams", len(res.VBAStreams))
+	}
+
+	both := oleparse.VBAModule{Code: "legacy", CodeBytes: []byte("bytes")}
+	out = codes(nil, []*oleparse.VBAModule{&both}, nil)
+	if got := string(out[0]); got != "bytes" {
+		t.Fatalf("CodeBytes should win over Code: got %q", got)
+	}
+}
+
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	buf, err := os.ReadFile(filepath.Join("testdata", name))

@@ -878,7 +878,7 @@ func fromDefaultPWRC4(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 	var wb []byte
 	for _, name := range []string{"Workbook", "Book"} {
 		if s := ole.FindStreamByName(name); s != nil {
-			wb = ole.GetStream(s.Index)
+			wb = ole.GetStreamView(s.Index)
 			break
 		}
 	}
@@ -1008,8 +1008,8 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 	if ei == nil || ep == nil {
 		return
 	}
-	infoData := ole.GetStream(ei.Index)
-	encPkgData := ole.GetStream(ep.Index)
+	infoData := ole.GetStreamView(ei.Index)
+	encPkgData := ole.GetStreamView(ep.Index)
 	if len(infoData) < 4 || len(encPkgData) == 0 {
 		return
 	}
@@ -1121,7 +1121,7 @@ func fromDefaultPWXOR(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 	var wb []byte
 	for _, name := range []string{"Workbook", "Book"} {
 		if s := ole.FindStreamByName(name); s != nil {
-			wb = ole.GetStream(s.Index)
+			wb = ole.GetStreamView(s.Index)
 			break
 		}
 	}

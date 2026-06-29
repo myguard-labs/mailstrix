@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/textproto"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -332,13 +333,18 @@ func readICAPChunkedBody(r *bufio.Reader, maxBytes int64) ([]byte, bool, error) 
 		if int64(len(out))+size > maxBytes {
 			return nil, false, errICAPBodyTooLarge
 		}
-		chunk := make([]byte, size)
-		if _, err := io.ReadFull(r, chunk); err != nil {
+		sizeInt := int(size)
+		if int64(sizeInt) != size {
+			return nil, false, errICAPBodyTooLarge
+		}
+		old := len(out)
+		out = slices.Grow(out, sizeInt)
+		out = out[:old+sizeInt]
+		if _, err := io.ReadFull(r, out[old:]); err != nil {
 			return nil, false, err
 		}
 		// Consume trailing CRLF after chunk data.
 		_, _ = r.ReadString('\n')
-		out = append(out, chunk...)
 	}
 }
 

@@ -74,10 +74,7 @@ func fromOLEIndicators(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		// materialises the whole stream, so skip an oversized one — we only need
 		// the first few bytes and won't pay to load a multi-GB blob for them.
 		if !flashSeen && d.Header.Mse == 2 && d.Header.Size > 0 && d.Header.Size <= maxOLEIDFlashStream {
-			head := ole.GetStream(d.Index)
-			if len(head) > maxOLEIDFlashScan {
-				head = head[:maxOLEIDFlashScan]
-			}
+			head := ole.GetStreamPrefix(d.Index, maxOLEIDFlashScan)
 			for _, m := range swfMagics {
 				if bytes.HasPrefix(head, m) {
 					flashSeen = true

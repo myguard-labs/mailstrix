@@ -379,6 +379,44 @@ func TestReadICAPChunkedBody(t *testing.T) {
 	}
 }
 
+func TestReadICAPChunkedBodyManyChunks(t *testing.T) {
+	var in strings.Builder
+	var want strings.Builder
+	for i := 0; i < 128; i++ {
+		in.WriteString("1\r\nx\r\n")
+		want.WriteByte('x')
+	}
+	in.WriteString("0 ; ieof\r\n\r\n")
+
+	got, gotIEOF, err := readICAPChunkedBody(bufio.NewReader(strings.NewReader(in.String())), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want.String() {
+		t.Fatalf("body len=%d want %d", len(got), want.Len())
+	}
+	if !gotIEOF {
+		t.Fatal("terminal ieof not preserved")
+	}
+}
+
+func BenchmarkReadICAPChunkedBodyManyChunks(b *testing.B) {
+	var in strings.Builder
+	for i := 0; i < 512; i++ {
+		in.WriteString("4\r\nabcd\r\n")
+	}
+	in.WriteString("0\r\n\r\n")
+	payload := in.String()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got, _, err := readICAPChunkedBody(bufio.NewReader(strings.NewReader(payload)), 4096)
+		if err != nil || len(got) != 2048 {
+			b.Fatalf("readICAPChunkedBody len=%d err=%v", len(got), err)
+		}
+	}
+}
+
 // TestICAPPreviewContinue verifies RFC 3507 §4.5 100-Continue handling:
 // when a client sends Preview: 0 and a 0-byte preview terminating with plain
 // "0\r\n\r\n" (no ieof), the server MUST write "100 Continue" and then read

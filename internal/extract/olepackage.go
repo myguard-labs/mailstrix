@@ -80,7 +80,7 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 		if emitted >= maxPackageObjects || len(res.Streams) >= maxStreams || total >= maxTotalPackage || expired(deadline) || bud.spent() {
 			break
 		}
-		b := ole.GetStream(d.Index)
+		b := ole.GetStreamView(d.Index)
 		data := carveOle10Native(b)
 		if len(data) == 0 {
 			continue
