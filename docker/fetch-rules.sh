@@ -27,6 +27,24 @@ mkdir -p "$OUT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# PERF-25 rule profile: `mail` (default) runs the conservative per-rule
+# mail-relevance filter (docker/filter-rules.py) over EVERY fetched source after
+# download — drops only host/runtime-only rules that can never fire on a mail
+# attachment (MEMORY/kernel-driver/Linux-ELF/pcap), keeps everything that might.
+# `full` skips the filter and bakes every fetched rule.
+#   MAILSTRIX_PROFILE=mail|full   (default mail)
+# Legacy alias: YARAFORGE_FILTER=0 forces `full` (back-compat with pre-PERF-25
+# builds that toggled the yara-forge-only filter).
+MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE:-mail}"
+if [ "${YARAFORGE_FILTER:-1}" = "0" ]; then
+    MAILSTRIX_PROFILE="full"
+fi
+case "$MAILSTRIX_PROFILE" in
+    mail|full) ;;
+    *) fail "invalid MAILSTRIX_PROFILE=$MAILSTRIX_PROFILE (want mail or full)" ;;
+esac
+echo "fetch-rules: rule profile = $MAILSTRIX_PROFILE"
+
 fail() { echo "fetch-rules: $*" >&2; [ "${MAILSTRIX_RULES_OPTIONAL:-0}" = "1" ] || exit 1; }
 
 # LOCAL_ONLY=1 — skip ALL network rule sources (the 8 public feeds) and produce
@@ -44,18 +62,9 @@ if [ "${LOCAL_ONLY:-0}" = "1" ]; then
 fi
 
 # 1) YARA-Forge bundle — one big .yar of vetted public rules. We pull the FULL
-#    tier (~11.7k rules) and run it through filter-yaraforge.py, which prunes
-#    per-rule (the bundle is ONE file, so file-level dropping can't touch it):
-#      - license: drop MALPEDIA (research-access) + CC-BY-NC; keep permissive +
-#        DRL + unresolved (workspace policy 2026-06-29).
-#      - mail-relevance (moderate): drop host/runtime-only rules (memory-dump,
-#        kernel drivers, Linux/ELF-only, sandbox post-exec); keep maldoc/script
-#        + PE dropper/loader/stealer families (closes the clamav-only 35-gap:
-#        Hancitor, CVE-2017-11882, LokiBot, Nanocore, AgentTesla, Formbook,
-#        Bumblebee, Mallox, …). All private helper rules are preserved (dropping
-#        one dangles its referencing rules → compile error).
-#    YARAFORGE_SET=core|extended falls back to the UNFILTERED bundle (the filter
-#    targets the full tier's breadth); set YARAFORGE_FILTER=0 to skip filtering.
+#    tier (~11.7k rules); the `mail` profile post-pass (end of this script) prunes
+#    it per-rule (the bundle is ONE file, so file-level dropping can't touch it).
+#    YARAFORGE_SET=core|extended pulls a smaller upstream tier instead.
 YARAFORGE_SET="${YARAFORGE_SET:-full}"
 case "$YARAFORGE_SET" in
     core|extended|full) ;;
@@ -67,15 +76,8 @@ fi
 echo "fetch-rules: YARA-Forge $YARAFORGE_SET <- $YARAFORGE_URL"
 if curl -fsSL "$YARAFORGE_URL" -o "$TMP/forge.zip"; then
     unzip -o -q "$TMP/forge.zip" -d "$TMP/forge" || fail "unzip yara-forge failed"
-    FILTER_PY="$(dirname "$0")/filter-yaraforge.py"
     find "$TMP/forge" \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
-        dest="$OUT/yaraforge-$(basename "$f")"
-        if [ "$YARAFORGE_SET" = "full" ] && [ "${YARAFORGE_FILTER:-1}" = "1" ] \
-           && [ -f "$FILTER_PY" ]; then
-            python3 "$FILTER_PY" "$f" "$dest" || fail "filter-yaraforge failed"
-        else
-            cp "$f" "$dest"
-        fi
+        cp "$f" "$OUT/yaraforge-$(basename "$f")"
     done
 else
     fail "download yara-forge failed"
@@ -315,6 +317,26 @@ for bad in $SLOW_RULE_DENYLIST; do
     done
 done
 
+# PERF-25 mail-profile post-pass: prune host/runtime-only rules per-rule across
+# EVERY fetched source file (in place). `full` skips this entirely. Runs after the
+# PERF-12 file-level denylist so a removed file isn't filtered needlessly.
+# filter-rules.py is conservative: KEEP-wins + private always kept (see its header).
+if [ "$MAILSTRIX_PROFILE" = "mail" ]; then
+    FILTER_PY="$(dirname "$0")/filter-rules.py"
+    if [ -f "$FILTER_PY" ]; then
+        echo "fetch-rules: mail profile — filtering fetched rules (filter-rules.py)"
+        find "$OUT" \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
+            if python3 "$FILTER_PY" "$f" "$f.filtered"; then
+                mv "$f.filtered" "$f"
+            else
+                fail "filter-rules failed on $(basename "$f")"
+            fi
+        done
+    else
+        fail "MAILSTRIX_PROFILE=mail but filter-rules.py not found at $FILTER_PY"
+    fi
+fi
+
 COUNT="$(find "$OUT" -name '*.yar' -o -name '*.yara' | wc -l)"
 echo "fetch-rules: $COUNT rule files in $OUT"
 [ "$COUNT" -gt 0 ] || fail "no rule files fetched"
@@ -323,7 +345,8 @@ echo "fetch-rules: $COUNT rule files in $OUT"
 # Only includes sources that were actually fetched (respects ANYRUN=0 etc).
 {
     printf '[\n'
-    printf '  {"name":"yaraforge","repo":"https://github.com/YARAHQ/yara-forge","license":"mixed permissive+DRL (MALPEDIA/CC-BY-NC filtered)","ref":"latest","set":"%s","filter":"%s"}' "${YARAFORGE_SET}" "$([ "$YARAFORGE_SET" = full ] && [ "${YARAFORGE_FILTER:-1}" = 1 ] && echo mail-relevance+license || echo none)"
+    printf '  {"name":"profile","value":"%s","filter":"%s"}' "${MAILSTRIX_PROFILE}" "$([ "$MAILSTRIX_PROFILE" = mail ] && echo mail-relevance+license || echo none)"
+    printf ',\n  {"name":"yaraforge","repo":"https://github.com/YARAHQ/yara-forge","license":"mixed permissive+DRL (MALPEDIA/CC-BY-NC filtered)","ref":"latest","set":"%s"}' "${YARAFORGE_SET}"
     printf ',\n  {"name":"signature-base","repo":"https://github.com/Neo23x0/signature-base","license":"CC BY-NC 4.0","ref":"%s"}' "${SIGBASE_REF}"
     if [ "${ANYRUN:-1}" = "1" ]; then
         printf ',\n  {"name":"anyrun","repo":"https://github.com/anyrun/YARA","license":"MIT","ref":"%s"}' "${ANYRUN_REF:-main}"

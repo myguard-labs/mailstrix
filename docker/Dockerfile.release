@@ -71,14 +71,17 @@ FROM yara AS rules
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates unzip python3 \
     && rm -rf /var/lib/apt/lists/*
-# filter-yaraforge.py beside fetch-rules.sh (resolved via $(dirname "$0")) for
-# the full-tier per-rule license/mail-relevance filter.
-COPY docker/fetch-rules.sh docker/compile-rules.sh docker/filter-yaraforge.py /usr/local/bin/
+# filter-rules.py beside fetch-rules.sh (resolved via $(dirname "$0")) for the
+# `mail` profile per-rule mail-relevance/license filter.
+COPY docker/fetch-rules.sh docker/compile-rules.sh docker/filter-rules.py /usr/local/bin/
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
-RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-yaraforge.py
+RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-rules.py
 ARG CACHEBUST=unset
 ARG LOCAL_ONLY=0
+# PERF-25 rule profile: mail (default, conservative prune) | full (every rule).
+ARG MAILSTRIX_PROFILE=mail
 ARG YARAFORGE_SET=full
+# Legacy alias: YARAFORGE_FILTER=0 forces the `full` profile (back-compat).
 ARG YARAFORGE_FILTER=1
 ARG YARAFORGE_URL=
 ARG SIGBASE_REF=master
@@ -94,7 +97,7 @@ ARG CAPE=1
 ARG CAPE_REF=master
 ARG YARAIFY=1
 ARG YARAIFY_URL=
-RUN LOCAL_ONLY="${LOCAL_ONLY}" \
+RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
         YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_FILTER="${YARAFORGE_FILTER}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
         ANYRUN="${ANYRUN}" ANYRUN_REF="${ANYRUN_REF}" \
         DIDIER="${DIDIER}" DIDIER_REF="${DIDIER_REF}" \

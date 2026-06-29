@@ -94,20 +94,23 @@ FROM yara AS rules
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates unzip python3 \
     && rm -rf /var/lib/apt/lists/*
-# filter-yaraforge.py must sit beside fetch-rules.sh (resolved via
-# $(dirname "$0")) so the full-tier per-rule license/mail-relevance filter runs.
-COPY docker/fetch-rules.sh docker/compile-rules.sh docker/filter-yaraforge.py /usr/local/bin/
+# filter-rules.py must sit beside fetch-rules.sh (resolved via $(dirname "$0"))
+# so the `mail` profile per-rule mail-relevance/license filter runs.
+COPY docker/fetch-rules.sh docker/compile-rules.sh docker/filter-rules.py /usr/local/bin/
 # Repo-tracked local rules (our own heuristics, e.g. the mraptor-style maldoc
 # rule) baked alongside the fetched public sets so they ship in the seed .yac.
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
-RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-yaraforge.py
+RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-rules.py
 ARG CACHEBUST=unset
 # LOCAL_ONLY=1 skips all network rule fetches; only docker/local-rules/ are
 # compiled into the seed .yac. GitHub CI + release builds set this (the heavy
 # public bundle is built by the local nightly cron and shipped via the
 # rules-current release, pulled at runtime by --fetch-rules).
 ARG LOCAL_ONLY=0
+# PERF-25 rule profile: mail (default, conservative prune) | full (every rule).
+ARG MAILSTRIX_PROFILE=mail
 ARG YARAFORGE_SET=full
+# Legacy alias: YARAFORGE_FILTER=0 forces the `full` profile (back-compat).
 ARG YARAFORGE_FILTER=1
 ARG YARAFORGE_URL=
 ARG SIGBASE_REF=master
@@ -123,7 +126,7 @@ ARG CAPE=1
 ARG CAPE_REF=master
 ARG YARAIFY=1
 ARG YARAIFY_URL=
-RUN LOCAL_ONLY="${LOCAL_ONLY}" \
+RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
         YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_FILTER="${YARAFORGE_FILTER}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
         ANYRUN="${ANYRUN}" ANYRUN_REF="${ANYRUN_REF}" \
         DIDIER="${DIDIER}" DIDIER_REF="${DIDIER_REF}" \

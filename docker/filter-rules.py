@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
-"""filter-yaraforge.py — rule-level filter for the YARA-Forge `full` bundle.
+"""filter-rules.py — conservative mail-relevance rule filter (the `mail` profile).
 
-YARA-Forge ships its `full` tier (~11.7k rules) as ONE .yar file. fetch-rules.sh
-can only drop WHOLE files (the bundle guard refuses to nuke a 11k-rule file for
-one bad rule), so per-rule pruning has to happen here, BEFORE compile.
+PERF-25: the `mail` rule profile prunes, per-rule, only the rules that can NEVER
+fire on an email attachment's bytes (host/runtime-only artifacts), leaving every
+rule that *might* match mail content. This is the `MAILSTRIX_PROFILE=mail` knob;
+`full` skips this filter (every fetched rule kept). Applied to EVERY fetched
+source .yar (was yara-forge-only) — the non-forge sources are already hand-curated
+at fetch, so the prune mostly bites the broad forge+sigbase sets, but running it
+everywhere makes the profile uniform.
 
-Two filters, both per-rule, driven by the meta block YARA-Forge embeds:
+CONSERVATIVE by construction — if there is ANY doubt a rule could match mail,
+it stays in `mail`:
+  - KEEP override wins over every mail-relevance heuristic drop (a maldoc/script/
+    dropper/loader/stealer/RAT token in the name keeps the rule).
+  - `private` helper rules are ALWAYS kept (dropping one dangles its referencing
+    rules → compile error; near-zero match cost anyway).
+  - Only host/runtime-ONLY classes are dropped: MEMORY/LOG-tagged, kernel drivers
+    (LOLDRIVERS), Linux/ELF/Unix-only families, memory config scanners, pcap /
+    network-traffic rules. Everything else is kept.
 
-  1. LICENSE — keep permissive + DRL + unresolved("N/A"), per workspace policy
-     (2026-06-29), EXCEPT MALPEDIA which is research-access (its license_url is
-     "N/A" but it is NOT redistributable) → always dropped. Explicit CC-BY-NC /
-     non-commercial license_urls are dropped too.
+Two filters, both per-rule, driven by the rule name/tags (+ the meta block where
+YARA-Forge embeds it):
 
-  2. MAIL-RELEVANCE (moderate) — keep rules that can plausibly fire on an email
-     attachment's bytes: maldoc/OOXML/RTF/PDF/LNK/script families + PE
-     dropper/loader/stealer/RAT families (the clamav-only 35-gap classes:
-     Hancitor, CVE-2017-11882, LokiBot, Nanocore, AgentTesla, Formbook,
-     Bumblebee, Mallox, …). Drop rules that only fire on host/runtime artifacts:
-     MEMORY-tagged, kernel drivers (LOLDRIVERS), Linux/ELF-only, sandbox
-     post-execution, network/pcap, and pure file-identifier INFO rules.
+  1. LICENSE (yara-forge-scoped) — YARA-Forge prefixes every rule name with its
+     upstream source in CAPS, so we can drop MALPEDIA (research-access, not
+     redistributable) by prefix and CC-BY-NC by `license_url`. Other sources are
+     curated/permissive at fetch, so this gate is a no-op for them (their rule
+     names carry no MALPEDIA_ prefix).
+
+  2. MAIL-RELEVANCE (all sources) — the conservative host-only drop above.
 
 A dropped rule is replaced by nothing (the import lines + remaining rules stay a
 valid bundle). Reports kept/dropped with reason breakdown. Idempotent; reads one
 .yar, writes one filtered .yar.
 
-Usage: filter-yaraforge.py IN.yar OUT.yar
+Usage: filter-rules.py IN.yar OUT.yar
 """
 import re
 import sys
@@ -59,7 +69,6 @@ DROP_NAME_SUBSTR = (
     "_MEMORY_",
     "_PCAP_",
     "_NETWORK_TRAFFIC",
-    "GODMODE", "GOD_MODE",
 )
 # Linux/ELF-only families: e.g. "Linux_", "_ELF_", "Unix_". Mail to a Windows
 # user base; keep cross-platform loaders but drop pure-ELF host implants.
@@ -215,7 +224,7 @@ def verdict(name, tags, lic):
 
 def main():
     if len(sys.argv) != 3:
-        sys.exit("usage: filter-yaraforge.py IN.yar OUT.yar")
+        sys.exit("usage: filter-rules.py IN.yar OUT.yar")
     src_path, out_path = sys.argv[1], sys.argv[2]
     text = open(src_path, encoding="utf-8", errors="replace").read()
 
@@ -244,7 +253,7 @@ def main():
 
     kept = reasons["keep"] + reasons["keep:private"]
     dropped = n_rules - kept
-    print(f"filter-yaraforge: {n_rules} rules in → {kept} kept "
+    print(f"filter-rules: {n_rules} rules in → {kept} kept "
           f"({reasons['keep:private']} private) → {dropped} dropped")
     for r, c in reasons.most_common():
         if not r.startswith("keep"):

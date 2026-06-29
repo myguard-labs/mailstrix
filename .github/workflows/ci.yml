@@ -122,7 +122,7 @@ jobs:
       - name: actionlint (workflow syntax + embedded shell)
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
       - name: shellcheck (rule + packaging maintainer scripts)
-        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 scripts/smoke.sh contrib/spamassassin/t/sa-lint.sh docker/fetch-rules.sh docker/compile-rules.sh docker/generate-rules.sh docker/pprof-capture.sh docker/profile/run-profile.sh packaging/deb/preremove.sh packaging/deb/postinstall.sh packaging/deb/maintscript_test.sh packaging/deb/env_keys_test.sh packaging/deb/readme_install_test.sh packaging/deb/contrib_links_test.sh packaging/deb/workflow_pins_test.sh packaging/deb/rule_source_args_test.sh packaging/deb/smoke_shared_test.sh
+        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 scripts/smoke.sh contrib/spamassassin/t/sa-lint.sh docker/fetch-rules.sh docker/compile-rules.sh docker/generate-rules.sh docker/pprof-capture.sh docker/profile/run-profile.sh packaging/deb/preremove.sh packaging/deb/postinstall.sh packaging/deb/maintscript_test.sh packaging/deb/env_keys_test.sh packaging/deb/readme_install_test.sh packaging/deb/contrib_links_test.sh packaging/deb/workflow_pins_test.sh packaging/deb/rule_source_args_test.sh packaging/deb/filter_rules_test.sh packaging/deb/smoke_shared_test.sh
 
       - name: deb maintainer-script behaviour (upgrade must not disable)
         run: sh packaging/deb/maintscript_test.sh
@@ -132,6 +132,9 @@ jobs:
 
       - name: documented rule-source build-args reach the build
         run: sh packaging/deb/rule_source_args_test.sh
+
+      - name: mail-profile rule filter stays conservative
+        run: sh packaging/deb/filter_rules_test.sh
 
       - name: deb env sample keys match the code
         run: sh packaging/deb/env_keys_test.sh

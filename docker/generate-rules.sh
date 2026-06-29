@@ -70,7 +70,7 @@ done
 # `docker build --build-arg …` of the image.
 note "building rules (CACHEBUST forces a fresh fetch of the public rulesets)…"
 build_args=""
-for v in YARAFORGE_SET YARAFORGE_FILTER YARAFORGE_URL SIGBASE_REF \
+for v in MAILSTRIX_PROFILE YARAFORGE_SET YARAFORGE_FILTER YARAFORGE_URL SIGBASE_REF \
          ANYRUN ANYRUN_REF DIDIER DIDIER_REF BARTBLAZE BARTBLAZE_REF \
          INQUEST INQUEST_REF CAPE CAPE_REF YARAIFY YARAIFY_URL; do
     eval "val=\${$v+set}"

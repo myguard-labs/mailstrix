@@ -410,6 +410,20 @@ authors — strixd only packages their work.** Each set keeps its own license:
 Roughly 10,000+ rules total. Pin or toggle any source with a build arg
 (`YARAFORGE_SET`, `*_REF`, `DIDIER=0`/`BARTBLAZE=0`/`ANYRUN=0`/`INQUEST=0`/`CAPE=0`/`YARAIFY=0`).
 
+**Rule profile (PERF-25)** — `MAILSTRIX_PROFILE` selects how much of the fetched
+breadth is baked:
+
+- **`mail`** (default) — runs a conservative per-rule filter
+  (`docker/filter-rules.py`) over *every* fetched source, dropping only the rules
+  that can never fire on a mail attachment's bytes (memory-dump / kernel-driver /
+  Linux-ELF-only / pcap / non-redistributable MALPEDIA). A rule is kept whenever a
+  maldoc/script/dropper/loader/stealer/RAT token appears in its name (KEEP-wins),
+  and all `private` helper rules are always kept. Smaller, faster bundle with **no
+  measured loss of mail detection** on the malware corpus.
+- **`full`** — bakes every fetched rule, no filtering.
+
+Legacy `YARAFORGE_FILTER=0` is honoured as an alias for `MAILSTRIX_PROFILE=full`.
+
 On top of the public sets, strixd bakes its own local heuristics from
 `docker/local-rules/`:
 
