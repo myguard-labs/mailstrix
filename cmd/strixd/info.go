@@ -30,6 +30,7 @@ func cmdInfo(args []string) int {
 		"libyara":           orUnknown(libyaraVersion),
 		"extractor_version": extract.Version,
 		"repo":              mailstrix.RepoURL,
+		"home":              mailstrix.HomeURL,
 		"license":           mailstrix.License,
 	}
 	if m, ok := mailstrix.LoadManifest(*cacheDir); ok {
@@ -68,6 +69,7 @@ func cmdInfo(args []string) int {
 	fmt.Printf("  libyara:    %s\n", orUnknown(libyaraVersion))
 	fmt.Printf("  extractor:  %s\n", extract.Version)
 	fmt.Printf("  repo:       %s\n", mailstrix.RepoURL)
+	fmt.Printf("  home:       %s\n", mailstrix.HomeURL)
 	fmt.Printf("  license:    %s\n", mailstrix.License)
 	if m, ok := mailstrix.LoadManifest(*cacheDir); ok {
 		fmt.Printf("  rules:      v%d, generated %s, libyara %s, %d rules\n",

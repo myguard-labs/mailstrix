@@ -106,6 +106,12 @@ func TestVersionEndpoint(t *testing.T) {
 	if m["extractor_version"] == "" || m["extractor_version"] == nil {
 		t.Error("extractor_version missing")
 	}
+	if m["repo"] != RepoURL {
+		t.Errorf("repo = %v want %v", m["repo"], RepoURL)
+	}
+	if m["home"] != HomeURL {
+		t.Errorf("home = %v want %v", m["home"], HomeURL)
+	}
 }
 
 // /version surfaces per-ruleset provenance (the manifest's sources array) so an

@@ -234,7 +234,7 @@ func (s *Server) logStartup(addr string) {
 			"over-subscribing by %.1fx increases latency under load (lower MAILSTRIX_MAX_CONCURRENT or raise cpu quota)",
 			s.cfg.MaxConcurrent, quota, float64(s.cfg.MaxConcurrent)/quota)
 	}
-	s.logf("repo: %s", RepoURL)
+	s.logf("repo: %s  home: %s", RepoURL, HomeURL)
 	if s.cfg.ICAPAddr != "" {
 		s.errf("WARNING: ICAP listener on %s has no built-in authentication. "+
 			"Gate by network/firewall; only trusted proxies should reach this port.", s.cfg.ICAPAddr)
@@ -244,6 +244,9 @@ func (s *Server) logStartup(addr string) {
 
 // RepoURL is the project's source, logged at startup when log-stdout is on.
 const RepoURL = "https://github.com/eilandert/mailstrix"
+
+// HomeURL is the project's home page, logged at startup alongside RepoURL.
+const HomeURL = "https://mailstrix.com"
 
 // License is yarad's SPDX license id, surfaced by `yarad info`.
 const License = "MIT"
@@ -410,6 +413,7 @@ func (s *Server) serveVersion(w http.ResponseWriter) {
 		"rules_mtime_unix":  rl.ModUnix,
 		"rules_stale":       s.rulesStale(),
 		"repo":              RepoURL,
+		"home":              HomeURL,
 		"license":           License,
 	}
 	if rl.PrevFingerprint != "" {
