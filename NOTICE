@@ -12,8 +12,10 @@ at image build time. Each source retains its own license:
 
 2. Neo23x0/signature-base
    URL:     https://github.com/Neo23x0/signature-base
-   License: Creative Commons Attribution-NonCommercial 4.0 International
-            (CC BY-NC 4.0)
+   License: Detection Rule License (DRL) 1.1
+            (https://github.com/Neo23x0/signature-base/blob/master/LICENSE —
+            permissive; commercial use permitted, attribution required.
+            Relicensed upstream from the earlier CC BY-NC 4.0.)
 
 3. ANY.RUN YARA Rules
    URL:     https://github.com/anyrun/YARA
@@ -43,6 +45,41 @@ at image build time. Each source retains its own license:
 9. Local rules (strixd)
    URL:     https://github.com/eilandert/mailstrix
    License: MIT (same as this project)
+
+---
+
+Go third-party libraries (statically compiled into the strixd / strix-scan
+binaries). Each retains its own license; full license texts are in each module
+under the Go module cache and on pkg.go.dev. The MS-OVBA / OLE parser below is
+SOURCE-VENDORED into this repository (third_party/oleparse, wired via a go.mod
+`replace`), so its copyright notice is reproduced here as its MIT license
+requires for binary distribution:
+
+   www.velocidex.com/golang/oleparse  — MIT License
+      Copyright (c) 2014 John William Davison
+      Copyright (c) 2019 Michael Cohen / Velocidex Enterprises
+      Vendored + forked at third_party/oleparse (hardening patches; see
+      third_party/oleparse for the local changes). Permission is granted,
+      free of charge, to deal in the software without restriction, including
+      the rights to use, copy, modify, merge, publish, distribute, sublicense,
+      and/or sell copies, subject to including the above copyright notice.
+
+Other statically-linked Go modules and their licenses:
+
+   github.com/hillu/go-yara/v4              — Apache-2.0 / MIT (CGO libyara bindings)
+   github.com/saferwall/pe                  — MIT
+   github.com/bodgit/sevenzip               — BSD-3-Clause
+   github.com/nwaples/rardecode/v2          — BSD-2-Clause
+   github.com/Teamwork/tnef                 — MIT
+   github.com/cespare/xxhash/v2             — MIT
+   github.com/redis/go-redis/v9             — BSD-2-Clause
+   github.com/hashicorp/golang-lru/v2       — MPL-2.0
+   github.com/klauspost/compress            — BSD-3-Clause / Apache-2.0
+   github.com/andybalholm/brotli            — MIT
+   github.com/ulikunitz/xz                  — BSD-3-Clause
+   github.com/pierrec/lz4/v4                — BSD-3-Clause
+   golang.org/x/{crypto,sys,text}           — BSD-3-Clause
+   (plus their transitive dependencies — see go.mod / go.sum for the full set.)
 
 ---
 

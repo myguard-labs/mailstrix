@@ -134,7 +134,7 @@ jobs:
       - name: checksums
         run: |
           set -euo pipefail
-          ( cd out && sha256sum strixd-linux-* strix-scan-linux-* ./*.deb > SHA256SUMS )
+          ( cd out && sha256sum strixd-linux-* strix-scan-linux-* *.deb > SHA256SUMS )
           ls -l out
 
       - name: create release

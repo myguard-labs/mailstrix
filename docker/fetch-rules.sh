@@ -47,6 +47,32 @@ echo "fetch-rules: rule profile = $MAILSTRIX_PROFILE"
 
 fail() { echo "fetch-rules: $*" >&2; [ "${MAILSTRIX_RULES_OPTIONAL:-0}" = "1" ] || exit 1; }
 
+# dl NAME URL OUTFILE — download URL to OUTFILE, then (supply-chain pin) verify
+# its SHA256 against ${NAME}_SHA256 when that env var is set. A set-but-mismatched
+# pin is ALWAYS fatal (never downgraded by MAILSTRIX_RULES_OPTIONAL) — a poisoned
+# or swapped upstream archive must hard-fail the build. With no pin set, behaves
+# like a plain curl (back-compat). Returns non-zero on download failure so callers
+# keep their existing `if dl ...; then` / `fail` flow.
+#
+# Public rulesets default to MOVING refs (latest/master/main) so the nightly cron
+# tracks fresh detections; to pin a build, set the matching ref env (SIGBASE_REF,
+# ANYRUN_REF, …) AND the archive hash, e.g.
+#   SIGBASE_REF=<tag> SIGBASE_SHA256=<sha> ...
+# Hash var names: FORGE, SIGBASE, ANYRUN, DIDIER, BARTBLAZE, INQUEST, YARAIFY.
+dl() {
+    _name="$1"; _url="$2"; _out="$3"
+    curl -fsSL "$_url" -o "$_out" || return 1
+    eval "_want=\${${_name}_SHA256:-}"
+    if [ -n "$_want" ]; then
+        _got="$(sha256sum "$_out" | cut -d' ' -f1)"
+        if [ "$_got" != "$_want" ]; then
+            echo "fetch-rules: SHA256 PIN MISMATCH for $_name: want $_want got $_got" >&2
+            exit 1   # hard-fail regardless of MAILSTRIX_RULES_OPTIONAL
+        fi
+        echo "fetch-rules: $_name SHA256 pin verified ($_got)"
+    fi
+}
+
 # LOCAL_ONLY=1 — skip ALL network rule sources (the 8 public feeds) and produce
 # an empty fetched set. The compile step still copies docker/local-rules/ in, so
 # the resulting .yac is a valid, loadable bundle of our own heuristics only.
@@ -74,7 +100,7 @@ if [ -z "${YARAFORGE_URL:-}" ]; then
     YARAFORGE_URL="https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-${YARAFORGE_SET}.zip"
 fi
 echo "fetch-rules: YARA-Forge $YARAFORGE_SET <- $YARAFORGE_URL"
-if curl -fsSL "$YARAFORGE_URL" -o "$TMP/forge.zip"; then
+if dl FORGE "$YARAFORGE_URL" "$TMP/forge.zip"; then
     unzip -o -q "$TMP/forge.zip" -d "$TMP/forge" || fail "unzip yara-forge failed"
     find "$TMP/forge" \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
         cp "$f" "$OUT/yaraforge-$(basename "$f")"
@@ -86,7 +112,7 @@ fi
 # 2) Neo23x0 signature-base — broad community malware/phishing rules.
 SIGBASE_REF="${SIGBASE_REF:-master}"
 echo "fetch-rules: signature-base <- Neo23x0@$SIGBASE_REF"
-if curl -fsSL "https://github.com/Neo23x0/signature-base/archive/${SIGBASE_REF}.tar.gz" -o "$TMP/sigbase.tgz"; then
+if dl SIGBASE "https://github.com/Neo23x0/signature-base/archive/${SIGBASE_REF}.tar.gz" "$TMP/sigbase.tgz"; then
     tar -xzf "$TMP/sigbase.tgz" -C "$TMP"
     # Only the yara/ subtree; skip rules that reference external modules we
     # don't load (cuckoo/androguard) by leaving those to compile-time pruning.
@@ -102,7 +128,7 @@ fi
 if [ "${ANYRUN:-1}" = "1" ]; then
     ANYRUN_REF="${ANYRUN_REF:-main}"
     echo "fetch-rules: anyrun <- anyrun/YARA@$ANYRUN_REF"
-    if curl -fsSL "https://github.com/anyrun/YARA/archive/${ANYRUN_REF}.tar.gz" -o "$TMP/anyrun.tgz"; then
+    if dl ANYRUN "https://github.com/anyrun/YARA/archive/${ANYRUN_REF}.tar.gz" "$TMP/anyrun.tgz"; then
         tar -xzf "$TMP/anyrun.tgz" -C "$TMP"
         find "$TMP"/YARA-* \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
             cp "$f" "$OUT/anyrun-$(basename "$f")"
@@ -122,7 +148,7 @@ fi
 if [ "${DIDIER:-1}" = "1" ]; then
     DIDIER_REF="${DIDIER_REF:-master}"
     echo "fetch-rules: didier <- DidierStevens/DidierStevensSuite@$DIDIER_REF (curated)"
-    if curl -fsSL "https://github.com/DidierStevens/DidierStevensSuite/archive/${DIDIER_REF}.tar.gz" -o "$TMP/didier.tgz"; then
+    if dl DIDIER "https://github.com/DidierStevens/DidierStevensSuite/archive/${DIDIER_REF}.tar.gz" "$TMP/didier.tgz"; then
         tar -xzf "$TMP/didier.tgz" -C "$TMP"
         for r in vba rtf maldoc contains_vbe_file contains_pe_file; do
             f="$(find "$TMP"/DidierStevensSuite-* -name "${r}.yara" 2>/dev/null | head -1)"
@@ -171,7 +197,7 @@ fi
 if [ "${BARTBLAZE:-1}" = "1" ]; then
     BARTBLAZE_REF="${BARTBLAZE_REF:-master}"
     echo "fetch-rules: bartblaze <- bartblaze/Yara-rules@$BARTBLAZE_REF"
-    if curl -fsSL "https://github.com/bartblaze/Yara-rules/archive/${BARTBLAZE_REF}.tar.gz" -o "$TMP/bartblaze.tgz"; then
+    if dl BARTBLAZE "https://github.com/bartblaze/Yara-rules/archive/${BARTBLAZE_REF}.tar.gz" "$TMP/bartblaze.tgz"; then
         tar -xzf "$TMP/bartblaze.tgz" -C "$TMP"
         find "$TMP"/Yara-rules-* \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
             cp "$f" "$OUT/bartblaze-$(basename "$f")"
@@ -188,7 +214,7 @@ fi
 if [ "${INQUEST:-1}" = "1" ]; then
     INQUEST_REF="${INQUEST_REF:-main}"
     echo "fetch-rules: inquest <- InQuest/yara-rules-vt@$INQUEST_REF (curated)"
-    if curl -fsSL "https://github.com/InQuest/yara-rules-vt/archive/${INQUEST_REF}.tar.gz" -o "$TMP/inquest.tgz"; then
+    if dl INQUEST "https://github.com/InQuest/yara-rules-vt/archive/${INQUEST_REF}.tar.gz" "$TMP/inquest.tgz"; then
         tar -xzf "$TMP/inquest.tgz" -C "$TMP"
         for r in \
             CVE_2014_1761.yar \
@@ -230,7 +256,7 @@ fi
 if [ "${YARAIFY:-1}" = "1" ]; then
     YARAIFY_URL="${YARAIFY_URL:-https://yaraify.abuse.ch/yarahub/yaraify-rules.zip}"
     echo "fetch-rules: yaraify <- $YARAIFY_URL"
-    if curl -fsSL "$YARAIFY_URL" -o "$TMP/yaraify.zip"; then
+    if dl YARAIFY "$YARAIFY_URL" "$TMP/yaraify.zip"; then
         unzip -o -q "$TMP/yaraify.zip" -d "$TMP/yaraify" || fail "unzip yaraify failed"
         find "$TMP/yaraify" \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
             cp "$f" "$OUT/yaraify-$(basename "$f")"
@@ -347,7 +373,7 @@ echo "fetch-rules: $COUNT rule files in $OUT"
     printf '[\n'
     printf '  {"name":"profile","value":"%s","filter":"%s"}' "${MAILSTRIX_PROFILE}" "$([ "$MAILSTRIX_PROFILE" = mail ] && echo mail-relevance+license || echo none)"
     printf ',\n  {"name":"yaraforge","repo":"https://github.com/YARAHQ/yara-forge","license":"mixed permissive+DRL (MALPEDIA/CC-BY-NC filtered)","ref":"latest","set":"%s"}' "${YARAFORGE_SET}"
-    printf ',\n  {"name":"signature-base","repo":"https://github.com/Neo23x0/signature-base","license":"CC BY-NC 4.0","ref":"%s"}' "${SIGBASE_REF}"
+    printf ',\n  {"name":"signature-base","repo":"https://github.com/Neo23x0/signature-base","license":"DRL 1.1","ref":"%s"}' "${SIGBASE_REF}"
     if [ "${ANYRUN:-1}" = "1" ]; then
         printf ',\n  {"name":"anyrun","repo":"https://github.com/anyrun/YARA","license":"MIT","ref":"%s"}' "${ANYRUN_REF:-main}"
     fi
