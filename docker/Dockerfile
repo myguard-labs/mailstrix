@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # strixd — YARA scanner backend for rspamd.
 #
 # Multi-stage: a Debian builder compiles libyara statically and builds strixd
@@ -40,7 +41,9 @@ COPY --from=yara /usr/local/include/yara/ /usr/local/include/yara/
 COPY --from=yara /usr/local/lib/pkgconfig/yara.pc /usr/local/lib/pkgconfig/
 WORKDIR /src
 COPY go.mod go.sum* ./
-RUN go mod download || true
+# Persist the module cache across builds so go mod download is incremental.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download || true
 COPY . .
 # The yara_static tag makes go-yara link libyara.a; libyara's own deps
 # (ssl/magic/jansson/z/zstd) and glibc stay dynamically linked and are provided
@@ -48,7 +51,8 @@ COPY . .
 # avoided on purpose: it makes dlopen/getaddrinfo fragile at runtime.
 ENV CGO_ENABLED=1 \
     PKG_CONFIG="pkg-config --static"
-RUN go mod tidy
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod tidy
 ARG VERSION=dev
 ARG YARA_VERSION
 # Two binaries: the CGO/libyara server (strixd), and the lean Sieve/LDA client
@@ -56,7 +60,11 @@ ARG YARA_VERSION
 # mail-delivery host that only POSTs to a central strixd. main.libyaraVersion is
 # baked from YARA_VERSION so `fetch-rules` can refuse a .yac built against a
 # different libyara.
-RUN go build -tags yara_static \
+# Mount the Go module + build caches so an unchanged-source rebuild reuses
+# compiled packages instead of recompiling cold every CI run.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -tags yara_static \
         -ldflags "-s -w -X main.version=${VERSION} -X main.libyaraVersion=${YARA_VERSION}" \
         -o /out/strixd ./cmd/strixd \
     && CGO_ENABLED=0 go build \
@@ -65,7 +73,9 @@ RUN go build -tags yara_static \
 
 # ---- tests (built into the image build so CI fails on a bad commit) ---------
 FROM build AS test
-RUN go vet ./... \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go vet ./... \
     && go test -race -tags yara_static ./...
 
 # ---- binary export (release artifacts; not part of the runtime image) -------
