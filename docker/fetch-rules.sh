@@ -43,9 +43,20 @@ if [ "${LOCAL_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
-# 1) YARA-Forge bundle — one curated .yar of vetted public rules. Core stays the
-#    default for production stability; extended/full are opt-in build profiles.
-YARAFORGE_SET="${YARAFORGE_SET:-core}"
+# 1) YARA-Forge bundle — one big .yar of vetted public rules. We pull the FULL
+#    tier (~11.7k rules) and run it through filter-yaraforge.py, which prunes
+#    per-rule (the bundle is ONE file, so file-level dropping can't touch it):
+#      - license: drop MALPEDIA (research-access) + CC-BY-NC; keep permissive +
+#        DRL + unresolved (workspace policy 2026-06-29).
+#      - mail-relevance (moderate): drop host/runtime-only rules (memory-dump,
+#        kernel drivers, Linux/ELF-only, sandbox post-exec); keep maldoc/script
+#        + PE dropper/loader/stealer families (closes the clamav-only 35-gap:
+#        Hancitor, CVE-2017-11882, LokiBot, Nanocore, AgentTesla, Formbook,
+#        Bumblebee, Mallox, …). All private helper rules are preserved (dropping
+#        one dangles its referencing rules → compile error).
+#    YARAFORGE_SET=core|extended falls back to the UNFILTERED bundle (the filter
+#    targets the full tier's breadth); set YARAFORGE_FILTER=0 to skip filtering.
+YARAFORGE_SET="${YARAFORGE_SET:-full}"
 case "$YARAFORGE_SET" in
     core|extended|full) ;;
     *) fail "invalid YARAFORGE_SET=$YARAFORGE_SET (want core, extended, or full)" ;;
@@ -56,8 +67,15 @@ fi
 echo "fetch-rules: YARA-Forge $YARAFORGE_SET <- $YARAFORGE_URL"
 if curl -fsSL "$YARAFORGE_URL" -o "$TMP/forge.zip"; then
     unzip -o -q "$TMP/forge.zip" -d "$TMP/forge" || fail "unzip yara-forge failed"
+    FILTER_PY="$(dirname "$0")/filter-yaraforge.py"
     find "$TMP/forge" \( -name '*.yar' -o -name '*.yara' \) | while read -r f; do
-        cp "$f" "$OUT/yaraforge-$(basename "$f")"
+        dest="$OUT/yaraforge-$(basename "$f")"
+        if [ "$YARAFORGE_SET" = "full" ] && [ "${YARAFORGE_FILTER:-1}" = "1" ] \
+           && [ -f "$FILTER_PY" ]; then
+            python3 "$FILTER_PY" "$f" "$dest" || fail "filter-yaraforge failed"
+        else
+            cp "$f" "$dest"
+        fi
     done
 else
     fail "download yara-forge failed"
@@ -305,7 +323,7 @@ echo "fetch-rules: $COUNT rule files in $OUT"
 # Only includes sources that were actually fetched (respects ANYRUN=0 etc).
 {
     printf '[\n'
-    printf '  {"name":"yaraforge","repo":"https://github.com/YARAHQ/yara-forge","license":"mixed (see repo)","ref":"latest","set":"%s"}' "${YARAFORGE_SET}"
+    printf '  {"name":"yaraforge","repo":"https://github.com/YARAHQ/yara-forge","license":"mixed permissive+DRL (MALPEDIA/CC-BY-NC filtered)","ref":"latest","set":"%s","filter":"%s"}' "${YARAFORGE_SET}" "$([ "$YARAFORGE_SET" = full ] && [ "${YARAFORGE_FILTER:-1}" = 1 ] && echo mail-relevance+license || echo none)"
     printf ',\n  {"name":"signature-base","repo":"https://github.com/Neo23x0/signature-base","license":"CC BY-NC 4.0","ref":"%s"}' "${SIGBASE_REF}"
     if [ "${ANYRUN:-1}" = "1" ]; then
         printf ',\n  {"name":"anyrun","repo":"https://github.com/anyrun/YARA","license":"MIT","ref":"%s"}' "${ANYRUN_REF:-main}"

@@ -82,20 +82,23 @@ COPY --from=build /out/strix-scan /strix-scan
 # runtime never compiles ~10k rules itself (that peaked >3 GB and OOM-killed).
 FROM yara AS rules
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates unzip \
+        curl ca-certificates unzip python3 \
     && rm -rf /var/lib/apt/lists/*
-COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/
+# filter-yaraforge.py must sit beside fetch-rules.sh (resolved via
+# $(dirname "$0")) so the full-tier per-rule license/mail-relevance filter runs.
+COPY docker/fetch-rules.sh docker/compile-rules.sh docker/filter-yaraforge.py /usr/local/bin/
 # Repo-tracked local rules (our own heuristics, e.g. the mraptor-style maldoc
 # rule) baked alongside the fetched public sets so they ship in the seed .yac.
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
-RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh
+RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-yaraforge.py
 ARG CACHEBUST=unset
 # LOCAL_ONLY=1 skips all network rule fetches; only docker/local-rules/ are
 # compiled into the seed .yac. GitHub CI + release builds set this (the heavy
 # public bundle is built by the local nightly cron and shipped via the
 # rules-current release, pulled at runtime by --fetch-rules).
 ARG LOCAL_ONLY=0
-ARG YARAFORGE_SET=core
+ARG YARAFORGE_SET=full
+ARG YARAFORGE_FILTER=1
 ARG YARAFORGE_URL=
 ARG SIGBASE_REF=master
 ARG ANYRUN_REF=main
@@ -111,7 +114,7 @@ ARG CAPE_REF=master
 ARG YARAIFY=1
 ARG YARAIFY_URL=
 RUN LOCAL_ONLY="${LOCAL_ONLY}" \
-        YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
+        YARAFORGE_SET="${YARAFORGE_SET}" YARAFORGE_FILTER="${YARAFORGE_FILTER}" YARAFORGE_URL="${YARAFORGE_URL}" SIGBASE_REF="${SIGBASE_REF}" \
         ANYRUN="${ANYRUN}" ANYRUN_REF="${ANYRUN_REF}" \
         DIDIER="${DIDIER}" DIDIER_REF="${DIDIER_REF}" \
         BARTBLAZE="${BARTBLAZE}" BARTBLAZE_REF="${BARTBLAZE_REF}" \
