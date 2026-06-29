@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eilandert/mailstrix/internal/feodo"
 	"github.com/eilandert/mailstrix/internal/mbazaar"
 	"github.com/eilandert/mailstrix/internal/threatfox"
 	"github.com/eilandert/mailstrix/internal/urlhaus"
@@ -333,7 +332,6 @@ func (f *fakeEngine) ReloadMetrics() ReloadMetrics        { return ReloadMetrics
 func (f *fakeEngine) URLhausMetrics() urlhaus.Metrics     { return urlhaus.Metrics{} }
 func (f *fakeEngine) MBazaarMetrics() mbazaar.Metrics     { return f.mb }
 func (f *fakeEngine) ThreatFoxMetrics() threatfox.Metrics { return threatfox.Metrics{} }
-func (f *fakeEngine) FeodoMetrics() feodo.Metrics         { return feodo.Metrics{} }
 func (f *fakeEngine) TopMatches(n int) []MatchCount       { return nil }
 
 func newTestServer(eng ScanEngine, token string) *Server {

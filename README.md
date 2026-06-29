@@ -118,8 +118,8 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Uses the attachment name** — `filename`/`extension` YARA vars from the
   plugin's `X-MAILSTRIX-Filename`, so name-keyed (THOR/Loki) rules fire.
 - **Checks abuse.ch feeds (optional)** — URLhaus malware-URL/host lookup (with
-  URL defanging), MalwareBazaar attachment-SHA256 lookup, ThreatFox URL/domain
-  IOCs, and the Feodo Tracker C&C IP blocklist; all cached, fail-open.
+  URL defanging), MalwareBazaar attachment-SHA256 lookup, and ThreatFox
+  URL/domain IOCs; all cached, fail-open.
 - **Drops/demotes noisy rules** — `MAILSTRIX_RULE_DENYLIST` (suppress) and
   `MAILSTRIX_RULE_ALLOWLIST` (keep but score log-only) without patching upstream.
 - **Caches verdicts** — `SHA256(body)` → matches (LRU+TTL), plus request
@@ -339,8 +339,6 @@ Every setting is an env var and a `serve` CLI flag (flag > env > default).
 | `MAILSTRIX_THREATFOX_KEY[_FILE]` | — | abuse.ch Auth-Key (same key); enables the ThreatFox URL/domain IOC lookup |
 | `MAILSTRIX_THREATFOX_REFRESH` | `21600` (6 h) | ThreatFox feed refresh (floor 5 min) |
 | `MAILSTRIX_THREATFOX_MAX_URLS` | `64` | max URLs/domains examined per message |
-| `MAILSTRIX_FEODO` | off | set `1` to enable the Feodo Tracker C&C IP-blocklist lookup (no key needed) |
-| `MAILSTRIX_FEODO_REFRESH` | `21600` (6 h) | Feodo feed refresh (floor 5 min) |
 | `MAILSTRIX_BIGFILE_THRESHOLD` | `6291456` (6 MiB) | buffers larger than this scan against the smaller `BIGFILE_RULES` set, not the full bundle (cost gate); markers always use the full set; `0` disables the gate |
 | `MAILSTRIX_BIGFILE_RULES` | baked seed | optional `.yac` bundle scanned for oversized buffers; unset ⇒ the baked `local.yac` seed set |
 | `MAILSTRIX_RULE_DENYLIST` | `http` | comma-sep rule names to suppress (case-insensitive); set empty to disable |
@@ -543,11 +541,8 @@ on top of the YARA rules:
   message and stream against the ThreatFox IOC feed. Hits: `THREATFOX_IOC_URL`,
   `_DOMAIN`, `_DEOBF`; matched URL in `meta.url`. Routes to the `THREATFOX_IOC`
   symbol.
-- **Feodo Tracker** (`MAILSTRIX_FEODO=1`, opt-in) — checks each URL's host IP against
-  the botnet C&C blocklist. Hits: `FEODO_CC_IP`, `_DEOBF`; IP in `meta.ip`, URL
-  in `meta.url`. Routes to the `FEODO_CC_IP` symbol.
 
-Both use the same fail-open cached-feed design: the feed is downloaded once per
+These use the same fail-open cached-feed design: the feed is downloaded once per
 refresh interval into an in-memory set (lookups are local map hits, never a
 per-message API call); a failed refresh keeps the previous set. MalwareBazaar's
 full dump adds ~40 MiB resident + a ~100–150 MiB transient spike on refresh —
@@ -668,7 +663,6 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
   | `URLHAUS_MALWARE_URL` | known malware URL (options = the URLs) | `8.0` |
   | `MALWAREBAZAAR_MALWARE` | attachment SHA256 = known sample (option = digest) | `10.0` |
   | `THREATFOX_IOC` | ThreatFox URL/domain IOC (options = the URLs) | `7.0` |
-  | `FEODO_CC_IP` | URL host IP on the Feodo C&C blocklist (option = the IP) | `8.0` |
 
   Tiers stack, capped by the group `max_score`. The classifier lives in the
   plugin, so retuning is just an rspamd reload (no strixd rebuild).
@@ -738,7 +732,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] HTML smuggling: container `data:` URI in plain HTML (`HTML_DataURI_Container`), `<svg>`-embedded base64 container payload (`SVG_Embedded_Payload`), OOXML `mhtml:`/`!x-usc:` external-rel scheme (`OOXML_MHTML_Scheme`, CVE-2021-40444)
 - [x] Webpack-bundled Node.js RAT (`Node_RAT_Webpack_Bundle`): child_process+axios+form-data require shims + `execSync` + scheme-hidden `"http://".concat(` C2 upload
 - [x] Legacy-encryption markers (`ENCRYPTION-RC4` from Word FibBase fEncrypted + PPT EncryptedSummary); Shell.Explorer CLSID content rule (`OLE_ShellExplorer_CLSID`, CVE-2026-21509)
-- [x] abuse.ch reputation feeds: URLhaus, MalwareBazaar hash, **ThreatFox** IOC (url/domain), **Feodo** C&C IP blocklist (cached, fail-open)
+- [x] abuse.ch reputation feeds: URLhaus, MalwareBazaar hash, **ThreatFox** IOC (url/domain) (cached, fail-open)
 - [x] Curated CAPEv2 family rules (Guloader/Formbook/AgentTesla/Obfuscar) as an 8th rule source; build-time `SLOW_RULE_DENYLIST` with a bundle guard (never unloads a shared multi-rule file)
 - [x] Distroless, non-root, read-only rootfs (~100 MB)
 - [x] **ICAP server** (RFC 3507) — optional `MAILSTRIX_ICAP_ADDR` listener; REQMOD+RESPMOD; shares engine, cache, and concurrency gate with `/scan`; ISTag tracks ruleset fingerprint; fail-open on scan error; `icap_*` Prometheus counters
@@ -769,7 +763,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] **Effort tiers** — config + resolution + cache key + profile struct (EFFORT-1), `MAILSTRIX_EFFORT=auto` from admission-gate pressure (EFFORT-2), the rspamd plugin setting `X-MAILSTRIX-Effort` from the sender's prior score / auth-failure symbols (EFFORT-3, opt-in via `effort_enabled`), and EFFORT-4 wiring each extraction/scan cap (decode depth, XLM/PDF clamps, reputation feeds, scan timeout) to the resolved profile so the dial actually scales work
 - [ ] Batch `/scan` endpoint (collapse N part round-trips)
 
-- [x] ThreatFox / Feodo Tracker IOC feeds (domains/IPs)
+- [x] ThreatFox IOC feed (domains/URLs)
 - [x] PE-overlay bytes (`PE-OVERLAY` via PE structural analysis)
 - [x] Known-bad-CLSID content rule (`EAB22AC3-30C1-11CF-A7EB-0000C05BAE0B` Shell.Explorer, CVE-2026-21509)
 

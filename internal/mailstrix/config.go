@@ -126,12 +126,6 @@ type Config struct {
 	ThreatFoxRefresh time.Duration // MAILSTRIX_THREATFOX_REFRESH (default 360m, floor 5m)
 	ThreatFoxMaxURLs int           // MAILSTRIX_THREATFOX_MAX_URLS (per message, default 64)
 
-	// Feodo Tracker IP blocklist (abuse.ch). Public feed of botnet C&C server IPs.
-	// Matches URLs with raw IP hosts against the blocklist. No auth required;
-	// set MAILSTRIX_FEODO=1 to enable.
-	FeodoEnabled bool          // MAILSTRIX_FEODO (0/1, default 0 = disabled)
-	FeodoRefresh time.Duration // MAILSTRIX_FEODO_REFRESH (default 360m, floor 5m)
-
 	ICAPAddr string // MAILSTRIX_ICAP_ADDR (empty = disabled; e.g. ":1344")
 
 	// RuleDenylist suppresses matches for these rule names (case-insensitive).
@@ -213,8 +207,6 @@ func LoadConfig() *Config {
 		ThreatFoxKey:     envOrFile("MAILSTRIX_THREATFOX_KEY"),
 		ThreatFoxRefresh: envDur("MAILSTRIX_THREATFOX_REFRESH", 21600),
 		ThreatFoxMaxURLs: envInt("MAILSTRIX_THREATFOX_MAX_URLS", 64),
-		FeodoEnabled:     envBool("MAILSTRIX_FEODO"),
-		FeodoRefresh:     envDur("MAILSTRIX_FEODO_REFRESH", 21600),
 		ICAPAddr:         strings.TrimSpace(os.Getenv("MAILSTRIX_ICAP_ADDR")),
 		RuleDenylist:     envSet("MAILSTRIX_RULE_DENYLIST", "http"),
 		RuleAllowlist:    envSet("MAILSTRIX_RULE_ALLOWLIST", ""),

@@ -57,8 +57,6 @@ config:
   MAILSTRIX_SCAN_TIMEOUT: ""     # per-scan libyara budget (s)
   MAILSTRIX_MBAZAAR_REFRESH: ""  # seconds; floor 300
   MAILSTRIX_THREATFOX_REFRESH: "" # 6h default; floor 300
-  MAILSTRIX_FEODO: ""            # "1" to enable the Feodo C&C IP blocklist (no key needed)
-  MAILSTRIX_FEODO_REFRESH: ""    # seconds; floor 300
   TZ: ""                     # e.g. "Europe/Amsterdam"
 
 # --- Shared verdict cache (Redis/Valkey) ------------------------------------

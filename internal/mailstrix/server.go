@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/eilandert/mailstrix/internal/extract"
-	"github.com/eilandert/mailstrix/internal/feodo"
 	"github.com/eilandert/mailstrix/internal/mbazaar"
 	"github.com/eilandert/mailstrix/internal/threatfox"
 	"github.com/eilandert/mailstrix/internal/urlhaus"
@@ -60,8 +59,6 @@ type ScanEngine interface {
 	MBazaarMetrics() mbazaar.Metrics
 	// ThreatFoxMetrics reports the ThreatFox checker state for /metrics.
 	ThreatFoxMetrics() threatfox.Metrics
-	// FeodoMetrics reports the Feodo Tracker checker state for /metrics.
-	FeodoMetrics() feodo.Metrics
 	// TopMatches returns the top n most-triggered rule names since last reload.
 	TopMatches(n int) []MatchCount
 }
@@ -829,15 +826,6 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 		gauge("threatfox_last_refresh_timestamp_seconds", "unix time of the last successful feed refresh", tf.LastRefreshUnix)
 	}
 
-	// Feodo Tracker IP blocklist (only meaningful when enabled).
-	fd := s.engine.FeodoMetrics()
-	if fd.Enabled {
-		fm("feodo_lookups_total", "buffers checked against the Feodo Tracker blocklist", fd.Lookups)
-		fm("feodo_hits_total", "buffers with >=1 Feodo match", fd.Hits)
-		fm("feodo_refresh_failures_total", "Feodo Tracker feed refresh failures", fd.RefreshFailures)
-		gauge("feodo_feed_ips", "C&C IPs in the loaded Feodo Tracker blocklist", fd.FeedIPs)
-		gauge("feodo_last_refresh_timestamp_seconds", "unix time of the last successful feed refresh", fd.LastRefreshUnix)
-	}
 	if s.cfg.ICAPAddr != "" {
 		fm("icap_requests_total", "total ICAP REQMOD/RESPMOD requests served", s.metrics.icapRequests.Load())
 		fm("icap_infected_total", "ICAP requests with >=1 rule match (403 replacement sent)", s.metrics.icapInfected.Load())

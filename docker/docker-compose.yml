@@ -52,9 +52,6 @@ services:
       # ThreatFox — recent IOC URL/domain feed (botnet C&C indicators). Same key.
       MAILSTRIX_THREATFOX_KEY_FILE: /run/secrets/abuse_ch_key
       # MAILSTRIX_THREATFOX_REFRESH: "21600"  # 6h; floor 300
-      # Feodo Tracker — botnet C&C IP blocklist (public feed, no key needed).
-      # MAILSTRIX_FEODO: "1"               # enable Feodo IP blocklist (default: off)
-      # MAILSTRIX_FEODO_REFRESH: "21600"   # seconds; floor 300
 
       # --- Auth (required) --------------------------------------------------
       # strixd refuses every /scan (503) until a token is set. The rspamd plugin

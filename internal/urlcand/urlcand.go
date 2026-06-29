@@ -1,5 +1,5 @@
 // Package urlcand provides shared URL candidate extraction for reputation-feed
-// checkers (urlhaus, threatfox, feodo). A single Extract call replaces the
+// checkers (urlhaus, threatfox). A single Extract call replaces the
 // per-checker redundant regex walk + defang copy that the old code performed
 // on every buffer.
 //

@@ -71,9 +71,6 @@ local settings = {
   -- ThreatFox. Routed to its own feed tier so it scores on an operator-tunable
   -- weight, not the generic YARA classification.
   threatfox_symbol = "THREATFOX_IOC",
-  -- Separate symbol for strixd's Feodo Tracker hits (rule names start "FEODO_"):
-  -- a URL whose host IP matched the abuse.ch Feodo botnet C&C blocklist.
-  feodo_symbol = "FEODO_CC_IP",
   -- Log-only symbol for rules strixd has allowlisted (meta.mailstrix_allow="1", set
   -- by MAILSTRIX_RULE_ALLOWLIST): the match is still surfaced (visible in history)
   -- but routed here so groups.conf can score it 0 — a known-FP rule demoted
@@ -394,17 +391,6 @@ local function check_cb(task)
             if m.rule:find("_DOMAIN") then tag = tag .. " (domain)" end
             if m.rule:find("_DEOBF") then tag = tag .. " (deobf)" end
             add(settings.threatfox_symbol, url .. tag, "tf:" .. url)
-          elseif m.rule:sub(1, 6) == "FEODO_" then
-            -- Feodo Tracker: a URL whose host IP is a known botnet C&C. Show the
-            -- blocked IP as the option (deduped on it), with the URL appended for
-            -- context; _DEOBF = matched only after defanging.
-            local ip = (type(m.meta) == "table" and m.meta.ip) or m.rule
-            local url = (type(m.meta) == "table" and m.meta.url) or ""
-            local tag = ""
-            if m.rule:find("_DEOBF") then tag = tag .. " (deobf)" end
-            local opt = ip
-            if url ~= "" then opt = ip .. " <" .. url .. ">" end
-            add(settings.feodo_symbol, opt .. tag, "feodo:" .. ip)
           else
             -- Classify into a scoring tier, and show "rule (source-file)" so a
             -- generic rule name (e.g. "http") is traceable to the ruleset that
@@ -497,7 +483,6 @@ for _, s in ipairs({
   settings.urlhaus_symbol,
   settings.mbazaar_symbol,
   settings.threatfox_symbol,
-  settings.feodo_symbol,
   settings.allow_symbol,
 }) do
   rspamd_config:register_symbol({ name = s, type = "virtual", parent = id })

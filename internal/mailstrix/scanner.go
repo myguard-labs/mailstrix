@@ -20,7 +20,6 @@ import (
 	yara "github.com/hillu/go-yara/v4"
 
 	"github.com/eilandert/mailstrix/internal/extract"
-	"github.com/eilandert/mailstrix/internal/feodo"
 	"github.com/eilandert/mailstrix/internal/mbazaar"
 	"github.com/eilandert/mailstrix/internal/threatfox"
 	"github.com/eilandert/mailstrix/internal/urlcand"
@@ -175,9 +174,6 @@ type Scanner struct {
 	// Optional abuse.ch ThreatFox IOC lookup (nil when no Auth-Key set).
 	threatfox    *threatfox.Checker
 	threatfoxMax int
-
-	// Optional abuse.ch Feodo Tracker IP blocklist (nil when not enabled).
-	feodo *feodo.Checker
 
 	// canary, when true, tags every surviving match with mailstrix_canary=1 so the
 	// rspamd plugin routes them all to weight-0 (shadow/observe-only mode).
@@ -389,7 +385,6 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 		mbazaar:          mbazaar.New(cfg.MBazaarKey, cfg.MBazaarRefresh, cfg.MBazaarFeed, cfg.CacheDir, logf), // nil if no key
 		threatfox:        threatfox.New(cfg.ThreatFoxKey, cfg.ThreatFoxRefresh, cfg.CacheDir, logf),            // nil if no key
 		threatfoxMax:     cfg.ThreatFoxMaxURLs,
-		feodo:            feodo.New(cfg.FeodoEnabled, cfg.URLhausKey, cfg.FeodoRefresh, cfg.CacheDir, logf), // nil if not enabled
 		canary:           cfg.Canary,
 		baseDenylist:     cfg.RuleDenylist,
 		denylistFile:     cfg.DenylistFile,
@@ -420,9 +415,6 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 	}
 	if s.threatfox != nil {
 		logf("ThreatFox IOC lookup enabled (refresh=%s, max_urls/msg=%d)", cfg.ThreatFoxRefresh, cfg.ThreatFoxMaxURLs)
-	}
-	if s.feodo != nil {
-		logf("Feodo Tracker IP blocklist enabled (refresh=%s)", cfg.FeodoRefresh)
 	}
 	if err := s.Reload(); err != nil {
 		return nil, err
@@ -1510,15 +1502,14 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 			out = append(out, Match{Rule: h.Rule(), Tags: []string{"malwarebazaar"}, Meta: map[string]string{"sha256": h.SHA256}})
 		}
 	}
-	// Reputation feeds: URLhaus, ThreatFox, Feodo. URL candidates are extracted
-	// ONCE per buffer (raw + defanged pass) and fanned to all three checkers,
-	// eliminating 3× redundant regex walks and 3× full-buffer defang copies.
+	// Reputation feeds: URLhaus, ThreatFox. URL candidates are extracted
+	// ONCE per buffer (raw + defanged pass) and fanned to both checkers,
+	// eliminating redundant regex walks and full-buffer defang copies.
 	// Each feed still deduplicates across buffers via its own seenX map.
-	if profile.ReputationFeeds && (s.urlhaus != nil || s.threatfox != nil || s.feodo != nil) {
+	if profile.ReputationFeeds && (s.urlhaus != nil || s.threatfox != nil) {
 		// maxN is the largest per-feed budget; Extract uses it so the candidate
 		// list is long enough for any single checker. Each checker truncates to
 		// its own (smaller) budget via the maxURLs argument to CheckCandidates.
-		// feodo reuses s.urlhausMax (same as the old code).
 		maxN := s.urlhausMax
 		if s.threatfoxMax > maxN {
 			maxN = s.threatfoxMax
@@ -1529,7 +1520,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		// case) produces no hit, so these stay nil and cost zero allocations. Reads of
 		// a nil map are safe in Go (`_, dup := seen[k]` on nil → dup=false), so the
 		// dedup check works before the first hit forces the make().
-		var seenURL, seenTF, seenFD map[string]struct{}
+		var seenURL, seenTF map[string]struct{}
 
 		// addFeedHits extracts URL candidates from b once and fans to all enabled
 		// checkers. URLhaus: check the raw message and every decompressed
@@ -1565,23 +1556,10 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 					out = append(out, Match{Rule: h.Rule(), Tags: []string{"threatfox"}, Meta: map[string]string{"url": h.URL}})
 				}
 			}
-			// Feodo Tracker: IP blocklist — URLs with raw C&C IP hosts.
-			if s.feodo != nil {
-				for _, h := range s.feodo.CheckCandidates(cands, s.urlhausMax) {
-					if _, dup := seenFD[h.URL]; dup {
-						continue
-					}
-					if seenFD == nil {
-						seenFD = make(map[string]struct{})
-					}
-					seenFD[h.URL] = struct{}{}
-					out = append(out, Match{Rule: h.Rule(), Tags: []string{"feodo"}, Meta: map[string]string{"url": h.URL, "ip": h.IP}})
-				}
-			}
 		}
 		// PERF-33: skip streams whose bytes are byte-identical to buf or to an
 		// already-processed stream. Identical bytes → identical urlcand.Extract
-		// candidates → any URL they'd yield is already in seenURL/seenTF/seenFD
+		// candidates → any URL they'd yield is already in seenURL/seenTF
 		// from the first occurrence, so CheckCandidates output for the dup is 100%
 		// deduped away. Removing the dup call removes ZERO appends to out and is
 		// therefore byte-identical to the output produced today. Uses the same
@@ -1706,7 +1684,6 @@ func (s *Scanner) Close() {
 	s.urlhaus.Close()
 	s.mbazaar.Close()
 	s.threatfox.Close()
-	s.feodo.Close()
 }
 
 // URLhausMetrics reports the URLhaus checker's state for /metrics, or a disabled
@@ -1724,14 +1701,6 @@ func (s *Scanner) ThreatFoxMetrics() threatfox.Metrics {
 		return threatfox.Metrics{}
 	}
 	return s.threatfox.Metrics()
-}
-
-// FeodoMetrics reports the Feodo Tracker checker's state for /metrics.
-func (s *Scanner) FeodoMetrics() feodo.Metrics {
-	if s.feodo == nil {
-		return feodo.Metrics{}
-	}
-	return s.feodo.Metrics()
 }
 
 // TopMatches returns the top n most-triggered rule names since the last reload,
