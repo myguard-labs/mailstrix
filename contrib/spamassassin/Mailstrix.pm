@@ -33,8 +33,8 @@
 # instead (useful on a host where a silent miss is worse than a visible error).
 #
 # Install: see README.md in this directory. In short — drop this file somewhere
-# SpamAssassin can read, point a `loadplugin` line at it (strixd.pre), and ship
-# strixd.cf with the rule scores.
+# SpamAssassin can read, point a `loadplugin` line at it (mailstrix.pre), and ship
+# mailstrix.cf with the rule scores.
 
 package Mail::SpamAssassin::Plugin::Mailstrix;
 
@@ -53,7 +53,7 @@ sub new {
     my $self = $class->SUPER::new($mailsa);
     bless($self, $class);
 
-    # The eval rules this plugin answers. Defined (with scores) in strixd.cf.
+    # The eval rules this plugin answers. Defined (with scores) in mailstrix.cf.
     $self->register_eval_rule('check_mailstrix');           # any YARA rule matched
     $self->register_eval_rule('check_mailstrix_high');      # a high meta.score match (http mode only)
     $self->register_eval_rule('check_mailstrix_error');     # backend unreachable and fail-open off

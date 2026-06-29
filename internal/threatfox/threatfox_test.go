@@ -1,17 +1,25 @@
 package threatfox
 
 import (
+	"bytes"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-const sampleCSV = `# Dump generated 2024-01-02
-# id,ioc_type,ioc_value,threat_type,fk_threat_type,malware,fk_malware,malware_alias,malware_printable,first_seen_utc,last_seen_utc,confidence_level,anonymized,tags,credits,reference
-"1","url","http://c2.evil.test/payload.exe","botnet_cc","1","AgentTesla","1","AgentTesla","AgentTesla","2024-01-01 00:00:00 UTC","2024-01-02 00:00:00 UTC","75","","exe","anon","https://threatfox.abuse.ch/ioc/1/"
-"2","domain","malicious.domain.test","botnet_cc","1","Emotet","2","Emotet","Emotet","2024-01-01 00:00:00 UTC","","90","","","anon","https://threatfox.abuse.ch/ioc/2/"
-"3","ip:port","10.20.30.40:4444","botnet_cc","1","TrickBot","3","TrickBot","TrickBot","2024-01-01 00:00:00 UTC","","80","","","anon","https://threatfox.abuse.ch/ioc/3/"
+const sampleCSV = `# Dump generated 2026-06-29
+# "first_seen_utc","ioc_id","ioc_value","ioc_type","threat_type","fk_malware","malware_alias","malware_printable","last_seen_utc","confidence_level","is_compromised","reference","tags","anonymous","reporter"
+"2026-06-29 16:02:30", "1839890", "http://c2.evil.test/Payload.exe", "url", "botnet_cc", "agenttesla", "None", "AgentTesla", "", "90", "False", "None", "exe", "1", "tester"
+"2026-06-29 16:02:28", "1839889", "malicious.domain.test", "domain", "botnet_cc", "emotet", "None", "Emotet", "", "90", "False", "None", "", "1", "tester"
+"2026-06-29 16:02:27", "1839888", "10.20.30.40:4444", "ip:port", "botnet_cc", "trickbot", "None", "TrickBot", "", "80", "False", "None", "", "1", "tester"
+`
+
+const legacySampleCSV = `# id,ioc_type,ioc_value,threat_type,fk_threat_type,malware,fk_malware,malware_alias,malware_printable,first_seen_utc,last_seen_utc,confidence_level,anonymized,tags,credits,reference
+"1","url","http://legacy.evil.test/payload.exe","botnet_cc","1","AgentTesla","1","AgentTesla","AgentTesla","2024-01-01 00:00:00 UTC","2024-01-02 00:00:00 UTC","75","","exe","anon","https://threatfox.abuse.ch/ioc/1/"
 `
 
 func testChecker(t *testing.T) *Checker {
@@ -46,8 +54,39 @@ func TestParseFeed(t *testing.T) {
 	}
 }
 
+func TestFeedHTTPClientRefusesRedirects(t *testing.T) {
+	c := newFeedHTTPClient(time.Second)
+	req, err := http.NewRequest(http.MethodGet, "https://example.test/next", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CheckRedirect(req, []*http.Request{{}}); err != http.ErrUseLastResponse {
+		t.Fatalf("CheckRedirect = %v, want ErrUseLastResponse", err)
+	}
+}
+
+func TestReadFeedBodyRejectsOversized(t *testing.T) {
+	_, err := readFeedBody(bytes.NewReader([]byte("123456")), 5)
+	if !errors.Is(err, errFeedTooLarge) {
+		t.Fatalf("readFeedBody err = %v, want errFeedTooLarge", err)
+	}
+}
+
+func TestParseFeedLegacyCacheFormat(t *testing.T) {
+	rs, err := parseFeed(strings.NewReader(legacySampleCSV))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rs.urls["http://legacy.evil.test/payload.exe"]; !ok {
+		t.Fatalf("legacy URL row missing; urls=%v", rs.urls)
+	}
+	if _, ok := rs.domains["legacy.evil.test"]; !ok {
+		t.Fatalf("legacy URL host missing; domains=%v", rs.domains)
+	}
+}
+
 func TestCheckExactURL(t *testing.T) {
-	hits := testChecker(t).Check([]byte("click http://c2.evil.test/payload.exe now"), 64)
+	hits := testChecker(t).Check([]byte("click http://c2.evil.test/Payload.exe now"), 64)
 	if len(hits) != 1 || hits[0].Host || hits[0].Deobf {
 		t.Fatalf("hits=%+v", hits)
 	}
@@ -68,7 +107,7 @@ func TestCheckDomainMatch(t *testing.T) {
 }
 
 func TestCheckDeobf(t *testing.T) {
-	hits := testChecker(t).Check([]byte("hxxp://c2.evil[.]test/payload.exe"), 64)
+	hits := testChecker(t).Check([]byte("hxxp://c2.evil[.]test/Payload.exe"), 64)
 	if len(hits) != 1 || !hits[0].Deobf {
 		t.Fatalf("deobf hits=%+v", hits)
 	}
@@ -85,7 +124,7 @@ func TestCheckClean(t *testing.T) {
 }
 
 func TestCheckBudget(t *testing.T) {
-	hits := testChecker(t).Check([]byte("https://good.example/a http://c2.evil.test/payload.exe"), 1)
+	hits := testChecker(t).Check([]byte("https://good.example/a http://c2.evil.test/Payload.exe"), 1)
 	if len(hits) != 0 {
 		t.Errorf("budget not honoured: %+v", hits)
 	}
@@ -118,7 +157,7 @@ func TestWarmStartFromCache(t *testing.T) {
 	if c == nil {
 		t.Fatal("New returned nil with a key set")
 	}
-	hits := c.Check([]byte("click http://c2.evil.test/payload.exe now"), 64)
+	hits := c.Check([]byte("click http://c2.evil.test/Payload.exe now"), 64)
 	if len(hits) == 0 {
 		t.Error("warm-started feed should match the cached URL before any network refresh")
 	}

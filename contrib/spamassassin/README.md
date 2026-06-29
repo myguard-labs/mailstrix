@@ -35,8 +35,8 @@ transport for both Sieve and SpamAssassin.
 | File | Goes to | What it is |
 |------|---------|------------|
 | `Mailstrix.pm` | a path SpamAssassin can read (e.g. `/etc/spamassassin/`) | the plugin |
-| `strixd.pre` | SpamAssassin config dir (e.g. `/etc/spamassassin/`) | the `loadplugin` line |
-| `strixd.cf` | SpamAssassin config dir | rule definitions, scores, and connection config |
+| `mailstrix.pre` | SpamAssassin config dir (e.g. `/etc/spamassassin/`) | the `loadplugin` line |
+| `mailstrix.cf` | SpamAssassin config dir | rule definitions, scores, and connection config |
 
 ## Setup
 
@@ -47,11 +47,11 @@ transport for both Sieve and SpamAssassin.
        -p 8079:8079 eilandert/mailstrix
    ```
 
-2. **Install the plugin.** Drop `Mailstrix.pm`, `strixd.pre` and `strixd.cf` into your
+2. **Install the plugin.** Drop `Mailstrix.pm`, `mailstrix.pre` and `mailstrix.cf` into your
    SpamAssassin config dir (`/etc/spamassassin/` or `/etc/mail/spamassassin/`).
-   Make sure the `loadplugin` path in `strixd.pre` points at `Mailstrix.pm`.
+   Make sure the `loadplugin` path in `mailstrix.pre` points at `Mailstrix.pm`.
 
-3. **Configure** `strixd.cf` — at minimum set `mailstrix_url`, and `mailstrix_token_file`
+3. **Configure** `mailstrix.cf` — at minimum set `mailstrix_url`, and `mailstrix_token_file`
    if your strixd requires a token (chmod `0440`, owned by the SpamAssassin /
    amavis user). For shellout mode set `mailstrix_mode shellout` and install the
    [`strix-scan`](../sieve/) binary.
@@ -90,7 +90,7 @@ transport for both Sieve and SpamAssassin.
    ```
 
    To reproduce the CI **real-host `spamassassin --lint`** (loads the plugin via
-   `strixd.pre` + the rules in `strixd.cf` into an installed SpamAssassin, in a
+   `mailstrix.pre` + the rules in `mailstrix.cf` into an installed SpamAssassin, in a
    throwaway `debian:trixie-slim` container — no host SA needed):
 
    ```sh
@@ -102,7 +102,7 @@ transport for both Sieve and SpamAssassin.
 
 A YARA malware match is high-confidence, so the shipped scores (`MAILSTRIX 5.0`,
 `MAILSTRIX_HIGH 5.0`, stacking to 10) push a confident hit well over the default
-spam threshold on their own. Tune in `strixd.cf`; per-rule scoring via the
+spam threshold on their own. Tune in `mailstrix.cf`; per-rule scoring via the
 `X-Spam-Yara` header is shown there too.
 
 ## See also

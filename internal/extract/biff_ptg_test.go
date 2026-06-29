@@ -32,6 +32,22 @@ func ptgFuncVarTok(argc byte, id uint16) []byte {
 	return []byte{ptgFuncVar, argc, byte(id), byte(id >> 8)}
 }
 
+func ptgCharTok(v uint16) []byte {
+	out := ptgIntTok(v)
+	return append(out, ptgFuncVarTok(1, 111)...)
+}
+
+func ptgCharConcat(s string) []byte {
+	var out []byte
+	for i := 0; i < len(s); i++ {
+		out = append(out, ptgCharTok(uint16(s[i]))...)
+		if i > 0 {
+			out = append(out, ptgConcat)
+		}
+	}
+	return out
+}
+
 // tests -----------------------------------------------------------------------
 
 func TestBIFF8Empty(t *testing.T) {
@@ -73,6 +89,13 @@ func TestBIFF8ConcatOrder(t *testing.T) {
 	}
 }
 
+func TestBIFF8CharFuncConcat(t *testing.T) {
+	stream := ptgCharConcat("http://evil.test/a")
+	if got := parseBIFF8Formula(stream); got != "http://evil.test/a" {
+		t.Fatalf("CHAR concat: got %q", got)
+	}
+}
+
 // XLM-2-FUNCARITY regression set. ptgFunc (fixed argc) used to pop exactly ONE
 // operand, so a multi-arg fixed-arity builder (MID/REPLACE/…) under-popped and
 // left its leading operands on the stack, garbling the fold. biffFuncArity now
@@ -84,10 +107,9 @@ func TestBIFF8FixedArityMID(t *testing.T) {
 	stream = append(stream, ptgIntTok(1)...)
 	stream = append(stream, ptgIntTok(8)...)
 	stream = append(stream, ptgFuncTok(31)...)
-	// 31 isn't a named dangerous verb → neutral FUNC_1f wrapper, but all three
-	// operands must be popped in source order.
-	if got := parseBIFF8Formula(stream); got != "FUNC_1f(calc.exe,1,8)" {
-		t.Fatalf("MID arity: got %q, want FUNC_1f(calc.exe,1,8)", got)
+	// 31 is MID; all three operands must be popped in source order.
+	if got := parseBIFF8Formula(stream); got != "=MID(calc.exe,1,8)" {
+		t.Fatalf("MID arity: got %q, want =MID(calc.exe,1,8)", got)
 	}
 }
 
@@ -113,8 +135,8 @@ func TestBIFF8FixedArityNestedInExec(t *testing.T) {
 	stream = append(stream, ptgFuncTok(31)...)        // MID, arity 3
 	stream = append(stream, ptgFuncVarTok(1, 110)...) // EXEC, argc 1 (variadic)
 	got := parseBIFF8Formula(stream)
-	if got != "=EXEC(FUNC_1f(calc.exe,1,8))" {
-		t.Fatalf("nested EXEC(MID): got %q, want =EXEC(FUNC_1f(calc.exe,1,8))", got)
+	if got != "=EXEC(=MID(calc.exe,1,8))" {
+		t.Fatalf("nested EXEC(MID): got %q, want =EXEC(=MID(calc.exe,1,8))", got)
 	}
 	if !strings.HasPrefix(got, "=EXEC(") {
 		t.Fatalf("EXEC marker lost / garbled: %q", got)

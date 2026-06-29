@@ -86,13 +86,13 @@ func cmdExtract(args []string) int {
 		err error
 	)
 	if path == "-" {
-		buf, err = io.ReadAll(io.LimitReader(os.Stdin, *maxBody))
+		buf, err = readExtractInput(os.Stdin, *maxBody)
 	} else {
 		var f *os.File
 		// #nosec G304 -- extract intentionally reads an operator-supplied path
 		if f, err = os.Open(path); err == nil {
 			defer f.Close()
-			buf, err = io.ReadAll(io.LimitReader(f, *maxBody))
+			buf, err = readExtractInput(f, *maxBody)
 		}
 	}
 	if err != nil {
@@ -146,6 +146,21 @@ func cmdExtract(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func readExtractInput(r io.Reader, maxBody int64) ([]byte, error) {
+	limit := maxBody + 1
+	if limit < maxBody {
+		limit = maxBody
+	}
+	buf, err := io.ReadAll(io.LimitReader(r, limit))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > maxBody {
+		return nil, fmt.Errorf("oversized: exceeds max-body %d bytes; not extracted", maxBody)
+	}
+	return buf, nil
 }
 
 // containerKind names the container type the extractor recognised, for the

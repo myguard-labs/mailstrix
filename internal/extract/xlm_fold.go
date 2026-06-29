@@ -367,6 +367,12 @@ func foldPart(part string, depth int, deadline time.Time) (string, bool) {
 		return inner, true
 	}
 
+	if strings.HasPrefix(upper, "MID(") && strings.HasSuffix(upper, ")") {
+		if folded, ok := foldMIDCall(trimmed, depth, deadline); ok {
+			return folded, true
+		}
+	}
+
 	// Function call with string arguments — preserve the function wrapper
 	// and fold its inner arguments so dangerous-func detection works.
 	if idx := strings.IndexByte(upper, '('); idx > 0 {
@@ -407,6 +413,153 @@ func foldFunctionCall(call string, depth int, deadline time.Time) string {
 	return "=" + fname + "(" + folded + ")"
 }
 
+func foldMIDCall(call string, depth int, deadline time.Time) (string, bool) {
+	idx := strings.IndexByte(call, '(')
+	if idx < 0 {
+		return "", false
+	}
+	rest := call[idx+1:]
+	closeIdx := strings.LastIndexByte(rest, ')')
+	if closeIdx < 0 {
+		return "", false
+	}
+	args := splitTopLevelArgs(rest[:closeIdx])
+	if len(args) < 3 {
+		return "", false
+	}
+	text := foldXLMFormulaDepth(args[0], depth+1, deadline)
+	if text == "" {
+		text = stripOuterQuotes(args[0])
+	}
+	start, ok := parseXLMIntArg(args[1])
+	if !ok || start <= 0 {
+		return "", false
+	}
+	count, ok := parseXLMIntArg(args[2])
+	if !ok || count < 0 {
+		return "", false
+	}
+	runes := []rune(text)
+	i := start - 1
+	if i >= len(runes) || count == 0 {
+		return "", true
+	}
+	end := i + count
+	if end > len(runes) {
+		end = len(runes)
+	}
+	return string(runes[i:end]), true
+}
+
+func foldEmbeddedMIDCalls(s string, depth int, deadline time.Time) (string, bool) {
+	upper := strings.ToUpper(s)
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(s); {
+		if expired(deadline) {
+			return b.String() + s[i:], changed
+		}
+		rel := strings.Index(upper[i:], "MID(")
+		if rel < 0 {
+			b.WriteString(s[i:])
+			break
+		}
+		start := i + rel
+		open := start + len("MID") // points at '('
+		close, ok := findMatchingParen(s, open)
+		if !ok {
+			b.WriteString(s[i:])
+			break
+		}
+		prefix := strings.TrimSuffix(s[i:start], "=")
+		b.WriteString(prefix)
+		if folded, ok := foldMIDCall(s[start:close+1], depth, deadline); ok {
+			b.WriteString(folded)
+			changed = true
+			i = close + 1
+			continue
+		}
+		b.WriteString(s[start : open+1])
+		i = open + 1
+	}
+	return b.String(), changed
+}
+
+func findMatchingParen(s string, open int) (int, bool) {
+	if open < 0 || open >= len(s) || s[open] != '(' {
+		return 0, false
+	}
+	inQuote := false
+	depth := 0
+	for i := open; i < len(s); i++ {
+		ch := s[i]
+		if ch == '"' {
+			if inQuote && i+1 < len(s) && s[i+1] == '"' {
+				i++
+				continue
+			}
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseXLMIntArg(s string) (int, bool) {
+	v, err := strconv.Atoi(strings.TrimSpace(stripOuterQuotes(s)))
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+func splitTopLevelArgs(s string) []string {
+	var args []string
+	var cur strings.Builder
+	inQuote := false
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '"':
+			cur.WriteByte(ch)
+			if inQuote && i+1 < len(s) && s[i+1] == '"' {
+				i++
+				cur.WriteByte('"')
+				continue
+			}
+			inQuote = !inQuote
+		case ch == '(' && !inQuote:
+			depth++
+			cur.WriteByte(ch)
+		case ch == ')' && !inQuote:
+			if depth > 0 {
+				depth--
+			}
+			cur.WriteByte(ch)
+		case ch == ',' && !inQuote && depth == 0:
+			args = append(args, strings.TrimSpace(cur.String()))
+			cur.Reset()
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	args = append(args, strings.TrimSpace(cur.String()))
+	return args
+}
+
 // isXLMFunctionName checks if a string looks like an XLM function name that
 // wraps arguments we should try to fold.
 func isXLMFunctionName(s string) bool {
@@ -414,7 +567,7 @@ func isXLMFunctionName(s string) bool {
 	case "EXEC", "CALL", "REGISTER", "FOPEN", "FWRITE", "HALT",
 		"FORMULA", "FORMULA.FILL", "SET.NAME", "SET.VALUE",
 		"ALERT", "INPUT", "APP.MAXIMIZE", "WORKBOOK.HIDE",
-		"RUN", "GOTO", "RETURN", "IF", "WHILE", "ERROR":
+		"RUN", "GOTO", "RETURN", "IF", "WHILE", "ERROR", "MID":
 		return true
 	}
 	return false

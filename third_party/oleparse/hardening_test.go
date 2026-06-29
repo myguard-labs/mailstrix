@@ -1,8 +1,11 @@
 package oleparse
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -142,6 +145,59 @@ func TestExtractMacrosRejectsHugeModuleOffsetNoPanic(t *testing.T) {
 	}
 	if len(modules) != 0 {
 		t.Fatalf("ExtractMacros returned %d modules, want 0 for out-of-range offset", len(modules))
+	}
+}
+
+func TestParseFileRejectsOversizedOLEInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.doc")
+	data := append([]byte(OLE_SIGNATURE), bytes.Repeat([]byte{0}, maxParseFileOLEBytes-len(OLE_SIGNATURE)+1)...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseFile(path); err == nil {
+		t.Fatal("ParseFile accepted an oversized OLE input")
+	}
+}
+
+func TestParseFileSkipsOversizedZipBin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.docm")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("word/vbaProject.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(bytes.Repeat([]byte{'A'}, maxParseFileBinBytes+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mods, err := ParseFile(path)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if len(mods) != 0 {
+		t.Fatalf("oversized vbaProject.bin should be skipped, got %d modules", len(mods))
+	}
+}
+
+func TestIsBinFileName(t *testing.T) {
+	for _, name := range []string{"vbaProject.bin", "xl/VBAPROJECT.BIN", "a.bIn"} {
+		if !isBinFileName(name) {
+			t.Fatalf("isBinFileName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"bin", "vbaProject.binary", "vbaProject.bin/evil"} {
+		if isBinFileName(name) {
+			t.Fatalf("isBinFileName(%q) = true", name)
+		}
 	}
 }
 

@@ -57,6 +57,8 @@ const (
 	maxHashes = 10_000_000
 )
 
+var errFeedTooLarge = errors.New("malwarebazaar feed exceeds byte limit")
+
 // Hit is one scanned buffer whose SHA256 matched a known malware sample.
 type Hit struct {
 	SHA256 string // hex digest of the matched buffer
@@ -124,7 +126,7 @@ func New(key string, refresh time.Duration, feedURL, cacheDir string, logf func(
 		refresh: refresh,
 		feedURL: feedURL,
 		stop:    make(chan struct{}),
-		client:  &http.Client{Timeout: fetchTimeout},
+		client:  newFeedHTTPClient(fetchTimeout),
 		logf:    logf,
 	}
 	if cacheDir != "" {
@@ -134,6 +136,15 @@ func New(key string, refresh time.Duration, feedURL, cacheDir string, logf func(
 	c.warmStart()
 	go c.refreshLoop()
 	return c
+}
+
+func newFeedHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func (c *Checker) refreshLoop() {
@@ -184,7 +195,7 @@ func (c *Checker) refreshOnce() error {
 	if resp.StatusCode != http.StatusOK {
 		return &statusError{resp.StatusCode}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes))
+	body, err := readFeedBody(resp.Body, maxFeedBytes)
 	if err != nil {
 		return err
 	}
@@ -201,6 +212,18 @@ func (c *Checker) refreshOnce() error {
 	}
 	c.logf("malwarebazaar feed loaded: %d hashes", len(hs.m))
 	return nil
+}
+
+func readFeedBody(r io.Reader, limit int64) ([]byte, error) {
+	lr := &io.LimitedReader{R: r, N: limit + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, errFeedTooLarge
+	}
+	return body, nil
 }
 
 // warmStart loads the persisted feed snapshot (if any) so lookups work from the

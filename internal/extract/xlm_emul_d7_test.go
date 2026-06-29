@@ -158,6 +158,33 @@ func TestEmulateXLMBIFF_EmulatorProducesOutput(t *testing.T) {
 	}
 }
 
+func TestEmulateXLMBIFF_RefPlaceholderMID(t *testing.T) {
+	cells := []xlmCell{
+		{coord: "A1", value: "ABCDEFGHIJK"},
+		{coord: "A2", formula: `=MID([[REF:A1]],2,8)!`},
+	}
+	var out [][]byte
+	total := 0
+	emulateXLMCells(cells, &out, &total, time.Time{})
+	if !bytes.Contains(bytes.Join(out, []byte("\n")), []byte("BCDEFGHI!")) {
+		t.Fatalf("expected resolved MID payload; got %q", out)
+	}
+}
+
+func TestEmulateXLMBIFF_StaticSweepDisconnected(t *testing.T) {
+	cells := []xlmCell{
+		{coord: "A1", formula: `=CHAR(65)&CHAR(65)&CHAR(65)&CHAR(65)&CHAR(65)&CHAR(65)&CHAR(65)&CHAR(65)`},
+		{coord: "C9", formula: `=CHAR(66)&CHAR(66)&CHAR(66)&CHAR(66)&CHAR(66)&CHAR(66)&CHAR(66)&CHAR(66)`},
+	}
+	var out [][]byte
+	total := 0
+	emulateXLMCells(cells, &out, &total, time.Time{})
+	joined := bytes.Join(out, []byte("\n"))
+	if !bytes.Contains(joined, []byte("AAAAAAAA")) || !bytes.Contains(joined, []byte("BBBBBBBB")) {
+		t.Fatalf("expected static sweep to emit both disconnected formulas; got %q", out)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestVersionContainsXLMEmulBiff
 // Version constant must carry +xlmemulbiff tag (D7 sentinel).

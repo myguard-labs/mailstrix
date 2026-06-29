@@ -7,9 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
-	"regexp"
 	"strings"
 	"unicode/utf16"
 
@@ -29,7 +27,12 @@ const (
 
 var (
 	MAC_CODEPAGES = map[uint16]string{}
-	BINFILE_NAME  = regexp.MustCompile("(?i).bin$")
+)
+
+const (
+	maxParseFileOLEBytes = 64 << 20
+	maxParseFileBinBytes = 8 << 20
+	maxParseFileBins     = 64
 )
 
 type OLEHeader struct {
@@ -196,7 +199,7 @@ func (self *OLEFile) ReadSector(sector uint32) []byte {
 	if start64 > uint64(len(self.data)) {
 		return nil
 	}
-	start := int(start64)
+	start := int(start64) // #nosec G115 -- start64 <= len(self.data), which is int-bounded.
 
 	to_read := self.SectorSize
 	if to_read > len(self.data)-start {
@@ -214,7 +217,7 @@ func (self *OLEFile) ReadMiniSector(sector uint32) []byte {
 	if start64 > uint64(len(self.ministream)) {
 		return nil
 	}
-	start := int(start64)
+	start := int(start64) // #nosec G115 -- start64 <= len(self.ministream), which is int-bounded.
 
 	to_read := self.MiniSectorSize
 	if to_read > len(self.ministream)-start {
@@ -251,7 +254,7 @@ func boundedInt(n uint64) int {
 	if n > uint64(maxInt) {
 		return maxInt
 	}
-	return int(n)
+	return int(n) // #nosec G115 -- n <= maxInt by the guard above.
 }
 
 func (self *OLEFile) ReadChainSize(start uint32, size uint64) []byte {
@@ -434,7 +437,7 @@ func (self *OLEFile) getStream(index uint32, copyResult bool, prefixLimit int) [
 
 	size := len(data)
 	if readSize < uint64(size) {
-		size = int(readSize)
+		size = int(readSize) // #nosec G115 -- readSize < len(data), which is int-bounded.
 	}
 	result := data[:size]
 
@@ -1203,12 +1206,12 @@ loop:
 			}
 			referencecontrol_reserved1 := getUint32(dir_stream, &i)
 			check_value("REFERENCECONTROL_Reserved1", 0x0000, referencecontrol_reserved1)
-			referencecontrol_reserved2 := int(getUint16(dir_stream, &i))
+			referencecontrol_reserved2 := getUint16(dir_stream, &i)
 			check_value("REFERENCECONTROL_Reserved2", 0x0000, uint32(referencecontrol_reserved2))
 
 			// optional field
-			check2 := int(getUint16(dir_stream, &i))
-			var referencecontrol_reserved3 int
+			check2 := getUint16(dir_stream, &i)
+			var referencecontrol_reserved3 uint16
 
 			if check2 == 0x0016 {
 				referencecontrol_namerecordextended_sizeof_name := int(getUint32(dir_stream, &i))
@@ -1216,14 +1219,14 @@ loop:
 				if !skipBytes(dir_stream, &i, referencecontrol_namerecordextended_sizeof_name) {
 					return nil, errors.New("REFERENCECONTROL_NameRecordExtended_Name value out of range")
 				}
-				referencecontrol_namerecordextended_reserved := int(getUint16(dir_stream, &i))
+				referencecontrol_namerecordextended_reserved := getUint16(dir_stream, &i)
 				if referencecontrol_namerecordextended_reserved == 0x003E {
 					referencecontrol_namerecordextended_sizeof_name_unicode := int(getUint32(dir_stream, &i))
 					// referencecontrol_namerecordextended_name_unicode := dir_stream[i : i+referencecontrol_namerecordextended_sizeof_name_unicode]
 					if !skipBytes(dir_stream, &i, referencecontrol_namerecordextended_sizeof_name_unicode) {
 						return nil, errors.New("REFERENCECONTROL_NameRecordExtended_NameUnicode value out of range")
 					}
-					referencecontrol_reserved3 = int(getUint16(dir_stream, &i))
+					referencecontrol_reserved3 = getUint16(dir_stream, &i)
 
 				} else {
 					referencecontrol_reserved3 = referencecontrol_namerecordextended_reserved
@@ -1534,7 +1537,7 @@ loop:
 }
 
 func ParseFile(filename string) ([]*VBAModule, error) {
-	fd, err := os.Open(filename)
+	fd, err := os.Open(filename) // #nosec G304 -- ParseFile intentionally opens a caller-supplied path.
 	if err != nil {
 		return nil, err
 	}
@@ -1547,8 +1550,10 @@ func ParseFile(filename string) ([]*VBAModule, error) {
 	}
 
 	if string(signature) == OLE_SIGNATURE {
-		fd.Seek(0, os.SEEK_SET)
-		data, err := ioutil.ReadAll(fd)
+		if _, err := fd.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		data, err := readAllLimited(fd, maxParseFileOLEBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -1563,24 +1568,53 @@ func ParseFile(filename string) ([]*VBAModule, error) {
 	defer r.Close()
 
 	results := []*VBAModule{}
+	bins := 0
 	for _, f := range r.File {
-		if BINFILE_NAME.MatchString(f.Name) {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			data, err := ioutil.ReadAll(rc)
-			if err != nil {
-				return nil, err
-			}
-			modules, err := ParseBuffer(data)
-			if err == nil {
-				results = append(results, modules...)
-			}
+		if !isBinFileName(f.Name) {
+			continue
+		}
+		if bins >= maxParseFileBins {
+			break
+		}
+		bins++
+		if f.UncompressedSize64 > maxParseFileBinBytes {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		data, readErr := readAllLimited(rc, maxParseFileBinBytes)
+		closeErr := rc.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		modules, err := ParseBuffer(data)
+		if err == nil {
+			results = append(results, modules...)
 		}
 	}
 
 	return results, nil
+}
+
+func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
+	lr := &io.LimitedReader{R: r, N: limit + 1}
+	data, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("oleparse: input exceeds %d byte limit", limit)
+	}
+	return data, nil
+}
+
+func isBinFileName(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), ".bin")
 }
 
 func ParseBuffer(data []byte) ([]*VBAModule, error) {

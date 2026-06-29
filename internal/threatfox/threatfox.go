@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -37,13 +38,15 @@ import (
 
 const (
 	// feedURL is the ThreatFox recent-IOCs CSV dump (last 7 days).
-	feedURL = "https://threatfox-api.abuse.ch/export/csv/recent/"
+	feedURL = "https://threatfox.abuse.ch/export/csv/recent/"
 
 	minRefresh     = 5 * time.Minute
 	defaultRefresh = 360 * time.Minute
 	fetchTimeout   = 60 * time.Second
 	maxFeedBytes   = 64 << 20 // hard ceiling on a downloaded feed
 )
+
+var errFeedTooLarge = errors.New("threatfox feed exceeds byte limit")
 
 // Hit is one URL or domain in a scanned buffer that matched the ThreatFox feed.
 type Hit struct {
@@ -115,7 +118,7 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 		key:     key,
 		refresh: refresh,
 		stop:    make(chan struct{}),
-		client:  &http.Client{Timeout: fetchTimeout},
+		client:  newFeedHTTPClient(fetchTimeout),
 		logf:    logf,
 	}
 	if cacheDir != "" {
@@ -125,6 +128,15 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	c.warmStart()
 	go c.refreshLoop()
 	return c
+}
+
+func newFeedHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func (c *Checker) warmStart() {
@@ -189,7 +201,7 @@ func (c *Checker) refreshOnce() error {
 	if resp.StatusCode != http.StatusOK {
 		return &statusError{resp.StatusCode}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes))
+	body, err := readFeedBody(resp.Body, maxFeedBytes)
 	if err != nil {
 		return err
 	}
@@ -212,9 +224,27 @@ type statusError struct{ code int }
 
 func (e *statusError) Error() string { return "threatfox feed HTTP " + strconv.Itoa(e.code) }
 
-// parseFeed reads the ThreatFox CSV.
-// Format: # id,ioc_type,ioc_value,...  (comment lines start with #)
-// We extract rows where ioc_type is "url" or "domain".
+func readFeedBody(r io.Reader, limit int64) ([]byte, error) {
+	lr := &io.LimitedReader{R: r, N: limit + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, errFeedTooLarge
+	}
+	return body, nil
+}
+
+// parseFeed reads the ThreatFox CSV. The current dump is:
+//
+//	first_seen_utc,ioc_id,ioc_value,ioc_type,...
+//
+// Older cached dumps used:
+//
+//	id,ioc_type,ioc_value,...
+//
+// Accept both so warm-start keeps working across the upstream format switch.
 func parseFeed(r io.Reader) (*ruleset, error) {
 	rs := &ruleset{urls: make(map[string]struct{}), domains: make(map[string]struct{})}
 	cr := csv.NewReader(io.LimitReader(r, maxFeedBytes))
@@ -222,6 +252,7 @@ func parseFeed(r io.Reader) (*ruleset, error) {
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
 	cr.ReuseRecord = true
+	cr.TrimLeadingSpace = true
 	for {
 		rec, err := cr.Read()
 		if err == io.EOF {
@@ -230,12 +261,10 @@ func parseFeed(r io.Reader) (*ruleset, error) {
 		if err != nil {
 			continue
 		}
-		// Expect: id, ioc_type, ioc_value, ...
-		if len(rec) < 3 {
+		iocType, iocValue := threatFoxIOC(rec)
+		if iocType == "" || iocValue == "" {
 			continue
 		}
-		iocType := strings.ToLower(strings.TrimSpace(rec[1]))
-		iocValue := strings.TrimSpace(rec[2])
 		switch iocType {
 		case "url":
 			norm, host := normalizeURL(iocValue)
@@ -252,6 +281,36 @@ func parseFeed(r io.Reader) (*ruleset, error) {
 		}
 	}
 	return rs, nil
+}
+
+func threatFoxIOC(rec []string) (iocType, iocValue string) {
+	if len(rec) >= 4 {
+		if typ := cleanIOCType(rec[3]); isThreatFoxURLType(typ) {
+			return typ, cleanIOCValue(rec[2])
+		}
+	}
+	if len(rec) >= 3 {
+		if typ := cleanIOCType(rec[1]); isThreatFoxURLType(typ) {
+			return typ, cleanIOCValue(rec[2])
+		}
+	}
+	return "", ""
+}
+
+func isThreatFoxURLType(s string) bool {
+	return s == "url" || s == "domain"
+}
+
+func cleanIOCType(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, `"`)
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+func cleanIOCValue(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, `"`)
+	return strings.TrimSpace(s)
 }
 
 // Check extracts URLs from data (and from a cheaply-defanged copy) via

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -44,6 +45,8 @@ const (
 	fetchTimeout   = 60 * time.Second
 	maxFeedBytes   = 256 << 20 // hard ceiling on a downloaded feed
 )
+
+var errFeedTooLarge = errors.New("urlhaus feed exceeds byte limit")
 
 // Hit is one URL in a scanned buffer that matched the feed.
 type Hit struct {
@@ -120,7 +123,7 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 		key:     key,
 		refresh: refresh,
 		stop:    make(chan struct{}),
-		client:  &http.Client{Timeout: fetchTimeout},
+		client:  newFeedHTTPClient(fetchTimeout),
 		logf:    logf,
 	}
 	if cacheDir != "" {
@@ -130,6 +133,15 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	c.warmStart()
 	go c.refreshLoop()
 	return c
+}
+
+func newFeedHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // warmStart loads the persisted feed snapshot (if any) into the set so lookups
@@ -200,8 +212,10 @@ func (c *Checker) refreshOnce() error {
 	if resp.StatusCode != http.StatusOK {
 		return &statusError{resp.StatusCode}
 	}
-	// Read the (capped) feed into memory so it can be both parsed and persisted.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes))
+	// Read the capped feed into memory so it can be both parsed and persisted.
+	// If it exceeds the cap, fail this refresh instead of caching/parsing a
+	// truncated snapshot.
+	body, err := readFeedBody(resp.Body, maxFeedBytes)
 	if err != nil {
 		return err
 	}
@@ -225,6 +239,18 @@ func (c *Checker) refreshOnce() error {
 type statusError struct{ code int }
 
 func (e *statusError) Error() string { return "urlhaus feed HTTP " + strconv.Itoa(e.code) }
+
+func readFeedBody(r io.Reader, limit int64) ([]byte, error) {
+	lr := &io.LimitedReader{R: r, N: limit + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, errFeedTooLarge
+	}
+	return body, nil
+}
 
 // parseFeed reads the URLhaus CSV (`#`-comment header, quoted fields). The `url`
 // is column 2 in the documented layout (id,dateadded,url,...); we take that when

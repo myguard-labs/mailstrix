@@ -53,6 +53,13 @@ func TestFoldXLMFormula_PlainString(t *testing.T) {
 	}
 }
 
+func TestFoldXLMFormula_MID(t *testing.T) {
+	got := foldXLMFormula(`=MID("ABCDEFGHIJK",2,8)&CHAR(33)`)
+	if got != "BCDEFGHI!" {
+		t.Errorf("MID: got %q, want %q", got, "BCDEFGHI!")
+	}
+}
+
 func TestFoldXLMFormula_CellRefSkipped(t *testing.T) {
 	// Cell references can't be folded — they should be skipped.
 	got := foldXLMFormula("=A1&CHAR(65)&B2")

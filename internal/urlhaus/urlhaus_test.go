@@ -1,10 +1,14 @@
 package urlhaus
 
 import (
+	"bytes"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eilandert/mailstrix/internal/urlcand"
 )
@@ -37,6 +41,24 @@ func TestWarmStartBadCacheIgnored(t *testing.T) {
 	}
 	if c := New("bogus-key", 0, dir, func(string, ...any) {}); c == nil {
 		t.Error("New should still return a checker despite a bad cache")
+	}
+}
+
+func TestFeedHTTPClientRefusesRedirects(t *testing.T) {
+	c := newFeedHTTPClient(time.Second)
+	req, err := http.NewRequest(http.MethodGet, "https://example.test/next", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CheckRedirect(req, []*http.Request{{}}); err != http.ErrUseLastResponse {
+		t.Fatalf("CheckRedirect = %v, want ErrUseLastResponse", err)
+	}
+}
+
+func TestReadFeedBodyRejectsOversized(t *testing.T) {
+	_, err := readFeedBody(bytes.NewReader([]byte("123456")), 5)
+	if !errors.Is(err, errFeedTooLarge) {
+		t.Fatalf("readFeedBody err = %v, want errFeedTooLarge", err)
 	}
 }
 

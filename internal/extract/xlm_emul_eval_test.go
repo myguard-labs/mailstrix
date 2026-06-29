@@ -44,6 +44,15 @@ func TestEvalExprA1Resolve(t *testing.T) {
 	}
 }
 
+func TestEvalExprRefPlaceholderQuoted(t *testing.T) {
+	m := newEvalTestMachine()
+	m.setCell("Sheet1", "A1", "", "ABCDEFGHIJK")
+	got := evalExpr(m, "Sheet1", "=MID([[REF:A1]],2,8)&CHAR(33)", nil)
+	if got != "BCDEFGHI!" {
+		t.Fatalf("placeholder MID: got %q, want BCDEFGHI!", got)
+	}
+}
+
 // TestEvalExprCycleBreak verifies that circular references do not infinite-loop.
 func TestEvalExprCycleBreak(t *testing.T) {
 	m := newEvalTestMachine()

@@ -337,21 +337,24 @@ func parseBIFF12FormulaWithRefs(data []byte) string {
 
 		case ptgRef:
 			// D7: emit [[REF:A1]] placeholder instead of "".
-			if pos+4 >= len(data) {
+			row, col, next, ok := readBIFF12PtgRef(data, pos)
+			if !ok {
 				return joinStack(stack)
 			}
-			row := uint16(data[pos+1]) | uint16(data[pos+2])<<8
-			col := uint16(data[pos+3]) | uint16(data[pos+4])<<8
-			a1 := biffCellToA1(row, col)
+			a1 := biff12CellToA1(row, col)
 			if a1 == "" {
 				push("")
 			} else {
 				push("[[REF:" + a1 + "]]")
 			}
-			pos += 5
+			pos = next
 
 		case ptgArea:
-			pos += 9
+			next, ok := skipBIFF12Ptg(data, pos, 13)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgMemArea:
@@ -359,15 +362,27 @@ func parseBIFF12FormulaWithRefs(data []byte) string {
 			push("")
 
 		case ptgExp:
-			pos += 5
+			next, ok := skipBIFF12Ptg(data, pos, 7)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgRef3d:
-			pos += 7
+			next, ok := skipBIFF12Ptg(data, pos, 9)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgArea3d:
-			pos += 11
+			next, ok := skipBIFF12Ptg(data, pos, 15)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgNameX:
@@ -429,6 +444,24 @@ func resolveRefPlaceholders(m *xlmMachine, sheetName, s string) string {
 		}
 		return match
 	})
+}
+
+func resolveRefPlaceholdersQuoted(m *xlmMachine, sheetName, s string) string {
+	return reRefPlaceholder.ReplaceAllStringFunc(s, func(match string) string {
+		sub := reRefPlaceholder.FindStringSubmatch(match)
+		if sub == nil {
+			return match
+		}
+		coord := sub[1]
+		if val, ok := m.getCellValue(sheetName, coord); ok {
+			return quoteXLMStringLiteral(val)
+		}
+		return match
+	})
+}
+
+func quoteXLMStringLiteral(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // stripRefPlaceholders removes every [[REF:...]] token from s, leaving the

@@ -13,7 +13,8 @@ package extract
 // This is a STATIC string folder, not an interpreter: ptgConcat reassembles
 // adjacent operands, ptgStr/ptgInt/ptgBool push literals, ptgFunc/ptgFuncVar
 // wrap their arguments in a "=NAME(args)" shape (so dangerous-func detection
-// fires), and every reference/name/array token pushes a neutral placeholder.
+// fires), CHAR(n) folds to its byte, and every reference/name/array token pushes
+// a neutral placeholder.
 // No cell dereferencing, no control flow, no execution.
 //
 // ptg opcodes, operand sizes and the function-id table are reimplemented from
@@ -119,6 +120,7 @@ const (
 // (xlm_extract.c) — see oletools-reference.md §4. Unknown ids fold to a neutral
 // FUNC_<hex> wrapper (no marker, but arguments are preserved for IOC scanning).
 var biffFuncNames = map[uint16]string{
+	31:    "MID",
 	53:    "GOTO",
 	54:    "HALT",
 	108:   "SET.VALUE",
@@ -441,10 +443,26 @@ func normalizePtg(ptg byte) byte {
 // neutral "FUNC_<hex>(args)" for unknown ids (arguments preserved for IOC scan,
 // no marker).
 func wrapFunc(funcID uint16, args string) string {
+	if funcID == 111 {
+		if s, ok := foldBIFFChar(args); ok {
+			return s
+		}
+	}
 	if name, ok := biffFuncNames[funcID]; ok {
 		return "=" + name + "(" + args + ")"
 	}
 	return "FUNC_" + strconv.FormatUint(uint64(funcID), 16) + "(" + args + ")"
+}
+
+func foldBIFFChar(args string) (string, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(args))
+	if err != nil || n < 0 || n > 127 {
+		return "", false
+	}
+	if n < 32 && n != '\t' && n != '\n' && n != '\r' {
+		return "", false
+	}
+	return string(rune(n)), true
 }
 
 // popStack removes and returns the top operand, or "" if the stack is empty.

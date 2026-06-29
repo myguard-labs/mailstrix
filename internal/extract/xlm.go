@@ -142,6 +142,15 @@ func fromOOXMLXLM(idx map[string]*zip.File, hasMacrosheet bool, out *[][]byte, d
 	}
 }
 
+func xlmEmulatorProducedPayload(out [][]byte, priorLen int) bool {
+	for _, s := range out[priorLen:] {
+		if !bytes.HasPrefix(s, []byte("XLM-EMUL-DEPTH ")) {
+			return true
+		}
+	}
+	return false
+}
+
 // fromBIFFXLM reads the Workbook and/or Book streams from an already-parsed OLE2
 // compound file and calls scanBIFFXLMStream for each present stream.
 //
@@ -353,7 +362,7 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 			emulateXLMCells(xlmCells, &res.Streams, &xlmOutput, deadline)
 		}
 
-		if len(res.Streams) == priorLen {
+		if !xlmEmulatorProducedPayload(res.Streams, priorLen) {
 			// Emulator produced no output — fall back to one-by-one fold.
 			for _, bc := range cells {
 				folded := parseBIFF8Formula(bc.rgce)

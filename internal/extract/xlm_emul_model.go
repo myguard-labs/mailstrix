@@ -238,6 +238,45 @@ func emulateXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline 
 	// defense-in-depth coverage.
 	if emulatorLen <= priorLen {
 		interpretXLMCells(cells, out, totalOutput, deadline)
+	} else {
+		emitEvaluatedXLMCells(cells, out, totalOutput, deadline)
+	}
+}
+
+func emitEvaluatedXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline time.Time) {
+	if len(cells) == 0 || expired(deadline) {
+		return
+	}
+	m := newMachine(out, totalOutput, deadline)
+	const sheetName = "Sheet1"
+	for _, c := range cells {
+		m.setCell(sheetName, c.coord, c.formula, c.value)
+	}
+	seen := make(map[string]struct{}, len(*out))
+	for _, s := range *out {
+		seen[string(s)] = struct{}{}
+	}
+	for _, c := range cells {
+		if expired(deadline) || len(*out) >= maxStreams {
+			return
+		}
+		if c.formula == "" {
+			continue
+		}
+		s := evalExpr(m, sheetName, c.formula, nil)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		before := len(*out)
+		if !emitFoldedFormula(s, out, totalOutput, true) {
+			return
+		}
+		if len(*out) > before {
+			seen[s] = struct{}{}
+		}
 	}
 }
 

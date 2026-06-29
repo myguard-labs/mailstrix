@@ -80,6 +80,7 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 
 		// Convert any R1C1 refs to A1 first.
 		s = replaceR1C1(s)
+		s = resolveRefPlaceholdersQuoted(m, sheetName, s)
 
 		// Resolve A1 refs.
 		changed := false
@@ -108,8 +109,7 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 			}
 			// Resolve: substitute value (quote it so fold treats it as a string literal).
 			evaluating[key] = true
-			quoted := `"` + strings.ReplaceAll(val, `"`, `""`) + `"`
-			b.WriteString(quoted)
+			b.WriteString(quoteXLMStringLiteral(val))
 			evaluating[key] = false
 			i = end
 			changed = true
@@ -121,7 +121,14 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 	}
 
 	// Step 2: constant-fold the ref-resolved formula.
-	return foldXLMFormulaDepth(s, 0, m.deadline)
+	folded := foldXLMFormulaDepth(s, 0, m.deadline)
+	if folded != "" && !strings.Contains(strings.ToUpper(folded), "MID(") {
+		return folded
+	}
+	if embedded, ok := foldEmbeddedMIDCalls(s, 0, m.deadline); ok {
+		return strings.TrimPrefix(embedded, "=")
+	}
+	return folded
 }
 
 // replaceR1C1 replaces R1C1-style references in s with their A1 equivalents,

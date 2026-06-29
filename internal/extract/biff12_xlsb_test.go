@@ -78,8 +78,8 @@ func TestParseBIFF12Formula_FixedArityMID(t *testing.T) {
 	rgce = append(rgce, ptgIntTok(1)...)
 	rgce = append(rgce, ptgIntTok(8)...)
 	rgce = append(rgce, ptgFuncTok(31)...)
-	if got := parseBIFF12Formula(rgce); got != "FUNC_1f(calc.exe,1,8)" {
-		t.Fatalf("BIFF12 MID arity: got %q, want FUNC_1f(calc.exe,1,8)", got)
+	if got := parseBIFF12Formula(rgce); got != "=MID(calc.exe,1,8)" {
+		t.Fatalf("BIFF12 MID arity: got %q, want =MID(calc.exe,1,8)", got)
 	}
 }
 
@@ -98,8 +98,8 @@ func TestParseBIFF8FormulaWithRefs_FixedArityMID(t *testing.T) {
 	stream = append(stream, ptgIntTok(1)...)
 	stream = append(stream, ptgIntTok(8)...)
 	stream = append(stream, ptgFuncTok(31)...)
-	if got := parseBIFF8FormulaWithRefs(stream); got != "FUNC_1f(calc.exe,1,8)" {
-		t.Fatalf("BIFF8 WithRefs MID arity: got %q, want FUNC_1f(calc.exe,1,8)", got)
+	if got := parseBIFF8FormulaWithRefs(stream); got != "=MID(calc.exe,1,8)" {
+		t.Fatalf("BIFF8 WithRefs MID arity: got %q, want =MID(calc.exe,1,8)", got)
 	}
 }
 
@@ -108,8 +108,8 @@ func TestParseBIFF12FormulaWithRefs_FixedArityMID(t *testing.T) {
 	rgce = append(rgce, ptgIntTok(1)...)
 	rgce = append(rgce, ptgIntTok(8)...)
 	rgce = append(rgce, ptgFuncTok(31)...)
-	if got := parseBIFF12FormulaWithRefs(rgce); got != "FUNC_1f(calc.exe,1,8)" {
-		t.Fatalf("BIFF12 WithRefs MID arity: got %q, want FUNC_1f(calc.exe,1,8)", got)
+	if got := parseBIFF12FormulaWithRefs(rgce); got != "=MID(calc.exe,1,8)" {
+		t.Fatalf("BIFF12 WithRefs MID arity: got %q, want =MID(calc.exe,1,8)", got)
 	}
 }
 
@@ -121,56 +121,113 @@ func TestParseBIFF12Formula_FailOpenTruncated(t *testing.T) {
 	}
 }
 
+func TestVersionContainsBIFF12Fmla(t *testing.T) {
+	if !strings.Contains(Version, "+biff12fmla") {
+		t.Errorf("Version %q does not contain +biff12fmla", Version)
+	}
+}
+
 // --- record extraction ---
 
-// fmlaNumRecord builds a FMLA_NUM payload: col4 style4 value8 flags2 sz4 rgce.
+// fmlaNumRecord builds a FMLA_NUM payload: col4 style4 value8 grbit2 cce4 rgce.
 func fmlaNumRecord(rgce []byte) []byte {
+	return fmlaNumRecordWithTrailer(rgce, nil)
+}
+
+func fmlaNumRecordWithTrailer(rgce, trailer []byte) []byte {
 	var p []byte
 	p = binary.LittleEndian.AppendUint32(p, 0) // col
 	p = binary.LittleEndian.AppendUint32(p, 0) // style
 	p = append(p, make([]byte, 8)...)          // value (double)
-	p = binary.LittleEndian.AppendUint16(p, 0) // flags
+	p = binary.LittleEndian.AppendUint16(p, 0) // grbit
+	p = binary.LittleEndian.AppendUint32(p, uint32(len(rgce)))
+	p = append(p, rgce...)
+	p = append(p, trailer...)
+	return p
+}
+
+func fmlaStringRecord(rgce []byte, value string) []byte {
+	var p []byte
+	p = binary.LittleEndian.AppendUint32(p, 0) // col
+	p = binary.LittleEndian.AppendUint32(p, 0) // style
+	p = binary.LittleEndian.AppendUint32(p, uint32(len([]rune(value))))
+	for _, r := range value {
+		p = binary.LittleEndian.AppendUint16(p, uint16(r))
+	}
+	p = binary.LittleEndian.AppendUint16(p, 0) // grbit
 	p = binary.LittleEndian.AppendUint32(p, uint32(len(rgce)))
 	p = append(p, rgce...)
 	return p
 }
 
+func fmlaErrorRecordWithTrailer(rgce, trailer []byte) []byte {
+	var p []byte
+	p = binary.LittleEndian.AppendUint32(p, 0) // col
+	p = binary.LittleEndian.AppendUint32(p, 0) // style
+	p = append(p, 0)                           // value (error)
+	p = binary.LittleEndian.AppendUint16(p, 0) // grbit
+	p = binary.LittleEndian.AppendUint32(p, uint32(len(rgce)))
+	p = append(p, rgce...)
+	p = append(p, trailer...)
+	return p
+}
+
+func rowHdrRecord(row uint32) []byte {
+	var p []byte
+	p = binary.LittleEndian.AppendUint32(p, row)
+	return biff12Record(0, p)
+}
+
+func cellIsstRecord(idx uint32) []byte {
+	var p []byte
+	p = binary.LittleEndian.AppendUint32(p, 0) // col
+	p = binary.LittleEndian.AppendUint32(p, 0) // style
+	p = binary.LittleEndian.AppendUint32(p, idx)
+	return biff12Record(biff12CellIsst, p)
+}
+
+func ptgRef12(row uint32, col uint16) []byte {
+	return []byte{0x44, byte(row), byte(row >> 8), byte(row >> 16), byte(row >> 24), byte(col), byte(col >> 8)}
+}
+
 func TestBIFF12FormulaRgce(t *testing.T) {
 	rgce := strPtg("payload")
 	p := fmlaNumRecord(rgce)
-	got := biff12FormulaRgce(p)
+	got := biff12FormulaRgce(biff12FmlaNum, p)
 	if !bytes.Equal(got, rgce) {
 		t.Fatalf("got %v want %v", got, rgce)
 	}
 }
 
+func TestBIFF12FormulaRgce_StringRecord(t *testing.T) {
+	rgce := strPtg("payload")
+	p := fmlaStringRecord(rgce, "cached")
+	got := biff12FormulaRgce(biff12FmlaString, p)
+	if !bytes.Equal(got, rgce) {
+		t.Fatalf("got %v want %v", got, rgce)
+	}
+}
+
+func TestBIFF12FormulaRgce_WithTrailer(t *testing.T) {
+	rgce := strPtg("payload")
+	p := fmlaNumRecordWithTrailer(rgce, []byte{0xde, 0xad, 0xbe, 0xef})
+	got := biff12FormulaRgce(biff12FmlaNum, p)
+	if !bytes.Equal(got, rgce) {
+		t.Fatalf("trailer must not be folded into rgce: got %v want %v", got, rgce)
+	}
+}
+
 func TestBIFF12FormulaRgce_TooShort(t *testing.T) {
-	if got := biff12FormulaRgce(make([]byte, 14)); got != nil {
+	if got := biff12FormulaRgce(biff12FmlaNum, make([]byte, 14)); got != nil {
 		t.Fatalf("payload < 15 bytes must return nil, got %v", got)
 	}
 }
 
-func TestBIFF12FormulaRgce_AmbiguousRejected(t *testing.T) {
-	// Construct a payload where two value-field widths both satisfy
-	// off+4+sz == len(p), so the extractor cannot disambiguate → must return nil.
-	// valWidth=1: off=11, need sz @ p[11..15], rgceStart=15, sz must = len-15.
-	// valWidth=2: off=12, need sz @ p[12..16], rgceStart=16, sz must = len-16.
-	// Pick len=24. width1 sz=9 @off11; width2 sz=8 @off12. Overlapping windows;
-	// craft bytes so both i32 reads equal their required value simultaneously is
-	// hard, so instead: zero-fill and rely on sz=0 matching only one width.
-	// Simpler deterministic ambiguity: all-zero payload. sz reads 0 at every off;
-	// off+4+0 == len(p) holds only when off+4 == len(p). For len=16: off=12
-	// (width2) gives 16; off=11(width1) gives 15≠16; off=14(width4) gives 18≠16;
-	// off=18(width8) skipped. → exactly ONE match, NOT ambiguous. Use len that
-	// two widths hit: off+4==len for width a, and a different width b with sz!=0.
-	// Build explicitly: len=18 → width4 off=14, off+4=18, sz=0 ✓ (rgce empty).
-	//                          width1 off=11, sz @11 must=18-15=3 to also match.
-	p := make([]byte, 18)
-	// width4 self-consistent with sz=0 (zeros at p[14:18]).
-	// Make width1 ALSO self-consistent: sz @ p[11:15] = 3.
-	p[11] = 3
-	if got := biff12FormulaRgce(p); got != nil {
-		t.Fatalf("ambiguous record must return nil, got %v", got)
+func TestBIFF12FormulaRgce_DeclaredLengthOverrun(t *testing.T) {
+	p := fmlaNumRecord(strPtg("payload"))
+	binary.LittleEndian.PutUint32(p[18:22], uint32(len(p)))
+	if got := biff12FormulaRgce(biff12FmlaNum, p); got != nil {
+		t.Fatalf("overrunning cce must return nil, got %v", got)
 	}
 }
 
@@ -197,6 +254,45 @@ func biff12Record(id int, payload []byte) []byte {
 	return append(b, payload...)
 }
 
+func buildXLSBWithRecord(t *testing.T, partPath string, rec []byte) []byte {
+	t.Helper()
+	return buildXLSBWithParts(t, map[string][]byte{partPath: rec})
+}
+
+func buildXLSBWithParts(t *testing.T, parts map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for path, body := range parts {
+		w, err := zw.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func sharedStringsBin(items ...string) []byte {
+	var raw []byte
+	raw = append(raw, biff12Record(biff12BrtSSTBegin, make([]byte, 8))...)
+	for _, item := range items {
+		var p []byte
+		p = append(p, 0) // flags
+		p = binary.LittleEndian.AppendUint32(p, uint32(len([]rune(item))))
+		for _, r := range item {
+			p = binary.LittleEndian.AppendUint16(p, uint16(r))
+		}
+		raw = append(raw, biff12Record(biff12BrtSSTItem, p)...)
+	}
+	return raw
+}
+
 // buildXLSB makes a minimal OOXML zip with one .bin part at the given path
 // holding a single FMLA_NUM record whose formula folds to wantFold.
 func buildXLSB(t *testing.T, partPath, formula string) []byte {
@@ -206,20 +302,7 @@ func buildXLSB(t *testing.T, partPath, formula string) []byte {
 	rgce = append(rgce, ptgFuncVar, 1)
 	rgce = binary.LittleEndian.AppendUint16(rgce, 110) // EXEC
 	rec := biff12Record(biff12FmlaNum, fmlaNumRecord(rgce))
-
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	w, err := zw.Create(partPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write(rec); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
+	return buildXLSBWithRecord(t, partPath, rec)
 }
 
 func foldStreams(t *testing.T, data []byte) [][]byte {
@@ -254,15 +337,62 @@ func TestXLSBFold_Macrosheet(t *testing.T) {
 	}
 }
 
+func TestXLSBFold_StringRecordID8(t *testing.T) {
+	rgce := strPtg("http://evil.test/string.exe")
+	rgce = append(rgce, ptgFuncVar, 1)
+	rgce = binary.LittleEndian.AppendUint16(rgce, 110) // EXEC
+	rec := biff12Record(biff12FmlaString, fmlaStringRecord(rgce, "cached"))
+	data := buildXLSBWithRecord(t, "xl/macrosheets/sheet1.bin", rec)
+	out := foldStreams(t, data)
+	if !bytes.Contains(bytes.Join(out, []byte("\n")), []byte("http://evil.test/string.exe")) {
+		t.Fatalf("BrtFmlaString id 8 formula not emitted; streams=%q", out)
+	}
+}
+
+func TestXLSBFold_CellIsstMIDReference(t *testing.T) {
+	rgce := ptgRef12(0, 0xc000)
+	rgce = append(rgce, ptgIntTok(2)...)
+	rgce = append(rgce, ptgIntTok(8)...)
+	rgce = append(rgce, ptgFuncTok(31)...) // MID(A1,2,8)
+	rgce = append(rgce, ptgIntTok('!')...)
+	rgce = append(rgce, ptgFuncTok(111)...) // CHAR("!")
+	rgce = append(rgce, ptgConcat)
+
+	var sheet []byte
+	sheet = append(sheet, rowHdrRecord(0)...)
+	sheet = append(sheet, cellIsstRecord(0)...)
+	sheet = append(sheet, rowHdrRecord(1)...)
+	sheet = append(sheet, biff12Record(biff12FmlaBool, fmlaErrorRecordWithTrailer(rgce, []byte{0, 0, 0, 0}))...)
+
+	data := buildXLSBWithParts(t, map[string][]byte{
+		"xl/sharedStrings.bin":      sharedStringsBin("ABCDEFGHIJK"),
+		"xl/macrosheets/sheet1.bin": sheet,
+	})
+	out := foldStreams(t, data)
+	if !bytes.Contains(bytes.Join(out, []byte("\n")), []byte("BCDEFGHI!")) {
+		t.Fatalf("BrtCellIsst + MID ref not emitted; streams=%q", out)
+	}
+}
+
+func TestXLSBFold_ErrorRecordTrailerCharConcatFallback(t *testing.T) {
+	rgce := ptgCharConcat("http://evil.test/hancitor")
+	rec := biff12Record(biff12FmlaError, fmlaErrorRecordWithTrailer(rgce, []byte{0, 0, 0, 0}))
+	data := buildXLSBWithRecord(t, "xl/macrosheets/sheet1.bin", rec)
+	out := foldStreams(t, data)
+	if !bytes.Contains(bytes.Join(out, []byte("\n")), []byte("http://evil.test/hancitor")) {
+		t.Fatalf("trailer-bearing BrtFmlaError CHAR concat not emitted; streams=%q", out)
+	}
+}
+
 // --- ptg-binop-skip BIFF12 mirror tests -----------------------------------------
 
 // TestParseBIFF12Formula_BinopSkip_EQBeforeEXEC mirrors the BIFF8 motivating
 // bug for the BIFF12 path: a ptgEQ operator between a ref+int and an EXEC
 // FuncVar must no longer cause early abort.
 func TestParseBIFF12Formula_BinopSkip_EQBeforeEXEC(t *testing.T) {
-	// ptgRef placeholder (5 bytes), ptgInt(1) (3 bytes), ptgEQ (1 byte),
+	// BIFF12 ptgRef placeholder (7 bytes), ptgInt(1) (3 bytes), ptgEQ (1 byte),
 	// then ptgStr("calc"), then ptgFuncVar EXEC argc=1.
-	rgce := []byte{ptgRef, 0, 0, 0, 0}
+	rgce := ptgRef12(0, 0)
 	rgce = append(rgce, ptgInt, 1, 0) // ptgInt value=1
 	rgce = append(rgce, ptgEQ)
 	rgce = append(rgce, strPtg("calc")...)

@@ -247,6 +247,17 @@ func TestExtractMissingFileErrors(t *testing.T) {
 	}
 }
 
+func TestExtractOversizedIsError(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "oversized.bin")
+	if err := os.WriteFile(f, []byte("abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := cmdExtract([]string{"-max-body=5", f})
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (oversized input must not be silently truncated)", code)
+	}
+}
+
 // TestScanSymlinkedDirRoot guards the Codex P2 fix: a symlink whose target is a
 // directory must be walked (os.Stat follows it, but filepath.WalkDir would not
 // descend the symlinked root) so a maildir reached via a symlink isn't silently

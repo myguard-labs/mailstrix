@@ -17,8 +17,8 @@ package extract
 //     length).
 //   - ptgStr (0x17) is always uint16 charcount + UTF-16LE (vs BIFF8's 1-byte cch
 //     + fHighByte flag).
-//   - All other ptg opcodes and operand sizes match BIFF8, so the operand-stack
-//     fold logic mirrors parseBIFF8Formula; only the string token differs.
+//   - Cell references carry wider row fields than BIFF8 (uint32 row + uint16
+//     column flags), so the BIFF12 token walker has its own reference skips.
 //
 // Macrosheet gate: only sheet parts under xl/macrosheets/ are folded — Excel
 // writes Excel-4.0 macro content there exclusively, so an ordinary worksheet
@@ -39,13 +39,19 @@ import (
 	"time"
 )
 
-// BIFF12 formula-cell record ids (pyxlsb2 recordtypes.py 8–11). Each carries
-// col(i32) style(i32) value flags(i16) sz(i32) formula_bytes[sz].
+// BIFF12 cell/formula record ids. FMLA_* carries:
+// col(i32) style(i32) value grbit(i16) cce(i32) formula_bytes[cce] rgcb.
+// The trailing rgcb bytes are optional parsed-formula metadata and are not part
+// of the ptg token stream.
 const (
+	biff12CellIsst   = 7
 	biff12FmlaString = 8
 	biff12FmlaNum    = 9
 	biff12FmlaBool   = 10
 	biff12FmlaError  = 11
+
+	biff12BrtSSTBegin = 159
+	biff12BrtSSTItem  = 19
 )
 
 // BIFF12 fold caps (mirror the BIFF8/OOXML caps so the three paths stay aligned).
@@ -56,6 +62,10 @@ const (
 	// maxBIFF12RecordLen caps a single record's declared length (varint guard) so
 	// a hostile 4-byte length cannot ask us to allocate gigabytes.
 	maxBIFF12RecordLen = maxBytesWorkbookXML
+	// maxBIFF12SSTStrings caps shared-string entries retained for macrosheet
+	// value-cell resolution. The enclosing sharedStrings.bin read is already
+	// byte-capped; this limits entry fan-out.
+	maxBIFF12SSTStrings = 1 << 16
 )
 
 // fromXLSBXLMFold finds Excel-4.0 macrosheet parts (xl/macrosheets/sheet*.bin)
@@ -86,12 +96,13 @@ func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Op
 		return
 	}
 
+	sst := loadXLSBSharedStrings(zr, deadline)
 	totalOutput := 0
 	for _, sf := range sheets {
 		if expired(deadline) || len(*out) >= maxStreams {
 			return
 		}
-		processXLSBSheet(sf, out, &totalOutput, deadline, formulaCap)
+		processXLSBSheet(sf, sst, out, &totalOutput, deadline, formulaCap)
 	}
 }
 
@@ -211,6 +222,98 @@ func readXLNullableWideString(p []byte, off int) (string, int) {
 	return s, off + need
 }
 
+func readXLWideString(p []byte, off int) (string, int, bool) {
+	if off < 0 || off+4 > len(p) {
+		return "", len(p), false
+	}
+	cch := uint32(p[off]) | uint32(p[off+1])<<8 | uint32(p[off+2])<<16 | uint32(p[off+3])<<24
+	off += 4
+	if cch > maxBIFF12RecordLen/2 {
+		return "", len(p), false
+	}
+	need := int(cch) * 2 // #nosec G115 -- cch is bounded by maxBIFF12RecordLen/2 above.
+	if need > len(p)-off {
+		return "", len(p), false
+	}
+	s := decodeUTF16LE(p[off : off+need])
+	return s, off + need, true
+}
+
+func loadXLSBSharedStrings(zr *zip.Reader, deadline time.Time) []string {
+	for _, f := range zr.File {
+		if expired(deadline) {
+			return nil
+		}
+		if strings.ToLower(f.Name) != "xl/sharedstrings.bin" {
+			continue
+		}
+		if f.UncompressedSize64 > maxBytesWorkbookXML {
+			return nil
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil
+		}
+		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesWorkbookXML))
+		rc.Close() // #nosec G104 -- zip entry close
+		if err != nil {
+			return nil
+		}
+		return parseXLSBSharedStrings(raw)
+	}
+	return nil
+}
+
+func parseXLSBSharedStrings(raw []byte) []string {
+	var out []string
+	pos := 0
+	records := 0
+	for pos < len(raw) {
+		if records >= maxBIFF12Records || len(out) >= maxBIFF12SSTStrings {
+			return out
+		}
+		records++
+
+		recID, n := readVarint(raw[pos:])
+		if n == 0 {
+			return out
+		}
+		pos += n
+		recLen, n := readVarint(raw[pos:])
+		if n == 0 || recLen < 0 || recLen > maxBIFF12RecordLen {
+			return out
+		}
+		pos += n
+		if pos+recLen > len(raw) {
+			return out
+		}
+		body := raw[pos : pos+recLen]
+		pos += recLen
+
+		switch recID {
+		case biff12BrtSSTBegin:
+			continue
+		case biff12BrtSSTItem:
+			s, ok := parseXLSBSharedStringItem(body)
+			if !ok {
+				s = ""
+			}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func parseXLSBSharedStringItem(p []byte) (string, bool) {
+	if len(p) < 5 {
+		return "", false
+	}
+	// BrtSSTItem starts with one flags byte, followed by an XLWideString. Rich
+	// text / extension payloads after the string are not needed for extraction.
+	s, _, ok := readXLWideString(p, 1)
+	return s, ok
+}
+
 // countXLSBDDE counts XLSB-DDE markers already emitted (bounds the per-file fan-out).
 func countXLSBDDE(out [][]byte) int {
 	c := 0
@@ -234,7 +337,7 @@ type biff12FormulaCollected struct {
 // feeds them to the emulator. If the emulator produces no output the original
 // one-by-one fold path is used as fallback (defense-in-depth).
 // formulaCap limits how many formula records are collected (effort-scaled).
-func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int) {
+func processXLSBSheet(sf *zip.File, sst []string, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int) {
 	if sf.UncompressedSize64 > maxBytesWorkbookXML {
 		return
 	}
@@ -255,6 +358,7 @@ func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline ti
 	records := 0
 	var currentRow uint32
 	var collected []biff12FormulaCollected
+	var valueCells []xlmCell
 
 	for pos < len(raw) {
 		if expired(deadline) || len(*out) >= maxStreams {
@@ -289,18 +393,22 @@ func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline ti
 					uint32(payload[2])<<16 | uint32(payload[3])<<24
 			}
 
+		case biff12CellIsst:
+			if len(valueCells) >= maxEmulCells {
+				continue
+			}
+			coord, value, ok := biff12CellIsstValue(currentRow, payload, sst)
+			if !ok {
+				continue
+			}
+			valueCells = append(valueCells, xlmCell{coord: coord, value: value})
+
 		case biff12FmlaString, biff12FmlaNum, biff12FmlaBool, biff12FmlaError:
-			rgce := biff12FormulaRgce(payload)
+			rgce := biff12FormulaRgce(recID, payload)
 			if rgce == nil {
 				continue
 			}
-			// Column is the first uint32 LE in the payload.
-			var col uint32
-			if len(payload) >= 4 {
-				col = uint32(payload[0]) | uint32(payload[1])<<8 |
-					uint32(payload[2])<<16 | uint32(payload[3])<<24
-			}
-			coord := biffCellToA1(uint16(currentRow), uint16(col))
+			coord := biff12CellCoord(currentRow, payload)
 			if coord == "" {
 				coord = "A" + strconv.Itoa(int(currentRow)+1)
 			}
@@ -310,12 +418,13 @@ func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline ti
 		}
 	}
 
-	if len(collected) == 0 {
+	if len(collected) == 0 && len(valueCells) == 0 {
 		return
 	}
 
 	// Pass 2: build xlmCell slice and try the emulator.
-	xlmCells := make([]xlmCell, 0, len(collected))
+	xlmCells := make([]xlmCell, 0, len(valueCells)+len(collected))
+	xlmCells = append(xlmCells, valueCells...)
 	for _, bc := range collected {
 		formula := parseBIFF12FormulaWithRefs(bc.rgce)
 		if formula == "" {
@@ -329,7 +438,7 @@ func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline ti
 		emulateXLMCells(xlmCells, out, totalOutput, deadline)
 	}
 
-	if len(*out) == priorLen {
+	if !xlmEmulatorProducedPayload(*out, priorLen) {
 		// Emulator produced no output — fall back to one-by-one fold.
 		for _, bc := range collected {
 			folded := parseBIFF12Formula(bc.rgce)
@@ -340,52 +449,107 @@ func processXLSBSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline ti
 	}
 }
 
+func biff12CellCoord(row uint32, p []byte) string {
+	if len(p) < 4 {
+		return ""
+	}
+	col := uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16 | uint32(p[3])<<24
+	return biff12CellToA1(row, col)
+}
+
+func biff12CellIsstValue(row uint32, p []byte, sst []string) (coord, value string, ok bool) {
+	if len(p) < 12 {
+		return "", "", false
+	}
+	idx := uint32(p[8]) | uint32(p[9])<<8 | uint32(p[10])<<16 | uint32(p[11])<<24
+	if idx >= maxBIFF12SSTStrings {
+		return "", "", false
+	}
+	i := int(idx) // #nosec G115 -- idx < maxBIFF12SSTStrings (65,536) above.
+	if i >= len(sst) {
+		return "", "", false
+	}
+	coord = biff12CellCoord(row, p)
+	if coord == "" {
+		return "", "", false
+	}
+	return coord, sst[i], true
+}
+
+func biff12CellToA1(row uint32, col uint32) string {
+	if row > 1_048_575 {
+		return ""
+	}
+	c := int(col&0x3FFF) + 1
+	letters := colNumToLetters(c)
+	if letters == "" {
+		return ""
+	}
+	return letters + strconv.Itoa(int(row)+1) // #nosec G115 -- row <= 1,048,575 above.
+}
+
 // biff12FormulaRgce extracts the raw ptg byte stream from a FMLA_* record
-// payload. Layout: col(i32) style(i32) <value> flags(i16) sz(i32) rgce[sz].
-// The <value> field width varies by record type (FMLA_NUM = 8-byte double,
-// FMLA_BOOL/ERROR = 1 byte, FMLA_STRING = a length-prefixed XLWideString of
-// unknown width), so the prefix length is not fixed.
+// payload. Layout:
 //
-// We anchor on the END of the record instead: rgce runs to the record end, and
-// the sz(i32) immediately precedes it. For each plausible value-field width we
-// read the sz at the resulting offset and check off+4+sz == len(p) (i.e. sz
-// exactly accounts for the trailing rgce bytes).
+//	col(i32) style(i32) <value> grbit(i16) cce(i32) rgce[cce] rgcb
 //
-// biff12FormulaRgce is called for all four FMLA_* record types without knowing
-// which produced the payload, so more than one candidate width could satisfy the
-// end-anchor check by coincidence (a crafted/corrupt record). Picking one
-// arbitrarily would silently hand the WRONG bytes to the ptg parser — a
-// false-negative in a security scanner. So we require an UNAMBIGUOUS match:
-// exactly one width must be self-consistent, otherwise return nil (fail-open).
-func biff12FormulaRgce(p []byte) []byte {
-	// Smallest real layout is col(4)+style(4)+value(1)+flags(2)+sz(4) = 15 bytes
-	// (1-byte value field), before any rgce. Shorter payloads cannot carry a
-	// FMLA_* formula.
+// The value field width is record-id specific; rgcb is a trailer after rgce.
+// Older code anchored rgce at the record end, which lost real .xlsb formulas
+// because non-empty trailers are normal.
+func biff12FormulaRgce(recID int, p []byte) []byte {
 	if len(p) < 15 {
 		return nil
 	}
-	var match []byte
-	matches := 0
-	for _, valWidth := range []int{8, 1, 2, 4} {
-		off := 8 + valWidth + 2 // col+style + value + flags
+	off := 8 // col + style
+	switch recID {
+	case biff12FmlaString:
 		if off+4 > len(p) {
-			continue
+			return nil
 		}
-		szU := uint32(p[off]) | uint32(p[off+1])<<8 | uint32(p[off+2])<<16 | uint32(p[off+3])<<24
-		if szU > maxBIFF12RecordLen {
-			continue // implausible sz (also guards the int conversion on 32-bit)
+		cch := uint32(p[off]) | uint32(p[off+1])<<8 | uint32(p[off+2])<<16 | uint32(p[off+3])<<24
+		off += 4
+		charBytes := uint64(cch) * 2
+		if charBytes > uint64(len(p)-off) {
+			return nil
 		}
-		sz := int(szU)
-		rgceStart := off + 4
-		if rgceStart+sz == len(p) {
-			match = p[rgceStart : rgceStart+sz]
-			matches++
-		}
+		off += int(charBytes) // #nosec G115 -- charBytes is bounded by len(p)-off above.
+	case biff12FmlaNum:
+		off += 8
+	case biff12FmlaBool, biff12FmlaError:
+		off++
+	default:
+		return nil
 	}
-	if matches != 1 {
-		return nil // none or ambiguous — fail-open rather than guess
+	if off+2+4 > len(p) {
+		return nil
 	}
-	return match
+	off += 2 // grbit
+	cceU := uint32(p[off]) | uint32(p[off+1])<<8 | uint32(p[off+2])<<16 | uint32(p[off+3])<<24
+	off += 4
+	if cceU > maxBIFF12RecordLen {
+		return nil
+	}
+	cce := int(cceU)
+	if cce < 0 || off+cce > len(p) {
+		return nil
+	}
+	return p[off : off+cce]
+}
+
+func readBIFF12PtgRef(data []byte, pos int) (row uint32, col uint32, next int, ok bool) {
+	if pos < 0 || pos+7 > len(data) {
+		return 0, 0, pos, false
+	}
+	row = uint32(data[pos+1]) | uint32(data[pos+2])<<8 | uint32(data[pos+3])<<16 | uint32(data[pos+4])<<24
+	col = uint32(data[pos+5]) | uint32(data[pos+6])<<8
+	return row, col, pos + 7, true
+}
+
+func skipBIFF12Ptg(data []byte, pos, size int) (int, bool) {
+	if pos < 0 || size < 0 || pos+size > len(data) {
+		return pos, false
+	}
+	return pos + size, true
 }
 
 // readVarint reads a pyxlsb2-style varint (7 bits per byte, high bit = more,
@@ -519,11 +683,19 @@ func parseBIFF12Formula(data []byte) string {
 			push("")
 
 		case ptgRef:
-			pos += 5
+			next, ok := skipBIFF12Ptg(data, pos, 7)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgArea:
-			pos += 9
+			next, ok := skipBIFF12Ptg(data, pos, 13)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgMemArea:
@@ -531,15 +703,27 @@ func parseBIFF12Formula(data []byte) string {
 			push("")
 
 		case ptgExp:
-			pos += 5
+			next, ok := skipBIFF12Ptg(data, pos, 7)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgRef3d:
-			pos += 7
+			next, ok := skipBIFF12Ptg(data, pos, 9)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgArea3d:
-			pos += 11
+			next, ok := skipBIFF12Ptg(data, pos, 15)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgNameX:
