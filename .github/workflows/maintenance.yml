@@ -94,7 +94,30 @@ jobs:
 
       - name: run benchmarks
         run: |
-          docker run --rm strixd-test             go test -bench=. -benchmem -count=3 -timeout=10m             ./internal/strixd/ ./internal/extract/             | tee bench-results.txt
+          # NOTE: package is ./internal/mailstrix (renamed from ./internal/strixd).
+          docker run --rm strixd-test             go test -bench=. -benchmem -count=6 -timeout=10m             ./internal/mailstrix/ ./internal/extract/             | tee bench-results.txt
+
+      - name: regression gate (vs committed baseline)
+        run: |
+          set -euo pipefail
+          BASE=docker/perf-baseline.txt
+          # Generous threshold: GitHub runners are noisy, so this gate catches
+          # algorithmic blow-ups (O(n)->O(n^2), lost fast-path), NOT micro-noise.
+          THRESH="${PERF_REGRESSION_PCT:-50}"
+          if [ ! -f "$BASE" ]; then
+            echo "::warning::no $BASE committed yet — seed it from the benchmark-results artifact of this run; gate is informational until then"
+            exit 0
+          fi
+          # Compare ns/op per benchmark name; fail if any is >THRESH% slower.
+          awk -v thresh="$THRESH" '
+            FNR==NR { if ($1 ~ /^Benchmark/) base[$1]=$3; next }
+            $1 ~ /^Benchmark/ && ($1 in base) && base[$1]+0>0 {
+              d=($3-base[$1])/base[$1]*100
+              printf "%-50s base=%s now=%s  %+.1f%%\n",$1,base[$1],$3,d
+              if (d>thresh) { print "REGRESSION >"thresh"%: "$1 > "/dev/stderr"; bad=1 }
+            }
+            END { exit bad }
+          ' "$BASE" bench-results.txt
 
       - name: upload benchmark results
         uses: actions/upload-artifact@v4

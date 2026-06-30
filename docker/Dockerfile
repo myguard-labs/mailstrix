@@ -40,10 +40,6 @@ COPY --from=yara /usr/local/include/yara.h /usr/local/include/
 COPY --from=yara /usr/local/include/yara/ /usr/local/include/yara/
 COPY --from=yara /usr/local/lib/pkgconfig/yara.pc /usr/local/lib/pkgconfig/
 WORKDIR /src
-COPY go.mod go.sum* ./
-# Persist the module cache across builds so go mod download is incremental.
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download || true
 COPY . .
 # The yara_static tag makes go-yara link libyara.a; libyara's own deps
 # (ssl/magic/jansson/z/zstd) and glibc stay dynamically linked and are provided
@@ -51,8 +47,20 @@ COPY . .
 # avoided on purpose: it makes dlopen/getaddrinfo fragile at runtime.
 ENV CGO_ENABLED=1 \
     PKG_CONFIG="pkg-config --static"
+# Reproducible, tamper-evident dependency resolution. Runs after `COPY . .` so the
+# source-vendored ./third_party/oleparse replace target is present. No `|| true`:
+# a failed download must fail the build, not silently ship a partial module set.
+#   go mod download — fetch modules into the cache-mounted /go/pkg/mod
+#   go mod verify   — check them against the committed go.sum hashes
+#   tidy-drift gate — assert the COMMITTED go.mod/go.sum are already tidy; tidy
+#     here would mutate them and mask drift. Fix = commit tidy files, not regen.
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod tidy
+    go mod download && go mod verify \
+    && cp go.mod /tmp/go.mod.orig && cp go.sum /tmp/go.sum.orig \
+    && go mod tidy \
+    && diff -u /tmp/go.mod.orig go.mod \
+    && diff -u /tmp/go.sum.orig go.sum \
+    && rm /tmp/go.mod.orig /tmp/go.sum.orig
 ARG VERSION=dev
 ARG YARA_VERSION
 # Two binaries: the CGO/libyara server (strixd), and the lean Sieve/LDA client
