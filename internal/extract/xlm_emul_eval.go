@@ -87,7 +87,18 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 		var b strings.Builder
 		b.Grow(len(s))
 		i := 0
+		resolved := 0
 		for i < len(s) {
+			// Check the deadline inside the inner loop, not just at pass
+			// boundaries: a single ref-dense cell can resolve thousands of refs
+			// in one pass and overrun the wall-clock budget before the next
+			// pass-boundary check. Gate the time.Now() call behind a resolved-ref
+			// counter so the check itself stays cheap. On expiry, flush the
+			// remaining tail unchanged and stop.
+			if resolved&0x3f == 0x3f && expired(m.deadline) {
+				b.WriteString(s[i:])
+				break
+			}
 			end, coord, ok := a1RefAt(s, i)
 			if !ok {
 				b.WriteByte(s[i])
@@ -113,6 +124,7 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 			evaluating[key] = false
 			i = end
 			changed = true
+			resolved++
 		}
 		s = b.String()
 		if !changed {

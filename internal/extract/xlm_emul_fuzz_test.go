@@ -164,18 +164,18 @@ func FuzzEmulateXLM(f *testing.F) {
 		totalOutput := 0
 
 		// Invariant 2: always terminates within the deadline. Use a SHORT 1s
-		// budget: the emulator checks its deadline at pass/step boundaries, so a
-		// pathological single cell with many cross-refs can overrun the deadline by
-		// the cost of one inner resolve pass (~1.5s seen on a crafted input). A
-		// short budget keeps per-exec wall-clock bounded so 32 parallel fuzz workers
-		// don't OOM/timeout (exit status 2). The deadline-granularity overrun itself
-		// is tracked as a separate perf finding (see issues.md / reference-fuzzing).
+		// budget. evalExpr now checks the deadline INSIDE the A1-resolve inner
+		// loop (not just at pass boundaries), so a pathological single cell with
+		// many cross-refs can overrun by at most the cost of ~64 ref resolves —
+		// previously a whole inner pass (~1.5s seen on a crafted input) could leak
+		// past a pass-boundary-only check. A short budget keeps per-exec wall-clock
+		// bounded so 32 parallel fuzz workers don't OOM/timeout (exit status 2).
 		deadline := time.Now().Add(1 * time.Second)
 		start := time.Now()
 		emulateXLMCells(cells, &out, &totalOutput, deadline)
 		// Guard the overrun explicitly: terminate must be within a small multiple of
-		// the budget. A gross overrun (>4×) is a real deadline-respect regression.
-		if el := time.Since(start); el > 4*time.Second {
+		// the budget. A gross overrun (>2×) is a real deadline-respect regression.
+		if el := time.Since(start); el > 2*time.Second {
 			t.Fatalf("emulateXLMCells ran %v on a 1s deadline — deadline not respected", el)
 		}
 
