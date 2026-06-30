@@ -68,6 +68,8 @@ func run(args []string) int {
 	maxBody := fs.Int64("max-body", 8<<20, "max bytes read from the input")
 	failOpen := fs.Bool("fail-open", true, "on a transport/HTTP error treat the message as CLEAN (exit 0) so a scanner outage never blocks delivery; =false surfaces the error (exit 2)")
 	quiet := fs.Bool("quiet", false, "print nothing on a match (rely on the exit code only)")
+	jsonOut := fs.Bool("json", false, "emit a structured verdict {malicious,family,confidence,rules:[...]} as JSON instead of MATCH lines")
+	labelOut := fs.Bool("label", false, "print a single `LABEL <family>` line for the highest-confidence family-bearing match (nothing if no family is known); for malware-store family labelling")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -78,6 +80,10 @@ func run(args []string) int {
 	}
 	if *url == "" {
 		fmt.Fprintln(os.Stderr, "strix-scan: -url (or MAILSTRIX_URL) is required")
+		return 2
+	}
+	if *jsonOut && *labelOut {
+		fmt.Fprintln(os.Stderr, "strix-scan: -json and -label are mutually exclusive")
 		return 2
 	}
 	if *maxBody <= 0 {
@@ -138,6 +144,31 @@ func run(args []string) int {
 	}
 
 	actionable := actionableMatches(matches)
+
+	// -json / -label render a structured verdict from the actionable matches'
+	// metadata. They print on a clean result too (so a labeller can record a
+	// negative), and never honour -quiet (their output IS the point).
+	if *jsonOut {
+		v := verdictFor(actionable)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(v)
+		if !v.Malicious {
+			return 0
+		}
+		return 1
+	}
+	if *labelOut {
+		v := verdictFor(actionable)
+		if v.Family != "" {
+			fmt.Println("LABEL", v.Family)
+		}
+		if !v.Malicious {
+			return 0
+		}
+		return 1
+	}
+
 	if len(actionable) == 0 {
 		return 0
 	}
@@ -151,6 +182,61 @@ func run(args []string) int {
 		}
 	}
 	return 1
+}
+
+// verdict is the structured -json output. Family is the single canonical malware
+// family for the input ("" when no family-bearing rule matched); Rules lists the
+// matched (actionable) rule names. Confidence is "family" when a family was
+// resolved, "rule" when rules matched but none carried family metadata, and
+// "" when nothing matched.
+type verdict struct {
+	Malicious  bool     `json:"malicious"`
+	Family     string   `json:"family"`
+	Confidence string   `json:"confidence"`
+	Rules      []string `json:"rules"`
+}
+
+// familyMetaKeys are the rule-meta keys that carry a malware family, in priority
+// order. A rule that sets one of these is "family-bearing"; a rule with none is a
+// generic / technique rule (http, meth_get_eip, pe_*, SUSP_*, …) and never
+// contributes a family label.
+var familyMetaKeys = []string{"family", "malware_family", "actor"}
+
+// verdictFor builds the structured verdict from the actionable matches. The
+// reported Family is the first family-bearing match's family (one family per
+// file = highest-confidence family-bearing hit); generic/technique rules that
+// carry no family meta are dropped from family consideration but still count
+// toward Malicious + Rules.
+func verdictFor(matches []match) verdict {
+	v := verdict{Rules: make([]string, 0, len(matches))}
+	for _, m := range matches {
+		v.Malicious = true
+		v.Rules = append(v.Rules, m.Rule)
+		if v.Family == "" {
+			if fam := familyOf(m); fam != "" {
+				v.Family = fam
+			}
+		}
+	}
+	switch {
+	case v.Family != "":
+		v.Confidence = "family"
+	case v.Malicious:
+		v.Confidence = "rule"
+	}
+	return v
+}
+
+// familyOf extracts a family string from one match's metadata, preferring the
+// keys in familyMetaKeys. Returns "" for a generic/technique rule that carries no
+// family meta (the caller drops it from family consideration).
+func familyOf(m match) string {
+	for _, k := range familyMetaKeys {
+		if v := strings.TrimSpace(m.Meta[k]); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func actionableMatches(matches []match) []match {

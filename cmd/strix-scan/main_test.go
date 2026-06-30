@@ -249,6 +249,162 @@ func TestStdin(t *testing.T) {
 	}
 }
 
+// jsonYarad returns a fixed /scan response body so the -json/-label tests can
+// drive specific rule metadata shapes.
+func jsonYarad(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
+// wrote.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = orig
+	out, _ := readAllReader(r)
+	return out
+}
+
+func readAllReader(r *os.File) (string, error) {
+	var b strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		b.Write(buf[:n])
+		if err != nil {
+			return b.String(), nil
+		}
+	}
+}
+
+// A family-bearing rule (meta: family=X) -> -json emits family:"X", confidence
+// "family", malicious true, exit 1.
+func TestJSONFamilyBearing(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[{"rule":"MALPEDIA_Win_Zeus_Auto","meta":{"family":"Zeus"}}]}`)
+	defer srv.Close()
+	f := writeTemp(t, eicar)
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"-url", srv.URL, "-json", f}) })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(out, `"family":"Zeus"`) || !strings.Contains(out, `"confidence":"family"`) || !strings.Contains(out, `"malicious":true`) {
+		t.Fatalf("json out = %q", out)
+	}
+}
+
+// A generic/technique rule (no family meta) -> empty family, confidence "rule",
+// still malicious.
+func TestJSONGenericNoFamily(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[{"rule":"meth_get_eip","namespace":"generic.yar"}]}`)
+	defer srv.Close()
+	f := writeTemp(t, eicar)
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"-url", srv.URL, "-json", f}) })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(out, `"family":""`) || !strings.Contains(out, `"confidence":"rule"`) {
+		t.Fatalf("json out = %q", out)
+	}
+}
+
+// A multi-match file with one generic + one family-bearing rule picks the
+// family-bearing one regardless of order.
+func TestJSONMultiMatchPicksFamily(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[{"rule":"http"},{"rule":"ELF_Mirai","meta":{"malware_family":"Mirai"}}]}`)
+	defer srv.Close()
+	f := writeTemp(t, eicar)
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"-url", srv.URL, "-json", f}) })
+	if code != 1 || !strings.Contains(out, `"family":"Mirai"`) {
+		t.Fatalf("exit=%d json out = %q", code, out)
+	}
+}
+
+// A clean result under -json emits malicious:false, empty family, exit 0.
+func TestJSONClean(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[]}`)
+	defer srv.Close()
+	f := writeTemp(t, "benign")
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"-url", srv.URL, "-json", f}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(out, `"malicious":false`) || !strings.Contains(out, `"family":""`) {
+		t.Fatalf("json out = %q", out)
+	}
+}
+
+// -label prints `LABEL <family>` for a family-bearing match and exits 1.
+func TestLabelFamily(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[{"rule":"x","meta":{"actor":"APT28"}}]}`)
+	defer srv.Close()
+	f := writeTemp(t, eicar)
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"-url", srv.URL, "-label", f}) })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if strings.TrimSpace(out) != "LABEL APT28" {
+		t.Fatalf("label out = %q", out)
+	}
+}
+
+// -label prints nothing when no family-bearing rule matched (generic-only or
+// clean), even though a generic match still exits 1.
+func TestLabelNoFamilyPrintsNothing(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[{"rule":"SUSP_generic"}]}`)
+	defer srv.Close()
+	f := writeTemp(t, eicar)
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"-url", srv.URL, "-label", f}) })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("label out = %q, want empty", out)
+	}
+}
+
+// Log-only canary/allow hits are dropped before the verdict, so -json on a
+// canary-only response is clean.
+func TestJSONDropsCanary(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[{"rule":"Shadow","meta":{"mailstrix_canary":"1","family":"Ghost"}}]}`)
+	defer srv.Close()
+	f := writeTemp(t, eicar)
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"-url", srv.URL, "-json", f}) })
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(out, `"malicious":false`) {
+		t.Fatalf("json out = %q (canary must not produce a verdict)", out)
+	}
+}
+
+// -json and -label together is a usage error (exit 2), not a silent precedence.
+func TestJSONLabelMutuallyExclusive(t *testing.T) {
+	srv := jsonYarad(t, `{"matches":[]}`)
+	defer srv.Close()
+	f := writeTemp(t, "benign")
+	if code := run([]string{"-url", srv.URL, "-json", "-label", f}); code != 2 {
+		t.Fatalf("exit = %d, want 2 (conflicting -json/-label)", code)
+	}
+}
+
 func TestRequiresURL(t *testing.T) {
 	t.Setenv("MAILSTRIX_URL", "")
 	if code := run([]string{writeTemp(t, "x")}); code != 2 {

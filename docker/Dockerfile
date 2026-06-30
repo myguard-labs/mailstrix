@@ -166,6 +166,10 @@ COPY --from=rules /rules/sources.json /sources.json
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot AS final
 COPY --from=build /out/strixd /usr/local/bin/strixd
+# strix-scan (the lean CGO-free HTTP client) ships in PATH too, so the same image
+# can both SERVE (strixd) and be a labelling client via `docker exec <ctr>
+# strix-scan -url http://127.0.0.1:8079 -json -`. Pure-Go, no extra runtime deps.
+COPY --from=build /out/strix-scan /usr/local/bin/strix-scan
 # The compiled bundle ships as a READ-ONLY seed under /usr/share/mailstrix. At
 # startup strixd copies it into the writable cache dir (MAILSTRIX_CACHE_DIR) when that
 # is empty/unreadable and serves from there, so a wiped cache bindmount self-heals
