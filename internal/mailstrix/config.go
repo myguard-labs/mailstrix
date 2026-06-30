@@ -493,19 +493,19 @@ func loadArchivePWFile(path string) []string {
 	// Open with O_NONBLOCK so opening a FIFO/special path returns immediately
 	// instead of blocking startup, then fstat the OPEN fd (no TOCTOU — we classify
 	// exactly what we opened) and reject anything that isn't a regular file.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- operator-provided wordlist path (env), not attacker input
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 G703 -- operator-provided wordlist path (env), not attacker input
 	if err != nil {
-		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q unreadable (%v); decrypt enabled but using built-in password list only", path, err)
+		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q unreadable (%v); decrypt enabled but using built-in password list only", path, err) // #nosec G706 -- operator-provided env path, not attacker-tainted
 		return nil
 	}
 	defer func() { _ = f.Close() }()
 	if fi, statErr := f.Stat(); statErr != nil || !fi.Mode().IsRegular() {
-		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q not a regular file (%v); decrypt enabled but using built-in password list only", path, statErr)
+		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q not a regular file (%v); decrypt enabled but using built-in password list only", path, statErr) // #nosec G706 -- operator-provided env path, not attacker-tainted
 		return nil
 	}
 	b, err := io.ReadAll(io.LimitReader(f, archivePWFileMaxBytes))
 	if err != nil {
-		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q read error (%v); decrypt enabled but using built-in password list only", path, err)
+		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q read error (%v); decrypt enabled but using built-in password list only", path, err) // #nosec G706 -- operator-provided env path, not attacker-tainted
 		return nil
 	}
 	seen := make(map[string]struct{})

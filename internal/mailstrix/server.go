@@ -882,7 +882,7 @@ const effortHeaderName = "X-MAILSTRIX-Effort"
 // capped on parse (count + per-item length) so a hostile header can't inflate the
 // brute-force candidate set; the candidates are only ever decrypt INPUTS, never
 // executed.
-const pwCandidatesHeader = "X-MAILSTRIX-PWCandidates"
+const pwCandidatesHeader = "X-MAILSTRIX-PWCandidates" // #nosec G101 -- HTTP header NAME, not a credential
 
 const (
 	// maxHeaderPWCandidates bounds how many candidate passwords are accepted from
