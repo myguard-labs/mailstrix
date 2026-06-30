@@ -71,6 +71,19 @@ type Options struct {
 	// XLMFoldFormulas caps the number of formulas processed per macrosheet by the
 	// XLM constant-fold pass. 0 means use the package default (maxXLMFoldFormulas).
 	XLMFoldFormulas int
+
+	// ArchivePWEnabled turns on bounded decrypt attempts against password-protected
+	// archive members (zip/7z/rar). Default false: an encrypted member emits the
+	// ARCHIVE-ENCRYPTED marker and is never decrypted (historical behaviour). When
+	// true, the unpacker tries PWCandidates against each encrypted member under a
+	// hard attempt budget + per-attempt deadline; on a hit the plaintext is fed to
+	// the normal child-scan path. Gated by MAILSTRIX_ARCHIVE_PW at the server.
+	ArchivePWEnabled bool
+	// PWCandidates is the effective, already-capped+deduped candidate-password list
+	// for this request (built-in defaults ∪ wordlist file ∪ filename tokens ∪
+	// mail-body candidates). Consulted only when ArchivePWEnabled is true. Nil/empty
+	// means "no candidates" → encrypted members stay ARCHIVE-ENCRYPTED.
+	PWCandidates []string
 }
 
 // FullOptions returns an Options at maximum depth for the given deadline — the
