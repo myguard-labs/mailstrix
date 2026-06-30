@@ -36,6 +36,7 @@ each attachment part, or both.
 local rspamd_logger = require "rspamd_logger"
 local rspamd_http = require "rspamd_http"
 local rspamd_util = require "rspamd_util"
+local rspamd_regexp = require "rspamd_regexp"
 local lua_util = require "lua_util"
 local N = "mailstrix"
 
@@ -118,6 +119,18 @@ local settings = {
   -- regardless of score (e.g. SPF/DKIM failures, known bad-sender lists). The
   -- max over score-derived and symbol-forced effort wins.
   effort_force_symbols = { "R_SPF_FAIL", "R_SPF_SOFTFAIL", "DMARC_POLICY_REJECT", "R_DKIM_REJECT" },
+
+  -- Password-protected archive decrypt support (opt-in, OFF by default). When
+  -- enabled, the plugin scrapes candidate passwords from the mail subject + text
+  -- body (malspam that ships a password-protected archive usually states the
+  -- password in the body, e.g. "password: infected") and sends them to strixd in
+  -- the X-MAILSTRIX-PWCandidates header. strixd only acts on them when ITS
+  -- MAILSTRIX_ARCHIVE_PW is also on, so this is gated on both ends. The candidates
+  -- are base64-encoded (control-byte safety) and capped count/length so a hostile
+  -- body can't inflate the header or strixd's brute-force list.
+  send_pw_candidates  = false, -- master toggle for the body→header sourcing
+  pw_candidate_max    = 32,    -- max candidates sent (mirror strixd header cap)
+  pw_candidate_maxlen = 64,    -- max bytes per candidate (mirror strixd header cap)
 }
 
 -- post sends buf to strixd and invokes cb(matches) with the decoded rule list
@@ -163,6 +176,67 @@ local function compute_effort(task)
   return level
 end
 
+-- pw_candidate_re matches an explicit password statement in mail text:
+-- "password: X", "pass = X", "pwd X", "code: X", and the multilingual common
+-- forms. A single required separator class ([\s:=]+) sits between the label and
+-- the captured token — no nested optional \s* groups, so there is no
+-- catastrophic-backtracking (ReDoS) path. The captured token is the first run of
+-- non-space, non-delimiter chars after the separator, bounded to 64 in-pattern.
+-- Separator: either a plain delimiter run ([\s:=]+) OR an "is"/"=" connector
+-- ("password is X"). The alternation is ordered longest-first and every branch
+-- consumes at least one fixed leading delimiter, so there is no overlapping-empty
+-- alternative and thus no catastrophic backtracking.
+local pw_candidate_re = rspamd_regexp.create_cached(
+  [[(?i)\b(?:password|passwort|wachtwoord|senha|contrase|pass|pwd|pw|code)(?:\s+is\s+|[\s:=]+)([^\s,;"'<>]{1,64})]])
+
+-- pw_scan_limit bounds how much of each text source is regex-scanned, so a huge
+-- body can't burn CPU regardless of the (non-backtracking) pattern.
+local pw_scan_limit = 65536
+
+-- extract_pw_candidates scrapes candidate passwords from the subject + text body
+-- parts. Returns a base64-encoded newline-joined list (≤ capped items, each ≤
+-- capped bytes, deduped), or nil if none / disabled. The list is
+-- attacker-controlled mail text, so it is ONLY ever sent as a decrypt input;
+-- base64 (no line-wrap) keeps control bytes out of the HTTP header.
+local function extract_pw_candidates(task)
+  if not settings.send_pw_candidates then return nil end
+  -- Hard-clamp the configured caps so a misconfigured setting can't exceed the
+  -- strixd-side header caps (count 32 / len 64).
+  local maxn = math.min(tonumber(settings.pw_candidate_max) or 32, 32)
+  local maxlen = math.min(tonumber(settings.pw_candidate_maxlen) or 64, 64)
+  if maxn < 1 then maxn = 1 end
+  if maxlen < 1 then maxlen = 1 end
+
+  local seen, out = {}, {}
+  local function scan(text)
+    if not text or #out >= maxn then return end
+    if #text > pw_scan_limit then text = text:sub(1, pw_scan_limit) end
+    -- re:search(line, raw=false (UTF-8), capture=true) returns a list of matches;
+    -- each match is a table whose [1] is the whole match and [2] the first capture.
+    local matches = pw_candidate_re:search(text, false, true)
+    if not matches then return end
+    for _, m in ipairs(matches) do
+      if #out >= maxn then break end
+      local c = m[2]
+      if c and c ~= "" and #c <= maxlen and not seen[c] then
+        seen[c] = true
+        out[#out + 1] = c
+      end
+    end
+  end
+
+  local subj = task:get_subject()
+  if subj then scan(subj) end
+  for _, p in ipairs(task:get_text_parts() or {}) do
+    if #out >= maxn then break end
+    local content = p:get_content()
+    if content then scan(tostring(content)) end
+  end
+
+  if #out == 0 then return nil end
+  return rspamd_util.encode_base64(table.concat(out, "\n"), 0)
+end
+
 local function post(task, buf, what, fname, effort, cb)
   local function http_cb(err, code, body)
     if err then
@@ -202,6 +276,13 @@ local function post(task, buf, what, fname, effort, cb)
   -- the DoS bound. nil → no header → strixd uses its own default.
   if effort then
     headers["X-MAILSTRIX-Effort"] = tostring(effort)
+  end
+  -- Candidate passwords scraped from the subject/body for strixd's opt-in
+  -- encrypted-archive decrypt. base64 (control-byte safety); already capped
+  -- count/length. nil when disabled or none found → no header.
+  local pwcand = extract_pw_candidates(task)
+  if pwcand then
+    headers["X-MAILSTRIX-PWCandidates"] = pwcand
   end
 
   -- rspamd_http.request returns false when it could not even schedule the

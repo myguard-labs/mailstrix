@@ -168,6 +168,19 @@ type Scanner struct {
 	// a scan's per-request cap profile from meta.Effort (EFFORT-4).
 	effortMax int
 
+	// Password-protected archive decrypt (opt-in, default OFF). archivePW mirrors
+	// cfg.ArchivePW. archivePWBase is the process-constant candidate set =
+	// built-in defaults ∪ boot wordlist (cfg.ArchivePWords), computed once at
+	// NewScanner; per-request candidates (filename tokens + body header) are merged
+	// on top in Scan. Empty/nil when the feature is off.
+	archivePW bool
+	// archivePWDefaults and archivePWWordlist are kept SEPARATE (not pre-merged) so
+	// Scan can order the effective list defaults-before-wordlist: when the global
+	// cap trims the tail, the low-signal wordlist drops first and the high-signal
+	// built-in defaults always survive. Both deduped at NewScanner; nil when off.
+	archivePWDefaults []string
+	archivePWWordlist []string
+
 	// Optional abuse.ch MalwareBazaar attachment-hash lookup (nil when no key).
 	mbazaar *mbazaar.Checker
 
@@ -373,22 +386,25 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 // "everything is clean".
 func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 	s := &Scanner{
-		scanTimeout:      cfg.ScanTimeout,
-		bigFileThreshold: cfg.BigFileThreshold,
-		logf:             logf,
-		srcDir:           cfg.RulesDir,
-		srcFile:          cfg.RulesPath,
-		urlhaus:          urlhaus.New(cfg.URLhausKey, cfg.URLhausRefresh, cfg.CacheDir, logf), // nil if no key
-		urlhausMax:       cfg.URLhausMaxURLs,
-		effortMax:        cfg.EffortMax,
-		mbazaar:          mbazaar.New(cfg.MBazaarKey, cfg.MBazaarRefresh, cfg.MBazaarFeed, cfg.CacheDir, logf), // nil if no key
-		threatfox:        threatfox.New(cfg.ThreatFoxKey, cfg.ThreatFoxRefresh, cfg.CacheDir, logf),            // nil if no key
-		threatfoxMax:     cfg.ThreatFoxMaxURLs,
-		canary:           cfg.Canary,
-		baseDenylist:     cfg.RuleDenylist,
-		denylistFile:     cfg.DenylistFile,
-		allowlist:        cfg.RuleAllowlist,
-		topMatches:       newMatchCounter(matchCounterCap),
+		scanTimeout:       cfg.ScanTimeout,
+		bigFileThreshold:  cfg.BigFileThreshold,
+		logf:              logf,
+		srcDir:            cfg.RulesDir,
+		srcFile:           cfg.RulesPath,
+		urlhaus:           urlhaus.New(cfg.URLhausKey, cfg.URLhausRefresh, cfg.CacheDir, logf), // nil if no key
+		urlhausMax:        cfg.URLhausMaxURLs,
+		effortMax:         cfg.EffortMax,
+		mbazaar:           mbazaar.New(cfg.MBazaarKey, cfg.MBazaarRefresh, cfg.MBazaarFeed, cfg.CacheDir, logf), // nil if no key
+		threatfox:         threatfox.New(cfg.ThreatFoxKey, cfg.ThreatFoxRefresh, cfg.CacheDir, logf),            // nil if no key
+		threatfoxMax:      cfg.ThreatFoxMaxURLs,
+		canary:            cfg.Canary,
+		archivePW:         cfg.ArchivePW,
+		archivePWDefaults: archivePWBaseDefaults(cfg.ArchivePW),
+		archivePWWordlist: archivePWBaseWordlist(cfg.ArchivePW, cfg.ArchivePWords),
+		baseDenylist:      cfg.RuleDenylist,
+		denylistFile:      cfg.DenylistFile,
+		allowlist:         cfg.RuleAllowlist,
+		topMatches:        newMatchCounter(matchCounterCap),
 	}
 	// Resolve the big-file ruleset path into a precompiled .yac (load) or a source
 	// dir (compile), so Reload can build it the same way it builds the main set.
@@ -657,6 +673,26 @@ func (s *Scanner) scoringPolicyHash() string {
 		_, _ = h.Write([]byte("canary=1\n"))
 	} else {
 		_, _ = h.Write([]byte("canary=0\n"))
+	}
+	// Fold the archive-decrypt policy: enabling it (or changing the process-constant
+	// base candidate set) can change the verdict for an encrypted-archive message
+	// with no per-request candidates, so it MUST partition the verdict cache —
+	// otherwise flipping MAILSTRIX_ARCHIVE_PW (or editing the wordlist) would serve
+	// stale pre-feature verdicts from L1/Redis until TTL. Per-request candidates are
+	// keyed separately in cacheKey; this covers the base set + the toggle itself.
+	if s.archivePW {
+		_, _ = h.Write([]byte("archivepw=1\n"))
+		// Hash the base set in its REAL tried order (defaults then wordlist, NOT
+		// sorted): the size cap in Scan trims by order, so two wordlists with the
+		// same entries in a different order can try a different candidate subset and
+		// produce different verdicts — the fingerprint must reflect tried order.
+		base := append(append([]string(nil), s.archivePWDefaults...), s.archivePWWordlist...)
+		_, _ = h.Write([]byte("pwbase="))
+		bh := sha256.Sum256([]byte(strings.Join(base, "\n")))
+		_, _ = h.Write(bh[:])
+		_, _ = h.Write([]byte{'\n'})
+	} else {
+		_, _ = h.Write([]byte("archivepw=0\n"))
 	}
 	_, _ = h.Write([]byte("allow="))
 	_, _ = h.Write([]byte(denylistHash(s.allowlist)))
@@ -1053,6 +1089,14 @@ type ScanMeta struct {
 	// The handler also uses string(RawKey[:]) as the body component of the
 	// verdict-cache key (same domain as streamDedupKey, replaces bodyCacheHash).
 	RawKey [16]byte
+	// PWCandidates carries per-request candidate passwords (from the mail
+	// subject/body via the rspamd plugin header) for the opt-in encrypted-archive
+	// decrypt feature. Already capped+sanitized by the server header parse. These
+	// change the verdict (a decrypted member yields different markers), so they
+	// MUST fold into cacheKey — see cacheKey. Nil/empty when the feature is off or
+	// no candidates were supplied; in that case cacheKey is byte-identical to the
+	// pre-feature key (no cache split for the default-OFF path).
+	PWCandidates []string
 }
 
 // cacheKey renders the metadata for the verdict cache key. The verdict depends on
@@ -1060,13 +1104,141 @@ type ScanMeta struct {
 // land on different keys. Extension derives from Filename but is included so the
 // key is explicit. NUL separator can't occur in either (NewScanMeta strips it).
 func (m ScanMeta) cacheKey() string {
-	return m.Filename + "\x00" + m.Extension + "\x00" + m.FileType + "\x00" + strconv.Itoa(m.Effort)
+	k := m.Filename + "\x00" + m.Extension + "\x00" + m.FileType + "\x00" + strconv.Itoa(m.Effort)
+	// Fold the per-request password candidates ONLY when present, so the default
+	// path (no candidates) yields exactly the historical key — no cache split for
+	// the 99% of traffic with the feature off. Order-independent: hash a sorted
+	// copy so {"a","b"} and {"b","a"} share a key. A fixed-width xxhash keeps the
+	// key bounded regardless of candidate count/length. Static defaults + the boot
+	// wordlist are process-constant and deliberately NOT keyed (a wordlist change =
+	// redeploy = new process = cold cache); only the per-request set is keyed.
+	if len(m.PWCandidates) > 0 {
+		sorted := append([]string(nil), m.PWCandidates...)
+		sort.Strings(sorted)
+		h := xxhash.New()
+		for _, c := range sorted {
+			_, _ = h.WriteString(c)
+			_, _ = h.Write([]byte{0})
+		}
+		k += "\x00pw:" + strconv.FormatUint(h.Sum64(), 16)
+	}
+	return k
 }
 
 // maxFilenameLen caps the attacker-controlled attachment name fed to libyara —
 // a hostile multi-kilobyte name must not bloat the cache key or the per-scan
 // variable. 255 is the usual filesystem basename limit.
 const maxFilenameLen = 255
+
+// archivePWDefaults is the built-in candidate list for the opt-in encrypted-
+// archive decrypt feature: passwords that recur in malspam that ships a
+// password-protected archive and puts the password in the body ("infected" is
+// the de-facto malware-sharing convention; the rest are the common weak ones).
+// Curated small on purpose — every candidate multiplies the per-member KDF cost.
+var archivePWDefaults = []string{
+	"infected", "malware", "virus", "password", "pass", "pw",
+	"123", "1234", "12345", "123456", "1234567", "12345678",
+	"0000", "1111", "letmein", "secret", "admin", "test", "file", "zip",
+}
+
+// maxEffectivePWCandidates hard-caps the merged per-request candidate list
+// (defaults ∪ wordlist ∪ filename tokens ∪ body header) before it is handed to
+// the extractor. The extractor enforces its own attempt budget too; this bounds
+// the list size so a large boot wordlist plus body candidates can't blow past a
+// sane brute ceiling. See PLAN security notes (candidate-list size cap).
+const maxEffectivePWCandidates = 64
+
+// archivePWBaseDefaults returns the deduped built-in default candidates when the
+// feature is enabled, else nil.
+func archivePWBaseDefaults(enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	return dedupCandidates(append([]string(nil), archivePWDefaults...))
+}
+
+// archivePWBaseWordlist returns the deduped boot wordlist (minus any entry that
+// already appears in the defaults) when the feature is enabled, else nil. Kept
+// separate from the defaults so Scan can order defaults-first under the cap.
+func archivePWBaseWordlist(enabled bool, wordlist []string) []string {
+	if !enabled || len(wordlist) == 0 {
+		return nil
+	}
+	inDefaults := make(map[string]struct{}, len(archivePWDefaults))
+	for _, d := range archivePWDefaults {
+		inDefaults[d] = struct{}{}
+	}
+	out := dedupCandidates(wordlist)
+	filtered := out[:0]
+	for _, w := range out {
+		if _, dup := inDefaults[w]; !dup {
+			filtered = append(filtered, w)
+		}
+	}
+	return filtered
+}
+
+// dedupCandidates trims blanks and dedups, preserving first-seen order. No size
+// cap — callers that need one use capDedupCandidates.
+func dedupCandidates(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, c := range in {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
+// capDedupCandidates is dedupCandidates with a hard size cap at
+// maxEffectivePWCandidates, applied to the FULLY-ORDERED list (per-request
+// candidates first, then base) so the cap drops low-signal tail entries.
+func capDedupCandidates(in []string) []string {
+	out := dedupCandidates(in)
+	if len(out) > maxEffectivePWCandidates {
+		out = out[:maxEffectivePWCandidates]
+	}
+	return out
+}
+
+// filenameTokens splits an attachment basename into candidate passwords: malspam
+// commonly names the archive after its password (e.g. "invoice_2024.zip" with
+// password "invoice2024", or the password literally in the name). Tokens are the
+// alnum runs of the name with the extension dropped, kept to a sane length range.
+func filenameTokens(name string) []string {
+	if name == "" {
+		return nil
+	}
+	// Drop the extension.
+	if i := strings.LastIndexByte(name, '.'); i > 0 {
+		name = name[:i]
+	}
+	out := make([]string, 0, maxFilenameTokens)
+	for _, tok := range strings.FieldsFunc(name, func(r rune) bool {
+		return r == ' ' || r == '_' || r == '-' || r == '.' || r == '(' || r == ')' || r == '[' || r == ']'
+	}) {
+		if n := len(tok); n >= 3 && n <= 32 {
+			out = append(out, tok)
+			if len(out) >= maxFilenameTokens {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// maxFilenameTokens caps how many candidates a single (attacker-controlled)
+// attachment name contributes, so a long crafted filename can't fill the global
+// candidate cap and starve the high-signal built-in defaults. Small: a real
+// password-in-the-name is one or two tokens.
+const maxFilenameTokens = 6
 
 // NewScanMeta normalizes a raw (attacker-controlled) attachment name into the
 // external-variable values: basename only (any path stripped), control bytes
@@ -1260,7 +1432,22 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	// Pre-extract any OLE2/OOXML macro source and account for it. The flags feed
 	// /metrics so this path is observable; the streams are scanned below. The
 	// same overall deadline bounds extraction time, not just the libyara scans.
-	res := extract.ExtractWithOptions(buf, profile.ExtractOptions(deadline))
+	xopts := profile.ExtractOptions(deadline)
+	if s.archivePW {
+		// Effective candidate list, ORDERED most-signal-first so the size cap drops
+		// the low-signal tail: per-message candidates (body-header passwords, then
+		// filename tokens) come BEFORE the process-constant base (defaults ∪
+		// wordlist). This way a large boot wordlist can't starve the per-message
+		// candidates out of the final capped list. Deduped + capped once at the end.
+		eff := make([]string, 0, len(meta.PWCandidates)+len(s.archivePWDefaults)+len(s.archivePWWordlist)+maxFilenameTokens)
+		eff = append(eff, meta.PWCandidates...)             // highest signal: explicit body password
+		eff = append(eff, filenameTokens(meta.Filename)...) // next: password-in-name (capped)
+		eff = append(eff, s.archivePWDefaults...)           // built-ins: survive the cap (small, high-value)
+		eff = append(eff, s.archivePWWordlist...)           // lowest signal: trimmed first by the cap
+		xopts.PWCandidates = capDedupCandidates(eff)
+		xopts.ArchivePWEnabled = len(xopts.PWCandidates) > 0
+	}
+	res := extract.ExtractWithOptions(buf, xopts)
 	if res.IsDoc {
 		s.exDocs.Add(1)
 	}

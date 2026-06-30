@@ -8,11 +8,13 @@
 package mailstrix
 
 import (
+	"io"
 	"log"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -98,6 +100,22 @@ type Config struct {
 	MetricsAuth bool // MAILSTRIX_METRICS_AUTH — require the token for /metrics and /version
 	Pprof       bool // MAILSTRIX_PPROF — enable /debug/pprof (off by default, ops-only)
 	Canary      bool // MAILSTRIX_CANARY — shadow/observe-only: tag ALL matches mailstrix_canary=1
+
+	// Password-protected archive decryption (opt-in, default OFF). When OFF the
+	// service behaves exactly as before — an encrypted zip/7z/rar member emits the
+	// ARCHIVE-ENCRYPTED marker and is never decrypted. When ON, the extractor tries
+	// a bounded candidate-password list against encrypted members and, on a hit,
+	// feeds the plaintext through the normal child-scan path. The brute loop is
+	// hard-capped (attempt budget + per-attempt deadline + candidate-list size cap);
+	// see internal/extract for the bounds. Candidates come from the built-in list,
+	// the optional wordlist file, the attachment filename, and (if the rspamd plugin
+	// sends them) the mail subject/body.
+	ArchivePW bool // MAILSTRIX_ARCHIVE_PW — enable encrypted-archive decrypt (default false)
+	// ArchivePWords is the boot-loaded wordlist from MAILSTRIX_ARCHIVE_PW_FILE,
+	// merged with the built-in defaults. Empty if the env is unset or the file is
+	// unreadable (fail-open + a logged warning). Capped at load time
+	// (archivePWFileMaxLines lines, archivePWWordMaxLen bytes/line, deduped).
+	ArchivePWords []string // from MAILSTRIX_ARCHIVE_PW_FILE (optional)
 
 	// DenylistFile is an optional path to a file of rule names (one per line,
 	// # comments, case-insensitive) merged with the env-based RuleDenylist.
@@ -197,6 +215,11 @@ func LoadConfig() *Config {
 		MetricsAuth:      envBool("MAILSTRIX_METRICS_AUTH"),
 		Pprof:            envBool("MAILSTRIX_PPROF"),
 		Canary:           envBool("MAILSTRIX_CANARY"),
+		ArchivePW:        envBool("MAILSTRIX_ARCHIVE_PW"),
+		// Wordlist is loaded ONLY when the feature is enabled — a default-OFF
+		// service must not touch (or read into memory) an operator-pointed file at
+		// boot. Gating here keeps the disabled path side-effect-free.
+		ArchivePWords:    loadArchivePWFileIf(envBool("MAILSTRIX_ARCHIVE_PW"), strings.TrimSpace(os.Getenv("MAILSTRIX_ARCHIVE_PW_FILE"))),
 		DenylistFile:     envStr("MAILSTRIX_DENYLIST_FILE", ""),
 		URLhausKey:       envOrFile("MAILSTRIX_URLHAUS_KEY"),
 		URLhausRefresh:   envDur("MAILSTRIX_URLHAUS_REFRESH", 21600),
@@ -428,4 +451,81 @@ func envBool(name string) bool {
 		return true
 	}
 	return false
+}
+
+const (
+	// archivePWFileMaxLines caps how many wordlist entries are loaded from
+	// MAILSTRIX_ARCHIVE_PW_FILE. A huge operator-supplied (or accidentally-pointed)
+	// file must not balloon the candidate list — the per-request effective list is
+	// itself re-capped in the scanner, but bound the boot load too.
+	archivePWFileMaxLines = 4096
+	// archivePWWordMaxLen caps one wordlist line; longer lines are truncated.
+	archivePWWordMaxLen = 128
+	// archivePWFileMaxBytes hard-bounds how much of the wordlist file is read into
+	// memory at boot, independent of the line cap — a multi-gigabyte (or /dev/zero)
+	// path must not OOM or hang startup. Sized generously above the worst-case
+	// archivePWFileMaxLines×archivePWWordMaxLen so the line/byte caps agree.
+	archivePWFileMaxBytes = archivePWFileMaxLines * (archivePWWordMaxLen + 2) // +CRLF
+)
+
+// loadArchivePWFileIf loads the wordlist only when the decrypt feature is enabled;
+// when disabled it returns nil without touching the path (default-OFF must be
+// side-effect-free at boot). See loadArchivePWFile for the parse/cap contract.
+func loadArchivePWFileIf(enabled bool, path string) []string {
+	if !enabled {
+		return nil
+	}
+	return loadArchivePWFile(path)
+}
+
+// loadArchivePWFile reads the optional password wordlist named by
+// MAILSTRIX_ARCHIVE_PW_FILE. One candidate per line; blank lines and lines
+// starting with '#' are skipped; each line is trimmed and truncated to
+// archivePWWordMaxLen; the result is deduped and capped at archivePWFileMaxLines.
+// At most archivePWFileMaxBytes are read into memory (LimitReader), so a huge or
+// special file (e.g. /dev/zero) cannot OOM or hang startup. Fail-open: an empty
+// path returns nil; an unreadable file logs a warning and returns nil so the
+// feature still runs on the built-in defaults.
+func loadArchivePWFile(path string) []string {
+	if path == "" {
+		return nil
+	}
+	// Open with O_NONBLOCK so opening a FIFO/special path returns immediately
+	// instead of blocking startup, then fstat the OPEN fd (no TOCTOU — we classify
+	// exactly what we opened) and reject anything that isn't a regular file.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 G703 -- operator-provided wordlist path (env), not attacker input
+	if err != nil {
+		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q unreadable (%v); decrypt enabled but using built-in password list only", path, err) // #nosec G706 -- operator-provided env path, not attacker-tainted
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	if fi, statErr := f.Stat(); statErr != nil || !fi.Mode().IsRegular() {
+		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q not a regular file (%v); decrypt enabled but using built-in password list only", path, statErr) // #nosec G706 -- operator-provided env path, not attacker-tainted
+		return nil
+	}
+	b, err := io.ReadAll(io.LimitReader(f, archivePWFileMaxBytes))
+	if err != nil {
+		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q read error (%v); decrypt enabled but using built-in password list only", path, err) // #nosec G706 -- operator-provided env path, not attacker-tainted
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 64)
+	for _, line := range strings.Split(string(b), "\n") {
+		w := strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if w == "" || strings.HasPrefix(w, "#") {
+			continue
+		}
+		if len(w) > archivePWWordMaxLen {
+			w = w[:archivePWWordMaxLen]
+		}
+		if _, dup := seen[w]; dup {
+			continue
+		}
+		seen[w] = struct{}{}
+		out = append(out, w)
+		if len(out) >= archivePWFileMaxLines {
+			break
+		}
+	}
+	return out
 }

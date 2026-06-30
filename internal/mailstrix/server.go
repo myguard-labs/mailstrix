@@ -505,7 +505,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// Attachment metadata (filename/extension) the plugin attached to this scan;
 	// fed to the YARA `filename`/`extension` external variables so name-keyed
 	// rules fire (see ScanMeta).
-	meta := scanMetaFromRequest(r)
+	meta := scanMetaFromRequest(r, s.cfg.ArchivePW)
 
 	// Resolve the effort tier for this scan (EFFORT-1): X-MAILSTRIX-Effort header,
 	// else the configured env default, clamped to [1, EffortMax]. The clamp is the
@@ -874,6 +874,77 @@ const filenameHeader = "X-MAILSTRIX-Filename"
 // past the configured DoS bound (see ResolveEffortLevel).
 const effortHeaderName = "X-MAILSTRIX-Effort"
 
+// pwCandidatesHeader carries candidate passwords extracted by the rspamd plugin
+// from the mail subject/body, for the opt-in encrypted-archive decrypt feature.
+// The value is base64 of a newline-joined list (same base64 transport + control-
+// byte safety as filenameHeader — the candidates are attacker-controlled mail
+// text). Absent/undecodable ⇒ no candidates, never an error. The list is hard-
+// capped on parse (count + per-item length) so a hostile header can't inflate the
+// brute-force candidate set; the candidates are only ever decrypt INPUTS, never
+// executed.
+const pwCandidatesHeader = "X-MAILSTRIX-PWCandidates" // #nosec G101 -- HTTP header NAME, not a credential
+
+const (
+	// maxHeaderPWCandidates bounds how many candidate passwords are accepted from
+	// the request header (the per-request slice). The scanner re-caps the merged
+	// effective list separately; this bounds just the attacker-supplied portion.
+	maxHeaderPWCandidates = 32
+	// maxHeaderPWCandidateLen caps one candidate length (bytes). Passwords longer
+	// than this are dropped — a multi-kilobyte "candidate" is abuse, not a password.
+	maxHeaderPWCandidateLen = 64
+)
+
+// pwCandidatesFromRequest decodes and bounds the X-MAILSTRIX-PWCandidates header.
+// Returns nil when the header is absent/undecodable/empty. Each newline-separated
+// candidate is trimmed of surrounding whitespace and control bytes; blank and
+// over-long candidates are dropped; duplicates are removed; the result is capped
+// at maxHeaderPWCandidates. Fail-soft: any decode problem yields nil (no
+// candidates), never an error — the scan still runs.
+func pwCandidatesFromRequest(r *http.Request) []string {
+	raw := r.Header.Get(pwCandidatesHeader)
+	if raw == "" {
+		return nil
+	}
+	dec, ok := decodeFilenameB64(raw) // same whitespace-tolerant std/raw base64 decode
+	if !ok {
+		return nil
+	}
+	// Bound the decoded blob before splitting: at most count×(len+1 newline) bytes
+	// can yield usable candidates, so a max-folded header full of newlines can't
+	// allocate a huge split slice. Excess is truncated (a real candidate list never
+	// approaches this).
+	if maxBlob := maxHeaderPWCandidates * (maxHeaderPWCandidateLen + 1); len(dec) > maxBlob {
+		dec = dec[:maxBlob]
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, maxHeaderPWCandidates)
+	for _, line := range strings.Split(string(dec), "\n") {
+		// Strip control bytes (incl. CR/NUL) and trim — the decoded blob is
+		// attacker-controlled; a candidate is a plain password, never a control seq.
+		c := strings.TrimSpace(strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}, line))
+		if c == "" || len(c) > maxHeaderPWCandidateLen {
+			continue
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+		if len(out) >= maxHeaderPWCandidates {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // autoEnvDefault returns the env-default effort level fed to ResolveEffortLevel.
 // With MAILSTRIX_EFFORT=auto (EFFORT-2) and no per-request header overriding it
 // (canAuto), it derives the level from current admission-gate pressure and steps
@@ -926,16 +997,22 @@ func effortHeader(r *http.Request) (int, bool) {
 
 // scanMetaFromRequest extracts and normalizes the attachment metadata the plugin
 // attached to the scan. See filenameHeader for the wire format / why base64.
-func scanMetaFromRequest(r *http.Request) ScanMeta {
-	raw := r.Header.Get(filenameHeader)
-	if raw == "" {
-		return ScanMeta{}
+func scanMetaFromRequest(r *http.Request, archivePW bool) ScanMeta {
+	var meta ScanMeta
+	if raw := r.Header.Get(filenameHeader); raw != "" {
+		if dec, ok := decodeFilenameB64(raw); ok {
+			meta = NewScanMeta(string(dec))
+		}
 	}
-	dec, ok := decodeFilenameB64(raw)
-	if !ok {
-		return ScanMeta{}
+	// Password candidates ride independently of the filename header — a message can
+	// carry body-extracted candidates with no attachment-name metadata. Parsed ONLY
+	// when the decrypt feature is enabled: when off, the candidates can never affect
+	// the verdict, so decoding+keying them would only let an attacker bust the cache
+	// (unique passwords per message → forced misses) for no detection benefit.
+	if archivePW {
+		meta.PWCandidates = pwCandidatesFromRequest(r)
 	}
-	return NewScanMeta(string(dec))
+	return meta
 }
 
 // decodeFilenameB64 decodes the (possibly whitespace-folded, possibly unpadded)
