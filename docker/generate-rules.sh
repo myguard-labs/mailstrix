@@ -31,6 +31,19 @@ set -euo pipefail
 REPO="${REPO:-myguard-labs/mailstrix}"
 TAG="${TAG:-rules-current}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"   # repo root (script lives in docker/)
+
+# gh needs a token with contents:write on the myguard-labs ORG to publish the
+# rolling release. The build user's default gh login (hosts.yml) carries the
+# personal GITHUB_API_TOKEN, which only has READ on org repos -> asset upload/
+# clobber 403s ("Resource not accessible by personal access token"). The
+# org-owned fine-grained PAT lives in /etc/myguard-build-env as
+# GITHUB_ORG_LAB_TOKEN; export it as GH_TOKEN so every gh call here uses it
+# without disturbing the default login or GITHUB_API_TOKEN (lastversion's key).
+if [ -z "${GH_TOKEN:-}" ] && [ -r /etc/myguard-build-env ]; then
+    # shellcheck disable=SC1091
+    . /etc/myguard-build-env
+    [ -n "${GITHUB_ORG_LAB_TOKEN:-}" ] && export GH_TOKEN="$GITHUB_ORG_LAB_TOKEN"
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -56,7 +69,7 @@ shout_fail() {  # shout_fail <body> — fires at most once per run
 # exiting, so a broken nightly is visible instead of silent. die() shouts its own
 # message; the once-guard stops a double-shout when die triggers ERR.
 # shellcheck disable=SC2154  # rc IS assigned (rc=$?) inside the trap-quoted string
-trap 'rc=$?; [ "$rc" -ne 0 ] && shout_fail "generate-rules.sh exited $rc — rules-current NOT updated. Check /opt/packages/log/strixd-generate-rules.log"; exit $rc' ERR
+trap 'rc=$?; [ "$rc" -ne 0 ] && shout_fail "generate-rules.sh exited $rc — rules-current NOT updated. Check /opt/packages/log/yarad-generate-rules.log"; exit $rc' ERR
 
 die()  { note "ERROR: $*"; shout_fail "$*"; exit 1; }
 
