@@ -24,7 +24,7 @@ jobs:
   # amd64 instead of after it (was a serial for-loop = sum of both).
   binaries:
     needs: gate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, docker]
     permissions:
       contents: read
     strategy:
@@ -65,7 +65,7 @@ jobs:
   # the just-built binaries with nfpm — no debian/ tree, pure-Go packager.
   debs:
     needs: binaries
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     permissions:
       contents: read
     steps:
@@ -112,7 +112,7 @@ jobs:
 
   release:
     needs: [binaries, debs]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     permissions:
       contents: write   # create GitHub release + upload assets
     steps:

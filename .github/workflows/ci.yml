@@ -32,7 +32,7 @@ jobs:
   # `go vet` + `go test -race -tags yara_static`; then we build the final image,
   # run it against a local EICAR rule, and smoke the HTTP contract.
   docker:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -74,7 +74,7 @@ jobs:
         run: scripts/smoke.sh strixd:ci
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
@@ -113,7 +113,7 @@ jobs:
   # via pinned upstream images instead of marketplace actions to avoid pulling
   # extra third-party Actions into the supply chain.
   scanners:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
