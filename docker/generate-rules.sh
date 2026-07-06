@@ -69,7 +69,7 @@ shout_fail() {  # shout_fail <body> — fires at most once per run
 # exiting, so a broken nightly is visible instead of silent. die() shouts its own
 # message; the once-guard stops a double-shout when die triggers ERR.
 # shellcheck disable=SC2154  # rc IS assigned (rc=$?) inside the trap-quoted string
-trap 'rc=$?; [ "$rc" -ne 0 ] && shout_fail "generate-rules.sh exited $rc — rules-current NOT updated. Check /opt/packages/log/yarad-generate-rules.log"; exit $rc' ERR
+trap 'rc=$?; [ "$rc" -ne 0 ] && shout_fail "generate-rules.sh exited $rc — rules-current NOT updated. Check /opt/myguard/packages/log/yarad-generate-rules.log"; exit $rc' ERR
 
 die()  { note "ERROR: $*"; shout_fail "$*"; exit 1; }
 
