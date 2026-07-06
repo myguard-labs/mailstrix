@@ -88,13 +88,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/go/bin
-          key: gotools-${{ runner.os }}-go1.25-rev1
-      - name: install analysis tools (on cache miss)
-        if: steps.gotools.outputs.cache-hit != 'true'
+          key: gotools-${{ runner.os }}-go1.25-rev2-selfhosted
+      # Presence-guarded (not just cache-hit): a cache blob restored from a
+      # different runner image can be incomplete, and the self-hosted runner
+      # does not have ~/go/bin on PATH by default.
+      - name: install analysis tools
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/go/bin:$PATH"
+          command -v staticcheck >/dev/null || go install honnef.co/go/tools/cmd/staticcheck@latest
+          command -v govulncheck >/dev/null || go install golang.org/x/vuln/cmd/govulncheck@latest
+          command -v gosec >/dev/null || go install github.com/securego/gosec/v2/cmd/gosec@latest
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd internal)
