@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
@@ -73,7 +73,7 @@ jobs:
   # is deliberately NOT used — on a Go binary its runtime/GC trips constant false
   # positives; ASAN via the Go toolchain is the right tool for the cgo boundary.
   asan:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
@@ -89,7 +89,7 @@ jobs:
         run: go test -asan ./...
 
   codeql:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -113,7 +113,7 @@ jobs:
   # rules-current manifest instead.
 
   perf-regression:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
@@ -178,7 +178,7 @@ jobs:
   # ruleset is curated; --error makes it fail the monthly job so findings surface.
   # Audit 2026-06-30.
   semgrep:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
