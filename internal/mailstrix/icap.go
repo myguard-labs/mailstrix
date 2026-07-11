@@ -79,8 +79,7 @@ func (s *Server) serveICAPConn(conn net.Conn) {
 
 // icapSection is one entry from the Encapsulated header.
 type icapSection struct {
-	name   string // req-hdr, res-hdr, req-body, res-body, opt-body, null-body
-	offset int64
+	name string // req-hdr, res-hdr, req-body, res-body, opt-body, null-body
 }
 
 func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
@@ -140,12 +139,12 @@ func (s *Server) handleICAPOptions(w io.Writer) error {
 // Used to skip encapsulated HTTP header sections inside an ICAP body.
 func skipHTTPHeaders(br *bufio.Reader) error {
 	for {
-		line, err := br.ReadString('\n')
+		line, err := readBoundedLine(br, maxICAPHeaderLine)
 		if err != nil {
 			return err
 		}
-		// Blank line (CRLF or bare LF) terminates the HTTP header section.
-		if line == "\r\n" || line == "\n" {
+		// Blank line (CR stripped by readBoundedLine → "") terminates the section.
+		if line == "" {
 			return nil
 		}
 	}
@@ -298,25 +297,30 @@ func parseICAPEncapsulated(v string) []icapSection {
 		if err != nil {
 			continue
 		}
-		out = append(out, icapSection{name: name, offset: off})
+		_ = off // offset is parsed for validation only; sections are consumed by name
+		out = append(out, icapSection{name: name})
 	}
 	return out
 }
 
 var errICAPBodyTooLarge = errors.New("ICAP body exceeds MaxBody limit")
 
-var errICAPChunkHeaderTooLong = errors.New("ICAP chunk header line too long")
+var errICAPChunkHeaderTooLong = errors.New("ICAP line exceeds length cap")
 
-// maxICAPChunkHeaderLine bounds a single chunk-size line ("<hex>[; ieof]\r\n").
-// A legitimate header is a few bytes; without this cap an attacker can stream a
-// multi-gigabyte size line with no '\n' and ReadString buffers it all before the
-// MaxBody check fires — unbounded per-connection memory on a fail-open service.
-const maxICAPChunkHeaderLine = 256
+// Line caps bound every CRLF-terminated read so a missing '\n' cannot grow the
+// buffer without bound. A legitimate chunk-size line is a few bytes; encapsulated
+// HTTP header lines are larger (cookies, long URLs) but still bounded. Without
+// these caps an attacker streams a multi-gigabyte line with no '\n' and the read
+// buffers it all before the MaxBody check fires — unbounded per-connection memory
+// on a fail-open service.
+const (
+	maxICAPChunkHeaderLine = 256
+	maxICAPHeaderLine      = 8192
+)
 
-// readICAPChunkHeaderLine reads one CRLF-terminated chunk header, capped at
-// maxICAPChunkHeaderLine bytes so a missing '\n' cannot grow the buffer without
-// bound. Returns the line without the trailing CRLF.
-func readICAPChunkHeaderLine(r *bufio.Reader) (string, error) {
+// readBoundedLine reads one '\n'-terminated line, discarding a trailing '\r',
+// capped at cap bytes. Returns errICAPChunkHeaderTooLong if no '\n' arrives within cap.
+func readBoundedLine(r *bufio.Reader, limit int) (string, error) {
 	var sb strings.Builder
 	for {
 		b, err := r.ReadByte()
@@ -326,11 +330,17 @@ func readICAPChunkHeaderLine(r *bufio.Reader) (string, error) {
 		if b == '\n' {
 			return strings.TrimRight(sb.String(), "\r"), nil
 		}
-		if sb.Len() >= maxICAPChunkHeaderLine {
+		if sb.Len() >= limit {
 			return "", errICAPChunkHeaderTooLong
 		}
 		sb.WriteByte(b)
 	}
+}
+
+// readICAPChunkHeaderLine reads one CRLF-terminated chunk header, capped at
+// maxICAPChunkHeaderLine bytes. Returns the line without the trailing CRLF.
+func readICAPChunkHeaderLine(r *bufio.Reader) (string, error) {
+	return readBoundedLine(r, maxICAPChunkHeaderLine)
 }
 
 // readICAPChunkedBody reads an ICAP chunked body (RFC 3507 §4.5) up to maxBytes.
@@ -369,8 +379,10 @@ func readICAPChunkedBody(r *bufio.Reader, maxBytes int64) ([]byte, bool, error) 
 			return nil, false, fmt.Errorf("bad ICAP chunk size %q: negative", raw)
 		}
 		if size == 0 {
-			// Terminal chunk — consume trailing CRLF.
-			_, _ = r.ReadString('\n')
+			// Terminal chunk — consume trailing CRLF (bounded).
+			if _, err := readBoundedLine(r, maxICAPChunkHeaderLine); err != nil && !errors.Is(err, io.EOF) {
+				return nil, false, err
+			}
 			return out, hasIEOF, nil
 		}
 		if int64(len(out))+size > maxBytes {
@@ -386,8 +398,10 @@ func readICAPChunkedBody(r *bufio.Reader, maxBytes int64) ([]byte, bool, error) 
 		if _, err := io.ReadFull(r, out[old:]); err != nil {
 			return nil, false, err
 		}
-		// Consume trailing CRLF after chunk data.
-		_, _ = r.ReadString('\n')
+		// Consume trailing CRLF after chunk data (bounded).
+		if _, err := readBoundedLine(r, maxICAPChunkHeaderLine); err != nil {
+			return nil, false, err
+		}
 	}
 }
 

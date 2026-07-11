@@ -7,7 +7,7 @@
 # rulesets are baked in at build time; a daily rebuild (CACHEBUST) re-pulls the
 # latest. Override YARAFORGE_SET/YARAFORGE_URL / SIGBASE_REF to pin.
 
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.25.12
 ARG YARA_VERSION=4.5.2
 
 # ---- libyara (static) -------------------------------------------------------

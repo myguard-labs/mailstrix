@@ -356,10 +356,10 @@ func TestParseICAPEncapsulated(t *testing.T) {
 		in   string
 		want []icapSection
 	}{
-		{"null-body=0", []icapSection{{"null-body", 0}}},
-		{"req-hdr=0, req-body=100", []icapSection{{"req-hdr", 0}, {"req-body", 100}}},
-		{"res-hdr=0, res-body=412", []icapSection{{"res-hdr", 0}, {"res-body", 412}}},
-		{"req-hdr=0, res-hdr=100, res-body=512", []icapSection{{"req-hdr", 0}, {"res-hdr", 100}, {"res-body", 512}}},
+		{"null-body=0", []icapSection{{"null-body"}}},
+		{"req-hdr=0, req-body=100", []icapSection{{"req-hdr"}, {"req-body"}}},
+		{"res-hdr=0, res-body=412", []icapSection{{"res-hdr"}, {"res-body"}}},
+		{"req-hdr=0, res-hdr=100, res-body=512", []icapSection{{"req-hdr"}, {"res-hdr"}, {"res-body"}}},
 	}
 	for _, tc := range cases {
 		got := parseICAPEncapsulated(tc.in)
@@ -671,6 +671,35 @@ func TestReadICAPChunkedBodyHeaderLineBounded(t *testing.T) {
 	_, _, err := readICAPChunkedBody(bufio.NewReader(strings.NewReader(junk)), 1024)
 	if err == nil {
 		t.Fatal("expected error on oversized chunk-header line, got nil")
+	}
+	if !errors.Is(err, errICAPChunkHeaderTooLong) {
+		t.Fatalf("want errICAPChunkHeaderTooLong, got %v", err)
+	}
+}
+
+// TestReadICAPChunkedBodyTrailerBounded ensures the post-data trailing-CRLF
+// consume is bounded: a valid chunk followed by a multi-megabyte run with no
+// '\n' must be rejected, not buffered whole (MaxBody bypass / per-conn DoS).
+func TestReadICAPChunkedBodyTrailerBounded(t *testing.T) {
+	// "1\r\nA" = one 1-byte chunk, then junk with no '\n' where the trailing CRLF
+	// should be.
+	body := "1\r\nA" + strings.Repeat("X", 4<<20)
+	_, _, err := readICAPChunkedBody(bufio.NewReader(strings.NewReader(body)), 1<<20)
+	if err == nil {
+		t.Fatal("expected error on oversized chunk trailer, got nil")
+	}
+	if !errors.Is(err, errICAPChunkHeaderTooLong) {
+		t.Fatalf("want errICAPChunkHeaderTooLong, got %v", err)
+	}
+}
+
+// TestSkipHTTPHeadersBounded ensures an encapsulated HTTP header line with no
+// terminating '\n' cannot grow the read buffer without bound.
+func TestSkipHTTPHeadersBounded(t *testing.T) {
+	junk := strings.Repeat("A", 4<<20) // no '\n' anywhere
+	err := skipHTTPHeaders(bufio.NewReader(strings.NewReader(junk)))
+	if err == nil {
+		t.Fatal("expected error on oversized HTTP header line, got nil")
 	}
 	if !errors.Is(err, errICAPChunkHeaderTooLong) {
 		t.Fatalf("want errICAPChunkHeaderTooLong, got %v", err)
