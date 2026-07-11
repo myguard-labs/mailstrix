@@ -11,3 +11,12 @@ ecosystem = "Go"
 name = "stdlib"
 ignore = true
 reason = "go.mod `go` directive is a language-version floor, not the build toolchain; release is built with the latest patched golang:1.25 image."
+
+# GO-2026-5932 (golang.org/x/crypto 0.52.0) has no fixed upstream version and the
+# dedicated govulncheck lint job confirms the affected symbol is NOT reached
+# (imported, not called). With call-analysis disabled here (bundled Go too old),
+# osv-scanner cannot apply that reachability filter itself, so ignore it
+# explicitly. Re-evaluate if x/crypto ships a fix or the call path changes.
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = "no upstream fix; govulncheck confirms unreached (imported, not called)."

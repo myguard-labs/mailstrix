@@ -154,7 +154,11 @@ jobs:
       - name: hadolint (Dockerfile; .hadolint.yaml ignores)
         run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile docker/Dockerfile.release
       - name: osv-scanner (go.mod/go.sum dependency CVEs)
-        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v1.9.2 --lockfile=go.mod
+        # --no-call-analysis=go: the v1.9.2 image bundles Go 1.23.4, which cannot
+        # run govulncheck call-analysis against this go1.25 module (fails "requires
+        # go >= 1.25.0"). Dependency-presence scanning still runs; reachability is
+        # covered by the dedicated govulncheck lint job on the pinned toolchain.
+        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v1.9.2 --no-call-analysis=go --lockfile=go.mod
 
       - name: zizmor (Actions supply-chain hardening)
         run: docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/woodruffw/zizmor:1.6.0 --format plain .github/workflows/
