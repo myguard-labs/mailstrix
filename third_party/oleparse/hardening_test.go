@@ -357,3 +357,142 @@ func vbaDirStreamWithModuleOffset(t testing.TB, moduleName string, moduleOffset 
 
 	return b.Bytes()
 }
+
+// --- CFB structural hardening (codex-audit follow-up) ---
+
+func TestNewOLEFileRejectsDuplicateFatRef(t *testing.T) {
+	data := miniOLE(t, map[string][]byte{"s": []byte("x")})
+	// Declare a second header FAT entry duplicating sector 0.
+	binary.LittleEndian.PutUint32(data[44:], 2) // CsectFat = 2
+	binary.LittleEndian.PutUint32(data[80:], 0) // SectFat[1] = 0 (dup)
+	if _, err := NewOLEFile(data); err == nil {
+		t.Fatal("duplicate FAT sector reference was not rejected")
+	}
+}
+
+func TestNewOLEFileHonorsCsectFatCount(t *testing.T) {
+	data := miniOLE(t, map[string][]byte{"s": []byte("x")})
+	// Junk beyond the declared count must be ignored, not dereferenced.
+	binary.LittleEndian.PutUint32(data[80:], 0) // SectFat[1] = 0 (dup, but unused)
+	ole, err := NewOLEFile(data)
+	if err != nil {
+		t.Fatalf("junk SectFat entry beyond CsectFat broke parsing: %v", err)
+	}
+	if got, err := ole.OpenStreamByName("s"); err != nil || len(got) == 0 {
+		t.Fatalf("stream lost: %v", err)
+	}
+}
+
+func TestNewOLEFileRejectsImpossibleCsectFat(t *testing.T) {
+	data := miniOLE(t, map[string][]byte{"s": []byte("x")})
+	binary.LittleEndian.PutUint32(data[44:], 0xFFFF) // CsectFat >> file sectors
+	if _, err := NewOLEFile(data); err == nil {
+		t.Fatal("impossible CsectFat was not rejected")
+	}
+}
+
+func TestNewOLEFileRejectsFatSectorOutOfRange(t *testing.T) {
+	data := miniOLE(t, map[string][]byte{"s": []byte("x")})
+	binary.LittleEndian.PutUint32(data[76:], 0x00FFFFFF) // SectFat[0] beyond EOF
+	if _, err := NewOLEFile(data); err == nil {
+		t.Fatal("out-of-range FAT sector ID was not rejected")
+	}
+}
+
+func TestNewOLEFileRejectsUnnecessaryDif(t *testing.T) {
+	data := miniOLE(t, map[string][]byte{"s": []byte("x")})
+	// CsectDif stays 0 but the start points at a real sector.
+	binary.LittleEndian.PutUint32(data[68:], 0) // SectDifStart = sector 0
+	if _, err := NewOLEFile(data); err == nil {
+		t.Fatal("DIF start with zero declared DIF count was not rejected")
+	}
+}
+
+func TestNewOLEFileStopsDifAtDeclaredCount(t *testing.T) {
+	base := miniOLE(t, map[string][]byte{"s": []byte("x")})
+	// Append one DIF sector that points at itself: an unbounded walk would
+	// loop; honoring CsectDif=1 stops after the first sector.
+	difSect := uint32(len(base)/512 - 1) // ID of the appended sector
+	dif := make([]byte, 512)
+	for off := 0; off < 512; off += 4 {
+		binary.LittleEndian.PutUint32(dif[off:], FREESECT)
+	}
+	binary.LittleEndian.PutUint32(dif[508:], difSect) // next = itself
+	data := append(append([]byte(nil), base...), dif...)
+	binary.LittleEndian.PutUint32(data[68:], difSect) // SectDifStart
+	binary.LittleEndian.PutUint32(data[72:], 1)       // CsectDif = 1
+	ole, err := NewOLEFile(data)
+	if err != nil {
+		t.Fatalf("bounded DIF walk failed: %v", err)
+	}
+	if got, err := ole.OpenStreamByName("s"); err != nil || len(got) == 0 {
+		t.Fatalf("stream lost: %v", err)
+	}
+}
+
+func TestDirectoryNameHonorsCB(t *testing.T) {
+	entry := make([]byte, 128)
+	name := utf16leEncode("dir")
+	copy(entry[0:], name)                                          // "dir" + NUL at units 0-3
+	copy(entry[8:], utf16leEncode("JUNK"))                         // junk after terminator
+	binary.LittleEndian.PutUint16(entry[64:], uint16(len(name)+2)) // CB incl. terminator
+	entry[66] = 2                                                  // stream
+	d, err := NewDirectory(entry, 1)
+	if err != nil {
+		t.Fatalf("NewDirectory: %v", err)
+	}
+	if d.Name != "dir" {
+		t.Fatalf("junk after CB terminator leaked into name: %q", d.Name)
+	}
+}
+
+func TestDirectoryNameNonSpecCBFallback(t *testing.T) {
+	// CB omitting the terminator (historical fixtures) must still resolve.
+	entry := make([]byte, 128)
+	name := utf16leEncode("dir")
+	copy(entry[0:], name)
+	binary.LittleEndian.PutUint16(entry[64:], uint16(len(name))) // no terminator
+	entry[66] = 2
+	d, err := NewDirectory(entry, 1)
+	if err != nil {
+		t.Fatalf("NewDirectory: %v", err)
+	}
+	if d.Name != "dir" {
+		t.Fatalf("non-spec CB fallback broken: %q", d.Name)
+	}
+}
+
+func TestGetStreamIgnoresHeaderMiniSectorCutoff(t *testing.T) {
+	payload := bytes.Repeat([]byte("A"), 4096) // FAT-resident (== cutoff)
+	data := miniOLE(t, map[string][]byte{"s": payload})
+	// Hostile header cutoff would misroute the read through the mini stream.
+	binary.LittleEndian.PutUint32(data[56:], 0x10000)
+	ole, err := NewOLEFile(data)
+	if err != nil {
+		t.Fatalf("NewOLEFile: %v", err)
+	}
+	got, err := ole.OpenStreamByName("s")
+	if err != nil {
+		t.Fatalf("OpenStreamByName: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("stream misread under hostile MiniSectorCutoff: %d bytes", len(got))
+	}
+}
+
+func TestDirectoryStreamSizeV3HighBitsMasked(t *testing.T) {
+	data := miniOLE(t, map[string][]byte{"s": []byte("x")})
+	// Poison the high 32 bits of the stream entry's 8-byte size field.
+	// miniOLE layout: header sector 0, FAT sector 0 at 512, directory at 1024;
+	// entry 1 is the stream.
+	dirEntry := 1024 + 128
+	binary.LittleEndian.PutUint32(data[dirEntry+124:], 0xDEADBEEF)
+	ole, err := NewOLEFile(data)
+	if err != nil {
+		t.Fatalf("v3 high size bits not masked: %v", err)
+	}
+	d := ole.FindStreamByName("s")
+	if d == nil || d.Header.Size>>32 != 0 {
+		t.Fatalf("v3 size mask missing: %#x", d.Header.Size)
+	}
+}
