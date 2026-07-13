@@ -56,10 +56,12 @@ func fromOLEOrphans(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			continue
 		}
 		var b []byte
-		if d.Header.Size < ole.Header.MiniSectorCutoff {
-			b = ole.ReadMiniChainSize(d.Header.SectStart, uint64(d.Header.Size))
+		// Spec cutoff, not the attacker-controlled header copy — a hostile
+		// MiniSectorCutoff would misroute mini-stream reads (wrong bytes).
+		if d.Header.Size < oleparse.MINI_SECTOR_CUTOFF {
+			b = ole.ReadMiniChainSize(d.Header.SectStart, d.Header.Size)
 		} else {
-			b = ole.ReadChainSize(d.Header.SectStart, uint64(d.Header.Size))
+			b = ole.ReadChainSize(d.Header.SectStart, d.Header.Size)
 		}
 		// Clamp the chain to the declared size. Size is bounded to maxOLEOrphanBytes
 		// by the filter above, so the int() conversion cannot overflow even on a

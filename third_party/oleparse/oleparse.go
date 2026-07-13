@@ -18,7 +18,17 @@ import (
 const (
 	FREESECT      = 0xFFFFFFFF
 	ENDOFCHAIN    = 0xFFFFFFFE
+	FATSECT       = 0xFFFFFFFD
+	DIFSECT       = 0xFFFFFFFC
+	MAXREGSECT    = 0xFFFFFFFA
 	OLE_SIGNATURE = "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
+
+	// MINI_SECTOR_CUTOFF is the MS-CFB mini stream cutoff. The spec fixes it
+	// at 4096; the header copy of the value is attacker-controlled and setting
+	// it to 0 would route every mini-stream read through the regular FAT and
+	// return wrong bytes (missed IOC). Stream reads must use this constant,
+	// never Header.MiniSectorCutoff.
+	MINI_SECTOR_CUTOFF = 4096
 
 	MODULE_EXTENSION = "bas"
 	CLASS_EXTENSION  = "cls"
@@ -73,8 +83,11 @@ type DirectoryHeader struct {
 	CreateTime  uint64
 	ModifyTime  uint64
 	SectStart   uint32
-	Size        uint32
-	PropType    uint16
+	// Size is the full 8-byte MS-CFB stream size. For major version 3 the
+	// high 32 bits are writer garbage per spec and are masked off in
+	// NewOLEFile; for version 4 non-zero high bits exceed any input this
+	// package accepts and the file is rejected there.
+	Size uint64
 }
 
 type Directory struct {
@@ -105,17 +118,38 @@ func NewDirectory(data []byte, index uint32) (*Directory, error) {
 	h.CreateTime = binary.LittleEndian.Uint64(data[100:])
 	h.ModifyTime = binary.LittleEndian.Uint64(data[108:])
 	h.SectStart = binary.LittleEndian.Uint32(data[116:])
-	h.Size = binary.LittleEndian.Uint32(data[120:])
-	h.PropType = binary.LittleEndian.Uint16(data[124:])
+	h.Size = binary.LittleEndian.Uint64(data[120:])
 
 	if self.Header.Mse == 0 { // Unallocated
 		return nil, nil
 	}
 
-	self.Name = strings.TrimRight(
-		string(utf16.Decode(self.Header.AB[:])), "\x00")
+	self.Name = decodeDirectoryName(&self.Header)
 
 	return self, nil
+}
+
+// decodeDirectoryName decodes the entry name honoring the CB byte count so
+// junk bytes after the declared terminator cannot alter stream lookup.
+// Non-spec CB values fall back to the historical trim-trailing-NULs decode
+// (real-world writers and older fixtures emit CB without the terminator).
+func decodeDirectoryName(h *DirectoryHeader) string {
+	cb := int(h.CB)
+	if cb >= 2 && cb <= 64 && cb%2 == 0 {
+		n := cb / 2
+		if h.AB[n-1] == 0 {
+			n-- // spec-valid: CB includes the UTF-16 NUL terminator
+		} else if cb > 62 {
+			n = 32 // CB=64 without terminator: whole buffer is name
+		}
+		name := string(utf16.Decode(h.AB[:n]))
+		// Cut at an embedded terminator, matching stream-name semantics.
+		if i := strings.IndexByte(name, 0); i >= 0 {
+			name = name[:i]
+		}
+		return strings.TrimRight(name, "\x00")
+	}
+	return strings.TrimRight(string(utf16.Decode(h.AB[:])), "\x00")
 }
 
 // streamCacheMaxSize is the upper bound on a stream's byte length for it to
@@ -425,11 +459,14 @@ func (self *OLEFile) getStream(index uint32, copyResult bool, prefixLimit int) [
 	if d == nil {
 		return nil
 	}
-	readSize := uint64(d.Header.Size)
+	readSize := d.Header.Size
 	if prefixLimit >= 0 && uint64(prefixLimit) < readSize {
 		readSize = uint64(prefixLimit)
 	}
-	if d.Header.Size < self.Header.MiniSectorCutoff {
+	// Use the spec cutoff, not Header.MiniSectorCutoff: the header copy is
+	// attacker-controlled and would misroute mini-stream reads (see the
+	// MINI_SECTOR_CUTOFF doc comment).
+	if d.Header.Size < MINI_SECTOR_CUTOFF {
 		data = self.ReadMiniChainSize(d.Header.SectStart, readSize)
 	} else {
 		data = self.ReadChainSize(d.Header.SectStart, readSize)
@@ -526,17 +563,67 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 	if self.SectorCount > MAX_SECTORS {
 		return nil, fmt.Errorf("sector count exceeds MAX_SECTORS: %d", self.SectorCount)
 	}
-	self.FatSectors = make([]uint32, 0, min(int(self.Header.CsectFat), len(self.Header.SectFat)))
-	for _, sect := range self.Header.SectFat {
-		if sect != FREESECT {
-			self.FatSectors = append(self.FatSectors, sect)
+	// SectorCount is derived from len(data) and bounded by MAX_SECTORS above,
+	// so it is non-negative and the unsigned widening below is exact.
+	sectorCount := uint64(self.SectorCount) // #nosec G115 -- 0 <= SectorCount <= MAX_SECTORS.
+
+	// A FAT/DIF/MiniFAT sector is itself a file sector, so a declared count
+	// larger than the file's sector count is impossible and only serves to
+	// inflate later allocations.
+	if uint64(self.Header.CsectFat) > sectorCount ||
+		uint64(self.Header.CsectDif) > sectorCount ||
+		uint64(self.Header.CsectMiniFat) > sectorCount {
+		return nil, fmt.Errorf(
+			"declared FAT/DIF/MiniFAT sector counts (%d/%d/%d) exceed file sectors (%d)",
+			self.Header.CsectFat, self.Header.CsectDif,
+			self.Header.CsectMiniFat, self.SectorCount)
+	}
+
+	// addFatSector validates a FAT sector reference before use: sentinel IDs
+	// must not be dereferenced, out-of-range IDs cannot exist in this file,
+	// and a duplicate reference would double-count the same FAT sector.
+	seenFat := make(map[uint32]bool)
+	addFatSector := func(sect uint32) error {
+		if sect > MAXREGSECT {
+			return fmt.Errorf("sentinel sector ID %#x used as FAT sector", sect)
+		}
+		if uint64(sect) >= sectorCount {
+			return fmt.Errorf("FAT sector ID %d out of range (%d sectors)",
+				sect, self.SectorCount)
+		}
+		if seenFat[sect] {
+			return fmt.Errorf("duplicate FAT sector reference %d", sect)
+		}
+		seenFat[sect] = true
+		self.FatSectors = append(self.FatSectors, sect)
+		return nil
+	}
+
+	// Honor the declared CsectFat count: entries beyond it are unused by spec
+	// and must not be dereferenced even when a writer left junk in them.
+	headerFat := int(self.Header.CsectFat)
+	if headerFat > len(self.Header.SectFat) {
+		headerFat = len(self.Header.SectFat)
+	}
+	self.FatSectors = make([]uint32, 0, headerFat)
+	for _, sect := range self.Header.SectFat[:headerFat] {
+		if sect == FREESECT {
+			continue
+		}
+		if err := addFatSector(sect); err != nil {
+			return nil, err
 		}
 	}
 
-	// load any DIF sectors
+	// load any DIF sectors, stopping at the declared CsectDif count
 	sector := self.Header.SectDifStart
+	if self.Header.CsectDif == 0 && sector != FREESECT && sector != ENDOFCHAIN {
+		return nil, fmt.Errorf(
+			"DIF chain declared empty but start sector is %d", sector)
+	}
 	seen := make(map[uint32]bool)
-	for sector != FREESECT && sector != ENDOFCHAIN {
+	difWalked := uint32(0)
+	for sector != FREESECT && sector != ENDOFCHAIN && difWalked < self.Header.CsectDif {
 		data := self.ReadSector(sector)
 		if len(data) < self.SectorSize {
 			return nil, io.ErrUnexpectedEOF
@@ -550,8 +637,11 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 		next := binary.LittleEndian.Uint32(data[(difValues-1)*4:])
 		for off := 0; off < (difValues-1)*4; off += 4 {
 			value := binary.LittleEndian.Uint32(data[off:])
-			if value != FREESECT {
-				self.FatSectors = append(self.FatSectors, value)
+			if value == FREESECT {
+				continue
+			}
+			if err := addFatSector(value); err != nil {
+				return nil, err
 			}
 		}
 
@@ -564,20 +654,26 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 
 		seen[next] = true
 		sector = next
+		difWalked++
 	}
 
-	// load the FAT
+	// load the FAT; entries past fatCap could only describe sectors beyond
+	// EOF, so loading stops there instead of growing past the preallocation.
 	fatCap := len(self.FatSectors) * (self.SectorSize / 4)
 	if fatCap > self.SectorCount+(self.SectorSize/4) {
 		fatCap = self.SectorCount + (self.SectorSize / 4)
 	}
 	self.Fat = make([]uint32, 0, fatCap)
+fatLoad:
 	for _, fat_sect := range self.FatSectors {
 		sect_data := self.ReadSector(fat_sect)
 		if len(sect_data) < self.SectorSize {
 			return nil, io.ErrUnexpectedEOF
 		}
 		for off := 0; off < self.SectorSize; off += 4 {
+			if len(self.Fat) >= fatCap {
+				break fatLoad
+			}
 			self.Fat = append(self.Fat, binary.LittleEndian.Uint32(sect_data[off:]))
 		}
 	}
@@ -604,6 +700,14 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 		if dir_obj == nil { // Unallocated index
 			continue
 		}
+		if self.Header.MajorVersion == 3 {
+			// v3 writers leave garbage in the high 32 bits of the 8-byte
+			// stream-size field; MS-CFB says to ignore them.
+			dir_obj.Header.Size &= 0xFFFFFFFF
+		} else if dir_obj.Header.Size>>32 != 0 {
+			return nil, fmt.Errorf(
+				"v4 stream size %#x exceeds package limits", dir_obj.Header.Size)
+		}
 		self.Directory[directory_index] = dir_obj
 	}
 
@@ -627,16 +731,17 @@ func NewOLEFile(data []byte) (*OLEFile, error) {
 	// load the ministream
 	root_directory := self.Directory[0]
 	if root_directory.Header.SectStart != ENDOFCHAIN {
-		self.ministream = self.ReadChainSize(root_directory.Header.SectStart, uint64(root_directory.Header.Size))
-		if uint64(len(self.ministream)) < uint64(root_directory.Header.Size) {
+		self.ministream = self.ReadChainSize(root_directory.Header.SectStart, root_directory.Header.Size)
+		if uint64(len(self.ministream)) < root_directory.Header.Size {
 			return nil, fmt.Errorf(
 				"specified size is larger than actual stream length %v\n",
 				len(self.ministream))
 		}
 
 		ministreamSize := len(self.ministream)
-		if uint64(root_directory.Header.Size) < uint64(ministreamSize) {
-			ministreamSize = int(root_directory.Header.Size)
+		if root_directory.Header.Size < uint64(ministreamSize) {
+			// Size < len(ministream), which is int-bounded.
+			ministreamSize = int(root_directory.Header.Size) // #nosec G115 -- guarded by the comparison above.
 		}
 		self.ministream = self.ministream[:ministreamSize]
 
