@@ -32,7 +32,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3 arm64 emulation
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
@@ -54,7 +54,7 @@ jobs:
           ls -l out
 
       - name: upload arch binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: bin-${{ matrix.arch }}
           path: out/
@@ -69,10 +69,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
       - name: download arch binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           pattern: bin-*
           merge-multiple: true
@@ -103,7 +103,7 @@ jobs:
           ls -l ../../debout
 
       - name: upload .deb packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: debs
           path: debout/
@@ -116,17 +116,17 @@ jobs:
     permissions:
       contents: write   # create GitHub release + upload assets
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked] (gh release needs repo context)
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
       - name: download arch binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           pattern: bin-*
           merge-multiple: true
           path: out/
 
       - name: download .deb packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: debs
           path: out/

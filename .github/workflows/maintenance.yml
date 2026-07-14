@@ -17,7 +17,7 @@ jobs:
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: ./.github/actions/go-setup
       - name: fuzz (untrusted /scan body)
         run: go test -run=x -fuzz='^FuzzScanBody$' -fuzztime=5m ./internal/mailstrix/
@@ -76,7 +76,7 @@ jobs:
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: ./.github/actions/go-setup
         with:
           packages: clang
@@ -95,7 +95,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357  # v3
         with:
           languages: go
@@ -116,7 +116,7 @@ jobs:
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
@@ -152,7 +152,7 @@ jobs:
           ' "$BASE" bench-results.txt
 
       - name: upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: benchmark-results
           path: bench-results.txt
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: build test image (arm64 native)
         run: docker buildx build --target test --load -t strixd-test-arm64 -f docker/Dockerfile .
@@ -181,7 +181,7 @@ jobs:
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[artipacked]
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - name: semgrep scan
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
