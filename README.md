@@ -28,7 +28,7 @@ moment the author edits one byte; a YARA rule matches the *shape* of a file (PE
 imports, section entropy, embedded magic) and survives the next variant. strixd
 compiles those rules — libyara modules and all — and runs them over your mail.
 
-**Four ways to plug it into a mail server, all shipped in this repo:**
+**Five ways to plug it into a mail server, all shipped in this repo:**
 
 - **rspamd** — an async `mailstrix.lua` plugin ([`contrib/rspamd/`](contrib/rspamd/)) POSTs each
   message/part to strixd at SMTP time and turns the hits into a spam-score symbol.
@@ -38,16 +38,21 @@ compiles those rules — libyara modules and all — and runs them over your mai
 - **Dovecot / Sieve** — the lean [`strix-scan`](#thin-client-for-dovecot--sieve-strix-scan)
   client scans at *delivery* and a Sieve rule quarantines a match
   ([`contrib/sieve/`](contrib/sieve/)).
+- **Postfix / Sendmail (milter)** — the lean
+  [`strix-milter`](#milter-for-postfix--sendmail-strix-milter) runs on the MTA host,
+  POSTs each message to strixd and stamps the verdict as a header. It **always
+  accepts**; your `header_checks` decides what to do about it.
 - **ICAP** — set `MAILSTRIX_ICAP_ADDR` and strixd also speaks ICAP (RFC 3507) so an
   ICAP-aware proxy or content-filter (Squid, c-icap) scans REQMOD/RESPMOD bodies
   through the same engine ([ICAP mode](#icap-mode-optional)).
 
 ```
- ┌──────────────────────┐  POST /scan  ┌──────────────┐    ┌──────────────┐
- │ rspamd (mailstrix.lua)│ ───────────▶ │    strixd    │ ─▶ │   libyara    │
- │ SpamAssassin / Sieve  │ ◀─────────── │ (Go service) │    │compiled rules│
- │ (strix-scan) / ICAP   │   {matches}  └──────────────┘    └──────────────┘
- └──────────────────────┘
+ ┌───────────────────────┐  POST /scan  ┌──────────────┐    ┌──────────────┐
+ │ rspamd (mailstrix.lua) │ ───────────▶ │    strixd    │ ─▶ │   libyara    │
+ │ SpamAssassin / Sieve   │ ◀─────────── │ (Go service) │    │compiled rules│
+ │ (strix-scan) / ICAP    │   {matches}  └──────────────┘    └──────────────┘
+ │ Postfix (strix-milter) │
+ └───────────────────────┘
 ```
 
 > **Where should YARA scanning live — opinion.** YARA scanning is genuinely
@@ -164,14 +169,19 @@ sudo systemctl enable --now strixd
 # strix-scan — the lean CGO-free Sieve/LDA client (no daemon)
 curl -fsSLO "${BASE}/strix-scan_${VER}_${ARCH}.deb"
 sudo apt install "./strix-scan_${VER}_${ARCH}.deb"
+
+# strix-milter — the lean CGO-free Postfix/Sendmail milter (systemd unit)
+curl -fsSLO "${BASE}/strix-milter_${VER}_${ARCH}.deb"
+sudo apt install "./strix-milter_${VER}_${ARCH}.deb"
 ```
 
 The daemon package installs a hardened systemd unit (unprivileged `strixd` user,
 `ProtectSystem=strict`, `NoNewPrivileges`) and a documented
 `/etc/mailstrix/strixd.env`. State (rules) lives in `/var/lib/mailstrix`.
 
-**Static binaries** — `strixd-linux-{amd64,arm64}` and
-`strix-scan-linux-{amd64,arm64}` plus `SHA256SUMS` are on the same release page.
+**Static binaries** — `strixd-linux-{amd64,arm64}`,
+`strix-scan-linux-{amd64,arm64}` and `strix-milter-linux-{amd64,arm64}` plus
+`SHA256SUMS` are on the same release page.
 
 **Docker** — see [Quick start](#quick-start) below (rules baked in).
 
@@ -316,6 +326,94 @@ delivery and quarantine a hit — off the connection's critical path.
 A ready-to-use Dovecot Sieve example (the `execute` rule, an install wrapper, the
 dovecot config, and a setup/test walkthrough) lives in **[`contrib/sieve/`](contrib/sieve/)**.
 Because the client fails open, a delivery is never lost if the backend is down.
+
+## Milter for Postfix / Sendmail (`strix-milter`)
+
+`strix-milter` is a milter (mail filter) front-end for strixd. It runs on the
+**MTA host**, buffers each message, POSTs it to strixd's `/scan`, and stamps the
+verdict into the message as `X-Mailstrix-*` headers.
+
+It **always accepts the message.** It never rejects, defers, discards or
+quarantines — it only reports. Turning a verdict into policy is the MTA's job.
+That is deliberate:
+
+- **Fail-open is trivial.** A scanner outage, timeout or oversized message is
+  just an `unknown` stamp, not a bounce. A bug here can never eat mail.
+- **Mail policy stays in the MTA**, where you already express it, version it, and
+  can change it without restarting the filter.
+- **The heavy lifting stays out of the delivery path.** Like `strix-scan`, this
+  binary links no CGO / libyara and holds no rules — it is a small pure-Go static
+  binary. The extractors and the YARA engine stay behind strixd's admission cap.
+
+```sh
+# on the MTA host
+sudoedit /etc/mailstrix/strix-milter.env     # set MAILSTRIX_URL (+ MAILSTRIX_TOKEN)
+sudo systemctl enable --now strix-milter
+```
+
+### Headers it stamps
+
+| Header | Value |
+| --- | --- |
+| `X-Mailstrix-Status` | `clean`, `infected`, or `unknown` |
+| `X-Mailstrix-Rules` | comma-separated actionable rule names (on `infected`) |
+| `X-Mailstrix-Family` | the malware family, when a rule carried one |
+| `X-Mailstrix-Info` | why the verdict is `unknown` (outage, oversized, empty) |
+| `X-Mailstrix-Version` | the `strix-milter` version |
+
+`unknown` means *not scanned* — it is **not** a clean bill of health. Decide
+explicitly what you want to do with it (most people accept and let the rest of the
+stack judge; a high-security site may prefer to hold it).
+
+Canary and allowlisted rules (`mailstrix_canary=1` / `mailstrix_allow=1`) are
+log-only and never make a message `infected` — the same rule the other clients
+apply, from the same code.
+
+### Postfix
+
+```ini
+# main.cf
+smtpd_milters     = inet:127.0.0.1:8081
+non_smtpd_milters = inet:127.0.0.1:8081
+milter_default_action = accept       # keep mail flowing if the milter is down
+header_checks = pcre:/etc/postfix/header_checks
+```
+
+```pcre
+# /etc/postfix/header_checks — hold anything the scanner called infected
+/^X-Mailstrix-Status:\s*infected/   HOLD Mailstrix: malware detected
+```
+
+`milter_default_action = accept` matters: with `tempfail`, a milter outage would
+defer your entire mailflow. The whole design assumes the filter is allowed to
+disappear.
+
+Released messages sit in the hold queue (`postsuper -H` / `-r`). Prefer to reject
+outright instead? Swap `HOLD` for `REJECT` — but note you are then rejecting on a
+scanner the MTA cannot see the health of.
+
+### Sendmail
+
+```m4
+INPUT_MAIL_FILTER(`strix', `S=inet:8081@127.0.0.1, F=T, T=S:30s;R:30s;E:5m')
+```
+
+`F=T` tempfails if the milter is unreachable; use `F=` (empty) to accept instead,
+which matches the fail-open posture above.
+
+### Flags
+
+| Flag / env | Default | What it does |
+| --- | --- | --- |
+| `-url` / `MAILSTRIX_URL` | — | **required**; base URL of strixd |
+| `-listen` / `MAILSTRIX_MILTER_LISTEN` | `inet:127.0.0.1:8081` | `inet:HOST:PORT` or `unix:/path.sock` |
+| `-token-file` / `MAILSTRIX_TOKEN` | — | strixd's shared secret; `-token-file` keeps it out of the process list |
+| `-timeout` | `20s` | hard per-message deadline; on expiry the message is **accepted** as `unknown` |
+| `-max-body` | `8 MiB` | a larger message is accepted **unscanned** rather than scanned as a truncated prefix (which would be a silent miss) |
+| `-log-clean` | off | log clean verdicts too (noisy) |
+
+Keep the listener on loopback or a unix socket: anyone who can reach it can have
+messages scanned.
 
 ## Configuration
 
@@ -773,6 +871,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] Tiered scoring (`STRIX_MALWARE`/`_EXPLOIT`/`_PHISHING`/`STRIX`/`_SUSPICIOUS` + `URLHAUS_MALWARE_URL`)
 - [x] SIGHUP rule reload (atomic swap, keeps old rules on a bad edit); `fetch-rules` out-of-image updates
 - [x] `strix-scan` lean CGO-free Sieve/LDA client ([`contrib/sieve/`](contrib/sieve/))
+- [x] **`strix-milter` lean CGO-free Postfix/Sendmail milter** — buffers each message, POSTs it to strixd, stamps `X-Mailstrix-Status`/`-Rules`/`-Family`; **always accepts** (the MTA's `header_checks` turns the verdict into policy), so a scanner outage can never block mail ([milter](#milter-for-postfix--sendmail-strix-milter))
 - [x] UserForm hidden-string extraction (carves payload strings from VBA UserForm `o`/`f`/`\x03VBFrame` OLE2 streams; `Maldoc_UserForm_Payload` rule)
 - [x] Document-properties string extraction (OOXML `docProps/`, `customXml/`, `word/settings.xml` docVars; OLE2 `\x05SummaryInformation`; `Maldoc_DocProps_Payload` rule)
 - [x] PE/ELF structural analysis of carved/embedded binaries (`saferwall/pe`, fail-open): section entropy (`PE-SECTION-PACKED` ≥7.2 / `-HIGH-ENTROPY` ≥7.0), `PE-OVERLAY`, `PE-VIRTUAL-SECTION` (FormBook `.ndata`), `PE-DOTNET` (CLR), `PE-ANOMALY`; header-validated `ELF-EXECUTABLE` → `pe_structural.yara`
@@ -838,6 +937,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
 - **[SpamAssassin plugin](contrib/spamassassin/)** — scan each message through strixd and score a YARA match.
 - **[Dovecot/Sieve example](contrib/sieve/)** — quarantine a match with the `strix-scan` client.
+- **[Milter for Postfix / Sendmail](#milter-for-postfix--sendmail-strix-milter)** — stamp a verdict header with `strix-milter` and let `header_checks` act on it.
 - **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/articles/yara-malware-scanning-mailstrix/) — the why and how, on deb.myguard.nl.
 - **Docker Hub:** [`myguard-labs/mailstrix`](https://hub.docker.com/r/myguard-labs/mailstrix).
 

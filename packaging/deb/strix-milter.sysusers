@@ -1,0 +1,2 @@
+# systemd-sysusers: create the unprivileged strix-milter service account.
+u strix-milter - "strix-milter mail filter" /nonexistent -

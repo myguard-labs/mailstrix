@@ -51,6 +51,8 @@ jobs:
           install -D "dist/${arch}/strixd" "out/strixd-linux-${arch}"
           # strix-scan: the lean, CGO-free Sieve/LDA client.
           install -D "dist/${arch}/strix-scan" "out/strix-scan-linux-${arch}"
+          # strix-milter: the lean, CGO-free Postfix/Sendmail milter.
+          install -D "dist/${arch}/strix-milter" "out/strix-milter-linux-${arch}"
           ls -l out
 
       - name: upload arch binaries
@@ -61,7 +63,8 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Build .deb packages (strixd daemon + strix-scan client, amd64 + arm64) from
+  # Build .deb packages (strixd daemon + strix-scan client + strix-milter, amd64
+  # and arm64) from
   # the just-built binaries with nfpm — no debian/ tree, pure-Go packager.
   debs:
     needs: binaries
@@ -95,10 +98,12 @@ jobs:
           for arch in amd64 arm64; do
             # nfpm doesn't template the contents src path — stage to a fixed name.
             cp "../../out/strixd-linux-${arch}"      dist/strixd
-            cp "../../out/strix-scan-linux-${arch}" dist/strix-scan
+            cp "../../out/strix-scan-linux-${arch}"   dist/strix-scan
+            cp "../../out/strix-milter-linux-${arch}" dist/strix-milter
             export ARCH="$arch"
             nfpm pkg -f nfpm-strixd.yaml      -p deb -t "../../debout/strixd_${VERSION}_${arch}.deb"
             nfpm pkg -f nfpm-strix-scan.yaml -p deb -t "../../debout/strix-scan_${VERSION}_${arch}.deb"
+            nfpm pkg -f nfpm-strix-milter.yaml -p deb -t "../../debout/strix-milter_${VERSION}_${arch}.deb"
           done
           ls -l ../../debout
 
@@ -134,7 +139,7 @@ jobs:
       - name: checksums
         run: |
           set -euo pipefail
-          ( cd out && sha256sum strixd-linux-* strix-scan-linux-* ./*.deb > SHA256SUMS )
+          ( cd out && sha256sum strixd-linux-* strix-scan-linux-* strix-milter-linux-* ./*.deb > SHA256SUMS )
           ls -l out
 
       # The self-hosted lxc runner image does not ship the gh CLI.
@@ -154,7 +159,7 @@ jobs:
           # manually before the tag push), upload/overwrite assets onto it
           # instead of failing the whole run on a duplicate. Assets = the four
           # binaries, the four .debs, and the SHA256SUMS that covers them all.
-          assets=( out/strixd-linux-* out/strix-scan-linux-* out/*.deb out/SHA256SUMS )
+          assets=( out/strixd-linux-* out/strix-scan-linux-* out/strix-milter-linux-* out/*.deb out/SHA256SUMS )
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" --clobber "${assets[@]}"
           else

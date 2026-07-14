@@ -1,0 +1,39 @@
+# nfpm config for the strix-milter .deb (lean, CGO-free Postfix/Sendmail milter).
+#   stage the binary to dist/strix-milter, then
+#   VERSION=1.1.0 ARCH=amd64 nfpm pkg -f nfpm-strix-milter.yaml -p deb
+# See nfpm-strixd.yaml for why the src path is fixed, not ${ARCH}-templated.
+name: strix-milter
+arch: ${ARCH}
+version: ${VERSION}
+version_schema: none
+section: mail
+priority: optional
+maintainer: eilandert <eilander@myguard.nl>
+description: |
+  strix-milter — Postfix/Sendmail milter for the strixd daemon
+  Lean CGO-free milter that buffers each message, POSTs it to a strixd daemon's
+  /scan endpoint, and stamps the verdict as X-Mailstrix-* headers. It ALWAYS
+  accepts the message: turning a verdict into policy (hold, quarantine, reject)
+  is left to the MTA's own header_checks, so a scanner outage can never block
+  mail. Runs on the MTA host; the YARA rules and extractors stay in strixd.
+homepage: https://github.com/myguard-labs/mailstrix
+license: MIT
+depends:
+  - libc6
+contents:
+  - src: dist/strix-milter
+    dst: /usr/bin/strix-milter
+    file_info:
+      mode: 0755
+  - src: strix-milter.service
+    dst: /lib/systemd/system/strix-milter.service
+  - src: strix-milter.sysusers
+    dst: /usr/lib/sysusers.d/strix-milter.conf
+  - src: strix-milter.env
+    dst: /etc/mailstrix/strix-milter.env
+    type: config|noreplace
+    file_info:
+      mode: 0640
+scripts:
+  postinstall: postinstall-milter.sh
+  preremove: preremove-milter.sh

@@ -1,10 +1,14 @@
 #!/bin/sh
-# Maintainer-script behaviour test. Runs preremove.sh / postinstall.sh with a
-# fake `systemctl` (and the systemd marker dir faked present) and asserts:
-#   - prerm "upgrade"  must NOT stop or disable strixd
-#   - prerm "remove"   must     stop and  disable strixd
-#   - postinst upgrade (configure <oldver>) try-restarts strixd
+# Maintainer-script behaviour test. Runs each unit's preremove/postinstall with a
+# fake `systemctl` (and the systemd marker dir faked present) and asserts, for
+# EVERY shipped unit (strixd, strix-milter, ...):
+#   - prerm "upgrade"  must NOT stop or disable the unit
+#   - prerm "remove"   must     stop and  disable the unit
+#   - postinst upgrade (configure <oldver>) try-restarts the unit
 #   - postinst install (configure, no oldver) does NOT restart, prints hints
+# The upgrade cases are the ones that matter: a prerm that stopped+disabled on an
+# upgrade would leave the service down after a routine `apt upgrade` — silently
+# unscanned mail (or, with milter_default_action=tempfail, a mail outage).
 # No root / no real systemd needed; the fake systemctl just logs its argv.
 set -eu
 
@@ -55,37 +59,47 @@ if [ ! -d /run/systemd/system ]; then
     echo "# /run/systemd/system absent on host — systemd-gated asserts limited"
 fi
 
-# --- prerm upgrade: keep service ---
-run preremove.sh upgrade 1.1.1
-absent "prerm upgrade does not stop"    "stop strixd"    "$work/calls"
-absent "prerm upgrade does not disable" "disable strixd" "$work/calls"
+# check_unit <unit> <preremove.sh> <postinstall.sh> <first-install-hint>
+check_unit() {
+    unit="$1"; prerm="$2"; postinst="$3"; hint="$4"
 
-# --- prerm remove: tear down ---
-run preremove.sh remove
-if [ -d /run/systemd/system ]; then
-    check "prerm remove stops"    "stop strixd"    "$work/calls"
-    check "prerm remove disables" "disable strixd" "$work/calls"
-fi
+    echo "# --- $unit ---"
 
-# --- postinst upgrade: restart new binary ---
-out="$(run postinstall.sh configure 1.1.0 2>&1 || true)"
-if [ -d /run/systemd/system ]; then
-    check "postinst upgrade try-restarts" "try-restart strixd" "$work/calls"
-fi
-if printf '%s' "$out" | grep -q "strixd installed"; then
-    echo "FAIL - postinst upgrade printed first-install hints"; fail=1
-else
-    echo "ok   - postinst upgrade stays quiet"
-fi
+    # --- prerm upgrade: keep service ---
+    run "$prerm" upgrade 1.1.1
+    absent "$unit: prerm upgrade does not stop"    "stop $unit"    "$work/calls"
+    absent "$unit: prerm upgrade does not disable" "disable $unit" "$work/calls"
 
-# --- postinst fresh install: no restart, prints hints ---
-out="$(run postinstall.sh configure 2>&1 || true)"
-absent "postinst install does not restart" "try-restart strixd" "$work/calls"
-if printf '%s' "$out" | grep -q "strixd installed"; then
-    echo "ok   - postinst install prints hints"
-else
-    echo "FAIL - postinst install missing hints"; fail=1
-fi
+    # --- prerm remove: tear down ---
+    run "$prerm" remove
+    if [ -d /run/systemd/system ]; then
+        check "$unit: prerm remove stops"    "stop $unit"    "$work/calls"
+        check "$unit: prerm remove disables" "disable $unit" "$work/calls"
+    fi
+
+    # --- postinst upgrade: restart new binary ---
+    out="$(run "$postinst" configure 1.1.0 2>&1 || true)"
+    if [ -d /run/systemd/system ]; then
+        check "$unit: postinst upgrade try-restarts" "try-restart $unit" "$work/calls"
+    fi
+    if printf '%s' "$out" | grep -q "$hint"; then
+        echo "FAIL - $unit: postinst upgrade printed first-install hints"; fail=1
+    else
+        echo "ok   - $unit: postinst upgrade stays quiet"
+    fi
+
+    # --- postinst fresh install: no restart, prints hints ---
+    out="$(run "$postinst" configure 2>&1 || true)"
+    absent "$unit: postinst install does not restart" "try-restart $unit" "$work/calls"
+    if printf '%s' "$out" | grep -q "$hint"; then
+        echo "ok   - $unit: postinst install prints hints"
+    else
+        echo "FAIL - $unit: postinst install missing hints"; fail=1
+    fi
+}
+
+check_unit strixd       preremove.sh        postinstall.sh        "strixd installed"
+check_unit strix-milter preremove-milter.sh postinstall-milter.sh "strix-milter installed"
 
 if [ "$fail" -eq 0 ]; then
     echo "ALL OK"
