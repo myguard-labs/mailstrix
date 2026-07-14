@@ -17,6 +17,10 @@ RestartSec=5
 RuntimeDirectory=strix-milter
 RuntimeDirectoryMode=0750
 
+# Memory ceiling as a backstop to -max-conns. If we ever do blow past it, dying
+# here is visible; silently ballooning until the OOM killer picks a victim is not.
+MemoryMax=512M
+
 # This process holds no rules, opens no files at runtime, and executes nothing.
 # It reads one env file, listens on a socket, and talks HTTP to strixd — so it
 # can be locked down harder than strixd itself (which needs its rules + cache).

@@ -369,6 +369,19 @@ Canary and allowlisted rules (`mailstrix_canary=1` / `mailstrix_allow=1`) are
 log-only and never make a message `infected` — the same rule the other clients
 apply, from the same code.
 
+**Forged headers are deleted, not just logged.** A sender who ships their own
+`X-Mailstrix-Status: clean` would otherwise be read by any downstream consumer
+doing a *first-match* header lookup (`net/mail`, `textproto.Get`, most MUA and
+Sieve implementations) — so the milter negotiates `SMFIF_CHGHDRS` and removes
+every inbound `X-Mailstrix-*` header before stamping its own. The forged header is
+not fed to the scanner either.
+
+**What gets scanned:** the milter protocol delivers the header block and the body
+separately; `strix-milter` reassembles them into the complete RFC 5322 message
+before posting it — the same bytes `strix-scan` sends for an `.eml`. Scanning the
+body alone would strip the MIME framing (`Content-Type`, `boundary`,
+`Content-Transfer-Encoding`, attachment `filename`) that the extractor needs.
+
 ### Postfix
 
 ```ini
@@ -410,6 +423,7 @@ which matches the fail-open posture above.
 | `-token-file` / `MAILSTRIX_TOKEN` | — | strixd's shared secret; `-token-file` keeps it out of the process list |
 | `-timeout` | `20s` | hard per-message deadline; on expiry the message is **accepted** as `unknown` |
 | `-max-body` | `8 MiB` | a larger message is accepted **unscanned** rather than scanned as a truncated prefix (which would be a silent miss) |
+| `-max-conns` | `64` | max concurrent MTA connections; bounds memory at roughly `max-conns × max-body`, so a flood of large messages cannot OOM the filter (an OOM restart would, with `milter_default_action = accept`, let mail through unscanned) |
 | `-log-clean` | off | log clean verdicts too (noisy) |
 
 Keep the listener on loopback or a unix socket: anyone who can reach it can have

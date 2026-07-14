@@ -14,30 +14,50 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	milter "github.com/emersion/go-milter"
 
 	"github.com/myguard-labs/mailstrix/internal/verdict"
 )
 
-// stampedHeader is one header the milter asked to add. go-milter's *Modifier is
-// a struct with unexported fields and no interface, so a test cannot construct a
-// working one — the milter's stamp seam lets us record the calls instead.
+// stampedHeader is one header the milter asked to add, with the value EXACTLY as
+// the production path produced it (already sanitised — that is the point).
+// go-milter's *Modifier is a struct with unexported fields and no interface, so
+// a test cannot construct a working one; the stamp/strip seams record the calls.
 type stampedHeader struct{ name, value string }
+
+// strippedHeader is one inbound header the milter asked the MTA to delete.
+type strippedHeader struct {
+	index int
+	name  string
+}
+
+// stripped is the recorder for the current milter under test. Package-level
+// because newTestMilter's signature predates it; each newTestMilter call resets it.
+var stripped *[]strippedHeader
 
 // newTestMilter builds the milter under test with its header sink redirected
 // into a slice.
 func newTestMilter(t *testing.T, cfg config) (*strixMilter, *[]stampedHeader, *strings.Builder) {
 	t.Helper()
 	var logbuf strings.Builder
+	stripped = &[]strippedHeader{}
 	s := &strixMilter{
 		cfg:    cfg,
 		client: verdict.NewClient(cfg.url, cfg.token, "strix-milter/test", cfg.timeout),
 		log:    log.New(&logbuf, "", 0),
 	}
 	stamped := &[]stampedHeader{}
+	// Record the value EXACTLY as Body() passes it. Sanitising here instead would
+	// make the injection tests prove only that sanitizeHeaderValue works, never
+	// that the production stamping path calls it — the guard could then be deleted
+	// from Body() with CI still green.
 	s.stamp = func(name, value string) {
-		*stamped = append(*stamped, stampedHeader{name, sanitizeHeaderValue(value)})
+		*stamped = append(*stamped, stampedHeader{name, value})
+	}
+	s.strip = func(index int, name string) {
+		*stripped = append(*stripped, strippedHeader{index, name})
 	}
 	return s, stamped, &logbuf
 }
@@ -72,9 +92,19 @@ func baseCfg(url string) config {
 	return config{url: url, timeout: 5 * time.Second, maxBody: 1 << 20}
 }
 
-// feed drives one complete message through the milter the way an MTA would.
-func feed(t *testing.T, s *strixMilter, body []byte) milter.Response {
+// feed drives one complete message through the milter the way an MTA does:
+// Header() per header line, Headers() at end-of-headers, BodyChunk() in <=64 KiB
+// chunks, then Body() at end-of-message.
+func feed(t *testing.T, s *strixMilter, hdrs [][2]string, body []byte) milter.Response {
 	t.Helper()
+	for _, h := range hdrs {
+		if _, err := s.Header(h[0], h[1], nil); err != nil {
+			t.Fatalf("Header: %v", err)
+		}
+	}
+	if _, err := s.Headers(nil, nil); err != nil {
+		t.Fatalf("Headers: %v", err)
+	}
 	for len(body) > 0 {
 		n := len(body)
 		if n > milter.MaxBodyChunk {
@@ -92,13 +122,19 @@ func feed(t *testing.T, s *strixMilter, body []byte) milter.Response {
 	return resp
 }
 
+// feedBody drives a message with a minimal header block.
+func feedBody(t *testing.T, s *strixMilter, body []byte) milter.Response {
+	t.Helper()
+	return feed(t, s, [][2]string{{"Subject", "test"}}, body)
+}
+
 // --- the contract: ALWAYS ACCEPT ------------------------------------------
 
 func TestCleanMessageIsAcceptedAndStampedClean(t *testing.T) {
 	srv := scanStub(t, nil, http.StatusOK)
 	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
 
-	if got := feed(t, s, []byte("hello")); got != milter.RespAccept {
+	if got := feedBody(t, s, []byte("hello")); got != milter.RespAccept {
 		t.Fatalf("response = %v, want RespAccept", got)
 	}
 	if v, _ := headerValue(*stamped, hdrStatus); v != statusClean {
@@ -117,7 +153,7 @@ func TestInfectedMessageIsSTILLAccepted(t *testing.T) {
 	}, http.StatusOK)
 	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
 
-	got := feed(t, s, []byte("evil"))
+	got := feedBody(t, s, []byte("evil"))
 	if got != milter.RespAccept {
 		t.Fatalf("response = %v, want RespAccept — the milter must never reject", got)
 	}
@@ -138,7 +174,7 @@ func TestScannerDownFailsOpenToUnknown(t *testing.T) {
 	// Point at a closed port: transport error.
 	s, stamped, _ := newTestMilter(t, baseCfg("http://127.0.0.1:1"))
 
-	if got := feed(t, s, []byte("hello")); got != milter.RespAccept {
+	if got := feedBody(t, s, []byte("hello")); got != milter.RespAccept {
 		t.Fatalf("response = %v, want RespAccept on scanner outage", got)
 	}
 	if v, _ := headerValue(*stamped, hdrStatus); v != statusUnknown {
@@ -154,7 +190,7 @@ func TestScannerErrorStatusFailsOpenToUnknown(t *testing.T) {
 	srv := scanStub(t, nil, http.StatusInternalServerError)
 	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
 
-	if got := feed(t, s, []byte("hello")); got != milter.RespAccept {
+	if got := feedBody(t, s, []byte("hello")); got != milter.RespAccept {
 		t.Fatalf("response = %v, want RespAccept on scanner 500", got)
 	}
 	if v, _ := headerValue(*stamped, hdrStatus); v != statusUnknown {
@@ -173,7 +209,7 @@ func TestScannerTimeoutFailsOpenToUnknown(t *testing.T) {
 	s, stamped, _ := newTestMilter(t, cfg)
 
 	start := time.Now()
-	if got := feed(t, s, []byte("hello")); got != milter.RespAccept {
+	if got := feedBody(t, s, []byte("hello")); got != milter.RespAccept {
 		t.Fatalf("response = %v, want RespAccept on timeout", got)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -210,7 +246,11 @@ func TestOversizeIsNotScannedAsTruncatedPrefix(t *testing.T) {
 	cfg.maxBody = 16
 	s, stamped, _ := newTestMilter(t, cfg)
 
-	// 3 chunks of 8: the first two fit (16 == cap), the third overflows.
+	// End the (empty) header block first, then 3 body chunks of 8: with a 16-byte
+	// cap the CRLF (2) + two chunks fit, and the third overflows.
+	if _, err := s.Headers(nil, nil); err != nil {
+		t.Fatalf("Headers: %v", err)
+	}
 	for i := 0; i < 3; i++ {
 		if _, err := s.BodyChunk([]byte(strings.Repeat("A", 8)), nil); err != nil {
 			t.Fatalf("BodyChunk: %v", err)
@@ -219,7 +259,7 @@ func TestOversizeIsNotScannedAsTruncatedPrefix(t *testing.T) {
 	if !s.oversize {
 		t.Fatal("the third chunk pushed the message over max-body but oversize was not latched")
 	}
-	if s.body != nil {
+	if s.msg != nil {
 		t.Fatal("oversize message must not retain a partial buffer")
 	}
 
@@ -242,6 +282,9 @@ func TestOversizeIsNotScannedAsTruncatedPrefix(t *testing.T) {
 }
 
 func TestExactlyMaxBodyIsScanned(t *testing.T) {
+	// Accumulate to EXACTLY the cap across several chunks (the multi-chunk
+	// arithmetic is the load-bearing path — see the oversize test), and assert the
+	// whole thing is still scanned rather than tripping the guard one byte early.
 	var got int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -252,12 +295,25 @@ func TestExactlyMaxBodyIsScanned(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	cfg := baseCfg(srv.URL)
-	cfg.maxBody = 32
+	cfg.maxBody = 34 // 2 bytes of CRLF (empty header block) + 32 body bytes
 	s, stamped, _ := newTestMilter(t, cfg)
 
-	feed(t, s, []byte(strings.Repeat("A", 32)))
-	if got != 32 {
-		t.Fatalf("scanner received %d bytes, want the full 32 (off-by-one at the cap)", got)
+	if _, err := s.Headers(nil, nil); err != nil {
+		t.Fatalf("Headers: %v", err)
+	}
+	for i := 0; i < 4; i++ { // 4 x 8 = 32, landing exactly on the cap
+		if _, err := s.BodyChunk([]byte(strings.Repeat("A", 8)), nil); err != nil {
+			t.Fatalf("BodyChunk: %v", err)
+		}
+	}
+	if s.oversize {
+		t.Fatal("a message landing EXACTLY on max-body was wrongly refused (off-by-one)")
+	}
+	if _, err := s.Body(nil); err != nil {
+		t.Fatalf("Body: %v", err)
+	}
+	if got != 34 {
+		t.Fatalf("scanner received %d bytes, want the full 34", got)
 	}
 	if v, _ := headerValue(*stamped, hdrStatus); v != statusClean {
 		t.Fatalf("%s = %q, want clean", hdrStatus, v)
@@ -273,7 +329,7 @@ func TestCanaryAndAllowlistDoNotMarkInfected(t *testing.T) {
 	}, http.StatusOK)
 	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
 
-	feed(t, s, []byte("hello"))
+	feedBody(t, s, []byte("hello"))
 	if v, _ := headerValue(*stamped, hdrStatus); v != statusClean {
 		t.Fatalf("%s = %q — a canary/allowlisted hit must stay CLEAN", hdrStatus, v)
 	}
@@ -289,7 +345,7 @@ func TestRuleNameCannotInjectAHeader(t *testing.T) {
 	}, http.StatusOK)
 	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
 
-	feed(t, s, []byte("x"))
+	feedBody(t, s, []byte("x"))
 	for _, h := range *stamped {
 		if strings.ContainsAny(h.value, "\r\n") {
 			t.Fatalf("header %s value %q still contains CR/LF — header injection", h.name, h.value)
@@ -303,8 +359,8 @@ func TestRuleNameCannotInjectAHeader(t *testing.T) {
 func TestSanitizeHeaderValueStripsControlChars(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"clean", "clean"},
-		{"a\r\nb", "a  b"},
-		{"a\x00b", "a b"},
+		{"a\r\nb", "a??b"},
+		{"a\x00b", "a?b"},
 		{"  padded  ", "padded"},
 	} {
 		if got := sanitizeHeaderValue(tc.in); got != tc.want {
@@ -313,15 +369,78 @@ func TestSanitizeHeaderValueStripsControlChars(t *testing.T) {
 	}
 }
 
-func TestInboundForgedHeaderIsLogged(t *testing.T) {
-	srv := scanStub(t, nil, http.StatusOK)
-	s, _, logbuf := newTestMilter(t, baseCfg(srv.URL))
+func TestInboundForgedHeaderIsDeletedNotJustLogged(t *testing.T) {
+	// A sender who ships their own "X-Mailstrix-Status: clean" must not be able to
+	// make a downstream FIRST-MATCH header lookup (net/mail, textproto.Get, most
+	// MUA/Sieve implementations) read their verdict instead of ours. Appending our
+	// own header after theirs is NOT enough — theirs has to go.
+	srv := scanStub(t, []verdict.Match{{Rule: "Win32_Evil"}}, http.StatusOK)
+	s, stamped, logbuf := newTestMilter(t, baseCfg(srv.URL))
 
-	if _, err := s.Header("X-Mailstrix-Status", "clean", nil); err != nil {
-		t.Fatalf("Header: %v", err)
+	feed(t, s, [][2]string{
+		{"Subject", "hi"},
+		{"X-Mailstrix-Status", "clean"},
+		{"X-Mailstrix-Rules", ""},
+	}, []byte("evil"))
+
+	if len(*stripped) != 2 {
+		t.Fatalf("stripped = %+v, want both forged headers deleted", *stripped)
+	}
+	for _, h := range *stripped {
+		if !strings.HasPrefix(strings.ToLower(h.name), strings.ToLower(headerPrefix)) {
+			t.Fatalf("stripped a header that was not ours to strip: %+v", h)
+		}
+		if h.index < 1 {
+			t.Fatalf("ChangeHeader index is 1-based per name, got %+v", h)
+		}
 	}
 	if !strings.Contains(logbuf.String(), "WARNING") {
-		t.Fatalf("a sender-supplied X-Mailstrix-* header must be logged loudly, got %q", logbuf.String())
+		t.Fatalf("a forged header must also be logged loudly, got %q", logbuf.String())
+	}
+	// Our real verdict still lands.
+	if v, _ := headerValue(*stamped, hdrStatus); v != statusInfected {
+		t.Fatalf("%s = %q, want infected", hdrStatus, v)
+	}
+}
+
+func TestForgedHeaderIsNotFedToTheScanner(t *testing.T) {
+	// The forged header must not be part of what we hand strixd either.
+	var posted []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verdict.Response{})
+	}))
+	t.Cleanup(srv.Close)
+
+	s, _, _ := newTestMilter(t, baseCfg(srv.URL))
+	feed(t, s, [][2]string{{"X-Mailstrix-Status", "clean"}, {"Subject", "hi"}}, []byte("x"))
+
+	if strings.Contains(string(posted), "X-Mailstrix-Status") {
+		t.Fatalf("the forged header was fed to the scanner: %q", posted)
+	}
+}
+
+func TestMultipleForgedCopiesAreAllDeletedHighestIndexFirst(t *testing.T) {
+	// ChangeHeader's index is per NAME. Deleting index 1 first would renumber the
+	// rest, so the second delete would hit the wrong (or a nonexistent) header.
+	srv := scanStub(t, nil, http.StatusOK)
+	s, _, _ := newTestMilter(t, baseCfg(srv.URL))
+
+	feed(t, s, [][2]string{
+		{"X-Mailstrix-Status", "clean"},
+		{"X-Mailstrix-Status", "clean"},
+		{"X-Mailstrix-Status", "clean"},
+	}, []byte("x"))
+
+	if len(*stripped) != 3 {
+		t.Fatalf("stripped = %+v, want all 3 copies deleted", *stripped)
+	}
+	for i, want := range []int{3, 2, 1} {
+		if (*stripped)[i].index != want {
+			t.Fatalf("delete #%d used index %d, want %d — deleting low-to-high renumbers the rest",
+				i, (*stripped)[i].index, want)
+		}
 	}
 }
 
@@ -335,14 +454,16 @@ func TestManyRulesProduceABoundedHeader(t *testing.T) {
 	srv := scanStub(t, matches, http.StatusOK)
 	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
 
-	feed(t, s, []byte("x"))
+	feedBody(t, s, []byte("x"))
 	v, ok := headerValue(*stamped, hdrRules)
 	if !ok {
 		t.Fatal("expected a rules header")
 	}
-	if len(v) > maxRuleHeaderLen+32 {
-		t.Fatalf("%s is %d bytes — unbounded header line", hdrRules, len(v))
+	if len(v) > maxHeaderValueLen {
+		t.Fatalf("%s is %d bytes, over the %d-byte header cap — an over-long header line can be rejected by the MTA", hdrRules, len(v), maxHeaderValueLen)
 	}
+	// The "(+N more)" tail must SURVIVE the header cap: a truncated list that
+	// looks complete is worse than one that admits it was cut.
 	if !strings.Contains(v, "more)") {
 		t.Fatalf("a truncated rule list must say how many were dropped, got %q", v)
 	}
@@ -360,7 +481,7 @@ func TestAbortResetsMessageState(t *testing.T) {
 	if err := s.Abort(nil); err != nil {
 		t.Fatalf("Abort: %v", err)
 	}
-	if s.body != nil || s.oversize || s.subject != "" {
+	if s.msg != nil || s.oversize || s.subject != "" {
 		t.Fatal("Abort must reset per-message state")
 	}
 }
@@ -378,23 +499,57 @@ func TestSecondMessageOnSameConnectionIsIndependent(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s, _, _ := newTestMilter(t, baseCfg(srv.URL))
-	feed(t, s, []byte("first"))
-	feed(t, s, []byte("second"))
+	feedBody(t, s, []byte("first"))
+	feedBody(t, s, []byte("second"))
 
-	if len(bodies) != 2 || bodies[0] != "first" || bodies[1] != "second" {
-		t.Fatalf("bodies = %q, want [first second] — per-message state leaked", bodies)
+	if len(bodies) != 2 {
+		t.Fatalf("want 2 scans, got %d", len(bodies))
+	}
+	if !strings.HasSuffix(bodies[0], "first") || !strings.HasSuffix(bodies[1], "second") {
+		t.Fatalf("bodies = %q — per-message state leaked between messages", bodies)
+	}
+	if strings.Contains(bodies[1], "first") {
+		t.Fatalf("message 2 still carries message 1's bytes: %q", bodies[1])
 	}
 }
 
-func TestEmptyBodyIsUnknownNotClean(t *testing.T) {
+func TestTotallyEmptyMessageIsUnknownNotClean(t *testing.T) {
+	// Nothing at all was buffered => nothing was scanned => "unknown", never a
+	// clean bill of health for bytes we never looked at.
 	srv := scanStub(t, nil, http.StatusOK)
 	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
 
-	if got := feed(t, s, nil); got != milter.RespAccept {
+	got, err := s.Body(nil) // no Header/Headers/BodyChunk at all
+	if err != nil {
+		t.Fatalf("Body: %v", err)
+	}
+	if got != milter.RespAccept {
 		t.Fatalf("response = %v, want RespAccept", got)
 	}
 	if v, _ := headerValue(*stamped, hdrStatus); v != statusUnknown {
-		t.Fatalf("%s = %q, want %q — an empty body was never scanned, so it is not known-clean", hdrStatus, v, statusUnknown)
+		t.Fatalf("%s = %q, want %q — nothing was scanned, so it is not known-clean", hdrStatus, v, statusUnknown)
+	}
+}
+
+func TestHeadersOnlyMessageIsStillScanned(t *testing.T) {
+	// A body-less message still has headers, and those headers ARE the message.
+	// It must be scanned, not written off as "empty".
+	var posted []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verdict.Response{})
+	}))
+	t.Cleanup(srv.Close)
+
+	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
+	feed(t, s, [][2]string{{"Subject", "hi"}}, nil)
+
+	if !strings.Contains(string(posted), "Subject: hi") {
+		t.Fatalf("scanner got %q, want the header block", posted)
+	}
+	if v, _ := headerValue(*stamped, hdrStatus); v != statusClean {
+		t.Fatalf("%s = %q, want clean", hdrStatus, v)
 	}
 }
 
@@ -481,15 +636,51 @@ func TestListenOnRefusesLiveUnixSocket(t *testing.T) {
 }
 
 func TestListenOnRemovesStaleUnixSocket(t *testing.T) {
+	// An ORPHANED socket (bound, then the process died without unlinking) must be
+	// cleared, or we could never restart.
 	sock := filepath.Join(t.TempDir(), "m.sock")
-	if err := os.WriteFile(sock, nil, 0o600); err != nil { // stale leftover, nobody listening
+	orphan, err := net.Listen("unix", sock)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// Close the listener but leave the socket FILE behind, exactly as an unclean
+	// shutdown does. (Go's unix listener unlinks on Close, so re-create the inode.)
+	_ = orphan.Close()
+	if _, err := os.Stat(sock); os.IsNotExist(err) {
+		l2, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, _ := l2.(*net.UnixListener)
+		f.SetUnlinkOnClose(false)
+		_ = l2.Close()
+	}
+	if fi, err := os.Lstat(sock); err != nil || fi.Mode()&os.ModeSocket == 0 {
+		t.Skip("could not stage an orphaned socket on this platform")
+	}
+
 	ln, err := listenOn("unix:" + sock)
 	if err != nil {
-		t.Fatalf("listenOn did not clear a stale socket: %v", err)
+		t.Fatalf("listenOn did not clear an orphaned socket: %v", err)
 	}
 	_ = ln.Close()
+}
+
+func TestListenOnRefusesToDeleteANonSocketFile(t *testing.T) {
+	// A typo in -listen (pointing at, say, an env file) must NOT make us delete an
+	// operator's file. The old dial-probe could not tell "not a socket" from
+	// "stale socket" and would unlink it.
+	f := filepath.Join(t.TempDir(), "strix-milter.env")
+	if err := os.WriteFile(f, []byte("MAILSTRIX_URL=http://x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ln, err := listenOn("unix:" + f); err == nil {
+		_ = ln.Close()
+		t.Fatal("listenOn accepted a non-socket path")
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Fatalf("listenOn DELETED an operator file that was not a socket: %v", err)
+	}
 }
 
 func TestListenOnRejectsBadSpec(t *testing.T) {
@@ -512,5 +703,226 @@ func TestRequiresURL(t *testing.T) {
 func TestVersionFlag(t *testing.T) {
 	if got := run([]string{"-version"}); got != 0 {
 		t.Fatalf("run -version = %d, want 0", got)
+	}
+}
+
+// --- the message we scan: headers MUST be included (the BLOCKER) -----------
+
+func TestScannedMessageIncludesHeadersAndMIMEFraming(t *testing.T) {
+	// The milter protocol hands us headers and body separately. Posting only the
+	// body would strip Content-Type/boundary/Content-Transfer-Encoding — exactly
+	// the framing strixd's extractor needs to find an attachment. strix-scan posts
+	// the whole .eml; so must we, or the two clients feed the scanner different
+	// things and every name/MIME-keyed rule silently goes dead behind the milter.
+	var posted []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verdict.Response{})
+	}))
+	t.Cleanup(srv.Close)
+
+	s, _, _ := newTestMilter(t, baseCfg(srv.URL))
+	feed(t, s, [][2]string{
+		{"From", "a@example.com"},
+		{"Subject", "invoice"},
+		{"Content-Type", `multipart/mixed; boundary="XYZ"`},
+	}, []byte("--XYZ\r\nContent-Disposition: attachment; filename=\"x.docm\"\r\n\r\nPK\x03\x04\r\n--XYZ--\r\n"))
+
+	got := string(posted)
+	for _, want := range []string{
+		"From: a@example.com",
+		"Subject: invoice",
+		`Content-Type: multipart/mixed; boundary="XYZ"`,
+		"filename=\"x.docm\"",
+		"PK\x03\x04",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("scanned message is missing %q — the scanner never sees it.\ngot: %q", want, got)
+		}
+	}
+	// The blank line that separates headers from body: without it this is not a
+	// parseable RFC 5322 message.
+	if !strings.Contains(got, "\r\n\r\n") {
+		t.Fatalf("no header/body separator in the scanned message: %q", got)
+	}
+	if strings.Index(got, "From:") > strings.Index(got, "PK") {
+		t.Fatal("headers must come BEFORE the body")
+	}
+}
+
+func TestScanSendsAFilenameSoNameKeyedRulesFire(t *testing.T) {
+	var gotName string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotName = r.Header.Get("X-MAILSTRIX-Filename")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verdict.Response{})
+	}))
+	t.Cleanup(srv.Close)
+
+	s, _, _ := newTestMilter(t, baseCfg(srv.URL))
+	feedBody(t, s, []byte("x"))
+
+	want := base64.StdEncoding.EncodeToString([]byte(scanFilename))
+	if gotName != want {
+		t.Fatalf("X-MAILSTRIX-Filename = %q, want %q (%s)", gotName, want, scanFilename)
+	}
+}
+
+// --- sanitisation happens on the PRODUCTION path ---------------------------
+
+func TestBodySanitisesBeforeStamping(t *testing.T) {
+	// The seam records the RAW value Body() passes. If Body() stopped sanitising,
+	// the CR/LF would arrive here — which is precisely the mutation the old test
+	// could not see, because the recorder used to sanitise on the test's behalf.
+	srv := scanStub(t, []verdict.Match{
+		{Rule: "evil\r\nX-Spam-Flag: NO", Meta: map[string]string{"family": "bad\nX-Forged: yes"}},
+	}, http.StatusOK)
+	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
+
+	feedBody(t, s, []byte("x"))
+
+	if len(*stamped) == 0 {
+		t.Fatal("nothing stamped")
+	}
+	for _, h := range *stamped {
+		if strings.ContainsAny(h.value, "\r\n\x00") {
+			t.Fatalf("Body() stamped an UNSANITISED value for %s: %q — header injection", h.name, h.value)
+		}
+	}
+}
+
+func TestSanitizeClampsToPrintableASCIIAndCaps(t *testing.T) {
+	// A raw 8-bit or control byte in a header field body is illegal on a
+	// non-SMTPUTF8 transport (RFC 5322 2.2): emitting one could make a downstream
+	// MTA reject the very message we promised to accept.
+	got := sanitizeHeaderValue("caf\u00e9\ttab\x1besc")
+	for i := 0; i < len(got); i++ {
+		if got[i] < 0x20 || got[i] > 0x7e {
+			t.Fatalf("sanitized value still holds a non-printable-ASCII byte %#x: %q", got[i], got)
+		}
+	}
+	long := sanitizeHeaderValue(strings.Repeat("A", maxHeaderValueLen*3))
+	if len(long) > maxHeaderValueLen+8 {
+		t.Fatalf("value not capped: %d bytes (an over-long header line can be rejected by the MTA)", len(long))
+	}
+}
+
+func TestTruncateDoesNotSplitARune(t *testing.T) {
+	s := strings.Repeat("\u00e9", 100) // 2 bytes each
+	if got := truncate(s, 15); !utf8.ValidString(got) {
+		t.Fatalf("truncate produced invalid UTF-8: %q", got)
+	}
+}
+
+// --- connection cap --------------------------------------------------------
+
+func TestLimitListenerCapsConcurrentConnections(t *testing.T) {
+	// Each in-flight message buffers up to max-body. Unbounded connections =
+	// unbounded memory = OOM = restart = (with milter_default_action=accept) a
+	// window in which mail is delivered UNSCANNED. Cap the accepts.
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+
+	ln := limitListener(base, 2)
+	accepted := make(chan net.Conn, 8)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+
+	var dialed []net.Conn
+	defer func() {
+		for _, c := range dialed {
+			_ = c.Close()
+		}
+	}()
+	for i := 0; i < 3; i++ {
+		c, err := net.Dial("tcp", base.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		dialed = append(dialed, c)
+	}
+
+	var held []net.Conn
+	for i := 0; i < 2; i++ {
+		select {
+		case c := <-accepted:
+			held = append(held, c)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d connections accepted, want 2", i)
+		}
+	}
+	// The 3rd must NOT be accepted while both slots are held.
+	select {
+	case <-accepted:
+		t.Fatal("accepted a 3rd connection despite a cap of 2 — the cap is inert")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// Free a slot; now it comes through.
+	_ = held[0].Close()
+	select {
+	case c := <-accepted:
+		_ = c.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("closing a connection did not free a slot — the cap leaks and will wedge")
+	}
+	_ = held[1].Close()
+}
+
+// --- negotiated milter options --------------------------------------------
+
+func TestNegotiatedActionsIncludeChangeHeader(t *testing.T) {
+	// Body() deletes forged inbound X-Mailstrix-* headers with ChangeHeader. The
+	// MTA refuses any action that was not negotiated, so without OptChangeHeader
+	// every one of those deletes is a silent no-op on the wire and the anti-forgery
+	// guard is inert — while still looking present in the code.
+	if milterActions&milter.OptChangeHeader == 0 {
+		t.Fatal("OptChangeHeader is not negotiated — the forged-header deletes cannot take effect")
+	}
+	if milterActions&milter.OptAddHeader == 0 {
+		t.Fatal("OptAddHeader is not negotiated — the verdict headers cannot be stamped")
+	}
+	// We must NOT hold power we never use: no body rewrite, no recipient change,
+	// no quarantine. The milter's whole contract is that it only ever reports.
+	for _, forbidden := range []struct {
+		bit  milter.OptAction
+		name string
+	}{
+		{milter.OptQuarantine, "OptQuarantine"},
+		{milter.OptChangeBody, "OptChangeBody"},
+		{milter.OptAddRcpt, "OptAddRcpt"},
+		{milter.OptRemoveRcpt, "OptRemoveRcpt"},
+		{milter.OptChangeFrom, "OptChangeFrom"},
+	} {
+		if milterActions&forbidden.bit != 0 {
+			t.Errorf("%s is negotiated — this milter must only ever ADD headers and DELETE its own", forbidden.name)
+		}
+	}
+}
+
+func TestProtocolKeepsHeadersEOHAndBody(t *testing.T) {
+	// All three feed the message we reassemble. Suppressing any of them would
+	// silently shrink what the scanner sees.
+	for _, suppressed := range []struct {
+		bit  milter.OptProtocol
+		name string
+	}{
+		{milter.OptNoHeaders, "OptNoHeaders"},
+		{milter.OptNoEOH, "OptNoEOH"},
+		{milter.OptNoBody, "OptNoBody"},
+	} {
+		if milterProtocol&suppressed.bit != 0 {
+			t.Errorf("%s is set — the scanner would not see part of the message", suppressed.name)
+		}
 	}
 }
