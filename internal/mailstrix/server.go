@@ -121,14 +121,14 @@ func NewServer(cfg *Config, engine ScanEngine) *Server {
 	cfg.sanitize()
 	info, errl := newLoggers(cfg)
 	s := &Server{
-		cfg:       cfg,
-		engine:    engine,
-		admit:     make(chan struct{}, cfg.MaxInflight),
-		sem:       make(chan struct{}, cfg.MaxConcurrent),
+		cfg:        cfg,
+		engine:     engine,
+		admit:      make(chan struct{}, cfg.MaxInflight),
+		sem:        make(chan struct{}, cfg.MaxConcurrent),
 		icapConns:  make(chan struct{}, cfg.ICAPMaxConns),
 		icapRefuse: make(chan struct{}, icapMaxRefuseInflight),
-		info:      info,
-		errl:      errl,
+		info:       info,
+		errl:       errl,
 	}
 	s.cache = NewCache(cfg, s.errf)
 	return s
