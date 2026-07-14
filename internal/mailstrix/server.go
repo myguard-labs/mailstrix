@@ -713,11 +713,16 @@ func (s *Server) authOK(r *http.Request) bool {
 
 func (s *Server) serveMetrics(w http.ResponseWriter) {
 	var b strings.Builder
-	fm := func(name, help string, v uint64) {
+	emit := func(name, help, typ string, v uint64) {
 		b.WriteString("# HELP mailstrix_" + name + " " + help + "\n")
-		b.WriteString("# TYPE mailstrix_" + name + " counter\n")
+		b.WriteString("# TYPE mailstrix_" + name + " " + typ + "\n")
 		b.WriteString("mailstrix_" + name + " " + strconv.FormatUint(v, 10) + "\n")
 	}
+	// fm emits a monotonic counter; fg emits a gauge. The distinction is not cosmetic:
+	// a gauge published as a counter makes every fall back to zero look like a counter
+	// reset, so rate()/increase() on it silently invent traffic that never happened.
+	fm := func(name, help string, v uint64) { emit(name, help, "counter", v) }
+	fg := func(name, help string, v uint64) { emit(name, help, "gauge", v) }
 	fm("scans_total", "total /scan requests served", s.metrics.scans.Load())
 	fm("matches_total", "/scan requests with >=1 rule match", s.metrics.matches.Load())
 	fm("errors_total", "scan/read/length errors", s.metrics.errors.Load())
@@ -843,7 +848,33 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 		fm("icap_options_total", "ICAP OPTIONS requests served", s.metrics.icapOptions.Load())
 		fm("icap_conn_refused_total", "ICAP connections refused at the live-connection cap", s.metrics.icapBusy.Load())
 	}
+
+	// Archive-decrypt worker pool. The third-party decoders cannot be cancelled, so a
+	// hostile member can leave one running past its watchdog; the pool bounds how many
+	// such workers can exist at once. A persistently non-zero decrypt_workers_abandoned
+	// is the operator's signal that a decoder is genuinely hanging on real traffic, and
+	// decrypt_attempts_refused_total rising means the pool is saturated and attempts are
+	// degrading to misses (encrypted members stay flagged, never scanned).
+	// The gauges are signed internally (they decrement) but can never legitimately go
+	// negative; clamp rather than wrap, so an accounting bug shows up as a flat 0
+	// instead of a 1.8e19 spike that reads as a catastrophic leak.
+	live, abandoned, refused, limit := extract.DecryptWorkerStats()
+	fg("decrypt_workers_live", "archive-decrypt decoders running now (abandoned ones included)", clampU64(live))
+	fg("decrypt_workers_abandoned", "archive-decrypt decoders still running after their watchdog gave up", clampU64(abandoned))
+	fg("decrypt_workers_limit", "archive-decrypt worker pool size", clampU64(int64(limit)))
+	fm("decrypt_attempts_refused_total", "archive-decrypt attempts refused because the worker pool was full", clampU64(refused))
+
 	writeRaw(w, http.StatusOK, "text/plain; version=0.0.4", []byte(b.String()))
+}
+
+// clampU64 renders a signed gauge as the unsigned counter the Prometheus text format
+// wants, without the wrap: a negative value (only reachable via an accounting bug)
+// becomes 0 rather than ~1.8e19, which would otherwise look like a runaway leak.
+func clampU64(v int64) uint64 {
+	if v < 0 {
+		return 0
+	}
+	return uint64(v)
 }
 
 // --- response helpers ---
