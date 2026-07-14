@@ -566,7 +566,7 @@ func listenOn(spec string) (net.Listener, error) {
 		}
 		return ln, nil
 	default:
-		return nil, fmt.Errorf("-listen: unknown network %q, want inet: or unix:", network)
+		return nil, fmt.Errorf("-listen: unknown network %q, want %q or %q", network, "inet", "unix")
 	}
 }
 
