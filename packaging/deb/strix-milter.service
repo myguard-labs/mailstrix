@@ -1,0 +1,58 @@
+[Unit]
+Description=strix-milter — Postfix/Sendmail milter for the strixd scanner
+Documentation=https://github.com/myguard-labs/mailstrix
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=strix-milter
+Group=strix-milter
+EnvironmentFile=-/etc/mailstrix/strix-milter.env
+ExecStart=/usr/bin/strix-milter $MAILSTRIX_MILTER_ARGS
+Restart=on-failure
+RestartSec=5
+
+# A unix-socket listener lives here (and the MTA's group needs to reach it).
+RuntimeDirectory=strix-milter
+RuntimeDirectoryMode=0750
+
+# Memory ceiling as a backstop to -max-conns. If we ever do blow past it, dying
+# here is visible; silently ballooning until the OOM killer picks a victim is not.
+MemoryMax=512M
+
+# This process holds no rules, opens no files at runtime, and executes nothing.
+# It reads one env file, listens on a socket, and talks HTTP to strixd — so it
+# can be locked down harder than strixd itself (which needs its rules + cache).
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# PrivateUsers=true is SAFE with the unix-socket listener: systemd maps this
+# service's own User/Group into the namespace, so the socket still lands on the
+# host with the real strix-milter uid/gid and an MTA in the shared group connects
+# normally. Verified empirically (a second user in the group connected fine with
+# it both on and off) — do not remove it on the theory that it breaks the socket.
+PrivateUsers=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

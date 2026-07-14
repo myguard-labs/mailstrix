@@ -29,34 +29,21 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/myguard-labs/mailstrix/internal/verdict"
 )
 
 var version = "dev"
 
 func main() { os.Exit(run(os.Args[1:])) }
-
-// match is the subset of yarad's /scan response we render. Kept local so this
-// client shares no type (and thus no dependency) with the scanner package.
-type match struct {
-	Rule      string            `json:"rule"`
-	Namespace string            `json:"namespace"`
-	Meta      map[string]string `json:"meta"`
-}
-
-type scanResponse struct {
-	Matches []match `json:"matches"`
-}
 
 func run(args []string) int {
 	fs := flag.NewFlagSet("strix-scan", flag.ContinueOnError)
@@ -133,7 +120,9 @@ func run(args []string) int {
 		return 2
 	}
 
-	matches, err := postScan(*url, tok, *name, buf, *timeout)
+	hc := verdict.NewClient(*url, tok, "strix-scan/"+version, *timeout)
+	defer hc.CloseIdle()
+	matches, err := hc.Scan(context.Background(), *name, buf)
 	if err != nil {
 		if *failOpen {
 			fmt.Fprintf(os.Stderr, "strix-scan: scanner unreachable, failing open (clean): %v\n", err)
@@ -143,13 +132,13 @@ func run(args []string) int {
 		return 2
 	}
 
-	actionable := actionableMatches(matches)
+	actionable := verdict.Actionable(matches)
 
 	// -json / -label render a structured verdict from the actionable matches'
 	// metadata. They print on a clean result too (so a labeller can record a
 	// negative), and never honour -quiet (their output IS the point).
 	if *jsonOut {
-		v := verdictFor(actionable)
+		v := verdict.For(actionable)
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetEscapeHTML(false)
 		_ = enc.Encode(v)
@@ -159,7 +148,7 @@ func run(args []string) int {
 		return 1
 	}
 	if *labelOut {
-		v := verdictFor(actionable)
+		v := verdict.For(actionable)
 		if v.Family != "" {
 			fmt.Println("LABEL", v.Family)
 		}
@@ -182,138 +171,6 @@ func run(args []string) int {
 		}
 	}
 	return 1
-}
-
-// verdict is the structured -json output. Family is the single canonical malware
-// family for the input ("" when no family-bearing rule matched); Rules lists the
-// matched (actionable) rule names. Confidence is "family" when a family was
-// resolved, "rule" when rules matched but none carried family metadata, and
-// "" when nothing matched.
-type verdict struct {
-	Malicious  bool     `json:"malicious"`
-	Family     string   `json:"family"`
-	Confidence string   `json:"confidence"`
-	Rules      []string `json:"rules"`
-}
-
-// familyMetaKeys are the rule-meta keys that carry a malware family, in priority
-// order. A rule that sets one of these is "family-bearing"; a rule with none is a
-// generic / technique rule (http, meth_get_eip, pe_*, SUSP_*, …) and never
-// contributes a family label.
-var familyMetaKeys = []string{"family", "malware_family", "actor"}
-
-// verdictFor builds the structured verdict from the actionable matches. The
-// reported Family is the first family-bearing match's family (one family per
-// file = highest-confidence family-bearing hit); generic/technique rules that
-// carry no family meta are dropped from family consideration but still count
-// toward Malicious + Rules.
-func verdictFor(matches []match) verdict {
-	v := verdict{Rules: make([]string, 0, len(matches))}
-	for _, m := range matches {
-		v.Malicious = true
-		v.Rules = append(v.Rules, m.Rule)
-		if v.Family == "" {
-			if fam := familyOf(m); fam != "" {
-				v.Family = fam
-			}
-		}
-	}
-	switch {
-	case v.Family != "":
-		v.Confidence = "family"
-	case v.Malicious:
-		v.Confidence = "rule"
-	}
-	return v
-}
-
-// familyOf extracts a family string from one match's metadata, preferring the
-// keys in familyMetaKeys. Returns "" for a generic/technique rule that carries no
-// family meta (the caller drops it from family consideration).
-func familyOf(m match) string {
-	for _, k := range familyMetaKeys {
-		if v := strings.TrimSpace(m.Meta[k]); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func actionableMatches(matches []match) []match {
-	if len(matches) == 0 {
-		return nil
-	}
-	var out []match
-	for i, m := range matches {
-		if m.Meta != nil && (m.Meta["mailstrix_canary"] == "1" || m.Meta["mailstrix_allow"] == "1") {
-			if out == nil {
-				out = make([]match, 0, len(matches)-1)
-				out = append(out, matches[:i]...)
-			}
-			continue
-		}
-		if out != nil {
-			out = append(out, m)
-		}
-	}
-	if out == nil {
-		return matches
-	}
-	return out
-}
-
-// postScan POSTs buf to <url>/scan and returns the matches. It mirrors the
-// rspamd plugin's wire format: X-MAILSTRIX-Token for auth, base64 X-MAILSTRIX-Filename
-// for the name. Redirects are NOT followed — a /scan endpoint never legitimately
-// 3xx, and following one would copy the token header onto the redirect target
-// (possibly another host), leaking the secret.
-func postScan(base, token, name string, buf []byte, timeout time.Duration) ([]match, error) {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	hc := &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	endpoint := strings.TrimRight(base, "/") + "/scan"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(buf))
-	if err != nil {
-		return nil, err
-	}
-	req.Close = true // one-shot CLI: close the connection, don't pool a keep-alive
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "strix-scan/"+version)
-	// Token is optional: omit the header when empty so this works against an open
-	// (token-less) yarad too. When set, the server requires it.
-	if token != "" {
-		req.Header.Set("X-MAILSTRIX-Token", token)
-	}
-	if name != "" {
-		req.Header.Set("X-MAILSTRIX-Filename", base64.StdEncoding.EncodeToString([]byte(name)))
-	}
-
-	resp, err := hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
-	}
-
-	var out scanResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return out.Matches, nil
 }
 
 // resolveToken prefers sources that don't expose the secret in the process list:

@@ -63,11 +63,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && rm /tmp/go.mod.orig /tmp/go.sum.orig
 ARG VERSION=dev
 ARG YARA_VERSION
-# Two binaries: the CGO/libyara server (strixd), and the lean Sieve/LDA client
-# (strix-scan) built CGO-free — pure Go, no libyara, a small static binary for a
-# mail-delivery host that only POSTs to a central strixd. main.libyaraVersion is
-# baked from YARA_VERSION so `fetch-rules` can refuse a .yac built against a
-# different libyara.
+# Three binaries: the CGO/libyara server (strixd), and two lean CGO-free clients
+# built pure-Go with no libyara — strix-scan (the Sieve/LDA exit-code client) and
+# strix-milter (the Postfix/Sendmail milter). Both are small static binaries for a
+# mail host that only POSTs to a central strixd. main.libyaraVersion is baked from
+# YARA_VERSION so `fetch-rules` can refuse a .yac built against a different
+# libyara.
 # Mount the Go module + build caches so an unchanged-source rebuild reuses
 # compiled packages instead of recompiling cold every CI run.
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -77,7 +78,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         -o /out/strixd ./cmd/strixd \
     && CGO_ENABLED=0 go build \
         -ldflags "-s -w -X main.version=${VERSION}" \
-        -o /out/strix-scan ./cmd/strix-scan
+        -o /out/strix-scan ./cmd/strix-scan \
+    && CGO_ENABLED=0 go build \
+        -ldflags "-s -w -X main.version=${VERSION}" \
+        -o /out/strix-milter ./cmd/strix-milter
 
 # ---- tests (built into the image build so CI fails on a bad commit) ---------
 FROM build AS test
@@ -92,6 +96,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM scratch AS bin
 COPY --from=build /out/strixd /strixd
 COPY --from=build /out/strix-scan /strix-scan
+COPY --from=build /out/strix-milter /strix-milter
 
 # ---- rules ------------------------------------------------------------------
 # FROM the yara stage so we have `yarac` (the libyara compiler) from the exact
@@ -170,6 +175,12 @@ COPY --from=build /out/strixd /usr/local/bin/strixd
 # can both SERVE (strixd) and be a labelling client via `docker exec <ctr>
 # strix-scan -url http://127.0.0.1:8079 -json -`. Pure-Go, no extra runtime deps.
 COPY --from=build /out/strix-scan /usr/local/bin/strix-scan
+# strix-milter (the Postfix/Sendmail milter front-end) ships in PATH too, so the
+# same image can run the milter alongside — or instead of — the daemon:
+#   `docker run … strix-milter -url http://strixd:8079 -listen inet:0.0.0.0:8081`.
+# Pure-Go, no extra runtime deps. It always ACCEPTS and stamps a verdict header;
+# the MTA turns that into policy.
+COPY --from=build /out/strix-milter /usr/local/bin/strix-milter
 # The compiled bundle ships as a READ-ONLY seed under /usr/share/mailstrix. At
 # startup strixd copies it into the writable cache dir (MAILSTRIX_CACHE_DIR) when that
 # is empty/unreadable and serves from there, so a wiped cache bindmount self-heals
