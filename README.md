@@ -333,6 +333,7 @@ Every setting is an env var and a `serve` CLI flag (flag > env > default).
 | `MAILSTRIX_BACKEND_TIMEOUT` | `1` (s) | how long to wait for an admission / scan slot |
 | `MAILSTRIX_MAX_CONCURRENT` | `auto` (CPU count) | max concurrent libyara scans (CPU gate) |
 | `MAILSTRIX_MAX_INFLIGHT` | `auto` (2× concurrent) | max in-flight requests (admission gate); kept above the scan gate so a slow body/Redis can't starve scans |
+| `MAILSTRIX_ICAP_MAX_CONNS` | `auto` (8× in-flight) | max live ICAP connections, capped at `accept()` (pre-admission); over the cap the server answers `503` and hangs up, so a slow-loris pool cannot accumulate goroutines/fds |
 | `MAILSTRIX_MAX_BODY` | `8388608` (8 MiB) | max request body, in bytes (checked before reading) |
 | `MAILSTRIX_EFFORT_MAX` | `10` | effort-tier ceiling (1–10); the hard cap a per-request `X-MAILSTRIX-Effort` header can never exceed (DoS guard) |
 | `MAILSTRIX_EFFORT` | `= MAILSTRIX_EFFORT_MAX` | default effort level when no `X-MAILSTRIX-Effort` header is sent (1 = raw + shallowest extraction, max = full depth). Set to `auto` (EFFORT-2) to derive the level from admission-gate pressure — full depth when idle, shedding a level at a time as in-flight scans fill the gate, climbing back as it drains (one level/scan; `mailstrix_effort_auto_level` gauge tracks it). The level scales real work: decode depth, XLM/PDF clamps, reputation feeds and scan timeout are all wired to the resolved profile (EFFORT-4), so a lower level genuinely does less. |
@@ -595,6 +596,23 @@ verdict cache, and concurrency budget (`MAILSTRIX_MAX_INFLIGHT`).
 **No ICAP-level authentication.** Gate the port by firewall/network; only
 trusted proxies should reach it (a startup warning is emitted when enabled,
 mirroring the `/scan` open-mode warning).
+
+### Request bounds
+
+Because the listener is unauthenticated, every part of an ICAP request is capped
+before it can allocate:
+
+| Bound | Limit | What it stops |
+| --- | --- | --- |
+| request line / header line | 8 KiB | a line with no `\n` buffered without bound |
+| header count | 128 | a flood of short header lines |
+| header block, total | 64 KiB | many medium lines, each under the line cap |
+| chunk-header line | 256 B | an oversized chunk-size line |
+| body | `MAILSTRIX_MAX_BODY` | an oversized payload (`413`) |
+| head read time | 30 s | a slow-loris holding a connection without completing a request |
+| live connections | `MAILSTRIX_ICAP_MAX_CONNS` | a connection pool exhausting goroutines/fds (`503` + close) |
+
+Refused connections are counted in the `icap_conn_refused_total` metric.
 
 ### Supported methods
 

@@ -27,6 +27,7 @@ type Config struct {
 	BackendTimeout time.Duration // MAILSTRIX_BACKEND_TIMEOUT (default 1s)
 	MaxConcurrent  int           // MAILSTRIX_MAX_CONCURRENT  (default "auto" = CPU count)
 	MaxInflight    int           // MAILSTRIX_MAX_INFLIGHT    (default 2×MaxConcurrent); admission gate
+	ICAPMaxConns   int           // MAILSTRIX_ICAP_MAX_CONNS  (default 8×MaxInflight); live ICAP conns, pre-admission
 	MaxBody        int64         // MAILSTRIX_MAX_BODY bytes  (default 8 MiB)
 	Token          string        // MAILSTRIX_TOKEN[_FILE]    (required for /scan; comma-separated for rotation)
 	TokenNext      string        // MAILSTRIX_TOKEN_NEXT[_FILE] (incoming rotation token; empty = no rotation)
@@ -194,7 +195,8 @@ func LoadConfig() *Config {
 		Port:             envInt("MAILSTRIX_PORT", 8079),
 		BackendTimeout:   envDur("MAILSTRIX_BACKEND_TIMEOUT", 1),
 		MaxConcurrent:    envIntAuto("MAILSTRIX_MAX_CONCURRENT", runtime.NumCPU()),
-		MaxInflight:      envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0), // 0 -> sanitize sets 2×MaxConcurrent
+		MaxInflight:      envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0),   // 0 -> sanitize sets 2×MaxConcurrent
+		ICAPMaxConns:     envIntAuto("MAILSTRIX_ICAP_MAX_CONNS", 0), // 0 -> sanitize sets 8×MaxInflight
 		MaxBody:          envInt64("MAILSTRIX_MAX_BODY", 8*1024*1024),
 		Token:            envOrFile("MAILSTRIX_TOKEN"),
 		TokenNext:        envOrFile("MAILSTRIX_TOKEN_NEXT"),
@@ -302,6 +304,21 @@ func (c *Config) sanitize() {
 	// so a slow body read or slow Redis L2 lookup can't starve scan slots.
 	if c.MaxInflight < c.MaxConcurrent {
 		c.MaxInflight = c.MaxConcurrent * 2
+	}
+	// Live ICAP connections are capped separately from the admission gate: a
+	// connection occupies a goroutine, a bufio.Reader and an fd from accept()
+	// onward, long before it reaches admit. Without this cap a slow-loris client
+	// pool costs nothing to open and is bounded only by the fd limit.
+	//
+	// Only 0 ("auto") is derived — an explicit operator value is honoured, even a
+	// small one, since a deliberately tight cap is a legitimate choice. Anything
+	// below 1 is nonsense and warns like every other clamp. Auto allows generous
+	// headroom over MaxInflight: most live conns are idle keep-alives.
+	switch {
+	case c.ICAPMaxConns == 0:
+		c.ICAPMaxConns = c.MaxInflight * 8
+	case c.ICAPMaxConns < 1:
+		c.ICAPMaxConns = clamp("MAILSTRIX_ICAP_MAX_CONNS", c.ICAPMaxConns, c.MaxInflight*8)
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		c.Port = clamp("MAILSTRIX_PORT", c.Port, 8079)

@@ -91,6 +91,7 @@ type Server struct {
 		canceled                                atomic.Uint64
 		cacheHit, cacheMiss, cacheCoalesced     atomic.Uint64
 		icapRequests, icapInfected, icapOptions atomic.Uint64
+		icapBusy                                atomic.Uint64 // conns refused at the pre-admission cap
 	}
 	info *log.Logger // access/info — stdout when MAILSTRIX_LOG_STDOUT, else stderr
 	errl *log.Logger // errors/warnings — always stderr
@@ -98,8 +99,11 @@ type Server struct {
 	httpSrv  atomic.Pointer[http.Server] // set by ListenAndServe; used by Shutdown
 	draining atomic.Bool                 // true once Shutdown begins -> /ready 503s
 
-	icapLn atomic.Pointer[net.Listener]
-	icapWg sync.WaitGroup
+	icapLn        atomic.Pointer[net.Listener]
+	icapWg        sync.WaitGroup
+	icapConns     chan struct{} // live-connection cap, taken at accept() (pre-admission)
+	icapRefuse    chan struct{} // bounds concurrent 503-refusal goroutines
+	icapRefuseLog atomic.Int64  // UnixNano of the last cap-reached log line (throttle)
 }
 
 func newLoggers(cfg *Config) (info, errl *log.Logger) {
@@ -117,12 +121,14 @@ func NewServer(cfg *Config, engine ScanEngine) *Server {
 	cfg.sanitize()
 	info, errl := newLoggers(cfg)
 	s := &Server{
-		cfg:    cfg,
-		engine: engine,
-		admit:  make(chan struct{}, cfg.MaxInflight),
-		sem:    make(chan struct{}, cfg.MaxConcurrent),
-		info:   info,
-		errl:   errl,
+		cfg:       cfg,
+		engine:    engine,
+		admit:     make(chan struct{}, cfg.MaxInflight),
+		sem:       make(chan struct{}, cfg.MaxConcurrent),
+		icapConns:  make(chan struct{}, cfg.ICAPMaxConns),
+		icapRefuse: make(chan struct{}, icapMaxRefuseInflight),
+		info:      info,
+		errl:      errl,
 	}
 	s.cache = NewCache(cfg, s.errf)
 	return s
@@ -835,6 +841,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 		fm("icap_requests_total", "total ICAP REQMOD/RESPMOD requests served", s.metrics.icapRequests.Load())
 		fm("icap_infected_total", "ICAP requests with >=1 rule match (403 replacement sent)", s.metrics.icapInfected.Load())
 		fm("icap_options_total", "ICAP OPTIONS requests served", s.metrics.icapOptions.Load())
+		fm("icap_conn_refused_total", "ICAP connections refused at the live-connection cap", s.metrics.icapBusy.Load())
 	}
 	writeRaw(w, http.StatusOK, "text/plain; version=0.0.4", []byte(b.String()))
 }
