@@ -74,6 +74,12 @@ type archiveBudget struct {
 	// primary DoS surface — see archivepw.go.
 	decryptAttempts int
 	kdfAttempts     int
+	// decryptStalled latches once a decrypt attempt for THIS input overran its
+	// watchdog. The decoder that did so is still running and cannot be cancelled, so
+	// every further candidate would stack another uncancellable worker on the same
+	// hostile member. One stall therefore ends all decryption for the input — see
+	// archiveBudget.decryptExhausted and archiveworker.go.
+	decryptStalled bool
 }
 
 func (b *archiveBudget) spent() bool {
@@ -507,7 +513,7 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 			markEncryptedArchive(res)
 			continue
 		}
-		if data, ok := openDecrypted7zMember(dec.File, i); ok {
+		if data, ok := boundedDecrypted7zMember(dec.File, i, b, deadline); ok {
 			// Payload before marker so a maxStreams cap can't drop the dropper.
 			emitMember(data, res, b, depth, deadline)
 			markDecryptedArchive(res)
@@ -551,8 +557,11 @@ func emit7zMembers(zr *sevenzip.Reader, res *Result, b *archiveBudget, depth int
 		if f.FileInfo().IsDir() || f.UncompressedSize > maxBytesPerMember {
 			continue
 		}
-		data, ok := openDecrypted7zMember(zr.File, i)
+		data, ok := boundedDecrypted7zMember(zr.File, i, b, deadline)
 		if !ok || len(data) == 0 {
+			if b.decryptExhausted() {
+				break // stalled decoder: stop walking this archive entirely
+			}
 			continue
 		}
 		emitMember(data, res, b, depth, deadline)
@@ -561,10 +570,40 @@ func emit7zMembers(zr *sevenzip.Reader, res *Result, b *archiveBudget, depth int
 	return emitted
 }
 
+// memberRead is openDecrypted7zMember's (data, ok) pair boxed into one value, so the
+// read can be handed to the single-result runBounded.
+type memberRead struct {
+	data []byte
+	ok   bool
+}
+
+// boundedDecrypted7zMember reads a member with the CRACKED password on a pooled
+// worker. Cracking the password does not make the member safe: the decrypt+LZMA of
+// attacker-authored plaintext is the same uncancellable third-party code the crack
+// loop runs, and it can spin just as easily. Without the pool this read would escape
+// the containment entirely — the crack would land inside a worker slot and then the
+// (unbounded) extraction would run on the scan goroutine. A stall latches the budget,
+// so the remaining members of a hostile archive are not fed to the decoder as well.
+func boundedDecrypted7zMember(files []*sevenzip.File, idx int, b *archiveBudget, deadline time.Time) ([]byte, bool) {
+	if b.decryptExhausted() {
+		return nil, false // already stalled/capped: launch no more decoder work
+	}
+	r, stalled := runBounded(deadline, func() memberRead {
+		data, ok := openDecrypted7zMember(files, idx)
+		return memberRead{data: data, ok: ok}
+	})
+	if stalled {
+		b.markDecryptStalled()
+		return nil, false
+	}
+	return r.data, r.ok
+}
+
 // openDecrypted7zMember opens the member at index idx in files and reads it,
 // bounded by maxBytesPerMember, under an unconditional recover (the decrypt +
 // decompress runs on hostile input). Returns (data, true) on a clean read,
-// (nil, false) on miss / error / oversize.
+// (nil, false) on miss / error / oversize. Call it through
+// boundedDecrypted7zMember — it must not run on the scan goroutine.
 func openDecrypted7zMember(files []*sevenzip.File, idx int) (out []byte, ok bool) {
 	defer func() {
 		if recover() != nil {

@@ -38,42 +38,17 @@ import (
 	yekazip "github.com/yeka/zip"
 )
 
-// maxDecryptAttemptTime hard-caps the wall-clock cost of a SINGLE decrypt attempt.
+// maxDecryptAttemptTime hard-caps how long we WAIT on a SINGLE decrypt attempt.
 // The third-party decrypt libs are fed hostile ciphertext and can spin for seconds
 // on a crafted member (a malformed central directory / a decompress loop) — far
 // longer than the between-attempt deadline check can catch, since that check only
-// fires between attempts, never mid-call. Each attempt therefore runs in a
-// goroutine bounded by this cap (and the remaining scan deadline); if it overruns,
-// the attempt is abandoned (counted as a miss) and the background goroutine is left
-// to finish and be GC'd. Fail-open: an abandoned attempt keeps ARCHIVE-ENCRYPTED.
+// fires between attempts, never mid-call. Each attempt therefore runs on a pooled
+// worker bounded by this cap (and the remaining scan deadline); if it overruns, we
+// stop waiting and count a miss, but the decoder cannot be cancelled and keeps its
+// worker slot until it really returns — see archiveworker.go for what that buys and
+// why the caller must then stop feeding this archive. Fail-open: an abandoned
+// attempt keeps ARCHIVE-ENCRYPTED.
 const maxDecryptAttemptTime = 750 * time.Millisecond
-
-// runBounded runs fn in a goroutine and returns its result, or nil if fn does not
-// finish within maxDecryptAttemptTime (and before the scan deadline). The result
-// channel is buffered so the abandoned goroutine never blocks on send. fn must not
-// mutate shared state (the decrypt helpers only read the input buffer + build a
-// fresh output), so abandoning it is safe.
-func runBounded[T any](deadline time.Time, fn func() T) (out T) {
-	limit := maxDecryptAttemptTime
-	if !deadline.IsZero() {
-		if rem := time.Until(deadline); rem < limit {
-			limit = rem
-		}
-	}
-	if limit <= 0 {
-		return out // deadline already passed: don't even spawn the work
-	}
-	ch := make(chan T, 1)
-	go func() { ch <- fn() }()
-	timer := time.NewTimer(limit)
-	defer timer.Stop()
-	select {
-	case v := <-ch:
-		return v
-	case <-timer.C:
-		return out // overran the per-attempt cap: abandon, treat as a miss
-	}
-}
 
 const (
 	// maxDecryptAttempts is the global per-input ceiling on decrypt attempts
@@ -121,9 +96,20 @@ func (b *archiveBudget) kdfExhausted() bool {
 	return b.kdfAttempts >= maxKDFDecryptAttempts
 }
 
-// decryptExhausted returns true once the global per-input attempt cap is reached.
+// decryptExhausted returns true once the global per-input attempt cap is reached, or
+// once an attempt on this input has stalled. A stall latches: the decoder that blew
+// its watchdog is still running and unkillable, so launching the next candidate would
+// add a SECOND uncancellable worker for the same hostile member — one crafted archive
+// would otherwise convert each of its ≤64 candidates into another abandoned decoder
+// and drain the whole pool by itself. One stall ends decryption for this input; the
+// member keeps ARCHIVE-ENCRYPTED (fail-open).
 func (b *archiveBudget) decryptExhausted() bool {
-	return b.decryptAttempts >= maxDecryptAttempts
+	return b.decryptStalled || b.decryptAttempts >= maxDecryptAttempts
+}
+
+// markDecryptStalled latches the stall (see decryptExhausted).
+func (b *archiveBudget) markDecryptStalled() {
+	b.decryptStalled = true
 }
 
 // countAttempt records one decrypt attempt against both the global counter and, if
@@ -213,7 +199,12 @@ func (zd *zipDecryptReader) decryptMember(idx int, kdf bool, declared uint64, ca
 		}
 		b.countAttempt(kdf)
 		buf, pw := zd.buf, pw
-		if plain := runBounded(deadline, func() []byte { return openYekaMemberFresh(buf, idx, pw) }); plain != nil {
+		plain, stalled := runBounded(deadline, func() []byte { return openYekaMemberFresh(buf, idx, pw) })
+		if stalled {
+			b.markDecryptStalled() // decoder still running: launch nothing more for this input
+			return nil
+		}
+		if plain != nil {
 			return plain
 		}
 	}
@@ -289,7 +280,12 @@ func crack7zPassword(buf []byte, targetIdx int, cands []string, b *archiveBudget
 		}
 		b.countAttempt(true)
 		pw := pw
-		if runBounded(deadline, func() bool { return verify7zPassword(buf, targetIdx, pw) }) {
+		ok, stalled := runBounded(deadline, func() bool { return verify7zPassword(buf, targetIdx, pw) })
+		if stalled {
+			b.markDecryptStalled() // decoder still running: launch nothing more for this input
+			return ""
+		}
+		if ok {
 			return pw
 		}
 	}
@@ -369,7 +365,12 @@ func crackRarPassword(buf []byte, cands []string, b *archiveBudget, deadline tim
 		}
 		b.countAttempt(true)
 		pw := pw
-		if runBounded(deadline, func() bool { return verifyRarPassword(buf, pw) }) {
+		ok, stalled := runBounded(deadline, func() bool { return verifyRarPassword(buf, pw) })
+		if stalled {
+			b.markDecryptStalled() // decoder still running: launch nothing more for this input
+			return ""
+		}
+		if ok {
 			return pw
 		}
 	}
