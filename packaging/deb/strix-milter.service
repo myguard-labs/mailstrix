@@ -42,6 +42,11 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+# PrivateUsers=true is SAFE with the unix-socket listener: systemd maps this
+# service's own User/Group into the namespace, so the socket still lands on the
+# host with the real strix-milter uid/gid and an MTA in the shared group connects
+# normally. Verified empirically (a second user in the group connected fine with
+# it both on and off) — do not remove it on the theory that it breaks the socket.
 PrivateUsers=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service

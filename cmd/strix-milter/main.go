@@ -165,8 +165,6 @@ func run(args []string) int {
 	return serve(ln, cfg, log.New(os.Stderr, "strix-milter: ", log.LstdFlags))
 }
 
-// serve runs the milter server on ln until SIGINT/SIGTERM. It always returns 0
-// on a clean shutdown: an MTA restarting us must not see a spurious failure.
 // milterActions are the option bits we negotiate with the MTA. OptChangeHeader is
 // load-bearing, not decorative: the MTA refuses any action that was not
 // negotiated, so dropping it would make every forged-header delete in Body() a
@@ -177,6 +175,8 @@ const milterActions = milter.OptAddHeader | milter.OptChangeHeader
 // and body must all stay ENABLED: all three feed the message we reassemble.
 const milterProtocol = milter.OptNoConnect | milter.OptNoHelo | milter.OptNoMailFrom | milter.OptNoRcptTo
 
+// serve runs the milter server on ln until SIGINT/SIGTERM. It always returns 0
+// on a clean shutdown: an MTA restarting us must not see a spurious failure.
 func serve(ln net.Listener, cfg config, lg *log.Logger) int {
 	client := verdict.NewClient(cfg.url, cfg.token, "strix-milter/"+version, cfg.timeout)
 
@@ -464,7 +464,10 @@ func sanitizeHeaderValue(v string) string {
 	}, v)
 	v = strings.TrimSpace(v)
 	if len(v) > maxHeaderValueLen {
-		v = v[:maxHeaderValueLen] + "..."
+		// Budget the ellipsis INSIDE the cap. Slicing to maxHeaderValueLen and then
+		// appending "..." would return maxHeaderValueLen+3 bytes and break the very
+		// invariant this cap exists to enforce (joinRules budgets against it).
+		v = v[:maxHeaderValueLen-3] + "..."
 	}
 	return v
 }

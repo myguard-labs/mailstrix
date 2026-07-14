@@ -1108,3 +1108,16 @@ func TestServeActuallyServesACappedListener(t *testing.T) {
 		t.Fatal("serve() did not return after the listener closed")
 	}
 }
+
+func TestSanitizeCapIsInclusiveOfTheEllipsis(t *testing.T) {
+	// The cap must bound the RETURNED value. Slicing to maxHeaderValueLen and then
+	// appending "..." would hand back maxHeaderValueLen+3 bytes and blow the budget
+	// joinRules sizes itself against.
+	got := sanitizeHeaderValue(strings.Repeat("A", maxHeaderValueLen*2))
+	if len(got) > maxHeaderValueLen {
+		t.Fatalf("sanitizeHeaderValue returned %d bytes, over its own %d-byte cap", len(got), maxHeaderValueLen)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("a truncated value must say so, got %q", got[len(got)-8:])
+	}
+}
