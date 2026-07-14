@@ -16,6 +16,10 @@ import (
 
 const icapProtoVersion = "ICAP/1.0"
 
+// processStart anchors monotonic elapsed-time measurements (time.Since carries
+// the monotonic reading), so they survive a wall-clock step.
+var processStart = time.Now()
+
 // ListenAndServeICAP binds the ICAP TCP listener and serves until ctx is
 // cancelled or the listener is closed. Safe to call concurrently with
 // ListenAndServe. Returns nil when shut down cleanly.
@@ -43,11 +47,7 @@ func (s *Server) ListenAndServeICAP(ctx context.Context) error {
 				return err
 			}
 		}
-		s.icapWg.Add(1)
-		go func() {
-			defer s.icapWg.Done()
-			s.serveICAPConn(conn)
-		}()
+		s.acceptICAP(conn)
 	}
 }
 
@@ -65,15 +65,103 @@ func (s *Server) ShutdownICAP(ctx context.Context) {
 	}
 }
 
+// acceptICAP takes a live-connection slot for conn and spawns its serve
+// goroutine, or refuses conn when the cap is reached. The accept loop and the
+// tests both go through here so the cap logic under test is the one that runs.
+//
+// The cap is applied *before* the goroutine is spawned: an accepted connection
+// costs a goroutine, a read buffer and an fd from here on, which is exactly what
+// a slow-loris pool exploits.
+func (s *Server) acceptICAP(conn net.Conn) {
+	select {
+	case s.icapConns <- struct{}{}:
+	default:
+		s.refuseICAP(conn)
+		return
+	}
+	s.icapWg.Add(1)
+	go func() {
+		defer s.icapWg.Done()
+		defer func() { <-s.icapConns }()
+		s.serveICAPConn(conn)
+	}()
+}
+
+// refuseICAP answers a 503 and closes conn, off the accept goroutine.
+//
+// The write must not run inline: a refused client that never reads (zero window)
+// would stall the write for the whole write deadline, and with the accept loop
+// blocked behind it the refusal path would be a cheaper DoS than the connection
+// flood the cap exists to stop. Refusal goroutines are themselves bounded, and
+// past that bound the connection is dropped without a reply — RFC 3507 does not
+// require the 503 to be delivered.
+func (s *Server) refuseICAP(conn net.Conn) {
+	s.metrics.icapBusy.Add(1)
+	s.logRefusedICAP()
+
+	select {
+	case s.icapRefuse <- struct{}{}:
+	default:
+		_ = conn.Close()
+		return
+	}
+	// Tracked by icapWg like a served connection, so ShutdownICAP does not report
+	// "drained" while refusal goroutines still hold open fds mid-write. The write
+	// deadline bounds the wait, so this cannot hang the drain.
+	s.icapWg.Add(1)
+	go func() {
+		defer s.icapWg.Done()
+		defer func() { <-s.icapRefuse }()
+		defer func() { _ = conn.Close() }() // #nosec G104 -- refused conn; close error is not actionable
+		_ = conn.SetWriteDeadline(time.Now().Add(icapRefuseWriteTimeout))
+		_, _ = io.WriteString(conn, icapProtoVersion+" 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+	}()
+}
+
+// logRefusedICAP logs the cap being hit at most once per icapRefuseLogInterval.
+// Unthrottled it is one synchronous stderr write per attacker connect, which
+// fills the log volume and slows the accept loop. The exact count is in the
+// icap_conn_refused_total metric.
+func (s *Server) logRefusedICAP() {
+	// Monotonic, not wall clock: an NTP step backwards would leave a wall-clock
+	// stamp in the future, and the throttle would suppress the cap-reached line
+	// for the whole skew — losing the only log signal precisely during a flood.
+	now := int64(time.Since(processStart))
+	last := s.icapRefuseLog.Load()
+	if now-last < int64(icapRefuseLogInterval) {
+		return
+	}
+	if !s.icapRefuseLog.CompareAndSwap(last, now) {
+		return // another goroutine just logged it
+	}
+	s.errf("ICAP 503 busy (icap_max_conns=%d reached); refused=%d",
+		s.cfg.ICAPMaxConns, s.metrics.icapBusy.Load())
+}
+
 func (s *Server) serveICAPConn(conn net.Conn) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
 	for {
-		deadline := time.Now().Add(s.cfg.BackendTimeout + 60*time.Second)
-		_ = conn.SetDeadline(deadline)
+		// Three deadlines, because "idle", "sending a head" and "sending a body"
+		// have very different legitimate durations.
+		//
+		// Idle: a keep-alive proxy (Squid's icap_persistent_connections) holds a
+		// pooled connection open between requests. Arming the short head deadline
+		// here would tear that pool down every icapHeadTimeout, so we wait for the
+		// first byte under the long idle deadline.
+		_ = conn.SetDeadline(time.Now().Add(icapIdleTimeout))
+		if _, err := br.Peek(1); err != nil {
+			return
+		}
+		// A request has started. Head: a client that has begun a request but does
+		// not finish the request line + headers is a slow-loris and must not hold a
+		// live-connection slot for the whole body budget.
+		_ = conn.SetDeadline(time.Now().Add(icapHeadTimeout))
 		if err := s.handleICAPRequest(conn, br); err != nil {
 			return
 		}
+		// Body: handleICAPRequest re-arms to the (legitimately slower) body
+		// deadline once the head has parsed.
 	}
 }
 
@@ -82,10 +170,34 @@ type icapSection struct {
 	name string // req-hdr, res-hdr, req-body, res-body, opt-body, null-body
 }
 
+const (
+	// icapIdleTimeout bounds how long a connection may sit between requests. It
+	// is generous because a keep-alive proxy legitimately pools idle connections.
+	icapIdleTimeout = 5 * time.Minute
+	// icapHeadTimeout bounds how long a connection that has *started* a request
+	// may take to deliver a complete request line + header block. Bodies get the
+	// longer BackendTimeout-derived deadline, re-armed once the head has parsed.
+	icapHeadTimeout = 30 * time.Second
+	// icapRefuseWriteTimeout bounds the 503 write on a refused connection.
+	icapRefuseWriteTimeout = 5 * time.Second
+	// icapRefuseLogInterval throttles the cap-reached log line.
+	icapRefuseLogInterval = 10 * time.Second
+	// icapMaxRefuseInflight bounds concurrent 503-refusal goroutines. Past it a
+	// refused connection is closed without a reply.
+	icapMaxRefuseInflight = 64
+)
+
+// deadlineSetter is satisfied by net.Conn. handleICAPRequest re-arms the read
+// deadline after the head parses; a plain io.Writer (as in unit tests) simply
+// skips that step.
+type deadlineSetter interface{ SetDeadline(time.Time) error }
+
 func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
-	tp := textproto.NewReader(br)
-	line, err := tp.ReadLine()
+	line, err := readBoundedLine(br, maxICAPHeaderLine)
 	if err != nil {
+		if errors.Is(err, errICAPLineTooLong) {
+			_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+		}
 		return err
 	}
 	parts := strings.Fields(line)
@@ -96,10 +208,20 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 
 	method := parts[0]
 
-	hdr, err := tp.ReadMIMEHeader()
-	if err != nil && !errors.Is(err, io.EOF) {
+	// No EOF tolerance: a head that never reaches its blank-line terminator is
+	// truncated, not complete. Tolerating io.EOF here would hand handleICAPMod an
+	// empty header set — no Encapsulated, no body — and it would answer 200 clean
+	// for content it never read. Fail closed.
+	hdr, err := readBoundedMIMEHeader(br)
+	if err != nil {
 		_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
 		return err
+	}
+
+	// Head is in. Re-arm with the body deadline: encapsulated headers and a
+	// chunked body may legitimately take longer than icapHeadTimeout.
+	if d, ok := w.(deadlineSetter); ok {
+		_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + 60*time.Second))
 	}
 
 	sections := parseICAPEncapsulated(hdr.Get("Encapsulated"))
@@ -127,7 +249,7 @@ func (s *Server) handleICAPOptions(w io.Writer) error {
 	sb.WriteString("Preview: 0\r\n")
 	sb.WriteString("Encapsulated: null-body=0\r\n")
 	sb.WriteString("Options-TTL: 3600\r\n")
-	sb.WriteString(fmt.Sprintf("Max-Connections: %d\r\n", s.cfg.MaxInflight))
+	sb.WriteString(fmt.Sprintf("Max-Connections: %d\r\n", s.cfg.ICAPMaxConns))
 	sb.WriteString("Date: " + time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT") + "\r\n")
 	sb.WriteString("\r\n")
 	_, err := io.WriteString(w, sb.String())
@@ -305,7 +427,7 @@ func parseICAPEncapsulated(v string) []icapSection {
 
 var errICAPBodyTooLarge = errors.New("ICAP body exceeds MaxBody limit")
 
-var errICAPChunkHeaderTooLong = errors.New("ICAP line exceeds length cap")
+var errICAPLineTooLong = errors.New("ICAP line exceeds length cap")
 
 // Line caps bound every CRLF-terminated read so a missing '\n' cannot grow the
 // buffer without bound. A legitimate chunk-size line is a few bytes; encapsulated
@@ -316,10 +438,95 @@ var errICAPChunkHeaderTooLong = errors.New("ICAP line exceeds length cap")
 const (
 	maxICAPChunkHeaderLine = 256
 	maxICAPHeaderLine      = 8192
+	// maxICAPHeaderCount and maxICAPHeaderBytes bound the ICAP request head as a
+	// whole. Per-line caps alone let an attacker send unbounded *many* short
+	// header lines; net/textproto would accumulate them all into one map.
+	maxICAPHeaderCount = 128
+	maxICAPHeaderBytes = 64 << 10
 )
 
+var (
+	errICAPTooManyHeaders = errors.New("ICAP header count exceeds cap")
+	errICAPHeadTooLarge   = errors.New("ICAP header block exceeds byte cap")
+)
+
+// isHTTPToken reports whether s is a non-empty RFC 7230 §3.2.6 token, the
+// grammar a header field-name must satisfy.
+func isHTTPToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// readBoundedMIMEHeader reads a CRLF-terminated MIME header block with a cap on
+// the length of each line, the number of header lines, and the total bytes of
+// the block. It is the bounded replacement for textproto.Reader.ReadMIMEHeader,
+// which applies none of these limits and will happily buffer an attacker's
+// entire header stream. Continuation (obs-fold) lines are folded into the
+// previous value, matching textproto's behaviour.
+func readBoundedMIMEHeader(br *bufio.Reader) (textproto.MIMEHeader, error) {
+	hdr := make(textproto.MIMEHeader)
+	total := 0
+	count := 0
+	lastKey := ""
+	for {
+		line, err := readBoundedLine(br, maxICAPHeaderLine)
+		if err != nil {
+			return nil, err
+		}
+		if line == "" {
+			return hdr, nil
+		}
+		total += len(line)
+		if total > maxICAPHeaderBytes {
+			return nil, errICAPHeadTooLarge
+		}
+		// Continuation line: append to the previous header's last value.
+		if line[0] == ' ' || line[0] == '\t' {
+			if lastKey == "" {
+				return nil, errors.New("ICAP header continuation without a preceding header")
+			}
+			vals := hdr[lastKey]
+			vals[len(vals)-1] += " " + strings.TrimSpace(line)
+			hdr[lastKey] = vals
+			continue
+		}
+		count++
+		if count > maxICAPHeaderCount {
+			return nil, errICAPTooManyHeaders
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			return nil, errors.New("malformed ICAP header line")
+		}
+		// Reject rather than repair. Whitespace between the field name and the
+		// colon must be rejected (RFC 7230 §3.2.4) — trimming it is the classic
+		// request-smuggling vector, because a downstream that does not trim sees a
+		// different header set than we do. Likewise a name with a non-token byte:
+		// textproto.CanonicalMIMEHeaderKey silently passes such keys through
+		// unchanged instead of erroring, so an unvalidated name can collide with a
+		// canonical one.
+		if !isHTTPToken(key) {
+			return nil, errors.New("invalid ICAP header name")
+		}
+		key = textproto.CanonicalMIMEHeaderKey(key)
+		hdr[key] = append(hdr[key], strings.TrimSpace(value))
+		lastKey = key
+	}
+}
+
 // readBoundedLine reads one '\n'-terminated line, discarding a trailing '\r',
-// capped at cap bytes. Returns errICAPChunkHeaderTooLong if no '\n' arrives within cap.
+// capped at cap bytes. Returns errICAPLineTooLong if no '\n' arrives within cap.
 func readBoundedLine(r *bufio.Reader, limit int) (string, error) {
 	var sb strings.Builder
 	for {
@@ -331,7 +538,7 @@ func readBoundedLine(r *bufio.Reader, limit int) (string, error) {
 			return strings.TrimRight(sb.String(), "\r"), nil
 		}
 		if sb.Len() >= limit {
-			return "", errICAPChunkHeaderTooLong
+			return "", errICAPLineTooLong
 		}
 		sb.WriteByte(b)
 	}

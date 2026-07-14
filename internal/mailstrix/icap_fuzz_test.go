@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 )
@@ -12,7 +13,7 @@ import (
 // arbitrary bytes. The reader is on the ICAP network path — any remote proxy
 // can send hostile input. Invariants:
 //   - never panic
-//   - when errICAPChunkHeaderTooLong is returned, no more than
+//   - when errICAPLineTooLong is returned, no more than
 //     maxICAPChunkHeaderLine bytes were buffered before the error
 func FuzzReadICAPChunkHeaderLine(f *testing.F) {
 	// Valid chunk-size lines.
@@ -25,7 +26,7 @@ func FuzzReadICAPChunkHeaderLine(f *testing.F) {
 	f.Add([]byte("abc"))
 	// Exactly at the cap, then newline.
 	f.Add(append(bytes.Repeat([]byte("f"), maxICAPChunkHeaderLine), '\n'))
-	// One over the cap — must return errICAPChunkHeaderTooLong.
+	// One over the cap — must return errICAPLineTooLong.
 	f.Add(append(bytes.Repeat([]byte("f"), maxICAPChunkHeaderLine+1), '\n'))
 	// Empty.
 	f.Add([]byte{})
@@ -93,5 +94,58 @@ func FuzzReadICAPChunkedBody(f *testing.F) {
 		if int64(len(body)) > maxBody {
 			t.Fatalf("body len %d exceeds maxBody %d", len(body), maxBody)
 		}
+	})
+}
+
+// FuzzHandleICAPRequest drives a COMPLETE ICAP request — request line, header
+// block, encapsulated HTTP headers and chunked body — through the same entry
+// point the network path uses. The per-piece fuzzers above cannot reach state
+// that depends on how the head steers the body read (Encapsulated section
+// counts, Preview, header caps), which is exactly where the outer parse used to
+// be unbounded. Invariants:
+//   - never panic
+//   - never buffer without bound: the head is capped by maxICAPHeaderLine /
+//     maxICAPHeaderCount / maxICAPHeaderBytes and the body by MaxBody, so a
+//     request of any shape terminates
+func FuzzHandleICAPRequest(f *testing.F) {
+	f.Add([]byte("OPTIONS icap://h/scan ICAP/1.0\r\nHost: h\r\nEncapsulated: null-body=0\r\n\r\n"))
+	f.Add([]byte(icapRESPMODRequest("h", "hello", true)))
+	f.Add([]byte(icapREQMODRequest("h", "hello", false)))
+	// Bad version / arity on the request line.
+	f.Add([]byte("RESPMOD icap://h/scan ICAP/2.0\r\n\r\n"))
+	f.Add([]byte("GARBAGE\r\n\r\n"))
+	// Unknown method.
+	f.Add([]byte("FROBNICATE icap://h/scan ICAP/1.0\r\n\r\n"))
+	// Head with no terminating blank line.
+	f.Add([]byte("OPTIONS icap://h/scan ICAP/1.0\r\nHost: h\r\n"))
+	// Over the per-line cap.
+	f.Add([]byte("OPTIONS icap://h/scan ICAP/1.0\r\nX: " + strings.Repeat("A", maxICAPHeaderLine+16) + "\r\n\r\n"))
+	// Over the header-count cap.
+	var many strings.Builder
+	many.WriteString("OPTIONS icap://h/scan ICAP/1.0\r\n")
+	for i := 0; i < maxICAPHeaderCount+8; i++ {
+		fmt.Fprintf(&many, "X-H%d: v\r\n", i)
+	}
+	many.WriteString("\r\n")
+	f.Add([]byte(many.String()))
+	// Obs-fold continuation, and a leading continuation with no preceding header.
+	f.Add([]byte("OPTIONS icap://h/scan ICAP/1.0\r\nX-A: one\r\n\ttwo\r\n\r\n"))
+	f.Add([]byte("OPTIONS icap://h/scan ICAP/1.0\r\n  orphan\r\n\r\n"))
+	// Encapsulated claiming header sections that never arrive.
+	f.Add([]byte("RESPMOD icap://h/scan ICAP/1.0\r\nEncapsulated: res-hdr=0, res-body=10\r\n\r\n"))
+	// Preview with a truncated continuation.
+	f.Add([]byte("RESPMOD icap://h/scan ICAP/1.0\r\nPreview: 0\r\n" +
+		"Encapsulated: res-hdr=0, res-body=0\r\n\r\n\r\n0\r\n\r\n"))
+	// Body chunk claiming more than it delivers.
+	f.Add([]byte("RESPMOD icap://h/scan ICAP/1.0\r\nEncapsulated: res-body=0\r\n\r\nffff\r\nshort"))
+	f.Add([]byte{})
+
+	s := newTestServer(&fakeEngine{count: 1}, "")
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		br := bufio.NewReader(bytes.NewReader(data))
+		// io.Discard is not a deadlineSetter, so the head/body deadline re-arm is
+		// skipped; termination must come from the caps alone, which is the point.
+		_ = s.handleICAPRequest(io.Discard, br)
 	})
 }
