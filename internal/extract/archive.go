@@ -710,6 +710,29 @@ func isEncryptedErr(err error) bool {
 // unpackRar walks a RAR archive (v4/v5, pure-Go rardecode) and emits each
 // regular-file member. Encrypted/solid members that error are skipped.
 func unpackRar(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	// A10: refuse a SOLID archive before rardecode ever sees the bytes.
+	//
+	// rardecode drains a solid member's body inline inside Next() (decodeReader.
+	// nextFile: `if d.solid { io.Copy(io.Discard, d) }`), on whatever goroutine calls
+	// it. That drain is an uncancellable, time-unbounded decode — the exact hazard A8/A9
+	// exist to keep off the scan goroutine — and the per-member h.Solid guard below
+	// CANNOT stop it, because h.Solid is the per-file flag while the drain fires on the
+	// archive-level one. In a solid archive the first member has h.Solid == false, so it
+	// passes that guard and the NEXT Next() drains its body on the scan goroutine.
+	//
+	// rardecode does not expose archive-solidity over an in-memory reader, so we read
+	// the main-header flag out of buf ourselves (rarsolid.go — a pure header parse, safe
+	// inline) and never hand a solid archive to the decoder at all.
+	//
+	// The archive is still MARKED so the signal survives; we simply never extract it.
+	// That detection loss is real, deliberate and counted (plainDropped) — see the long
+	// note above boundedRarMemberFresh for why every alternative containment strategy
+	// for solid RAR is unsound.
+	if rarArchiveIsSolid(buf) {
+		res.IsArchive = true
+		plainDropped.Add(1)
+		return
+	}
 	// A8: same reasoning as unpack7z — the RAR header parse is uncancellable
 	// third-party code over attacker-authored bytes, so it runs on a pooled worker.
 	open, ok := runBoundedPlain(deadline, func() rarOpen {
@@ -785,6 +808,13 @@ type rarOpen struct {
 // its bytes are never scanned. Solid RAR is rare in mail, and the alternative is a
 // remotely-triggerable stall of the scan pool. Every skipped member is counted in
 // plainDropped, so the detection loss is visible rather than silent.
+//
+// A solid archive is refused UP FRONT, before rardecode is constructed, by
+// rarArchiveIsSolid (rarsolid.go) reading the archive-level solid flag straight out of
+// the main header. That is A10, and it is what actually keeps the inline body drain in
+// Next() off the scan goroutine — the per-file h.Solid guard in emitRarMembers cannot,
+// because the drain fires on the archive-level flag and the first member of a solid
+// archive has the per-file flag clear.
 //
 // If you ever need solid RAR extraction, the ONLY sound route is to contain the entire
 // unpackRar walk as one pooled unit that builds an ISOLATED Result and hands it back —
@@ -913,27 +943,18 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 		if h.IsDir {
 			continue
 		}
-		// ⚠ INCOMPLETE — THIS GUARD DOES NOT FULLY CONTAIN SOLID RAR. See TODO A10.
+		// Belt-and-braces. A solid ARCHIVE is already refused up front by
+		// rarArchiveIsSolid (A10, see unpackRar) — the inline body drain in Next() fires
+		// on the archive-level flag, so it has to be stopped before rardecode is handed
+		// the bytes at all, and it is.
 		//
-		// The hazard: rardecode's Next() drains a solid body inline —
-		// decodeReader.nextFile() does `if d.solid { io.Copy(io.Discard, d) }`
-		// (decode_reader.go:345) — and d.solid is the ARCHIVE-level flag (d.solid =
-		// arcSolid, decode_reader.go:58). We want to bail BEFORE that drain.
-		//
-		// But this guard tests h.Solid, the PER-FILE flag (file5CompSolid,
-		// archive50.go:373) — NOT arcSolid (arc5Solid, archive50.go:469). In a solid
-		// archive the FIRST member has h.Solid == false (nothing precedes it), so it
-		// passes this guard, gets read, and the NEXT Next() drains member 1's body on the
-		// scan goroutine before any h.Solid==true header arrives. The exported FileHeader
-		// does not expose arcSolid, so over an in-memory Reader we CANNOT detect archive-
-		// solidity here at all.
-		//
-		// The sound fix (chosen, not yet built) is to run the whole unpackRar walk as ONE
-		// pooled unit that builds an isolated Result — then the drain runs on a pooled
-		// worker, bounded and abandonable like every other decoder. Until then this guard
-		// catches the multi-member tail case only; a two-member solid RAR still pins one
-		// scan goroutine for one bounded member drain. Kept because it is strictly better
-		// than nothing and preserves the mark; it is NOT the containment A8/A9 needs.
+		// This per-file guard therefore should not fire in practice: h.Solid is the
+		// PER-FILE flag (file5CompSolid, archive50.go:373), and a per-file solid member
+		// only occurs inside a solid archive, which we never open. It is kept because a
+		// solid member is an uncontainable decode either way (see the long note above
+		// boundedRarMemberFresh), so if a format quirk ever produced one in an archive
+		// whose main header did not advertise solidity, refusing it here is still the
+		// correct answer.
 		if h.Solid {
 			plainDropped.Add(1) // uncontainable decode refused: real, counted detection loss
 			res.IsArchive = true
