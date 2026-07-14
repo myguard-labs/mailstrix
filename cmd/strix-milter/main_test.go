@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -924,5 +927,184 @@ func TestProtocolKeepsHeadersEOHAndBody(t *testing.T) {
 		if milterProtocol&suppressed.bit != 0 {
 			t.Errorf("%s is set — the scanner would not see part of the message", suppressed.name)
 		}
+	}
+}
+
+// --- the PRODUCTION path is capped (not just the primitive) ----------------
+
+func TestServerListenerAppliesTheConnectionCap(t *testing.T) {
+	// Testing limitListener() alone proves only that the primitive works: the wrap
+	// could be dropped out of the production path with the whole suite still green
+	// (it was, and CI stayed green). Assert the cap on the listener serve() runs on.
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+
+	cfg := baseCfg("http://127.0.0.1:1")
+	cfg.maxConns = 3
+
+	ln := serverListener(base, cfg)
+	if got := effectiveCap(ln); got != 3 {
+		t.Fatalf("the production listener is capped at %d, want 3 — the connection cap is not wired in", got)
+	}
+}
+
+func TestEffectiveCapReportsZeroForAnUncappedListener(t *testing.T) {
+	// The startup log prints effectiveCap(), so a missing wrap must NOT keep
+	// claiming a cap is in force.
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	if got := effectiveCap(base); got != 0 {
+		t.Fatalf("effectiveCap(uncapped) = %d, want 0", got)
+	}
+}
+
+// --- joinRules edge cases ---------------------------------------------------
+
+func TestJoinRulesAlwaysNamesAtLeastOneRule(t *testing.T) {
+	// A single pathologically long rule name must not produce a header that is
+	// nothing but "(+N more)" — the operator would lose every name.
+	rules := []string{strings.Repeat("R", maxRuleHeaderLen+100), "second", "third"}
+	got := joinRules(rules)
+	if !strings.HasPrefix(got, "R") {
+		t.Fatalf("joinRules = %q, want it to still name the first rule", got)
+	}
+	if !strings.Contains(got, "more)") {
+		t.Fatalf("joinRules = %q, want it to admit it truncated", got)
+	}
+	if len(sanitizeHeaderValue(got)) > maxHeaderValueLen {
+		t.Fatalf("joinRules produced %d bytes, over the header cap", len(sanitizeHeaderValue(got)))
+	}
+}
+
+func TestJoinRulesTailSurvivesTheHeaderCapAtLargeN(t *testing.T) {
+	var rules []string
+	for i := 0; i < 10000; i++ {
+		rules = append(rules, fmt.Sprintf("rule_%05d", i))
+	}
+	got := sanitizeHeaderValue(joinRules(rules))
+	if !strings.Contains(got, "more)") {
+		t.Fatalf("the (+N more) tail was clipped by the header cap: %q", got)
+	}
+}
+
+// --- a body chunk arriving before end-of-headers ---------------------------
+
+func TestBodyBeforeEOHStillGetsAHeaderSeparator(t *testing.T) {
+	// Without the blank line the body is concatenated onto the last header line
+	// and parsed as its continuation — a silently corrupted message.
+	var posted []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verdict.Response{})
+	}))
+	t.Cleanup(srv.Close)
+
+	s, _, _ := newTestMilter(t, baseCfg(srv.URL))
+	if _, err := s.Header("Subject", "hi", nil); err != nil {
+		t.Fatal(err)
+	}
+	// NOTE: no Headers() call — go straight to the body.
+	if _, err := s.BodyChunk([]byte("BODY"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Body(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(posted), "\r\n\r\nBODY") {
+		t.Fatalf("no header/body separator: %q — BODY would parse as a Subject continuation", posted)
+	}
+	msg, err := mail.ReadMessage(strings.NewReader(string(posted)))
+	if err != nil {
+		t.Fatalf("the scanned message does not parse as RFC 5322: %v", err)
+	}
+	if got := msg.Header.Get("Subject"); got != "hi" {
+		t.Fatalf("Subject = %q, want %q — the body leaked into the header", got, "hi")
+	}
+}
+
+// --- the reassembled message really is a parseable MIME message ------------
+
+func TestScannedMessageParsesAsMIMEWithTheAttachment(t *testing.T) {
+	var posted []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posted, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verdict.Response{})
+	}))
+	t.Cleanup(srv.Close)
+
+	s, _, _ := newTestMilter(t, baseCfg(srv.URL))
+	feed(t, s, [][2]string{
+		{"From", "a@example.com"},
+		{"Subject", "invoice"},
+		{"Content-Type", `multipart/mixed; boundary="XYZ"`},
+	}, []byte("--XYZ\r\nContent-Disposition: attachment; filename=\"x.docm\"\r\n\r\nPK\x03\x04payload\r\n--XYZ--\r\n"))
+
+	msg, err := mail.ReadMessage(strings.NewReader(string(posted)))
+	if err != nil {
+		t.Fatalf("scanned message is not RFC 5322: %v\ngot: %q", err, posted)
+	}
+	mt, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || mt != "multipart/mixed" {
+		t.Fatalf("Content-Type = %q (%v) — the extractor cannot see this is multipart", mt, err)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	part, err := mr.NextPart()
+	if err != nil {
+		t.Fatalf("no MIME part: %v", err)
+	}
+	if got := part.FileName(); got != "x.docm" {
+		t.Fatalf("attachment filename = %q, want x.docm — name-keyed rules would not fire", got)
+	}
+	body, _ := io.ReadAll(part)
+	if !strings.Contains(string(body), "PK\x03\x04") {
+		t.Fatalf("attachment payload missing: %q", body)
+	}
+}
+
+func TestServeActuallyServesACappedListener(t *testing.T) {
+	// The one that matters: not "does serverListener cap?" but "does serve() run on
+	// a capped listener?". Dropping the wrap from serve() left every other test
+	// green — a guard present in the code and inert on the path that matters.
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan net.Listener, 1)
+	serveListenerHook = func(ln net.Listener) { got <- ln }
+	t.Cleanup(func() { serveListenerHook = nil })
+
+	cfg := baseCfg("http://127.0.0.1:1")
+	cfg.maxConns = 5
+	cfg.listen = "inet:" + base.Addr().String()
+
+	done := make(chan int, 1)
+	go func() { done <- serve(base, cfg, log.New(io.Discard, "", 0)) }()
+
+	var served net.Listener
+	select {
+	case served = <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve() never reached its listener")
+	}
+
+	if n := effectiveCap(served); n != 5 {
+		t.Fatalf("serve() is running on a listener capped at %d, want 5 — the connection cap is NOT wired into the production path", n)
+	}
+
+	_ = base.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve() did not return after the listener closed")
 	}
 }

@@ -180,14 +180,10 @@ const milterProtocol = milter.OptNoConnect | milter.OptNoHelo | milter.OptNoMail
 func serve(ln net.Listener, cfg config, lg *log.Logger) int {
 	client := verdict.NewClient(cfg.url, cfg.token, "strix-milter/"+version, cfg.timeout)
 
-	// Bound concurrency at the ACCEPT, not per message. go-milter spawns a
-	// goroutine per connection with no cap of its own, and each in-flight message
-	// holds up to max-body in memory (twice, briefly, while it is being POSTed).
-	// Unbounded, a spammer opening many concurrent sessions with large messages
-	// could OOM us — and because the MTA is configured to fail open, the restart
-	// window would deliver mail UNSCANNED. Capping accepts turns that into
-	// backpressure on the MTA instead.
-	ln = limitListener(ln, cfg.maxConns)
+	ln = serverListener(ln, cfg)
+	if hook := serveListenerHook; hook != nil {
+		hook(ln) // test seam: observe the listener serve() ACTUALLY serves
+	}
 
 	srv := &milter.Server{
 		NewMilter: func() milter.Milter {
@@ -201,7 +197,7 @@ func serve(ln net.Listener, cfg config, lg *log.Logger) int {
 	go func() { errCh <- srv.Serve(ln) }()
 
 	lg.Printf("listening on %s, scanning via %s (timeout %s, max-body %d, max-conns %d)",
-		cfg.listen, cfg.url, cfg.timeout, cfg.maxBody, cfg.maxConns)
+		cfg.listen, cfg.url, cfg.timeout, cfg.maxBody, effectiveCap(ln))
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -292,14 +288,24 @@ func (s *strixMilter) Header(name, value string, m *milter.Modifier) (milter.Res
 // Headers marks the end of the header block: write the blank line that separates
 // headers from body, so what we post is a complete RFC 5322 message.
 func (s *strixMilter) Headers(h textproto.MIMEHeader, m *milter.Modifier) (milter.Response, error) {
-	s.appendMsg([]byte("\r\n"))
-	s.inBody = true
+	if !s.inBody {
+		s.appendMsg([]byte("\r\n"))
+		s.inBody = true
+	}
 	return milter.RespContinue, nil
 }
 
 // BodyChunk accumulates the message body. The cap covers the WHOLE message
 // (headers + body), matching strix-scan's -max-body over the whole .eml.
 func (s *strixMilter) BodyChunk(chunk []byte, m *milter.Modifier) (milter.Response, error) {
+	// Postfix always sends end-of-headers before the body, so Headers() has
+	// normally written the separator already. Guard it anyway: without the blank
+	// line the body would be concatenated straight onto the last header line and
+	// parsed as its continuation, quietly corrupting the message we scan.
+	if !s.inBody {
+		s.appendMsg([]byte("\r\n"))
+		s.inBody = true
+	}
 	s.appendMsg(chunk)
 	return milter.RespContinue, nil
 }
@@ -480,6 +486,13 @@ func joinRules(rules []string) string {
 			add += 2 // ", "
 		}
 		if b.Len()+add > maxRuleHeaderLen {
+			// Always name at least ONE rule. A single pathologically long rule name
+			// would otherwise trip the budget on the first iteration and produce a
+			// header consisting of nothing but "(+N more)" — the operator would lose
+			// every name, including the short ones that would have fit.
+			if b.Len() == 0 {
+				b.WriteString(truncateASCII(r, maxRuleHeaderLen))
+			}
 			fmt.Fprintf(&b, " (+%d more)", len(rules)-i)
 			break
 		}
@@ -581,6 +594,30 @@ func envOr(key, def string) string {
 	return def
 }
 
+// serveListenerHook, when set, is handed the listener serve() actually serves.
+// It exists so a test can assert the PRODUCTION path is capped — asserting on
+// serverListener() alone would still let the call be dropped out of serve() with
+// CI green, which is the whole failure mode this guards.
+var serveListenerHook func(net.Listener)
+
+// serverListener applies the connection cap to the listener serve() will run on.
+//
+// This is a named function, not an inline wrap inside serve(), so a test can
+// assert that the PRODUCTION path is actually capped. Testing limitListener
+// directly proves only that the primitive works — the wrap could be dropped from
+// serve() with the whole suite still green, which is exactly the "guard present in
+// the code, inert on the path that matters" failure this codebase keeps hitting.
+func serverListener(ln net.Listener, cfg config) net.Listener {
+	// Bound concurrency at the ACCEPT, not per message. go-milter spawns a
+	// goroutine per connection with no cap of its own, and each in-flight message
+	// holds up to max-body in memory (twice, briefly, while it is being POSTed).
+	// Unbounded, a spammer opening many concurrent sessions with large messages
+	// could OOM us — and because the MTA is configured to fail open, the restart
+	// window would deliver mail UNSCANNED. Capping accepts turns that into
+	// backpressure on the MTA instead.
+	return limitListener(ln, cfg.maxConns)
+}
+
 // limitListener caps the number of simultaneously-accepted connections. It is
 // golang.org/x/net/netutil.LimitListener in miniature — reproduced here rather
 // than pulled in, to keep this binary's dependency surface at go-milter + stdlib.
@@ -623,4 +660,25 @@ func (c *limitedConn) Close() error {
 	err := c.Conn.Close()
 	c.release()
 	return err
+}
+
+// effectiveCap reports the connection cap actually in force on ln, so the startup
+// log states what is true rather than what was configured. A listener that is not
+// capped reports 0 ("unlimited") even if -max-conns was set — which is the signal
+// that the wrap went missing.
+func effectiveCap(ln net.Listener) int {
+	if l, ok := ln.(*limitedListener); ok {
+		return cap(l.sem)
+	}
+	return 0
+}
+
+// truncateASCII shortens an already-ASCII string to at most n bytes. Used for a
+// single over-long rule name; sanitizeHeaderValue has already stripped anything
+// non-printable, so a byte cut is safe here.
+func truncateASCII(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
