@@ -402,6 +402,16 @@ func verifyRarPassword(buf []byte, pw string) (ok bool) {
 		if h.IsDir {
 			continue
 		}
+		// SOLID: give up on the whole archive, do not verify. Decoding a solid member
+		// requires inflating every predecessor (the dictionary), which is the
+		// uncancellable, time-unbounded decode the extractor refuses to run at all — see
+		// the block comment above boundedRarMemberFresh. Verifying here would drag that
+		// decode back in through the crack loop, and rardecode's own Next() would inflate
+		// the body on the very next iteration regardless of what we read. A solid RAR is
+		// simply not unpacked, so there is nothing to unlock: report no match.
+		if h.Solid {
+			return false
+		}
 		if !(h.Encrypted || h.HeaderEncrypted) {
 			continue // plaintext member — reading it proves nothing about the password
 		}

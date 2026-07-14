@@ -431,7 +431,22 @@ func looksLikeTar(data []byte) bool {
 // encrypted. One 7z password unlocks the whole archive, so the crack is done once.
 func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
 	pwc := pwCandidates(res)
-	zr, err := sevenzip.NewReader(bytes.NewReader(buf), int64(len(buf)))
+	// A8: NewReader parses an attacker-authored header with the same uncancellable
+	// third-party code the member reads use, so it runs on a pooled worker too — a 7z
+	// crafted to spin here would otherwise pin the scan goroutine before a single
+	// member is touched. A stall/refusal is indistinguishable from "won't open", which
+	// the err path below already handles conservatively.
+	open, ok := runBoundedPlain(deadline, func() sevenzipOpen {
+		zr, err := sevenzip.NewReader(bytes.NewReader(buf), int64(len(buf)))
+		return sevenzipOpen{r: zr, err: err, done: true}
+	})
+	if !ok || !open.done {
+		// The header decoder stalled or the pool was full. Treat it as an archive we
+		// could not open: mark it so the tell isn't lost, but never as "clean".
+		res.IsArchive = true
+		return
+	}
+	zr, err := open.r, open.err
 	if err != nil {
 		// The reader won't open. This is either a header-encrypted 7z (the file
 		// list itself is AES-wrapped) or plain corruption. With candidates, try to
@@ -495,7 +510,15 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		// is indistinguishable from corruption here, so on !ok with candidates we
 		// fall through to a password crack. An empty member reads ok (empty plaintext)
 		// and must NOT be mistaken for encryption.
-		if data, ok := open7zMemberPlain(f); ok {
+		// A8: the plaintext member read is LZMA over attacker-authored bytes — the same
+		// uncancellable decoder as the decrypt path. Pool it. A stall/refusal drops this
+		// member only (counted in plainDropped) and the walk moves on; it must not abort
+		// the archive, or one crafted member would suppress every member after it.
+		plain, ran := boundedPlain7zMember(f, deadline)
+		if !ran {
+			continue
+		}
+		if data, ok := plain.data, plain.ok; ok {
 			emitMember(data, res, b, depth, deadline)
 			continue
 		}
@@ -503,7 +526,18 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 			// No candidates: an unreadable member might be encrypted or corrupt. The
 			// pre-feature behaviour marked encrypted only on an isEncryptedErr Open;
 			// preserve that conservative signal by re-checking the Open error.
-			if _, oerr := f.Open(); isEncryptedErr(oerr) {
+			//
+			// This Open re-enters sevenzip on hostile bytes, so it is pooled like every
+			// other decoder entry point (A8) — calling it bare here would reopen exactly
+			// the hole the bounded read above closes. A stall/refusal just means we could
+			// not classify the member: skip it (the read already failed).
+			if encrypted, ok := runBoundedPlain(deadline, func() bool {
+				rc, oerr := f.Open()
+				if rc != nil {
+					_ = rc.Close() // we only want the error; don't leak the reader
+				}
+				return isEncryptedErr(oerr)
+			}); ok && encrypted {
 				markEncryptedArchive(res)
 			}
 			continue
@@ -523,11 +557,43 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 	}
 }
 
+// sevenzipOpen boxes sevenzip.NewReader's (reader, error) pair so the open can be
+// handed to the single-result runBoundedPlain.
+//
+// done is what makes the ZERO VALUE safe. A panicking pooled worker delivers the zero
+// box, and a zero box without this flag reads as {r: nil, err: nil} — "opened fine,
+// here is your nil reader" — which the caller then dereferences on the scan goroutine.
+// done is set only on a real return from NewReader, so !done means "never completed"
+// (panicked), which the caller must treat exactly like a stall.
+type sevenzipOpen struct {
+	r    *sevenzip.Reader
+	err  error
+	done bool
+}
+
+// boundedPlain7zMember runs open7zMemberPlain on a pooled worker (A8). ran is false
+// when the decoder stalled or no slot was free — the member is then left unextracted
+// and counted as detection loss; the caller skips it and keeps walking. When ran is
+// true the inner (data, ok) carries the normal plaintext-read outcome, so !ok still
+// means "unreadable — try a password crack if candidates exist".
+//
+// The closure builds nothing shared: sevenzip.File.Open() creates its own reader over
+// the immutable archive buffer, so an abandoned read cannot corrupt the walk.
+func boundedPlain7zMember(f *sevenzip.File, deadline time.Time) (memberRead, bool) {
+	return runBoundedPlain(deadline, func() memberRead {
+		data, ok := open7zMemberPlain(f)
+		return memberRead{data: data, ok: ok}
+	})
+}
+
 // open7zMemberPlain opens and reads a 7z member with no password, bounded by
 // maxBytesPerMember, under an unconditional recover. Returns (data, true) on a
 // clean read (data may be empty for a legitimately empty member) and (nil, false)
 // on any failure (encrypted member, corrupt stream) — the caller treats !ok as
 // "try a password crack if candidates exist".
+//
+// Call it through boundedPlain7zMember, never directly: the LZMA decode runs on
+// hostile input and cannot be cancelled, so it belongs on a pooled worker (A8).
 func open7zMemberPlain(f *sevenzip.File) (out []byte, ok bool) {
 	defer func() {
 		if recover() != nil {
@@ -644,7 +710,17 @@ func isEncryptedErr(err error) bool {
 // unpackRar walks a RAR archive (v4/v5, pure-Go rardecode) and emits each
 // regular-file member. Encrypted/solid members that error are skipped.
 func unpackRar(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
-	rr, err := rardecode.NewReader(bytes.NewReader(buf))
+	// A8: same reasoning as unpack7z — the RAR header parse is uncancellable
+	// third-party code over attacker-authored bytes, so it runs on a pooled worker.
+	open, ok := runBoundedPlain(deadline, func() rarOpen {
+		rr, err := rardecode.NewReader(bytes.NewReader(buf))
+		return rarOpen{r: rr, err: err, done: true}
+	})
+	if !ok || !open.done {
+		res.IsArchive = true // stalled/refused open: an archive we could not read
+		return
+	}
+	rr, err := open.r, open.err
 	if err != nil {
 		if !isEncryptedErr(err) {
 			return
@@ -659,7 +735,7 @@ func unpackRar(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 					// Marker emitted per successfully-read member inside the walk; if
 					// the walk landed nothing (cap/deadline), fall through to mark
 					// encrypted so the signal isn't lost.
-					if emitRarMembers(dr, buf, true, res, b, depth, deadline) {
+					if emitRarMembers(dr, buf, pw, res, b, depth, deadline) {
 						return
 					}
 				}
@@ -669,16 +745,148 @@ func unpackRar(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 		return
 	}
 	res.IsArchive = true
-	emitRarMembers(rr, buf, false, res, b, depth, deadline)
+	emitRarMembers(rr, buf, "", res, b, depth, deadline)
+}
+
+// rarOpen boxes rardecode.NewReader's (reader, error) pair for runBoundedPlain.
+// done distinguishes a real return from the zero value a panicking worker delivers —
+// see sevenzipOpen.
+type rarOpen struct {
+	r    *rardecode.Reader
+	err  error
+	done bool
+}
+
+// SOLID RAR IS NOT UNPACKED. Read this before "fixing" it.
+//
+// A solid member's bytes are only reconstructible from the decoder dictionary built by
+// decoding every PRECEDING member (rardecode says so itself: ErrSolidOpen, "solid files
+// don't support Open"). That single fact defeats every containment strategy available
+// to us, and two adversarial review rounds were spent proving it:
+//
+//   - Can't pool it per-member off a FRESH reader (the trick that makes non-solid RAR
+//     safe): a fresh reader that header-skips to member N has no dictionary, so it
+//     returns GARBAGE — a silent detection-correctness bug, worse than the DoS. Making
+//     it rebuild the dictionary re-inflates every predecessor: quadratic.
+//   - Can't pool it per-member off the SHARED cursor: rardecode is a streaming decoder
+//     with one stateful cursor, so an abandoned read leaves it mid-stream and races the
+//     walk's next Next().
+//   - Can't read it inline-but-bounded: the decode is uncancellable and has no time
+//     bound. maxBytesPerMember caps the bytes COPIED OUT, not the time spent before the
+//     first byte, so a crafted member pins the scan goroutine anyway. And skipping the
+//     body doesn't help — rr.Next() itself drains a solid body to keep the dictionary.
+//
+// A solid member is therefore an indivisible, uncancellable, time-unbounded decode: the
+// exact thing A8 exists to keep off the scan goroutine. So we don't run it. The archive
+// is still MARKED (IsArchive, plus the encrypted tell where it applies) so the signal
+// survives — we just never hand its bytes to the decoder.
+//
+// The cost is honest and deliberate: a dropper inside a SOLID rar is not extracted, so
+// its bytes are never scanned. Solid RAR is rare in mail, and the alternative is a
+// remotely-triggerable stall of the scan pool. Every skipped member is counted in
+// plainDropped, so the detection loss is visible rather than silent.
+//
+// If you ever need solid RAR extraction, the ONLY sound route is to contain the entire
+// unpackRar walk as one pooled unit that builds an ISOLATED Result and hands it back —
+// the walk currently mutates res/b and recurses into the extractor, which an abandoned
+// worker may never do.
+
+// boundedRarMemberFresh reads the idx'th regular-file member of a RAR on a pooled
+// worker, over a reader it opens ITSELF (A9).
+//
+// The obvious fix — pool the read off the walk's existing rardecode.Reader — is
+// unsound, and that is the whole difficulty of A9. rardecode is a STREAMING decoder
+// with a single stateful cursor: an abandoned pooled read would leave that cursor
+// parked mid-member, and the walk's next Next() would then race a decoder goroutine
+// that is still advancing it. The walk cannot be abandoned wholesale either — it
+// mutates res/b and recurses back into the extractor.
+//
+// So each read gets its OWN reader over the immutable buffer and re-seeks to the
+// member by ordinal. An abandoned read then owns a private cursor that nobody else
+// will ever touch, which is exactly the invariant runBounded's contract demands (and
+// the same trick openYekaMemberFresh uses).
+//
+// The re-seek is cheap because rardecode's Next() skips forward over BLOCK HEADERS
+// (packedFileReader.nextFile → nextBlock); it does not inflate the bodies of the
+// members it steps over. So the per-member cost is a header walk, not a re-decode.
+//
+// !!! NOT VALID FOR SOLID MEMBERS. A solid member's content depends on the decoder
+// dictionary built by decoding every PRECEDING member (rardecode says so itself:
+// ErrSolidOpen, "solid files don't support Open"). A fresh reader that header-skips
+// to idx has no dictionary, so it would return WRONG BYTES — and forcing it to
+// rebuild one would re-inflate every predecessor, turning the walk quadratic. Solid
+// members are therefore read inline on the shared cursor by emitRarMembers, never
+// through here. Callers MUST check h.Solid first.
+//
+// pw is "" for a plain archive, or the cracked archive password. ran is false when the
+// decoder stalled or the pool was full: the member is left unextracted, counted as
+// detection loss, and the caller keeps walking.
+func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, deadline time.Time) (out []byte, ran bool) {
+	r, ok := runBoundedPlain(deadline, func() []byte {
+		return readRarMemberFresh(buf, idx, pw, declared)
+	})
+	if !ok {
+		return nil, false
+	}
+	return r, true
+}
+
+// readRarMemberFresh opens its own rardecode reader over buf, advances to the idx'th
+// regular-file member (matching emitRarMembers' own ordinal: dirs are not counted)
+// and reads it, bounded by maxBytesPerMember. Unconditional recover — every call here
+// is third-party code over hostile bytes. Returns nil on any miss.
+//
+// Only ever call this from boundedRarMemberFresh, so the decode stays on a pooled
+// worker and an abandoned one cannot outlive its slot. Never call it for a SOLID
+// member — see boundedRarMemberFresh.
+func readRarMemberFresh(buf []byte, idx int, pw string, declared uint64) (out []byte) {
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	var rr *rardecode.Reader
+	var err error
+	if pw != "" {
+		rr, err = rardecode.NewReader(bytes.NewReader(buf), rardecode.Password(pw))
+	} else {
+		rr, err = rardecode.NewReader(bytes.NewReader(buf))
+	}
+	if err != nil {
+		return nil
+	}
+	for i := 0; ; {
+		h, err := rr.Next()
+		if err != nil {
+			return nil // EOF before idx, or a header we can't read
+		}
+		if h.IsDir {
+			continue // dirs are skipped by the walk too, so they don't consume an ordinal
+		}
+		if i == idx {
+			return readMember(rr, declared)
+		}
+		i++
+	}
 }
 
 // emitRarMembers walks a rardecode reader and emits each regular-file member. buf
 // is the original archive bytes (needed to re-open with a password); cracked marks
-// rr as an already-password-unlocked reader. When a per-file-encrypted member is
+// rr as an already-password-unlocked reader.
+//
+// A9: the walk itself only calls Next() (a header parse); every member BODY read is
+// delegated to boundedRarMemberFresh, which decodes on a pooled worker over its own
+// private reader. The walk's cursor is therefore only ever advanced by this goroutine,
+// and no abandoned decoder can be left sitting in the middle of it. When a per-file-encrypted member is
 // hit on a NON-cracked reader and candidates are available, it cracks the archive
 // password once and re-walks via a fresh password reader (RAR applies one password
 // per archive), decrypting this and the remaining encrypted members.
-func emitRarMembers(rr *rardecode.Reader, buf []byte, cracked bool, res *Result, b *archiveBudget, depth int, deadline time.Time) (emitted bool) {
+func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b *archiveBudget, depth int, deadline time.Time) (emitted bool) {
+	cracked := pw != ""
+	// idx is the walk's regular-file ordinal (dirs excluded), and is what
+	// readRarMemberFresh re-seeks by. It must advance for EVERY non-dir member the walk
+	// sees — including ones we skip — or a fresh re-open would read the wrong member.
+	idx := -1
 	for {
 		if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
 			break
@@ -690,9 +898,9 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, cracked bool, res *Result,
 				// rather than at NewReader. On a non-cracked reader with candidates,
 				// crack and re-walk via a password reader before giving up.
 				if pwc := pwCandidates(res); !cracked && len(pwc) > 0 {
-					if pw := crackRarPassword(buf, pwc, b, deadline); pw != "" {
-						if dr := openRarReader(buf, pw); dr != nil {
-							if emitRarMembers(dr, buf, true, res, b, depth, deadline) {
+					if cpw := crackRarPassword(buf, pwc, b, deadline); cpw != "" {
+						if dr := openRarReader(buf, cpw); dr != nil {
+							if emitRarMembers(dr, buf, cpw, res, b, depth, deadline) {
 								return true
 							}
 						}
@@ -705,13 +913,43 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, cracked bool, res *Result,
 		if h.IsDir {
 			continue
 		}
+		// ⚠ INCOMPLETE — THIS GUARD DOES NOT FULLY CONTAIN SOLID RAR. See TODO A10.
+		//
+		// The hazard: rardecode's Next() drains a solid body inline —
+		// decodeReader.nextFile() does `if d.solid { io.Copy(io.Discard, d) }`
+		// (decode_reader.go:345) — and d.solid is the ARCHIVE-level flag (d.solid =
+		// arcSolid, decode_reader.go:58). We want to bail BEFORE that drain.
+		//
+		// But this guard tests h.Solid, the PER-FILE flag (file5CompSolid,
+		// archive50.go:373) — NOT arcSolid (arc5Solid, archive50.go:469). In a solid
+		// archive the FIRST member has h.Solid == false (nothing precedes it), so it
+		// passes this guard, gets read, and the NEXT Next() drains member 1's body on the
+		// scan goroutine before any h.Solid==true header arrives. The exported FileHeader
+		// does not expose arcSolid, so over an in-memory Reader we CANNOT detect archive-
+		// solidity here at all.
+		//
+		// The sound fix (chosen, not yet built) is to run the whole unpackRar walk as ONE
+		// pooled unit that builds an isolated Result — then the drain runs on a pooled
+		// worker, bounded and abandonable like every other decoder. Until then this guard
+		// catches the multi-member tail case only; a two-member solid RAR still pins one
+		// scan goroutine for one bounded member drain. Kept because it is strictly better
+		// than nothing and preserves the mark; it is NOT the containment A8/A9 needs.
+		if h.Solid {
+			plainDropped.Add(1) // uncontainable decode refused: real, counted detection loss
+			res.IsArchive = true
+			if h.Encrypted || h.HeaderEncrypted {
+				markEncryptedArchive(res) // keep the hidden-payload tell
+			}
+			return emitted
+		}
+		idx++
 		// Encrypted file contents or an encrypted header (whole-archive password).
 		if h.Encrypted || h.HeaderEncrypted {
 			if cracked {
-				// rr already carries the correct password — DON'T skip; read the
-				// member (the reader decrypts it transparently). On an oversized
-				// member or a read failure, keep the ARCHIVE-ENCRYPTED signal so the
-				// hidden-payload tell isn't silently lost.
+				// pw is the correct archive password — DON'T skip; read the member
+				// through a FRESH reader that carries it (the reader decrypts
+				// transparently). On an oversized member or a read failure, keep the
+				// ARCHIVE-ENCRYPTED signal so the hidden-payload tell isn't silently lost.
 				if h.UnPackedSize > maxBytesPerMember {
 					markEncryptedArchive(res)
 					continue
@@ -720,7 +958,22 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, cracked bool, res *Result,
 				if h.UnPackedSize > 0 {
 					decl = uint64(h.UnPackedSize)
 				}
-				if data := readMember(rr, decl); data != nil {
+				if h.Solid {
+					// Uncontainable decode — never run it. Keep the encrypted tell so the
+					// hidden-payload signal survives, and count the detection loss.
+					plainDropped.Add(1)
+					markEncryptedArchive(res)
+					continue
+				}
+				data, ran := boundedRarMemberFresh(buf, idx, pw, decl, deadline)
+				if !ran {
+					// Decoder stalled or pool full: this member's bytes were never read.
+					// Keep the encrypted tell — we know it was there, we just couldn't
+					// extract it — and move on to the next member (A8/A9 semantics).
+					markEncryptedArchive(res)
+					continue
+				}
+				if data != nil {
 					// Payload before marker so a maxStreams cap can't drop the dropper.
 					emitMember(data, res, b, depth, deadline)
 					markDecryptedArchive(res)
@@ -735,9 +988,9 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, cracked bool, res *Result,
 			// lands NO payload (cap/deadline stopped it before the dropper), keep the
 			// ARCHIVE-ENCRYPTED signal so the hidden-payload tell isn't lost.
 			if pwc := pwCandidates(res); len(pwc) > 0 {
-				if pw := crackRarPassword(buf, pwc, b, deadline); pw != "" {
-					if dr := openRarReader(buf, pw); dr != nil {
-						if emitRarMembers(dr, buf, true, res, b, depth, deadline) {
+				if cpw := crackRarPassword(buf, pwc, b, deadline); cpw != "" {
+					if dr := openRarReader(buf, cpw); dr != nil {
+						if emitRarMembers(dr, buf, cpw, res, b, depth, deadline) {
 							return true
 						}
 						markEncryptedArchive(res)
@@ -750,14 +1003,16 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, cracked bool, res *Result,
 		}
 		// Plaintext member. On the cracked RE-WALK these were already emitted by the
 		// first (non-cracked) pass, so DON'T re-emit — re-emitting would burn the
-		// member/stream budget before the encrypted dropper is reached. Read-and-
-		// discard to keep the rardecode stream positioned, but bound it: skip an
-		// oversized sibling (past the per-member cap) outright so a hostile archive
-		// can't force repeated 16MiB inflates during the replay.
+		// member/stream budget before the encrypted dropper is reached.
+		//
+		// Next() advances by BLOCK HEADERS, so a body we never read costs nothing and
+		// leaves the cursor consistent — we never need to read-and-discard. (The old code
+		// did, only to keep the shared cursor positioned for the body reads it did off
+		// rr; bodies now come from fresh per-member readers, so that is gone.) On the
+		// cracked RE-WALK these plaintext members were already emitted by the first pass,
+		// so re-emitting would burn the member/stream budget before the encrypted dropper
+		// is reached.
 		if cracked {
-			if h.UnPackedSize > 0 && h.UnPackedSize <= maxBytesPerMember {
-				_ = readMember(rr, uint64(h.UnPackedSize))
-			}
 			continue
 		}
 		if h.UnPackedSize > maxBytesPerMember {
@@ -767,7 +1022,11 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, cracked bool, res *Result,
 		if h.UnPackedSize > 0 {
 			decl = uint64(h.UnPackedSize)
 		}
-		data := readMember(rr, decl)
+		// A9: the body decodes on a pooled worker over its OWN reader, never off rr.
+		data, ran := boundedRarMemberFresh(buf, idx, "", decl, deadline)
+		if !ran {
+			continue // stalled/refused: member dropped (counted), keep walking
+		}
 		emitMember(data, res, b, depth, deadline)
 		emitted = true
 	}
