@@ -39,11 +39,23 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"   # repo root (script lives in docker/)
 # org-owned fine-grained PAT lives in /etc/myguard-build-env as
 # GITHUB_ORG_LAB_TOKEN; export it as GH_TOKEN so every gh call here uses it
 # without disturbing the default login or GITHUB_API_TOKEN (lastversion's key).
-if [ -z "${GH_TOKEN:-}" ] && [ -r /etc/myguard-build-env ]; then
-    # shellcheck disable=SC1091
-    . /etc/myguard-build-env
-    [ -n "${GITHUB_ORG_LAB_TOKEN:-}" ] && export GH_TOKEN="$GITHUB_ORG_LAB_TOKEN"
+# build-env is mode 600 root-only (since 2026-07-26), so a plain `[ -r ]` test is
+# FALSE for the cron user (eilander) and the old sourcing block was skipped
+# SILENTLY -> GH_TOKEN unset -> gh fell back to the interactive hosts.yml login.
+# Read it via `sudo cat` (passwordless sudo on this host) and extract only the one
+# var, so an `export `-prefixed line still matches and no other secret enters the
+# environment. No token => die here: publishing is impossible without it, and
+# failing fast beats discovering it after a 55s docker build.
+if [ -z "${GH_TOKEN:-}" ]; then
+    GH_TOKEN="$(sudo -n cat /etc/myguard-build-env 2>/dev/null \
+        | sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?GITHUB_ORG_LAB_TOKEN=//p' \
+        | tail -n1 | tr -d '"'"'"'' | tr -d "'")"
+    export GH_TOKEN
 fi
+# Never let a stale/invalid ~/.config/gh/hosts.yml login serve as the fallback:
+# that token is currently invalid and 401s even on READS, which is what defeated
+# the version guard below. GH_TOKEN takes precedence over hosts.yml in gh.
+[ -n "${GH_TOKEN:-}" ] || { echo "generate-rules: ERROR: GITHUB_ORG_LAB_TOKEN not readable from /etc/myguard-build-env; cannot publish" >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -114,7 +126,23 @@ LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
 #    republish a LOWER version than the live one, breaking monotonicity and making
 #    strixd skip every future update ("version 1 <= local"). So: no release ⇒ start
 #    at 1; release present but manifest unreadable ⇒ die.
-if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+#    The existence probe must NOT rely on `gh release view`'s exit status: with an
+#    invalid credential gh has been observed printing "401 Unauthorized" while
+#    STILL exiting 0, so the old `if gh release view` took the else-branch and
+#    reset the version to 1 while live was 34 (2026-07-30). Probe the REST API and
+#    branch on the HTTP STATUS instead: 200 => exists, 404 => genuinely absent,
+#    anything else (401/403/5xx) => credential/network fault, so abort rather than
+#    guess. This is what actually enforces the monotonicity rule described above.
+RELEASE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${GH_TOKEN}" \
+    -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" || echo 000)"
+case "$RELEASE_HTTP" in
+    200|404) : ;;
+    *) die "cannot determine whether release ${TAG} exists (HTTP ${RELEASE_HTTP}); refusing to guess the version — check the GITHUB_ORG_LAB_TOKEN and network" ;;
+esac
+
+if [ "$RELEASE_HTTP" = 200 ]; then
     gh release download "$TAG" --repo "$REPO" \
         --pattern 'compiled.yac.manifest.json' --dir "$WORK" --clobber \
         || die "release ${TAG} exists but its manifest could not be fetched; refusing to reset the version (re-run when gh/network recovers)"
@@ -162,7 +190,9 @@ fi
 note "version ${PREV} -> ${VERSION}, libyara ${LIBYARA}, size ${SIZE}, sha256 ${SUM:0:12}…"
 
 # 4) Publish to the rolling release (create once if absent), clobbering assets.
-if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+# Reuse the HTTP-status probe from step 1 (same reason: gh's exit status is not
+# trustworthy here). RELEASE_HTTP is 200 or 404 by now — anything else already died.
+if [ "$RELEASE_HTTP" != 200 ]; then
     note "creating rolling release ${TAG}"
     gh release create "$TAG" --repo "$REPO" \
         --title "Compiled rules (rolling)" \
