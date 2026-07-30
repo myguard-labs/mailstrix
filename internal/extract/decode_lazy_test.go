@@ -126,45 +126,118 @@ func TestLazySeenCleanProseNoSideEffects(t *testing.T) {
 	}
 }
 
-// TestLazySeenAllocsCleanProse uses testing.AllocsPerRun to assert that the
-// clean-prose path (no decode, no seen map needed) allocates fewer objects than
-// it did before PERF-28. We use a relative bound: the allocs on a prose buffer
-// must be strictly fewer than for a buffer that actually decodes something.
-// This is a directional assertion — not a hard zero — because fromEncoded still
-// allocates the sources slice, BFS queue, etc.; we just verify the seen maps
-// do not add to the prose count.
-func TestLazySeenAllocsCleanProse(t *testing.T) {
-	prose := []byte(strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20))
+// junkSource returns a buffer that passes the PERF-4 scalar pre-gate
+// (mayBeEncoded: a long run of base64-alphabet characters) but is not valid
+// base64 and decodes to nothing >= minDecodedLen in any decoder — i.e. it
+// reaches decodeSourceTree's per-source BFS state and every decoder is tried
+// against it, but no blob is ever emitted. n only perturbs the trailing run
+// length so N distinct sources are not byte-identical (PERF-39 would collapse
+// identical sources to one before the BFS, which would defeat the N-source
+// scaling TestLazySeenAllocsScaling relies on).
+func junkSource(n int) []byte {
+	return []byte(strings.Repeat("x", 300) + strings.Repeat("y", n%5))
+}
 
-	inner := "ShellPayloadForAllocComparison"
-	encoded := []byte(base64.StdEncoding.EncodeToString([]byte(inner)))
+// TestLazySeenAllocsScaling uses testing.AllocsPerRun to assert that the
+// per-source cost of a "clean" source — one that enters the BFS, is tried by
+// every decoder, and never emits a blob — does not include allocating that
+// source's seen map (PERF-28's contract: st.seen is nil until the first
+// accepted blob).
+//
+// Design notes, from measurement on this branch (grind-flaky-alloc-ceiling):
+//
+//   - Plain prose is the WRONG fixture for this test. mayBeEncoded (PERF-4,
+//     predates PERF-28, #170) rejects plain prose before it ever reaches
+//     decodeSourceTree's states slice, so prose's allocation count is governed
+//     by PERF-4, not PERF-28 — mutating PERF-28's laziness away (restoring
+//     `for i := range states { states[i].seen = make(...) }` from before
+//     #286) does not change plain-prose's alloc count at all. junkSource above
+//     is the fixture that actually exercises PERF-28: it passes PERF-4 (long
+//     alphabet run) but emits zero blobs, so it lands exactly on the "clean
+//     source with allocated-but-idle per-source state" path PERF-28 optimises.
+//
+//   - A single-call, single-source comparison (one junkSource call vs. one
+//     real-decode call) does not detect the mutation either: Go's
+//     `make(map[K]V)` with no size hint costs 0 heap allocations until the
+//     first write (verified directly), so restoring the eager
+//     `states[i].seen = make(...)` line for ONE source changes the observed
+//     alloc count by 0 on this runtime — the regression is real (it changes
+//     behaviour pre-PERF-28 vs post-PERF-28 in terms of what gets written
+//     where) but invisible to AllocsPerRun at n=1 because the empty map
+//     itself is free.
+//
+//   - Scaling to many (500) independent junk sources in one fromEncoded call
+//     makes the per-source difference observable: even though each individual
+//     `make(map[K]V)` is free, 500 of them plus their assignment into 500
+//     srcState structs is not exactly free once combined with normal escape
+//     analysis and GC bookkeeping — moving the count from ~10 (healthy) to
+//     ~15 (mutated) reproducibly on this machine. That gap is what this test
+//     asserts on, scale-invariant: allocsAt500 must not exceed a small
+//     multiple of allocsAt1's growth, not a hardcoded absolute number.
+//
+//   - An earlier version of this test asserted an absolute ceiling
+//     ("proseAllocs <= 8") on a single plain-prose call. It red CI twice
+//     (PR #345, PR #355) at "prose allocs = 9" under the Docker
+//     `-tags yara_static` test stage, on diffs that never touched
+//     internal/extract, while staying a stable 5 in a local build (with or
+//     without that tag). That ceiling was GC/build-tag-sensitive noise, not a
+//     property of the code — see memory/labs/mailstrix/TODO.md history for
+//     2026-07-14. It is replaced by this scaling design instead of just being
+//     dropped, because a same-fixture 1-vs-1 relative check (this file's
+//     previous approach) turned out not to catch the regression at all (see
+//     the n=1 note above).
+func TestLazySeenAllocsScaling(t *testing.T) {
+	const bigN = 500
 
-	proseFn := func() {
+	oneFn := func() {
 		res := &Result{childOpts: FullOptions(time.Time{})}
-		fromEncoded(prose, res, FullOptions(time.Time{}))
+		fromEncoded(junkSource(0), res, FullOptions(time.Time{}))
 	}
-	decodeFn := func() {
-		res := &Result{childOpts: FullOptions(time.Time{})}
-		fromEncoded(encoded, res, FullOptions(time.Time{}))
+
+	manyStreams := make([][]byte, 0, bigN)
+	for i := 1; i < bigN; i++ {
+		manyStreams = append(manyStreams, junkSource(i))
+	}
+	manyFn := func() {
+		res := &Result{
+			Streams:   append([][]byte(nil), manyStreams...),
+			childOpts: FullOptions(time.Time{}),
+		}
+		fromEncoded(junkSource(0), res, FullOptions(time.Time{}))
 	}
 
 	// Warm-up to stabilise the allocator.
-	proseFn()
-	decodeFn()
+	oneFn()
+	manyFn()
 
-	proseAllocs := testing.AllocsPerRun(20, proseFn)
-	decodeAllocs := testing.AllocsPerRun(20, decodeFn)
+	oneAllocs := testing.AllocsPerRun(20, oneFn)
+	manyAllocs := testing.AllocsPerRun(20, manyFn)
 
-	// The prose path must allocate fewer objects than the decode path.
-	// Before PERF-28 both paths allocated N seen-maps (N = len(sources));
-	// after, prose allocates none. This test will catch a regression where the
-	// lazy initialisation is accidentally removed.
-	if proseAllocs >= decodeAllocs {
-		t.Errorf("prose allocs (%g) >= decode allocs (%g): lazy seen-map optimisation may be missing",
-			proseAllocs, decodeAllocs)
-	}
-	if proseAllocs > 8 {
-		t.Errorf("prose allocs = %g, want <=8 after filtering non-decodable BFS sources", proseAllocs)
+	// Healthy (lazy seen-map intact) on this machine: oneAllocs ~12,
+	// manyAllocs ~10 — bigN=500 non-decoding sources in ONE fromEncoded call
+	// do NOT cost noticeably more than a single-source call, because no seen
+	// map is ever created for a source that emits nothing (per-call overhead
+	// dominates at this scale, so manyAllocs is not even required to exceed
+	// oneAllocs). Mutated (lazy init removed, i.e.
+	// `states[i].seen = make(...)` restored unconditionally for every source,
+	// matching the code before PERF-28 / #286): manyAllocs jumps to ~15,
+	// oneAllocs stays ~12 (a single empty `make(map[K]V)` costs 0 heap
+	// allocations on this runtime until the first write — verified directly —
+	// so the single-source case cannot detect this regression at all; only
+	// the 500-source case makes 500 near-zero-cost-each allocations add up to
+	// a visible difference). See the mutation record in
+	// memory/labs/mailstrix/TODO.md. A margin of oneAllocs+2 tolerates the
+	// healthy case (manyAllocs 10 <= 12+2) with headroom while still catching
+	// the mutated case (manyAllocs 15 > 12+2) — scale-invariant to the
+	// GC/build-tag noise that made the previous absolute-ceiling version of
+	// this test red CI twice on diffs that never touched internal/extract
+	// (PR #345, PR #355: "prose allocs = 9, want <=8" under Docker
+	// `-tags yara_static`, vs. a stable 5 locally).
+	if manyAllocs > oneAllocs+2 {
+		t.Errorf("bigN=%d source allocs (%g) too high relative to single-source baseline (%g): "+
+			"lazy seen-map optimisation may be missing (each of the %d non-decoding sources may be "+
+			"allocating its seen map eagerly instead of on first accepted blob)",
+			bigN, manyAllocs, oneAllocs, bigN)
 	}
 }
 
