@@ -3,10 +3,12 @@
 #
 # SINGLE SOURCE OF TRUTH for the smoke matrix. Invoked by BOTH:
 #   - .github/workflows/ci.yml   (docker job, after building strixd:ci)
-#   - tools/strixd-local-ci.sh    (full mode, after building the final image)
+#   - the superrepo's local CI gate, which lives OUTSIDE this submodule
+#     (full mode, after building the final image)
 # so a local-green admin merge can no longer miss a coverage regression that
 # only the remote smoke matrix would have caught. The hygiene test
-# packaging/deb/smoke_shared_test.sh asserts both callers invoke this script.
+# packaging/deb/smoke_shared_test.sh pins the in-repo half (ci.yml); the
+# out-of-tree caller is verified by that file's own review.
 #
 # Each smoke spins ONE container loaded with a single isolated rule file
 # (cache off), asserts positives/negatives over /scan, and tears it down.
