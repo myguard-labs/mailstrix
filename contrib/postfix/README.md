@@ -88,9 +88,13 @@ journalctl -u strix-milter -f &
 EICAR='X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
 printf 'Subject: milter test\n\n%s\n' "$EICAR" | sendmail -i you@example.org
 
-mailq            # expect the message in the hold queue
-postsuper -d ALL hold    # clean up
+mailq                    # expect the message in the hold queue
+postsuper -r <queue_id>  # release that one message, or
+postsuper -d <queue_id>  # delete it
 ```
+
+`postsuper -d ALL hold` empties the whole hold queue. On a live gateway that
+throws away every held message, not only your test one, so prefer the queue id.
 
 (The baked rules include an EICAR rule, so a real match should fire.) On a clean
 message, check the stamp survived:
