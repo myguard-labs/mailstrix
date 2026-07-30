@@ -39,13 +39,14 @@ MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE:-mail}"
 if [ "${YARAFORGE_FILTER:-1}" = "0" ]; then
     MAILSTRIX_PROFILE="full"
 fi
+
+fail() { echo "fetch-rules: $*" >&2; [ "${MAILSTRIX_RULES_OPTIONAL:-0}" = "1" ] || exit 1; }
+
 case "$MAILSTRIX_PROFILE" in
     mail|full) ;;
     *) fail "invalid MAILSTRIX_PROFILE=$MAILSTRIX_PROFILE (want mail or full)" ;;
 esac
 echo "fetch-rules: rule profile = $MAILSTRIX_PROFILE"
-
-fail() { echo "fetch-rules: $*" >&2; [ "${MAILSTRIX_RULES_OPTIONAL:-0}" = "1" ] || exit 1; }
 
 # dl NAME URL OUTFILE — download URL to OUTFILE, then (supply-chain pin) verify
 # its SHA256 against ${NAME}_SHA256 when that env var is set. A set-but-mismatched

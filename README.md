@@ -930,7 +930,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 **Other planned (open roadmap)**
 
-- [ ] **Password-protected ZIP** — body/filename/wordlist password candidates → `yeka/zip` decrypt → YARA child scan (or a `malunpacker` ICAP sidecar); decision on path 1 vs 2 pending
+- [x] **Password-protected archives** — opt-in `MAILSTRIX_ARCHIVE_PW=1` decrypts password-protected zip (ZipCrypto + WinZip-AES), 7z, and rar members using candidate passwords scraped from the mail plus an optional wordlist, then scans the recovered payload (see [`MAILSTRIX_ARCHIVE_PW`](#env-vars))
 - [ ] **TLSH fuzzy hashing** — `glaslos/tlsh` + MalwareBazaar `get_tlsh` family lookup (distance <30 = same family); needs a labelled corpus to FP-tune
 - [ ] **FP auto-tuning** — derive the empirical rule denylist from the rspamd ham corpus instead of the 3 hand-curated entries
 - [x] ~~Batch `.bat` echo-redirect dropper carving~~ — shipped (see above)

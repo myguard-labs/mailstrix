@@ -12,7 +12,7 @@ on:
   # before publishing.
   pull_request:
     # Per-item campaign PRs target the staging branch `dev` and are gated by the
-    # local CI gate only (tools/strixd-local-ci.sh); remote CI runs once on the
+    # local CI gate only (a superrepo-side wrapper); remote CI runs once on the
     # aggregate dev->main PR. Filtering on the base branch keeps PRs into dev from
     # firing this workflow while still running it for PRs into main/master.
     branches: [main, master]
@@ -146,7 +146,7 @@ jobs:
       - name: actionlint (workflow syntax + embedded shell)
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
       - name: shellcheck (rule + packaging maintainer scripts)
-        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 scripts/smoke.sh contrib/spamassassin/t/sa-lint.sh docker/fetch-rules.sh docker/compile-rules.sh docker/generate-rules.sh docker/pprof-capture.sh docker/profile/run-profile.sh packaging/deb/preremove.sh packaging/deb/postinstall.sh packaging/deb/maintscript_test.sh packaging/deb/env_keys_test.sh packaging/deb/readme_install_test.sh packaging/deb/contrib_links_test.sh packaging/deb/workflow_pins_test.sh packaging/deb/rule_source_args_test.sh packaging/deb/filter_rules_test.sh packaging/deb/smoke_shared_test.sh
+        run: docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 scripts/smoke.sh contrib/spamassassin/t/sa-lint.sh docker/fetch-rules.sh docker/fetch-rules_test.sh docker/compile-rules.sh docker/generate-rules.sh docker/pprof-capture.sh docker/profile/run-profile.sh packaging/deb/preremove.sh packaging/deb/postinstall.sh packaging/deb/maintscript_test.sh packaging/deb/env_keys_test.sh packaging/deb/readme_install_test.sh packaging/deb/contrib_links_test.sh packaging/deb/workflow_pins_test.sh packaging/deb/rule_source_args_test.sh packaging/deb/filter_rules_test.sh packaging/deb/smoke_shared_test.sh
 
       - name: deb maintainer-script behaviour (upgrade must not disable)
         run: sh packaging/deb/maintscript_test.sh
