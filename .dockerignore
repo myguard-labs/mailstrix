@@ -1,0 +1,53 @@
+# Deny-by-default build context. Every Dockerfile in this repo uses the repo
+# root as its build context (docker/Dockerfile, docker/Dockerfile.release, and
+# docker/profile/Dockerfile.profile all COPY from `.`), so anything not
+# explicitly re-included below never reaches the daemon and can't land in an
+# image layer or a `COPY . .` stage.
+#
+# Keep in sync with the actual COPY/ADD instructions when a Dockerfile changes
+# what it needs — packaging/deb/dockerignore_test.sh asserts sentinel files
+# stay out of the `test` stage's /src.
+*
+
+# ---- Go build (docker/Dockerfile `build`/`test` stages: COPY . .) ----------
+!go.mod
+!go.sum
+!NOTICE
+!cmd
+!cmd/**
+!internal
+!internal/**
+!third_party
+!third_party/**
+
+# ---- rules pipeline (all three Dockerfiles: docker/fetch-rules.sh etc.) ----
+!docker
+!docker/*.sh
+!docker/*.py
+!docker/Dockerfile
+!docker/Dockerfile.release
+!docker/local-rules
+!docker/local-rules/**
+!docker/profile
+!docker/profile/Dockerfile.profile
+!docker/profile/profile.c
+
+# ---- smoke test (CI docker job: scripts/smoke.sh strixd:ci) ----------------
+!scripts
+!scripts/smoke.sh
+
+# Everything else stays denied, including but not limited to:
+#   .git/                    - VCS metadata, never needed in an image
+#   .claude/                 - agent config
+#   .github/                 - CI workflow definitions
+#   contrib/, packaging/     - not consumed by any Dockerfile COPY/ADD
+#   rules*/                  - transient smoke-suite rule dirs (gitignored;
+#                               scripts/smoke.sh creates rules*/ in the tree)
+#   /testdata/               - the gitignored live-samples corpus at the repo
+#                               ROOT. Note internal/*/testdata/ fixtures DO
+#                               reach the context via !internal/** — the test
+#                               stage's `go test ./...` needs them.
+#   secrets/, *.token, .env* - deploy-time secrets (gitignored)
+#   *.log, coverage.txt      - build/test output (gitignored)
+#   *.test, /strixd, /strix-scan, /strix-milter, /dist/, /out/, /debout/
+#                             - compiled test/release binaries (gitignored)
