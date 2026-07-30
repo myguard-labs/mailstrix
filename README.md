@@ -41,7 +41,8 @@ compiles those rules — libyara modules and all — and runs them over your mai
 - **Postfix / Sendmail (milter)** — the lean
   [`strix-milter`](#milter-for-postfix--sendmail-strix-milter) runs on the MTA host,
   POSTs each message to strixd and stamps the verdict as a header. It **always
-  accepts**; your `header_checks` decides what to do about it.
+  accepts**; your `header_checks` decides what to do about it
+  ([`contrib/postfix/`](contrib/postfix/)).
 - **ICAP** — set `MAILSTRIX_ICAP_ADDR` and strixd also speaks ICAP (RFC 3507) so an
   ICAP-aware proxy or content-filter (Squid, c-icap) scans REQMOD/RESPMOD bodies
   through the same engine ([ICAP mode](#icap-mode-optional)).
@@ -350,6 +351,10 @@ That is deliberate:
 sudoedit /etc/mailstrix/strix-milter.env     # set MAILSTRIX_URL (+ MAILSTRIX_TOKEN)
 sudo systemctl enable --now strix-milter
 ```
+
+Ready-to-copy MTA config (Postfix `main.cf` + `header_checks`, the Sendmail
+`INPUT_MAIL_FILTER`, and a setup/test walkthrough) lives in
+**[`contrib/postfix/`](contrib/postfix/)**.
 
 ### Headers it stamps
 
