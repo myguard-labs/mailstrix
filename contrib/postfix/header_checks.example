@@ -1,0 +1,24 @@
+# /etc/postfix/header_checks — pcre. Turns the milter's verdict into policy.
+# Referenced from main.cf as: header_checks = pcre:/etc/postfix/header_checks
+#
+# After editing:  postmap -q - pcre:/etc/postfix/header_checks < sample-header
+#                 systemctl reload postfix
+#
+# NOTE these run on EVERY header of every message, including mail that never
+# passed the milter. If the MILTER ITSELF is down, milter_default_action = accept
+# means no X-Mailstrix-* header is added at all, so such mail matches nothing here
+# and is delivered. (A STRIXD outage is different: the milter is up, so it stamps
+# X-Mailstrix-Status: unknown with the reason in X-Mailstrix-Info.)
+
+# Hold anything the scanner called infected. Released with `postsuper -r`,
+# deleted with `postsuper -d`; inspect the queue with `mailq`.
+/^X-Mailstrix-Status:\s*infected/   HOLD Mailstrix: malware detected
+
+# Prefer to bounce instead of hold? Swap the line above for this one — but note
+# you are then rejecting on the health of a scanner Postfix cannot see.
+#/^X-Mailstrix-Status:\s*infected/   REJECT Mailstrix: malware detected
+
+# `unknown` means NOT SCANNED (outage, oversized, empty) — it is not a clean
+# bill of health. Default is to deliver it and let the rest of the stack judge.
+# A high-security site may prefer to hold it as well:
+#/^X-Mailstrix-Status:\s*unknown/    HOLD Mailstrix: message was not scanned

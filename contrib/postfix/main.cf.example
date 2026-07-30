@@ -1,0 +1,26 @@
+# strix-milter wiring for Postfix — merge into /etc/postfix/main.cf.
+#
+# strix-milter never rejects, defers or discards. It stamps X-Mailstrix-* and
+# always accepts; header_checks below is what turns a verdict into policy.
+
+# The milter socket. Must match MAILSTRIX_MILTER_LISTEN in
+# /etc/mailstrix/strix-milter.env (default inet:127.0.0.1:8081).
+# For the unix-socket variant shipped in the systemd unit, use instead:
+#   smtpd_milters = unix:/run/strix-milter/milter.sock
+smtpd_milters     = inet:127.0.0.1:8081
+
+# Scan locally-submitted mail too (sendmail(1)/pickup). Drop this line to scan
+# inbound SMTP only.
+non_smtpd_milters = inet:127.0.0.1:8081
+
+# REQUIRED. With the default `tempfail`, a milter outage defers your entire
+# mailflow. The whole design assumes the filter is allowed to disappear.
+milter_default_action = accept
+
+# Give the milter room to buffer + scan; -timeout defaults to 20s, so a 30s
+# MTA-side timeout lets the milter return its own `unknown` first.
+milter_connect_timeout = 30s
+milter_command_timeout = 30s
+milter_content_timeout = 300s
+
+header_checks = pcre:/etc/postfix/header_checks

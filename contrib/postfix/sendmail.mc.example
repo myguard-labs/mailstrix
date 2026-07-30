@@ -1,0 +1,23 @@
+dnl strix-milter wiring for Sendmail — add to your sendmail.mc, then rebuild:
+dnl   m4 /etc/mail/sendmail.mc > /etc/mail/sendmail.cf && systemctl restart sendmail
+dnl
+dnl S= must match MAILSTRIX_MILTER_LISTEN. Note sendmail spells an inet socket
+dnl PORT@HOST, the reverse of Postfix's HOST:PORT.
+dnl
+dnl F= is the failure action, and it is the one setting that matters most:
+dnl   F=T  tempfail if the milter is unreachable (defers mail during an outage)
+dnl   F=   (empty) accept if unreachable — matches the fail-open posture of the
+dnl        rest of this design, and the equivalent of Postfix's
+dnl        milter_default_action = accept
+dnl
+dnl T= timeouts: S=connect/send, R=read reply, E=overall end-of-message. E must
+dnl exceed the milter's own -timeout (default 20s) so the milter returns its own
+dnl `unknown` verdict rather than sendmail giving up first.
+
+INPUT_MAIL_FILTER(`strix', `S=inet:8081@127.0.0.1, F=, T=S:30s;R:30s;E:5m')
+
+dnl Unix-socket variant (matches the RuntimeDirectory in the systemd unit):
+dnl INPUT_MAIL_FILTER(`strix', `S=local:/run/strix-milter/milter.sock, F=, T=S:30s;R:30s;E:5m')
+
+dnl Sendmail has no header_checks. To act on the verdict, use a ruleset or run
+dnl the check at delivery (procmail/maildrop/Sieve) against X-Mailstrix-Status.
