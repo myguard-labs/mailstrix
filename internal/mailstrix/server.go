@@ -261,10 +261,16 @@ const License = "MIT"
 // no enforced limit or it can't be read. Supports cgroup v2 (memory.max) and v1
 // (memory.limit_in_bytes); "max" or the kernel's no-limit sentinel is unlimited.
 func cgroupMemLimitMiB() int64 {
-	for _, p := range []string{
+	return cgroupMemLimitMiBFrom(
 		"/sys/fs/cgroup/memory.max",                   // cgroup v2
 		"/sys/fs/cgroup/memory/memory.limit_in_bytes", // cgroup v1
-	} {
+	)
+}
+
+// cgroupMemLimitMiBFrom is cgroupMemLimitMiB over caller-supplied paths, tried in
+// order, so the parse and sentinel handling can be exercised without a container.
+func cgroupMemLimitMiBFrom(paths ...string) int64 {
+	for _, p := range paths {
 		b, err := os.ReadFile(p) // #nosec G304 -- fixed cgroup pseudo-file paths, not user input
 		if err != nil {
 			continue
@@ -308,7 +314,13 @@ func procRSSMiB() int64 {
 // there is no enforced quota or it can't be read. Format: "$quota $period" where
 // "max" means unlimited; quota/period gives the number of CPUs allotted.
 func cgroupCPUQuota() float64 {
-	b, err := os.ReadFile("/sys/fs/cgroup/cpu.max") // #nosec G304 -- fixed cgroup path
+	return cgroupCPUQuotaFrom("/sys/fs/cgroup/cpu.max")
+}
+
+// cgroupCPUQuotaFrom is cgroupCPUQuota over a caller-supplied path, so the
+// "$quota $period" parse can be exercised without a container.
+func cgroupCPUQuotaFrom(path string) float64 {
+	b, err := os.ReadFile(path) // #nosec G304 -- fixed cgroup path
 	if err != nil {
 		return 0
 	}
