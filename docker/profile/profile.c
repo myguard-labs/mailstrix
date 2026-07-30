@@ -57,10 +57,16 @@ static int add_dir(YR_COMPILER *comp, const char *dir, int *added) {
 static unsigned char *readfile(const char *p, size_t *len) {
   FILE *f = fopen(p, "rb");
   if (!f) return NULL;
-  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-  unsigned char *b = malloc(sz);
-  if (fread(b, 1, sz, f) != (size_t)sz) { free(b); fclose(f); return NULL; }
-  fclose(f); *len = sz; return b;
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+  long sz = ftell(f);
+  if (sz < 0 || (size_t)sz > 1000000000) { fclose(f); return NULL; }
+  if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+  /* malloc(0) may legitimately return NULL; a zero-byte sample is a valid read. */
+  unsigned char *b = malloc(sz ? (size_t)sz : 1);
+  if (!b) { fclose(f); return NULL; }
+  size_t n = (size_t)sz; /* sz >= 0 checked above, so the conversion is exact. */
+  if (fread(b, 1, n, f) != n) { free(b); fclose(f); return NULL; }
+  fclose(f); *len = n; return b;
 }
 
 int main(int argc, char **argv) {

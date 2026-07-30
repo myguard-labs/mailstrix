@@ -4,7 +4,7 @@
 # rather than re-inlining the ~13 rule/extractor smoke blocks. Guards against the
 # drift class where the inline smokes and a separate local gate diverge.
 #
-# The superrepo's tools/strixd-local-ci.sh also invokes the script, but it lives
+# The superrepo's local CI gate also invokes the script, but it lives
 # OUTSIDE this submodule, so it can't be checked from here — its invocation is
 # verified by that file's own review. This test pins the in-repo half.
 set -eu

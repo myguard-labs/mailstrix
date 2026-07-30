@@ -39,13 +39,21 @@ MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE:-mail}"
 if [ "${YARAFORGE_FILTER:-1}" = "0" ]; then
     MAILSTRIX_PROFILE="full"
 fi
-case "$MAILSTRIX_PROFILE" in
-    mail|full) ;;
-    *) fail "invalid MAILSTRIX_PROFILE=$MAILSTRIX_PROFILE (want mail or full)" ;;
-esac
-echo "fetch-rules: rule profile = $MAILSTRIX_PROFILE"
 
 fail() { echo "fetch-rules: $*" >&2; [ "${MAILSTRIX_RULES_OPTIONAL:-0}" = "1" ] || exit 1; }
+
+# NOT via fail(): MAILSTRIX_RULES_OPTIONAL downgrades a missing DOWNLOAD to a
+# warning, which is a runtime condition. An unrecognised profile is a config
+# error, and letting it through means baking an unintended rule set - the script
+# would print the diagnostic and then carry on fetching under the bad value.
+case "$MAILSTRIX_PROFILE" in
+    mail|full) ;;
+    *)
+        echo "fetch-rules: invalid MAILSTRIX_PROFILE=$MAILSTRIX_PROFILE (want mail or full)" >&2
+        exit 1
+        ;;
+esac
+echo "fetch-rules: rule profile = $MAILSTRIX_PROFILE"
 
 # dl NAME URL OUTFILE — download URL to OUTFILE, then (supply-chain pin) verify
 # its SHA256 against ${NAME}_SHA256 when that env var is set. A set-but-mismatched
