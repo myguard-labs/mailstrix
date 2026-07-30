@@ -293,9 +293,11 @@ func TestReadMiniChainPrefixLongerThanChainReturnsWholeChain(t *testing.T) {
 }
 
 func TestReadMiniChainSizeCyclicBoundedByLimitNotCycleDetection(t *testing.T) {
-	// sector 0 -> 1 -> 0. _ReadChainLimit's termination for Size/Prefix comes
-	// from the limit cap (len(result) >= limit), not the check map - so a
-	// cycle still returns bounded output even when it revisits sectors.
+	// sector 0 -> 1 -> 0. Every sector here yields real bytes, so the limit cap
+	// (len(result) >= limit) is what stops this particular cycle. That is NOT
+	// true in general: a cycle of empty sectors makes no progress toward the
+	// limit and terminates only via the check map. See
+	// TestReadMiniChainSizeEmptySectorCycleTerminates.
 	ministream := buildMiniSectors(2)
 	miniFat := []uint32{1, 0}
 	ole := miniChainOLE(ministream, miniFat)
@@ -349,4 +351,29 @@ func TestReadMiniChainVariantsAgreeOnChainLongerThanDeclaredSize(t *testing.T) {
 func timeoutCh(t *testing.T) <-chan time.Time {
 	t.Helper()
 	return time.After(200 * time.Millisecond)
+}
+
+// A cycle whose sectors all read back ZERO bytes makes no progress toward the
+// limit, so `len(result) >= limit` never fires and the limit cap cannot stop it.
+// Termination rests entirely on _ReadChainLimit's `check` map. ReadMiniSector
+// returns an empty slice for any sector starting at or past len(ministream),
+// while ReadMiniFat keeps returning ok=true as long as the index is inside
+// MiniFat, so this is reachable from a crafted mini-FAT.
+func TestReadMiniChainSizeEmptySectorCycleTerminates(t *testing.T) {
+	miniSectorSize := 1 << miniSectorShift
+	// Sector 1 begins exactly at len(ministream): ReadMiniSector clamps its
+	// read length to 0 and hands back an empty chunk rather than nil-ing out.
+	ole := miniChainOLE(make([]byte, miniSectorSize), []uint32{1, 2, 1})
+
+	done := make(chan []byte, 1)
+	go func() { done <- ole.ReadMiniChainSize(1, 1<<20) }()
+
+	select {
+	case got := <-done:
+		if len(got) != 0 {
+			t.Fatalf("empty-sector cycle returned %d bytes, want 0", len(got))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadMiniChainSize hung on a cycle of empty sectors: the cycle-detection map is the only thing bounding this loop")
+	}
 }
