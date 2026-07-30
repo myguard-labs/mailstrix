@@ -43,7 +43,10 @@
 #   contrib/, packaging/     - not consumed by any Dockerfile COPY/ADD
 #   rules*/                  - transient smoke-suite rule dirs (gitignored;
 #                               scripts/smoke.sh creates rules*/ in the tree)
-#   testdata/                - live malware sample corpus (gitignored)
+#   /testdata/               - the gitignored live-samples corpus at the repo
+#                               ROOT. Note internal/*/testdata/ fixtures DO
+#                               reach the context via !internal/** — the test
+#                               stage's `go test ./...` needs them.
 #   secrets/, *.token, .env* - deploy-time secrets (gitignored)
 #   *.log, coverage.txt      - build/test output (gitignored)
 #   *.test, /strixd, /strix-scan, /strix-milter, /dist/, /out/, /debout/

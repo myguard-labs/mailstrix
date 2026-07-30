@@ -10,9 +10,11 @@
 # text: it creates sentinel files matching each denied category directly in
 # the working tree, builds a tiny throwaway `FROM scratch` stage that does
 # `COPY . /ctx` (repo root as context, exactly like the real Dockerfiles), and
-# asserts none of the sentinels reach /ctx. Mutation-tested: deleting the
-# corresponding .dockerignore line makes the matching assertion fail (see
-# memory/labs/mailstrix/issues.md A5 entry for the recorded mutation run).
+# asserts none of the sentinels reach /ctx. Mutation-tested: deleting the `*`
+# deny-all line from .dockerignore makes every absence assertion fail (the
+# context grows from ~300 to ~420 entries and all five sentinels appear). The
+# sentinels are denied by that one line, not by per-category deny rules —
+# there are none — so `*` is the assertion these tests actually bind to.
 set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -29,10 +31,10 @@ cleanup() {
     rm -f "$root/.dockerignore-test-sentinel.tar" \
           "$root/extract.test.sentinel" \
           "$root/.env.sentinel" \
-          "$root/secrets/sentinel.token" \
+          "$root/secrets-sentinel/sentinel.token" \
           "$root/rules-sentinel/sentinel.yara" \
           "$root/build.log.sentinel" 2>/dev/null || true
-    rmdir "$root/secrets" 2>/dev/null || true
+    rmdir "$root/secrets-sentinel" 2>/dev/null || true
     rmdir "$root/rules-sentinel" 2>/dev/null || true
     docker image rm -f dockerignore-ctx-probe >/dev/null 2>&1 || true
     rm -rf "$tmpdir"
@@ -42,10 +44,10 @@ trap cleanup EXIT INT TERM
 
 # Sentinels for the categories A5 calls out: .git, secrets/tokens/env, live
 # rule corpora, logs, compiled test binaries, transient rule dirs.
-mkdir -p "$root/secrets" "$root/rules-sentinel"
+mkdir -p "$root/secrets-sentinel" "$root/rules-sentinel"
 echo "sentinel" > "$root/extract.test.sentinel"      # compiled test binary lookalike
 echo "SECRET=x" > "$root/.env.sentinel"               # env/secret file
-echo "shh" > "$root/secrets/sentinel.token"           # token under secrets/
+echo "shh" > "$root/secrets-sentinel/sentinel.token"           # token under a secrets-style dir
 echo "rule sentinel" > "$root/rules-sentinel/sentinel.yara"  # transient rule dir
 echo "log line" > "$root/build.log.sentinel"          # build/test log
 
@@ -81,8 +83,8 @@ check_absent() {
 check_absent '\.git' '.git VCS metadata'
 check_absent 'extract\.test\.sentinel' 'compiled test binary sentinel'
 check_absent '\.env\.sentinel' 'env/secret file sentinel'
-check_absent 'secrets' 'secrets/ directory'
-check_absent 'rules-sentinel' 'transient rule-dir sentinel'
+check_absent 'secrets-sentinel/sentinel\.token' 'token under a secrets-style dir'
+check_absent 'rules-sentinel/sentinel\.yara' 'transient rule-dir sentinel'
 check_absent 'build\.log\.sentinel' 'log file sentinel'
 
 # Real files docker/Dockerfile's `build`/`test` stage COPY . . actually needs
