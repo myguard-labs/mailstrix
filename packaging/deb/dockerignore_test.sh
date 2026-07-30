@@ -28,8 +28,7 @@ command -v docker >/dev/null 2>&1 || { echo "SKIP - docker not available"; exit 
 tmpdir="$(mktemp -d)"
 cleanup() {
     rc=$?
-    rm -f "$root/.dockerignore-test-sentinel.tar" \
-          "$root/extract.test.sentinel" \
+    rm -f "$root/extract.test.sentinel" \
           "$root/.env.sentinel" \
           "$root/secrets-sentinel/sentinel.token" \
           "$root/rules-sentinel/sentinel.yara" \
