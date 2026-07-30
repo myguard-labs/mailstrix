@@ -14,6 +14,7 @@ package extract
 // pure fuzz, and every truncation prefix of both, and asserts equality.
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -149,6 +150,107 @@ func biffPtgCorpus(t testing.TB) [][]byte {
 		corpus = append(corpus, s)
 		for cut := 0; cut < len(s); cut++ {
 			corpus = append(corpus, s[:cut:cut])
+		}
+	}
+
+	// The seeds above top out at 63 bytes, so none of them reaches the three limit
+	// arms in the shared loop: the maxBIFFPtgTokens break, the maxBIFFPtgStackDepth
+	// drop in push, and the maxBIFFPtgOutputLen clamp. Those arms are shared by all
+	// four dialects, so a drift there would be invisible above. Mutation testing
+	// confirms the depth-cap and token-cap off-by-ones are caught only because of
+	// the seeds below.
+	//
+	// Added AFTER the prefix expansion on purpose — these are long, and expanding
+	// every prefix of a 64 KiB seed would add ~65k corpus entries and turn a 0.2s
+	// test into a slow one. A handful of cuts per seed is enough, since the cap arms
+	// trigger on accumulated state, not on a byte boundary.
+	long := [][]byte{
+		bytes.Repeat([]byte{ptgBool, 1}, maxBIFFPtgStackDepth+64),     // depth cap
+		bytes.Repeat([]byte{ptgInt, 0x39, 0x30}, maxBIFFPtgTokens+64), // token cap
+		bytes.Repeat([]byte{ptgConcat}, maxBIFFPtgTokens+64),          // pops on empty stack
+	}
+
+	// The TOKEN cap needs a stream that burns tokens WITHOUT pushing, or the depth
+	// cap (4096) fires first and masks it: at 3 bytes per ptgInt, token 8192 lands
+	// long after push stopped accepting. ptgParen advances pos and spends a token
+	// while pushing nothing, so the token break is the only arm that can fire.
+	// NOTE: this reaches the arm but cannot OBSERVE an off-by-one on it — a
+	// ptgParen stream folds to "" either way, and the differential compares return
+	// values. Interleave operands so the token at which the fold stops is visible
+	// in the output, which is what makes a `>=` -> `>` flip detectable.
+	// The break must also land ON a pushing token, or the off-by-one is invisible:
+	// letting one extra ptgParen through pushes nothing. Keep the push count under
+	// the depth cap so the token counter stays the binding constraint, and arrange
+	// for the tokens at the boundary to be ptgBool (which pushes TRUE).
+	for _, lead := range []int{4, 1, 0} {
+		var s []byte
+		pushes := 0
+		for tok := 0; tok < maxBIFFPtgTokens+8; tok++ {
+			if tok >= maxBIFFPtgTokens-lead && pushes < maxBIFFPtgStackDepth-8 {
+				s = append(s, ptgBool, 1)
+				pushes++
+			} else {
+				s = append(s, ptgParen)
+			}
+		}
+		long = append(long, s)
+	}
+
+	// Operands at and over the output clamp. Note what these do NOT pin: flipping
+	// either clamp's `len(s) > cap` to `>= cap` is INERT, because at exactly cap
+	// the truncation s = s[:cap] is a no-op and returns the same string. Verified
+	// against the old snapshot directly, not inferred. So these seeds exercise the
+	// clamp arms and pin the truncation LENGTH; the comparison operator itself has
+	// no observable behaviour to pin — same shape as the skipRef note above.
+	{
+		// Over the clamp: 0xffff 3-byte runes decode to 196605 bytes.
+		s := []byte{ptgStr, 0xff, 0xff}
+		for i := 0; i < 0xffff; i++ {
+			s = append(s, 0x2c, 0x6f) // U+6F2C, 3 bytes in UTF-8
+		}
+		long = append(long, s)
+		long = append(long, append(append([]byte{}, s...), ptgConcat))
+
+		// EXACTLY on the clamp, which is the only length at which `len(s) > cap`
+		// and `len(s) >= cap` disagree. 65536 is not divisible by 3, so 3-byte
+		// runes can never land on it; 32768 2-byte runes (U+00E9) do.
+		for _, n := range []int{32767, 32768, 32769} {
+			e := []byte{ptgStr, byte(n & 0xff), byte(n >> 8)}
+			for i := 0; i < n; i++ {
+				e = append(e, 0xe9, 0x00) // U+00E9, 2 bytes in UTF-8
+			}
+			long = append(long, e)
+			long = append(long, append(append([]byte{}, e...), ptgConcat))
+		}
+	}
+
+	// Also cross the joinStack clamp from both sides via concatenation.
+	for _, target := range []int{maxBIFFPtgOutputLen - 1, maxBIFFPtgOutputLen, maxBIFFPtgOutputLen + 1} {
+		var s []byte
+		emitted := 0
+		for emitted+0xff <= target {
+			s = append(s, ptgStr, 0xff, 0)
+			s = append(s, bytes.Repeat([]byte("a"), 0xff)...)
+			emitted += 0xff
+			if emitted > 0xff {
+				s = append(s, ptgConcat)
+			}
+		}
+		if rem := target - emitted; rem > 0 {
+			s = append(s, ptgStr, byte(rem), 0)
+			s = append(s, bytes.Repeat([]byte("b"), rem)...)
+			s = append(s, ptgConcat)
+		}
+		long = append(long, s)
+	}
+
+	for _, s := range long {
+		corpus = append(corpus, s)
+		// A few interior cuts, including odd offsets that land mid-payload.
+		for _, cut := range []int{1, 2, 3, len(s) / 3, len(s) / 2, len(s) - 3, len(s) - 1} {
+			if cut > 0 && cut < len(s) {
+				corpus = append(corpus, s[:cut:cut])
+			}
 		}
 	}
 	return corpus
