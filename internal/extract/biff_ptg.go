@@ -173,6 +173,164 @@ var biffFuncArity = map[uint16]int{
 	119: 4, // REPLACE(old_text, start_num, num_chars, new_text)
 }
 
+// biffPtgDialect captures everything that genuinely differs between the four
+// BIFF ptg fold entry points (BIFF8/BIFF12 x plain/WithRefs). The dispatch loop
+// itself — operand stack, caps, fail-open contract, operator arity, function
+// wrapping, ptgAttr skipping — is shared in foldBIFFPtgStream.
+//
+// Two axes of divergence, both deliberately explicit rather than dedup'd away:
+//
+//  1. ENCODING (BIFF8 vs BIFF12). ptgStr is length-prefixed differently, and the
+//     reference-family tokens have different payload widths. The two flavours also
+//     differ in truncation style — BIFF8 advances by a fixed width with no bounds
+//     check (the loop condition catches the overrun next iteration) while BIFF12
+//     routes each through skipBIFF12Ptg, which bails out immediately — so skipRef
+//     carries per-flavour behaviour rather than just a size. NOTE: that particular
+//     asymmetry is provably NOT observable in the output (the only difference is
+//     one extra ""  push on the truncation path, which joinStack concatenates
+//     away); it is modelled faithfully anyway so each flavour still reads like its
+//     spec, and so a future non-empty ref rendering cannot silently change the
+//     fail-open contract. Mutation-tested: swapping skipBIFF8Ptg for skipBIFF12Ptg
+//     is the one dialect mutation TestBIFFPtgDifferentialOldVsNew cannot catch.
+//     The PAYLOAD WIDTHS, ptgStr readers and ref rendering all are observable.
+//
+//  2. REF RENDERING (plain vs WithRefs). The plain folders push "" for ptgRef;
+//     the WithRefs folders push a "[[REF:A1]]" placeholder the XLM emulator later
+//     resolves against the live grid. ptgRef3d pushes "" in all four.
+type biffPtgDialect struct {
+	// readStr folds a ptgStr token at pos. Returns the decoded string, the next
+	// position, and ok=false on truncation (caller fails open).
+	readStr func(data []byte, pos int) (s string, next int, ok bool)
+
+	// ptgRefCase folds a ptgRef token at pos. Returns the operand to push, the
+	// next position, and ok=false on truncation.
+	ptgRefCase func(data []byte, pos int) (s string, next int, ok bool)
+
+	// skipRef advances past a reference-family token (ptgArea/ptgExp/ptgRef3d/
+	// ptgArea3d) whose total size including the opcode byte is size. ok=false
+	// fails open. BIFF8 never fails here (unchecked fixed advance); BIFF12 does.
+	skipRef func(data []byte, pos, size int) (next int, ok bool)
+
+	// Total token sizes (opcode byte included) for the reference-family tokens
+	// routed through skipRef.
+	sizeArea   int
+	sizeExp    int
+	sizeRef3d  int
+	sizeArea3d int
+}
+
+// skipBIFF8Ptg advances past a fixed-width BIFF8 reference token WITHOUT a
+// bounds check, matching the original per-case `pos += N`: an overrun leaves pos
+// past len(data) and the loop condition ends the fold, returning what was folded
+// so far. Deliberately not tightened — the fail-open cut points are observable.
+func skipBIFF8Ptg(_ []byte, pos, size int) (int, bool) {
+	return pos + size, true
+}
+
+// readBIFF8PtgStr folds a BIFF8 ptgStr: 1-byte cch + 1-byte fHighByte flag
+// (0 = 8-bit chars, 1 = UTF-16LE) + the character bytes.
+func readBIFF8PtgStr(data []byte, pos int) (string, int, bool) {
+	if pos+2 >= len(data) {
+		return "", pos, false
+	}
+	cch := int(data[pos+1])
+	high := data[pos+2]
+	body := data[pos+3:]
+	if high == 1 {
+		need := cch * 2
+		if need > len(body) {
+			return "", pos, false
+		}
+		return decodeUTF16LE(body[:need]), pos + 3 + need, true
+	}
+	if cch > len(body) {
+		return "", pos, false
+	}
+	return string(body[:cch]), pos + 3 + cch, true
+}
+
+// readBIFF12PtgStr folds a BIFF12 ptgStr: uint16 charcount + UTF-16LE chars,
+// with no fHighByte flag.
+func readBIFF12PtgStr(data []byte, pos int) (string, int, bool) {
+	if pos+3 > len(data) {
+		return "", pos, false
+	}
+	cch := int(uint16(data[pos+1]) | uint16(data[pos+2])<<8)
+	body := data[pos+3:]
+	need := cch * 2
+	if need > len(body) {
+		return "", pos, false
+	}
+	return decodeUTF16LE(body[:need]), pos + 3 + need, true
+}
+
+// biff8Dialect folds BIFF8 (.xls) streams, pushing "" for cell references.
+var biff8Dialect = biffPtgDialect{
+	readStr: readBIFF8PtgStr,
+	ptgRefCase: func(_ []byte, pos int) (string, int, bool) {
+		return "", pos + 5, true // 1-byte token + 4-byte cell ref, unchecked
+	},
+	skipRef:    skipBIFF8Ptg,
+	sizeArea:   9,
+	sizeExp:    5,
+	sizeRef3d:  7,
+	sizeArea3d: 11,
+}
+
+// biff8RefsDialect is biff8Dialect with ptgRef emitting a [[REF:A1]] placeholder.
+// Unlike the plain BIFF8 ptgRef advance, this one IS bounds-checked, because it
+// must actually read the 4-byte row/col payload.
+var biff8RefsDialect = func() biffPtgDialect {
+	d := biff8Dialect
+	d.ptgRefCase = func(data []byte, pos int) (string, int, bool) {
+		// Payload: 4 bytes after the token byte — row(uint16 LE) + col(uint16 LE).
+		if pos+4 >= len(data) {
+			return "", pos, false
+		}
+		row := uint16(data[pos+1]) | uint16(data[pos+2])<<8
+		col := uint16(data[pos+3]) | uint16(data[pos+4])<<8
+		return refPlaceholder(biffCellToA1(row, col)), pos + 5, true
+	}
+	return d
+}()
+
+// biff12Dialect folds BIFF12 (.xlsb) streams, pushing "" for cell references.
+var biff12Dialect = biffPtgDialect{
+	readStr: readBIFF12PtgStr,
+	ptgRefCase: func(data []byte, pos int) (string, int, bool) {
+		next, ok := skipBIFF12Ptg(data, pos, 7)
+		return "", next, ok
+	},
+	skipRef:    skipBIFF12Ptg,
+	sizeArea:   13,
+	sizeExp:    7,
+	sizeRef3d:  9,
+	sizeArea3d: 15,
+}
+
+// biff12RefsDialect is biff12Dialect with ptgRef emitting a [[REF:A1]] placeholder.
+var biff12RefsDialect = func() biffPtgDialect {
+	d := biff12Dialect
+	d.ptgRefCase = func(data []byte, pos int) (string, int, bool) {
+		row, col, next, ok := readBIFF12PtgRef(data, pos)
+		if !ok {
+			return "", pos, false
+		}
+		return refPlaceholder(biff12CellToA1(row, col)), next, true
+	}
+	return d
+}()
+
+// refPlaceholder wraps an A1 coordinate in the [[REF:...]] marker the XLM
+// emulator resolves later. An empty coordinate (out-of-range row/col) folds to
+// "" so no bogus placeholder reaches the grid resolver.
+func refPlaceholder(a1 string) string {
+	if a1 == "" {
+		return ""
+	}
+	return "[[REF:" + a1 + "]]"
+}
+
 // parseBIFF8Formula statically folds a BIFF8 XLM formula ptg token stream into a
 // formula string. It evaluates the reverse-Polish token sequence on an operand
 // stack: literal tokens push their value, ptgConcat folds the top two operands,
@@ -185,6 +343,13 @@ var biffFuncArity = map[uint16]int{
 // stack is joined bottom-to-top so left-to-right formula order is preserved).
 // Never panics.
 func parseBIFF8Formula(data []byte) string {
+	return foldBIFFPtgStream(data, biff8Dialect)
+}
+
+// foldBIFFPtgStream is the shared ptg dispatch loop behind all four BIFF formula
+// folders; d supplies the encoding- and ref-specific behaviour. See
+// biffPtgDialect for what varies and parseBIFF8Formula for the fold contract.
+func foldBIFFPtgStream(data []byte, d biffPtgDialect) string {
 	if len(data) == 0 {
 		return ""
 	}
@@ -222,27 +387,12 @@ func parseBIFF8Formula(data []byte) string {
 			push(a + b)
 
 		case ptgStr:
-			// data[pos+1] = cch, data[pos+2] = fHighByte (0 = 8-bit, 1 = UTF-16LE).
-			if pos+2 >= len(data) {
+			s, next, ok := d.readStr(data, pos)
+			if !ok {
 				return joinStack(stack)
 			}
-			cch := int(data[pos+1])
-			high := data[pos+2]
-			body := data[pos+3:]
-			if high == 1 {
-				need := cch * 2
-				if need > len(body) {
-					return joinStack(stack)
-				}
-				push(decodeUTF16LE(body[:need]))
-				pos += 3 + need
-			} else {
-				if cch > len(body) {
-					return joinStack(stack)
-				}
-				push(string(body[:cch]))
-				pos += 3 + cch
-			}
+			push(s)
+			pos = next
 
 		case ptgInt:
 			if pos+2 >= len(data) {
@@ -311,27 +461,51 @@ func parseBIFF8Formula(data []byte) string {
 			push("")
 
 		case ptgRef:
-			pos += 5 // 1-byte token + 4-byte cell ref
-			push("")
+			// Plain folders push ""; WithRefs folders push a [[REF:A1]] placeholder.
+			s, next, ok := d.ptgRefCase(data, pos)
+			if !ok {
+				return joinStack(stack)
+			}
+			push(s)
+			pos = next
 
 		case ptgArea:
-			pos += 9 // 1-byte token + 8-byte area ref
+			next, ok := d.skipRef(data, pos, d.sizeArea)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgMemArea:
-			pos += 7 // 1-byte token + 6-byte reference-subexpression header
+			// Reference-subexpression header: same 7-byte unchecked advance in both
+			// flavours (NOT routed through skipRef — BIFF12 does not bounds-check
+			// this one either).
+			pos += 7
 			push("")
 
 		case ptgExp:
-			pos += 5 // 1-byte token + 4-byte row/col pointer
+			next, ok := d.skipRef(data, pos, d.sizeExp)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgRef3d:
-			pos += 7 // 1-byte token + 6-byte 3-D cell ref
+			next, ok := d.skipRef(data, pos, d.sizeRef3d)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgArea3d:
-			pos += 11 // 1-byte token + 10-byte 3-D area ref
+			next, ok := d.skipRef(data, pos, d.sizeArea3d)
+			if !ok {
+				return joinStack(stack)
+			}
+			pos = next
 			push("")
 
 		case ptgNameX:
