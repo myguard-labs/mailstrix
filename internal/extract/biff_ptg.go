@@ -187,7 +187,7 @@ var biffFuncArity = map[uint16]int{
 //     routes each through skipBIFF12Ptg, which bails out immediately — so skipRef
 //     carries per-flavour behaviour rather than just a size. NOTE: that particular
 //     asymmetry is provably NOT observable in the output (the only difference is
-//     one extra ""  push on the truncation path, which joinStack concatenates
+//     one extra "" push on the truncation path, which joinStack concatenates
 //     away); it is modelled faithfully anyway so each flavour still reads like its
 //     spec, and so a future non-empty ref rendering cannot silently change the
 //     fail-open contract. Mutation-tested: swapping skipBIFF8Ptg for skipBIFF12Ptg

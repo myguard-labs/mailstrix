@@ -186,6 +186,8 @@ func TestBIFFPtgDifferentialOldVsNew(t *testing.T) {
 			t.Errorf("%s: %d further mismatches suppressed", p.name, mismatches-5)
 		}
 	}
-	t.Logf("differential: %d inputs x %d parsers = %d comparisons, all byte-identical",
-		len(corpus), len(parsers), cases)
+	if !t.Failed() {
+		t.Logf("differential: %d inputs x %d parsers = %d comparisons, all byte-identical",
+			len(corpus), len(parsers), cases)
+	}
 }
