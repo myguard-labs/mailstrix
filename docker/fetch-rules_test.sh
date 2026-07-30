@@ -10,11 +10,26 @@ script="$here/fetch-rules.sh"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-# Test 1: invalid MAILSTRIX_PROFILE should produce the diagnostic message
-# (not "fail: not found")
-output=$(MAILSTRIX_PROFILE=invalid "$script" "$tmpdir" 2>&1 || true)
+# Test 1: an invalid MAILSTRIX_PROFILE must produce the diagnostic (not
+# "fail: not found") AND abort. MAILSTRIX_RULES_OPTIONAL=1 is set deliberately:
+# it downgrades a failed download to a warning, and the validation must not be
+# reachable through it. Without the exit-status assertion this test passed while
+# the script printed the diagnostic and then fetched under the bad profile.
+set +e
+output=$(MAILSTRIX_PROFILE=invalid MAILSTRIX_RULES_OPTIONAL=1 "$script" "$tmpdir" 2>&1)
+status=$?
+set -e
+if [ "$status" -eq 0 ]; then
+    echo "FAIL - invalid MAILSTRIX_PROFILE exited 0; it must abort"
+    echo "Output was: $output"
+    exit 1
+fi
+if echo "$output" | grep -q "rule profile = invalid"; then
+    echo "FAIL - invalid MAILSTRIX_PROFILE was accepted and used anyway"
+    exit 1
+fi
 if echo "$output" | grep -q "invalid MAILSTRIX_PROFILE=invalid"; then
-    echo "ok   - invalid MAILSTRIX_PROFILE produces the intended diagnostic"
+    echo "ok   - invalid MAILSTRIX_PROFILE produces the intended diagnostic and aborts"
 else
     if echo "$output" | grep -q "fail: not found"; then
         echo "FAIL - fail() was called before being defined (error: 'fail: not found')"

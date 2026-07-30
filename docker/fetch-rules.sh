@@ -42,9 +42,16 @@ fi
 
 fail() { echo "fetch-rules: $*" >&2; [ "${MAILSTRIX_RULES_OPTIONAL:-0}" = "1" ] || exit 1; }
 
+# NOT via fail(): MAILSTRIX_RULES_OPTIONAL downgrades a missing DOWNLOAD to a
+# warning, which is a runtime condition. An unrecognised profile is a config
+# error, and letting it through means baking an unintended rule set - the script
+# would print the diagnostic and then carry on fetching under the bad value.
 case "$MAILSTRIX_PROFILE" in
     mail|full) ;;
-    *) fail "invalid MAILSTRIX_PROFILE=$MAILSTRIX_PROFILE (want mail or full)" ;;
+    *)
+        echo "fetch-rules: invalid MAILSTRIX_PROFILE=$MAILSTRIX_PROFILE (want mail or full)" >&2
+        exit 1
+        ;;
 esac
 echo "fetch-rules: rule profile = $MAILSTRIX_PROFILE"
 
