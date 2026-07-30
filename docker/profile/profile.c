@@ -64,8 +64,9 @@ static unsigned char *readfile(const char *p, size_t *len) {
   /* malloc(0) may legitimately return NULL; a zero-byte sample is a valid read. */
   unsigned char *b = malloc(sz ? (size_t)sz : 1);
   if (!b) { fclose(f); return NULL; }
-  if (fread(b, 1, sz, f) != (size_t)sz) { free(b); fclose(f); return NULL; }
-  fclose(f); *len = sz; return b;
+  size_t n = (size_t)sz; /* sz >= 0 checked above, so the conversion is exact. */
+  if (fread(b, 1, n, f) != n) { free(b); fclose(f); return NULL; }
+  fclose(f); *len = n; return b;
 }
 
 int main(int argc, char **argv) {
