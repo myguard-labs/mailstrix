@@ -347,10 +347,13 @@ func TestReadMiniChainVariantsAgreeOnChainLongerThanDeclaredSize(t *testing.T) {
 }
 
 // timeoutCh returns a channel that fires after a generous bound, used only to
-// turn a hang into a test failure instead of a stuck CI job.
+// turn a hang into a test failure instead of a stuck CI job. These tests only
+// distinguish "terminates" from "loops forever", so the bound is deliberately far
+// larger than any real run needs: a tight one buys nothing and goes flaky under
+// -race on a loaded runner.
 func timeoutCh(t *testing.T) <-chan time.Time {
 	t.Helper()
-	return time.After(200 * time.Millisecond)
+	return time.After(5 * time.Second)
 }
 
 // A cycle whose sectors all read back ZERO bytes makes no progress toward the
