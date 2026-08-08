@@ -1,0 +1,8 @@
+[Unit]
+Description=Reconcile orphaned Mailstrix JIT runner LXCs
+
+[Service]
+Type=oneshot
+TimeoutStartSec=60
+EnvironmentFile=/etc/myguard-build-env
+ExecStart=/opt/mailstrix/.github/runner/reconcile-jit-lxc.sh --apply

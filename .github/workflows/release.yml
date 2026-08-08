@@ -24,7 +24,9 @@ jobs:
   # amd64 instead of after it (was a serial for-loop = sum of both).
   binaries:
     needs: gate
-    runs-on: [self-hosted, builder02, docker]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, docker]
     permissions:
       contents: read
     strategy:
@@ -68,7 +70,9 @@ jobs:
   # the just-built binaries with nfpm — no debian/ tree, pure-Go packager.
   debs:
     needs: binaries
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, lxc]
     permissions:
       contents: read
     steps:
@@ -117,7 +121,9 @@ jobs:
 
   release:
     needs: [binaries, debs]
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, lxc]
     permissions:
       contents: write   # create GitHub release + upload assets
     steps:

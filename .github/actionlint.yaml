@@ -1,2 +1,2 @@
 self-hosted-runner:
-  labels: [builder02, lxc, docker]
+  labels: [mailstrix, ephemeral, lxc, docker, canary-leave, canary-prove]

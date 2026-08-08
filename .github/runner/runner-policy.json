@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "runner_group": {
+    "name": "mailstrix-jit",
+    "organization": "myguard-labs",
+    "repository": "myguard-labs/mailstrix",
+    "visibility": "selected",
+    "default": false,
+    "restricted_to_workflows": true
+  },
+  "profiles": {
+    "docker": {
+      "snapshot": "mailstrix-runner-docker/clean",
+      "snapshot_sha256_env": "RUNNER_DOCKER_SNAPSHOT_SHA256"
+    },
+    "lxc": {
+      "snapshot": "mailstrix-runner-lxc/clean",
+      "snapshot_sha256_env": "RUNNER_LXC_SNAPSHOT_SHA256"
+    }
+  },
+  "attestation": {
+    "canary_leave_label": "canary-leave",
+    "canary_prove_label": "canary-prove"
+  },
+  "lifecycle": {
+    "command_timeout_seconds": 30,
+    "max_seconds": 3900,
+    "delete_attempts": 5,
+    "delete_delay_seconds": 2,
+    "receipt_fresh_seconds": 4200,
+    "predecessor_wait_seconds": 120,
+    "reconcile_after_seconds": 4200
+  },
+  "dispatcher": {
+    "allowed_ref_regex": "^(main|master|dev|grind-[A-Za-z0-9._-]+|[0-9a-f]{40})$",
+    "workflows": {
+      "ci": ["docker", "lint", "scanners"],
+      "maintenance": ["fuzz", "asan", "codeql", "perf-regression", "semgrep"],
+      "release": ["binaries", "debs", "release"],
+      "runner isolation": ["leave-state-outside-work", "prove-state-was-restored"]
+    },
+    "routes": {
+      "ci": {"docker": ["docker", "generic"], "lint": ["docker", "generic"], "scanners": ["docker", "generic"]},
+      "maintenance": {"fuzz": ["lxc", "generic"], "asan": ["lxc", "generic"], "codeql": ["lxc", "generic"], "perf-regression": ["docker", "generic"], "semgrep": ["docker", "generic"]},
+      "release": {"binaries": ["docker", "generic"], "debs": ["lxc", "generic"], "release": ["lxc", "generic"]},
+      "runner isolation": {"leave-state-outside-work": ["matrix", "canary-leave"], "prove-state-was-restored": ["matrix", "canary-prove"]}
+    }
+  }
+}
