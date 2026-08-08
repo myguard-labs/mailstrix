@@ -14,7 +14,9 @@ permissions:
 
 jobs:
   fuzz:
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, lxc]
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
@@ -73,7 +75,9 @@ jobs:
   # is deliberately NOT used — on a Go binary its runtime/GC trips constant false
   # positives; ASAN via the Go toolchain is the right tool for the cgo boundary.
   asan:
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, lxc]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
@@ -89,7 +93,9 @@ jobs:
         run: go test -asan ./...
 
   codeql:
-    runs-on: [self-hosted, builder02, lxc]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, lxc]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -113,7 +119,9 @@ jobs:
   # rules-current manifest instead.
 
   perf-regression:
-    runs-on: [self-hosted, builder02, docker]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, docker]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
@@ -178,7 +186,9 @@ jobs:
   # ruleset is curated; --error makes it fail the monthly job so findings surface.
   # Audit 2026-06-30.
   semgrep:
-    runs-on: [self-hosted, builder02, docker]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, docker]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]

@@ -1,0 +1,108 @@
+# A group-aware canary for the external JIT LXC dispatcher.  A simple
+# cross-host path check can false-pass on two persistent hosts, so the second
+# job also requires the dispatcher's durable deletion receipt for the first.
+name: runner isolation
+on:
+  pull_request:
+    paths:
+      - '.github/runner/**'
+      - '.github/workflows/**'
+      - 'packaging/deb/runner_isolation_test.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  leave-state-outside-work:
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [lxc, docker]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, canary-leave, '${{ matrix.profile }}']
+    timeout-minutes: 5
+    steps:
+      - name: attest sealed clone identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - /run/mailstrix-jit/attestation.json "${{ matrix.profile }}" <<'PY'
+          import json, pathlib, sys
+          receipt = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert receipt["schema"] == 2
+          assert receipt["run_id"] == int("${{ github.run_id }}")
+          assert receipt["run_attempt"] == int("${{ github.run_attempt }}")
+          assert receipt["runner_group"] == "mailstrix-jit"
+          assert receipt["runner_group_id"] > 1
+          assert receipt["profile"] == sys.argv[2]
+          assert receipt["role"] == "canary-leave"
+          assert receipt["key"] == f"r{receipt['run_id']}-a{receipt['run_attempt']}-j{receipt['job_id']}-{receipt['profile']}-{receipt['role']}"
+          assert receipt["snapshot"]["name"] == f"mailstrix-runner-{sys.argv[2]}/clean"
+          assert receipt["snapshot"]["sha256"]
+          assert receipt["predecessor"] is None
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+      - name: leave a canary outside _work
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_root="$(dirname "$(dirname "$RUNNER_TEMP")")"
+          case "$state_root" in */_work|*/_work/*) exit 1 ;; esac
+          canary="$state_root/.mailstrix-runner-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.profile }}"
+          test ! -e "$canary"
+          install -d -m 700 "$canary"
+          printf 'must disappear before the next job\n' > "$canary/probe"
+
+  prove-state-was-restored:
+    needs: leave-state-outside-work
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [lxc, docker]
+    runs-on:
+      group: mailstrix-jit
+      labels: [self-hosted, mailstrix, ephemeral, canary-prove, '${{ matrix.profile }}']
+    timeout-minutes: 5
+    steps:
+      - name: verify predecessor deletion and sealed clone identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - /run/mailstrix-jit/attestation.json "${{ matrix.profile }}" <<'PY'
+          import json, pathlib, sys
+          receipt = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          previous = receipt["predecessor"]
+          assert receipt["schema"] == 2
+          assert receipt["run_id"] == int("${{ github.run_id }}")
+          assert receipt["run_attempt"] == int("${{ github.run_attempt }}")
+          assert receipt["runner_group"] == "mailstrix-jit"
+          assert receipt["runner_group_id"] > 1
+          assert receipt["profile"] == sys.argv[2]
+          assert receipt["role"] == "canary-prove"
+          assert receipt["key"] == f"r{receipt['run_id']}-a{receipt['run_attempt']}-j{receipt['job_id']}-{receipt['profile']}-{receipt['role']}"
+          assert receipt["snapshot"]["name"] == f"mailstrix-runner-{sys.argv[2]}/clean"
+          assert receipt["snapshot"]["sha256"]
+          assert previous["deleted"] is True
+          assert previous["instance_absent"] is True
+          assert previous["schema"] == 2
+          assert previous["run_id"] == receipt["run_id"]
+          assert previous["run_attempt"] == receipt["run_attempt"]
+          assert previous["profile"] == sys.argv[2]
+          assert previous["role"] == "canary-leave"
+          assert previous["key"] == f"r{previous['run_id']}-a{previous['run_attempt']}-j{previous['job_id']}-{previous['profile']}-{previous['role']}"
+          assert previous["snapshot"]["sha256"] == receipt["snapshot"]["sha256"]
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+      - name: fail if the previous job's state survived
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_root="$(dirname "$(dirname "$RUNNER_TEMP")")"
+          case "$state_root" in */_work|*/_work/*) exit 1 ;; esac
+          canary="$state_root/.mailstrix-runner-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.profile }}"
+          if [ -e "$canary" ]; then
+            echo "runner state from the previous job survived outside _work" >&2
+            exit 1
+          fi
