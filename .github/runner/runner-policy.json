@@ -24,12 +24,12 @@
   },
   "lifecycle": {
     "command_timeout_seconds": 30,
-    "max_seconds": 3900,
+    "max_seconds": 25200,
     "delete_attempts": 5,
     "delete_delay_seconds": 2,
-    "receipt_fresh_seconds": 4200,
+    "receipt_fresh_seconds": 25500,
     "predecessor_wait_seconds": 120,
-    "reconcile_after_seconds": 4200
+    "reconcile_after_seconds": 25500
   },
   "dispatcher": {
     "allowed_ref_regex": "^(main|master|dev|grind-[A-Za-z0-9._-]+|[0-9a-f]{40})$",

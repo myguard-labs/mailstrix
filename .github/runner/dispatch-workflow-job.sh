@@ -18,7 +18,9 @@ else
     # Redelivery resumes an incomplete durable delivery rather than silently
     # acknowledging it. Completed deliveries remain idempotent.
     state_name="$(cat "$delivery_dir/state" 2>/dev/null || true)"
-    [ "$state_name" = completed ] && exit 0
+    if [ "$state_name" = completed ]; then
+        exit 0
+    fi
 fi
 
 action="$(jq -er '.action' "$event")"; full_name="$(jq -er '.repository.full_name' "$event")"

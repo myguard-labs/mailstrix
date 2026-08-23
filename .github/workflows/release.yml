@@ -148,14 +148,6 @@ jobs:
           ( cd out && sha256sum strixd-linux-* strix-scan-linux-* strix-milter-linux-* ./*.deb > SHA256SUMS )
           ls -l out
 
-      # The self-hosted lxc runner image does not ship the gh CLI.
-      - name: ensure gh CLI
-        run: |
-          command -v gh >/dev/null || {
-            sudo apt-get update
-            sudo apt-get install -y gh
-          }
-
       - name: create release
         env:
           GH_TOKEN: ${{ github.token }}

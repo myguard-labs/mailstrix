@@ -49,6 +49,7 @@ mkdir -p "$receipt_dir" "$claim_dir" "$index_dir"; chmod 700 "$state_root" "$rec
 receipt="$receipt_dir/$key.json"
 [ ! -e "$receipt" ] || { echo "receipt already exists for canonical job identity" >&2; exit 1; }
 claim="$claim_dir/$key"
+runner_registration_file="$claim/runner-registration.json"
 if mkdir "$claim" 2>/dev/null; then
     started_epoch="$(date +%s)"; started_at="$(date --iso-8601=seconds)"
     instance="mailstrix-jit-${profile}-${run_id}-${run_attempt}-${job_id}-${role}-${started_epoch}-resume"
@@ -100,6 +101,8 @@ attestation="$(jq -cn --arg key "$key" --arg group "$group_name" --arg profile "
  '{schema:2,key:$key,run_id:$run,run_attempt:$attempt,job_id:$job,runner_group:$group,runner_group_id:$group_id,profile:$profile,role:$role,instance:$instance,snapshot:{name:$snapshot,sha256:$sha},started_at:$started,started_epoch:$started_epoch,predecessor:$predecessor}')"
 launch_attempted=0
 launched=0
+runner_id=""
+runner_registration_active=0
 
 # 0=present; 1=authoritatively absent (successful list returned []); 2=operational error.
 instance_state() {
@@ -117,16 +120,32 @@ write_receipt() {
     ln "$tmp" "$receipt" 2>/dev/null || { rm -f "$tmp"; echo "receipt collision" >&2; return 1; }
     rm -f "$tmp"
 }
+delete_runner_registration() {
+    local response http_status
+    [ "$runner_registration_active" -eq 1 ] || return 0
+    if ! response="$(run_external gh api --include --silent --method DELETE "orgs/${organization}/actions/runners/${runner_id}" 2>/dev/null)"; then
+        http_status="$(awk '/^HTTP\// { status=$2 } END { print status }' <<<"$response")"
+        [ "$http_status" = 404 ] || { echo "failed to delete unused JIT runner registration $runner_id" >&2; return 1; }
+    fi
+    rm -f "$runner_registration_file"
+    runner_registration_active=0
+}
+finalize_absence() {
+    delete_runner_registration || return 1
+    if [ "$launched" -eq 1 ]; then
+        write_receipt
+    fi
+}
 cleanup() {
     local attempt=1 state
     renew_lease || return 1
     [ "$launch_attempted" -eq 1 ] || return 0
     while [ "$attempt" -le "$delete_attempts" ]; do
         if instance_state; then state=0; else state=$?; fi
-        case "$state" in 1) if [ "$launched" -eq 1 ]; then write_receipt; return $?; fi; return 0 ;; 2) echo "cannot establish LXC absence" >&2; return 1 ;; esac
+        case "$state" in 1) finalize_absence; return $? ;; 2) echo "cannot establish LXC absence" >&2; return 1 ;; esac
         run_external lxc delete --force "$instance" >/dev/null 2>&1 || true
         if instance_state; then state=0; else state=$?; fi
-        case "$state" in 1) if [ "$launched" -eq 1 ]; then write_receipt; return $?; fi; return 0 ;; 2) echo "cannot establish post-delete LXC absence" >&2; return 1 ;; esac
+        case "$state" in 1) finalize_absence; return $? ;; 2) echo "cannot establish post-delete LXC absence" >&2; return 1 ;; esac
         attempt=$((attempt + 1)); sleep "$delete_delay"
     done
     echo "failed to delete JIT LXC after $delete_attempts attempts" >&2; return 1
@@ -136,16 +155,22 @@ on_signal() { local code="$1" cleanup_status=0; trap - EXIT INT TERM; cleanup ||
 trap on_exit EXIT; trap 'on_signal 130' INT; trap 'on_signal 143' TERM
 
 labels="$(jq -cn --arg profile "$profile" --arg role "$role" '["self-hosted","mailstrix","ephemeral",$profile] + if $role == "generic" then [] else [$role] end')"
-jit_config="$(jq -cn --arg name "$instance" --argjson group "$RUNNER_GROUP_ID" --argjson labels "$labels" '{name:$name,runner_group_id:$group,labels:$labels,work_folder:"_work"}' | run_external gh api --method POST "orgs/${organization}/actions/runners/generate-jitconfig" --input - --jq '.encoded_jit_config')"
-[ -n "$jit_config" ] || { echo "empty JIT configuration" >&2; exit 1; }
+jit_response="$(jq -cn --arg name "$instance" --argjson group "$RUNNER_GROUP_ID" --argjson labels "$labels" '{name:$name,runner_group_id:$group,labels:$labels,work_folder:"_work"}' | run_external gh api --method POST "orgs/${organization}/actions/runners/generate-jitconfig" --input -)"
+runner_id="$(jq -er '.runner.id | select(type == "number" and . > 0) | tostring' <<<"$jit_response")" || { echo "missing JIT runner registration ID" >&2; exit 1; }
+launch_attempted=1
+runner_registration_active=1
+registration_tmp="$claim/.runner-registration.$$.tmp"
+jq -cn --argjson id "$runner_id" '{id:$id}' > "$registration_tmp"
+chmod 600 "$registration_tmp"
+mv -f "$registration_tmp" "$runner_registration_file"
+jit_config="$(jq -er '.encoded_jit_config | select(type == "string" and length > 0)' <<<"$jit_response")" || { echo "empty JIT configuration" >&2; exit 1; }
 if instance_state; then
     marker="$(run_external lxc config get "$instance" user.mailstrix.jit-key)"
     [ "$marker" = "$key" ] || { echo "existing claimed instance has wrong ownership marker" >&2; exit 1; }
-    launch_attempted=1; launched=1
+    launched=1
 else
     state=$?
     [ "$state" -eq 1 ] || { echo "cannot inspect partial launch state" >&2; exit 1; }
-    launch_attempted=1
     # LXD accepts -c at creation, so ownership exists in the same request that
     # creates the clone; the claim still records this deterministic name for a
     # crash between request submission and response.

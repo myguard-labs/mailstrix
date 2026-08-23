@@ -5,10 +5,19 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"; policy="$script_dir/runner-policy.j
 usage() { echo "usage: $0 --dry-run|--apply" >&2; exit 64; }
 [ "$#" -eq 1 ] || usage
 case "$1" in --dry-run) apply=0 ;; --apply) apply=1 ;; *) usage ;; esac
-command -v jq >/dev/null; command -v lxc >/dev/null; command -v timeout >/dev/null
+command -v gh >/dev/null; command -v jq >/dev/null; command -v lxc >/dev/null; command -v timeout >/dev/null
 : "${RUNNER_ATTESTATION_DIR:?RUNNER_ATTESTATION_DIR is required}"
-bound="$(jq -er '.lifecycle.reconcile_after_seconds' "$policy")"; command_timeout="$(jq -er '.lifecycle.command_timeout_seconds' "$policy")"
+bound="$(jq -er '.lifecycle.reconcile_after_seconds' "$policy")"; command_timeout="$(jq -er '.lifecycle.command_timeout_seconds' "$policy")"; organization="$(jq -er '.runner_group.organization' "$policy")"
 run_external() { timeout --foreground --kill-after=5 "${command_timeout}s" "$@"; }
+delete_runner_registration() {
+    local runner_id="$1" response http_status
+    : "${GH_TOKEN:?GH_TOKEN is required to delete a stale JIT runner registration}"
+    if response="$(run_external gh api --include --silent --method DELETE "orgs/${organization}/actions/runners/${runner_id}" 2>/dev/null)"; then
+        return 0
+    fi
+    http_status="$(awk '/^HTTP\// { status=$2 } END { print status }' <<<"$response")"
+    [ "$http_status" = 404 ] || { echo "failed to delete stale JIT runner registration $runner_id" >&2; return 1; }
+}
 now="$(date +%s)"; failed=0
 claim_root="$RUNNER_ATTESTATION_DIR/claims"; receipt_root="$RUNNER_ATTESTATION_DIR/receipts"
 # A claim is intentionally retained after a receipt (dedup/audit trail).  Only
@@ -27,8 +36,14 @@ if [ -d "$claim_root" ]; then
         [ "$expiry" -le "$now" ] || continue
         instance="$(jq -er '.instance' "$claim/identity.json" 2>/dev/null)" || continue
         [[ "$instance" =~ ^mailstrix-jit-(lxc|docker)-[0-9]+-[0-9]+-[0-9]+-(generic|canary-leave|canary-prove)-[0-9]+-resume$ ]] || continue
+        runner_id=""
+        if [ -e "$claim/runner-registration.json" ]; then
+            runner_id="$(jq -er '.id | select(type == "number" and . > 0) | tostring' "$claim/runner-registration.json" 2>/dev/null)" || { failed=1; continue; }
+        fi
         present="$(run_external lxc list "$instance" --format json)" || { failed=1; continue; }
-        if jq -e 'type == "array" and length == 1' >/dev/null <<<"$present"; then
+        exact_count="$(jq -er --arg instance "$instance" 'if type == "array" and all(.[]; type == "object" and (.name | type == "string")) then map(select(.name == $instance)) | length else error("invalid LXC listing") end' <<<"$present")" || { failed=1; continue; }
+        [ "$exact_count" -le 1 ] || { failed=1; continue; }
+        if [ "$exact_count" -eq 1 ]; then
             if [ "$apply" -eq 0 ]; then
                 printf 'would delete claim-recorded partial LXC %s\n' "$instance"
             elif ! run_external lxc delete --force "$instance"; then
@@ -37,11 +52,13 @@ if [ -d "$claim_root" ]; then
             fi
         fi
         if [ "$apply" -eq 0 ]; then
+            if [ -n "$runner_id" ]; then printf 'would delete stale JIT runner registration %s\n' "$runner_id"; fi
             printf 'would remove stale JIT claim %s\n' "$key"
             continue
         fi
         absent="$(run_external lxc list "$instance" --format json)" || { failed=1; continue; }
-        jq -e 'type == "array" and length == 0' >/dev/null <<<"$absent" || { failed=1; continue; }
+        jq -e --arg instance "$instance" 'type == "array" and all(.[]; type == "object" and (.name | type == "string")) and (map(select(.name == $instance)) | length == 0)' >/dev/null <<<"$absent" || { failed=1; continue; }
+        if [ -n "$runner_id" ] && ! delete_runner_registration "$runner_id"; then failed=1; continue; fi
         rm -rf "$claim"
     done
 fi
@@ -56,6 +73,6 @@ while IFS=$'\t' read -r name status; do
     if [ "$apply" -eq 0 ]; then printf 'would delete stale owned JIT LXC %s (%s)\n' "$name" "$status"; continue; fi
     run_external lxc delete --force "$name" || { failed=1; continue; }
     remains="$(run_external lxc list "$name" --format json)" || { failed=1; continue; }
-    jq -e 'type == "array" and length == 0' >/dev/null <<<"$remains" || { echo "owned orphan remains: $name" >&2; failed=1; }
+    jq -e --arg instance "$name" 'type == "array" and all(.[]; type == "object" and (.name | type == "string")) and (map(select(.name == $instance)) | length == 0)' >/dev/null <<<"$remains" || { echo "owned orphan remains: $name" >&2; failed=1; }
 done < <(jq -r '.[] | [.name, .status] | @tsv' <<<"$listing")
 exit "$failed"

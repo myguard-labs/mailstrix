@@ -15,11 +15,10 @@ repository, workflow/job, ref, labels, and group policy before atomically
 claiming both the delivery and the canonical run/attempt/job identity.
 
 ```sh
-RUNNER_GROUP_ID=<mailstrix-jit group ID>
-RUNNER_REPOSITORY=myguard-labs/mailstrix
-RUNNER_ATTESTATION_DIR=/var/lib/mailstrix-jit/attestations
-RUNNER_LXC_SNAPSHOT_SHA256=<sealed digest>
-RUNNER_DOCKER_SNAPSHOT_SHA256=<sealed digest>
+export RUNNER_GROUP_ID=<mailstrix-jit group ID>
+export RUNNER_ATTESTATION_DIR=/var/lib/mailstrix-jit/attestations
+export RUNNER_LXC_SNAPSHOT_SHA256=<sealed digest>
+export RUNNER_DOCKER_SNAPSHOT_SHA256=<sealed digest>
 .github/runner/dispatch-workflow-job.sh --delivery-id <delivery> --event <verified-event>
 ```
 
@@ -38,13 +37,15 @@ The next clone receives that predecessor receipt at
 job log.  This makes a green canary evidence of both a sealed clone and prior
 instance deletion, not merely two jobs landing on different persistent hosts.
 
-The launcher has a 65-minute default lifetime and does not suppress a failed
+The launcher has a 7-hour default lifetime and does not suppress a failed
 delete. The dispatcher waits up to 120 seconds for the predecessor's durable
 deletion receipt, covering GitHub's normal job-complete/runner-exit race.
 Install the included systemd service/timer on each dispatcher host to
 reconcile only marker-owned stale `mailstrix-jit-<profile>-...` instances and
 unreceipted expired claims, using the single bound in `runner-policy.json`. Run
 the reconciler with `--dry-run` first; it needs `--apply` to delete anything.
+The service orders itself after `lxd.service` and refuses to start unless
+`RUNNER_ATTESTATION_DIR` is present in `/etc/myguard-build-env`.
 
 `GH_TOKEN` is supplied through the dispatcher service environment, never a
 workflow, command line, or repository file.  For the organization JIT endpoint
