@@ -50,13 +50,27 @@ if grep -R -F 'mailstrix-jit' "$root/.github" >/dev/null; then
 	exit 1
 fi
 
-tmp="$(mktemp -d "$root/.runner-isolation-test.XXXXXX")"
+test_tmp_root="${RUNNER_ISOLATION_TEST_TMPDIR:-/tmp}"
+tmp="$(mktemp -d "$test_tmp_root/mailstrix-runner-isolation.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-RUNNER_TEMP="$tmp/state/_work/_temp"
 GITHUB_RUN_ID=10
 GITHUB_RUN_ATTEMPT=1
 RUNNER_NAME=jit-lxc-first
-export RUNNER_TEMP GITHUB_RUN_ID GITHUB_RUN_ATTEMPT RUNNER_NAME
+export GITHUB_RUN_ID GITHUB_RUN_ATTEMPT RUNNER_NAME
+
+# The harness itself must prove the production guard still rejects a checkout-
+# relative fixture when Actions places that checkout beneath `_work`.
+RUNNER_TEMP="$tmp/fake/_work/mailstrix/mailstrix/state/_work/_temp"
+export RUNNER_TEMP
+mkdir -p "$RUNNER_TEMP"
+if "$probe" leave lxc >"$tmp/inside-work.log" 2>&1; then
+	echo "inside-_work negative control unexpectedly passed" >&2
+	exit 1
+fi
+grep -F 'runner state root resolves inside _work:' "$tmp/inside-work.log" >/dev/null
+
+RUNNER_TEMP="$tmp/state/_work/_temp"
+export RUNNER_TEMP
 mkdir -p "$RUNNER_TEMP"
 "$probe" leave lxc
 canary="$tmp/state/.mailstrix-runner-isolation-10-1-lxc"
