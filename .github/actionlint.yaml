@@ -1,2 +1,2 @@
 self-hosted-runner:
-  labels: [builder02, lxc, docker]
+  labels: [builder02, b02lxc, lxc, docker]
