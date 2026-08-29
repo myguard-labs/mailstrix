@@ -24,9 +24,7 @@ jobs:
   # amd64 instead of after it (was a serial for-loop = sum of both).
   binaries:
     needs: gate
-    runs-on:
-      group: mailstrix-jit
-      labels: [self-hosted, mailstrix, ephemeral, docker]
+    runs-on: [self-hosted, builder02, docker]
     permissions:
       contents: read
     strategy:
@@ -70,9 +68,7 @@ jobs:
   # the just-built binaries with nfpm — no debian/ tree, pure-Go packager.
   debs:
     needs: binaries
-    runs-on:
-      group: mailstrix-jit
-      labels: [self-hosted, mailstrix, ephemeral, lxc]
+    runs-on: [self-hosted, builder02, lxc]
     permissions:
       contents: read
     steps:
@@ -121,9 +117,7 @@ jobs:
 
   release:
     needs: [binaries, debs]
-    runs-on:
-      group: mailstrix-jit
-      labels: [self-hosted, mailstrix, ephemeral, lxc]
+    runs-on: [self-hosted, builder02, lxc]
     permissions:
       contents: write   # create GitHub release + upload assets
     steps:
@@ -147,6 +141,14 @@ jobs:
           set -euo pipefail
           ( cd out && sha256sum strixd-linux-* strix-scan-linux-* strix-milter-linux-* ./*.deb > SHA256SUMS )
           ls -l out
+
+      # The self-hosted lxc runner image does not ship the gh CLI.
+      - name: ensure gh CLI
+        run: |
+          command -v gh >/dev/null || {
+            sudo apt-get update
+            sudo apt-get install -y gh
+          }
 
       - name: create release
         env:

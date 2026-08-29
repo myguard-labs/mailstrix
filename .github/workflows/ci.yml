@@ -32,9 +32,7 @@ jobs:
   # `go vet` + `go test -race -tags yara_static`; then we build the final image,
   # run it against a local EICAR rule, and smoke the HTTP contract.
   docker:
-    runs-on:
-      group: mailstrix-jit
-      labels: [self-hosted, mailstrix, ephemeral, docker]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -76,9 +74,7 @@ jobs:
         run: scripts/smoke.sh strixd:ci
 
   lint:
-    runs-on:
-      group: mailstrix-jit
-      labels: [self-hosted, mailstrix, ephemeral, docker]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
@@ -141,9 +137,7 @@ jobs:
   # via pinned upstream images instead of marketplace actions to avoid pulling
   # extra third-party Actions into the supply chain.
   scanners:
-    runs-on:
-      group: mailstrix-jit
-      labels: [self-hosted, mailstrix, ephemeral, docker]
+    runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
@@ -162,9 +156,7 @@ jobs:
             docker/generate-rules.sh \
             docker/pprof-capture.sh \
             docker/profile/run-profile.sh \
-            .github/runner/jit-lxc-runner.sh \
-            .github/runner/dispatch-workflow-job.sh \
-            .github/runner/reconcile-jit-lxc.sh \
+            .github/runner/isolation-canary.sh \
             packaging/deb/preremove.sh \
             packaging/deb/postinstall.sh \
             packaging/deb/maintscript_test.sh \
@@ -184,7 +176,7 @@ jobs:
       - name: SHA-pinned actions consistent across workflows
         run: sh packaging/deb/workflow_pins_test.sh
 
-      - name: self-hosted runners are JIT LXC snapshots
+      - name: self-hosted runners use disposable builder slots
         run: sh packaging/deb/runner_isolation_test.sh
 
       - name: documented rule-source build-args reach the build
