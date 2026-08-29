@@ -1,7 +1,9 @@
-# Canary for the shared disposable builder-slot contract. Each serial pair uses
-# the singleton selector for one physical slot, avoiding cross-host false passes.
+---
+# Canary for the shared disposable builder-slot contract. Each serial pair
+# uses the singleton selector for one physical slot, avoiding cross-host false
+# passes.
 name: runner isolation
-on:
+"on":
   pull_request:
     paths:
       - '.github/runner/**'
@@ -14,63 +16,59 @@ permissions:
 
 jobs:
   leave-lxc-state:
-    runs-on: [self-hosted, b02lxc, lxc]
+    runs-on:
+      - self-hosted
+      - b02lxc
+      - lxc
     timeout-minutes: 5
     steps:
+      # yamllint disable rule:line-length
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
-      - name: record JIT identity and leave host state
+      # yamllint enable rule:line-length
+      - name: leave host state outside the work directory
         shell: bash
         run: .github/runner/isolation-canary.sh leave lxc
-      - name: preserve predecessor identity
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: runner-isolation-${{ github.run_id }}-${{ github.run_attempt }}-lxc
-          path: ${{ runner.temp }}/runner-identity
-          retention-days: 1
-          if-no-files-found: error
 
   prove-lxc-restore:
     needs: leave-lxc-state
-    runs-on: [self-hosted, b02lxc, lxc]
+    runs-on:
+      - self-hosted
+      - b02lxc
+      - lxc
     timeout-minutes: 5
     steps:
+      # yamllint disable rule:line-length
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
-      - name: retrieve predecessor identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
-        with:
-          name: runner-isolation-${{ github.run_id }}-${{ github.run_attempt }}-lxc
-          path: ${{ runner.temp }}/predecessor
-      - name: prove fresh identity and pristine restore
+      # yamllint enable rule:line-length
+      - name: prove pristine restore
         shell: bash
         run: .github/runner/isolation-canary.sh prove lxc
 
   leave-docker-state:
-    runs-on: [self-hosted, builder02, docker]
+    runs-on:
+      - self-hosted
+      - builder02
+      - docker
     timeout-minutes: 5
     steps:
+      # yamllint disable rule:line-length
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
-      - name: record JIT identity and leave host state
+      # yamllint enable rule:line-length
+      - name: leave host state outside the work directory
         shell: bash
         run: .github/runner/isolation-canary.sh leave docker
-      - name: preserve predecessor identity
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: runner-isolation-${{ github.run_id }}-${{ github.run_attempt }}-docker
-          path: ${{ runner.temp }}/runner-identity
-          retention-days: 1
-          if-no-files-found: error
 
   prove-docker-restore:
     needs: leave-docker-state
-    runs-on: [self-hosted, builder02, docker]
+    runs-on:
+      - self-hosted
+      - builder02
+      - docker
     timeout-minutes: 5
     steps:
+      # yamllint disable rule:line-length
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
-      - name: retrieve predecessor identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
-        with:
-          name: runner-isolation-${{ github.run_id }}-${{ github.run_attempt }}-docker
-          path: ${{ runner.temp }}/predecessor
-      - name: prove fresh identity and pristine restore
+      # yamllint enable rule:line-length
+      - name: prove pristine restore
         shell: bash
         run: .github/runner/isolation-canary.sh prove docker

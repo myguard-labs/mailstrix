@@ -12,7 +12,7 @@ label, `docker` or `lxc`. The runner-isolation workflow exercises both profiles
 in serial job pairs. Its LXC pair uses the unique `b02lxc+lxc` selector; its
 Docker pair uses the unique `builder02+docker` selector. These intersections
 must remain single-slot selectors so each successor returns to the predecessor's
-physical slot. Each first job records its JIT identity and leaves a file outside
-`_work`; its successor must observe a different identity and no file. Together
-those checks detect both identity reuse and failure to restore the slot's golden
-snapshot between jobs.
+physical slot. Each first job leaves a file outside `_work`; its successor must
+observe that the file is gone. This tests the restore-mediated removal of
+cross-job state. `RUNNER_NAME` is deliberately not used as evidence: the shared
+service may reuse a slot name while issuing a fresh single-job JIT registration.

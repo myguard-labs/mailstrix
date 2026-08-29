@@ -23,20 +23,12 @@ esac
 canary="$state_root/.mailstrix-runner-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${profile}"
 
 if [ "$mode" = leave ]; then
-	test -n "$RUNNER_NAME"
-	printf '%s\n' "$RUNNER_NAME" >"$RUNNER_TEMP/runner-identity"
 	test ! -e "$canary"
 	install -d -m 700 "$canary"
 	printf 'must disappear before the next job\n' >"$canary/probe"
 	exit 0
 fi
 
-previous="$(cat "$RUNNER_TEMP/predecessor/runner-identity")"
-test -n "$previous"
-if [ "$RUNNER_NAME" = "$previous" ]; then
-	echo "JIT runner identity was reused across jobs: $RUNNER_NAME" >&2
-	exit 1
-fi
 if [ -e "$canary" ]; then
 	echo "runner state from the previous job survived pristine restore" >&2
 	exit 1

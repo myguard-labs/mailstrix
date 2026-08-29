@@ -43,8 +43,11 @@ assert canary["prove-docker-restore"]["needs"] == "leave-docker-state"
 PY
 
 probe="$root/.github/runner/isolation-canary.sh"
-grep -F "if [ \"\$RUNNER_NAME\" = \"\$previous\" ]" "$probe" >/dev/null
 grep -F 'runner state from the previous job survived pristine restore' "$probe" >/dev/null
+if grep -F 'RUNNER_NAME' "$probe" >/dev/null; then
+	echo "RUNNER_NAME must not be treated as JIT registration identity" >&2
+	exit 1
+fi
 if grep -R -F 'mailstrix-jit' "$root/.github" >/dev/null; then
 	echo "repository-local runner group/dispatcher contract survived" >&2
 	exit 1
@@ -55,8 +58,7 @@ tmp="$(mktemp -d "$test_tmp_root/mailstrix-runner-isolation.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 GITHUB_RUN_ID=10
 GITHUB_RUN_ATTEMPT=1
-RUNNER_NAME=jit-lxc-first
-export GITHUB_RUN_ID GITHUB_RUN_ATTEMPT RUNNER_NAME
+export GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
 
 # The harness itself must prove the production guard still rejects a checkout-
 # relative fixture when Actions places that checkout beneath `_work`.
@@ -75,27 +77,16 @@ mkdir -p "$RUNNER_TEMP"
 "$probe" leave lxc
 canary="$tmp/state/.mailstrix-runner-isolation-10-1-lxc"
 test -e "$canary/probe"
-mkdir -p "$RUNNER_TEMP/predecessor"
-cp "$RUNNER_TEMP/runner-identity" "$RUNNER_TEMP/predecessor/runner-identity"
 rm -rf "$canary"
-RUNNER_NAME=jit-lxc-second
-export RUNNER_NAME
 "$probe" prove lxc
 
-RUNNER_NAME=jit-docker-first
 GITHUB_RUN_ID=11
-export RUNNER_NAME GITHUB_RUN_ID
+export GITHUB_RUN_ID
 "$probe" leave docker
-mkdir -p "$RUNNER_TEMP/predecessor"
-cp "$RUNNER_TEMP/runner-identity" "$RUNNER_TEMP/predecessor/runner-identity"
-if "$probe" prove docker 2>/dev/null; then
-	echo "identity-reuse negative control unexpectedly passed" >&2
-	exit 1
-fi
-RUNNER_NAME=jit-docker-second
-export RUNNER_NAME
 if "$probe" prove docker 2>/dev/null; then
 	echo "surviving-state negative control unexpectedly passed" >&2
 	exit 1
 fi
-echo "ok - shared disposable singleton slots and both-profile canary"
+rm -rf "$tmp/state/.mailstrix-runner-isolation-11-1-docker"
+"$probe" prove docker
+echo "ok - shared disposable singleton slots and both-profile restore canary"
