@@ -114,16 +114,19 @@ jobs:
       # different runner image can be incomplete, and the self-hosted runner
       # does not have ~/go/bin on PATH by default.
       - name: install analysis tools
-        env:
-          STATICCHECK_VERSION: ${{ steps.toolvers.outputs.staticcheck }}
-          GOVULNCHECK_VERSION: ${{ steps.toolvers.outputs.govulncheck }}
-          GOSEC_VERSION: ${{ steps.toolvers.outputs.gosec }}
         run: |
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/go/bin:$PATH"
-          command -v staticcheck >/dev/null || go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
-          command -v govulncheck >/dev/null || go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
-          command -v gosec >/dev/null || go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          if [ "${{ steps.gotools.outputs.cache-hit }}" != true ]; then
+            rm -f "$HOME/go/bin/staticcheck" \
+              "$HOME/go/bin/govulncheck" "$HOME/go/bin/gosec"
+          fi
+          [ -x "$HOME/go/bin/staticcheck" ] ||
+            go install "honnef.co/go/tools/cmd/staticcheck@v0.7.0"
+          [ -x "$HOME/go/bin/govulncheck" ] ||
+            go install "golang.org/x/vuln/cmd/govulncheck@v1.6.0"
+          [ -x "$HOME/go/bin/gosec" ] ||
+            go install "github.com/securego/gosec/v2/cmd/gosec@v2.27.1"
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd internal)

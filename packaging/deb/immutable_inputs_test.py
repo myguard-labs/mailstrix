@@ -28,7 +28,21 @@ IMAGE_PINS = {
         "e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48"
     ),
 }
-PINNED_IMAGE_REPOSITORIES = {image.rsplit(":", 1)[0] for image in IMAGE_PINS}
+
+
+def _canonical_image_label(label: str) -> str:
+    """Normalize equivalent Docker Hub names for reviewed-pin comparison."""
+    for prefix in ("docker.io/", "index.docker.io/", "registry-1.docker.io/"):
+        if label.startswith(prefix):
+            label = label[len(prefix) :]
+            break
+    return "library/" + label if "/" not in label else label
+
+
+CANONICAL_IMAGE_PINS = {
+    _canonical_image_label(label): digest for label, digest in IMAGE_PINS.items()
+}
+PINNED_IMAGE_REPOSITORIES = {image.rsplit(":", 1)[0] for image in CANONICAL_IMAGE_PINS}
 YARA_PINS = {
     "4.5.2": "1f87056fcb10ee361936ee7b0548444f7974612ebb0e681734d8de7df055d1ec"
 }
@@ -80,9 +94,10 @@ def _image_repository(image: str) -> str:
 def _pin_association_errors(image: str) -> list[str]:
     """Bind reviewed readable image labels to their verified index digests."""
     label, separator, digest = image.partition("@sha256:")
-    if not separator or _image_repository(label) not in PINNED_IMAGE_REPOSITORIES:
+    canonical = _canonical_image_label(label)
+    if not separator or _image_repository(canonical) not in PINNED_IMAGE_REPOSITORIES:
         return []
-    expected = IMAGE_PINS.get(label)
+    expected = CANONICAL_IMAGE_PINS.get(canonical)
     if expected is None:
         return ["Docker image label has no reviewed digest: " + label]
     if digest != expected:
@@ -122,11 +137,48 @@ def _frontend_errors(frontend: str) -> list[str]:
     return _pin_association_errors(frontend)
 
 
+def _external_sources(line: str) -> list[str]:
+    """Extract image/stage sources from COPY and RUN mount instructions."""
+    sources = []
+    if re.match(r"COPY\s", line, re.IGNORECASE):
+        sources.extend(re.findall(r"--from=([^\s]+)", line, re.IGNORECASE))
+    if re.match(r"RUN\s", line, re.IGNORECASE):
+        sources.extend(
+            re.findall(r"--mount=[^\s]*?\bfrom=([^,\s]+)", line, re.IGNORECASE)
+        )
+    return [source.strip("\"'") for source in sources]
+
+
+def _external_source_errors(
+    line: str,
+    args: dict[str, str],
+    stages: set[str],
+    local_images: frozenset[str],
+) -> list[str]:
+    """Validate every external COPY or RUN mount image source."""
+    errors = []
+    for raw_source in _external_sources(line):
+        source = _expand_args(raw_source, args)
+        errors.extend(_docker_image_errors(source, raw_source, stages, local_images))
+    return errors
+
+
 def _yaml_uses(text: str) -> tuple[list[tuple[int, str]], list[str]]:
     """Extract supported block-style uses values and reject flow-style steps."""
     uses = []
     errors = []
     for lineno, line in enumerate(text.splitlines(), 1):
+        code = line.split("#", 1)[0]
+        stripped = code.lstrip()
+        unsupported_key = (
+            re.match(r"(?:-\s*)?\?", stripped)
+            or re.search(r'(?:^|[{,])\s*(?:-\s*)?"[^"\n]*\\[^"\n]*"\s*:', stripped)
+            or "!!" in code
+            or re.search(r"(?:^|[{,])\s*(?:-\s*)?\*[A-Za-z0-9_-]+\s*:", stripped)
+        )
+        if unsupported_key:
+            errors.append(f"line {lineno}: unsupported YAML key syntax; use plain keys")
+            continue
         if FLOW_USES.search(line):
             errors.append(
                 f"line {lineno}: flow-style uses mappings are unsupported; use block style"
@@ -136,6 +188,11 @@ def _yaml_uses(text: str) -> tuple[list[tuple[int, str]], list[str]]:
         if match:
             value = next(value for value in match.groups() if value is not None)
             uses.append((lineno, value.strip()))
+            continue
+        if re.search(r"(?:^|[\s{?])(?:uses|\"uses\"|'uses')(?=\s*:|\s*$)", code):
+            errors.append(
+                f"line {lineno}: unsupported uses key syntax; use a plain block key"
+            )
     return uses, errors
 
 
@@ -154,34 +211,20 @@ def _local_uses_file(root: Path, value: str) -> Path | None:
     return None
 
 
-def _resolved_go_version(text: str, variable: str) -> str | None:
-    """Resolve one workflow output-backed tool version without shell overrides."""
-    env_pattern = (
-        rf"(?m)^\s*{re.escape(variable)}:\s*\$\{{\{{\s*steps\."
-        r"[A-Za-z0-9_-]+\.outputs\.([A-Za-z0-9_-]+)\s*\}\}\s*$"
-    )
-    outputs = set(re.findall(env_pattern, text))
-    if len(outputs) != 1:
-        return None
-    output = next(iter(outputs))
-    version_pattern = (
-        rf'(?m)^\s*echo\s+"{re.escape(output)}='
-        r'(v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)"(?:\s*>>.*)?$'
-    )
-    versions = set(re.findall(version_pattern, text))
-    overridden = re.search(rf"(?m)^\s*(?:export\s+)?{re.escape(variable)}=", text)
-    return next(iter(versions)) if len(versions) == 1 and not overridden else None
-
-
 def _go_install_errors(root: Path, path: Path, text: str) -> list[str]:
     """Reject mutable Go tool versions in workflow shell blocks."""
     errors = []
     for lineno, line in enumerate(text.splitlines(), 1):
+        if re.match(r"^\s*(?:-\s*)?run\s*:\s*>[+-]?\s*(?:#.*)?$", line):
+            relative = path.relative_to(root)
+            errors.append(
+                f"{relative}:{lineno}: folded run scalars are unsupported; use |"
+            )
+            continue
         for match in re.finditer(r'go install\s+"?([^"\s]+)', line):
             ref = match.group(1)
             exact = re.search(r"@v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$", ref)
-            variable = re.search(r"@\$\{([A-Za-z_][A-Za-z0-9_]*)\}$", ref)
-            if exact or (variable and _resolved_go_version(text, variable.group(1))):
+            if exact:
                 continue
             relative = path.relative_to(root)
             errors.append(
@@ -264,6 +307,7 @@ def docker_errors(text: str, local_images: frozenset[str] = frozenset()) -> list
     """Require immutable external images and checked YARA extraction."""
     errors = []
     stages = {"scratch"}
+    stage_number = 0
     args = {}
     yara_recipes = 0
     # Join only Docker continuation lines; command chaining remains significant.
@@ -284,8 +328,11 @@ def docker_errors(text: str, local_images: frozenset[str] = frozenset()) -> list
             raw_image = fields[1]
             image = _expand_args(raw_image, args)
             errors.extend(_docker_image_errors(image, raw_image, stages, local_images))
+            stages.add(str(stage_number))
+            stage_number += 1
             if len(fields) == 4 and fields[2].lower() == "as":
                 stages.add(fields[3].lower())
+        errors.extend(_external_source_errors(line, args, stages, local_images))
         if (
             "github.com/VirusTotal/yara/" in line
             and not line.startswith("#")
@@ -395,6 +442,17 @@ class PinFixtures(unittest.TestCase):
         )
         self.assertIn("Docker external base", docker_errors("FROM unknown_stage")[0])
 
+    def test_external_copy_and_mount_sources(self) -> None:
+        for instruction in (
+            "COPY --from=example.test/tool:1 /bin/tool /bin/tool",
+            "RUN --mount=type=bind,from=example.test/tool:1,target=/tool true",
+        ):
+            self.assertIn(
+                "Docker external base", docker_errors("FROM scratch\n" + instruction)[0]
+            )
+            pinned = instruction.replace(":1", f":1@sha256:{self.digest}")
+            self.assertEqual([], docker_errors("FROM scratch\n" + pinned))
+
     def test_frontend(self) -> None:
         self.assertEqual(
             [], docker_errors(f"# syntax=example.test/frontend:1@sha256:{self.digest}")
@@ -416,9 +474,15 @@ class PinFixtures(unittest.TestCase):
             f"FROM golang:${{GO_VERSION}}-bookworm@sha256:{digest}\n"
         )
         self.assertEqual([], docker_errors(recipe))
+        qualified = recipe.replace("FROM golang:", "FROM docker.io/library/golang:")
+        self.assertEqual([], docker_errors(qualified))
         self.assertIn(
             "label has no reviewed digest",
             docker_errors(recipe.replace("1.25.13", "9.99.99"))[0],
+        )
+        self.assertIn(
+            "label has no reviewed digest",
+            docker_errors(qualified.replace("1.25.13", "9.99.99"))[0],
         )
         self.assertIn(
             "label/digest pair",

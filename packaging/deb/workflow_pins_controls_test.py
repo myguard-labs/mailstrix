@@ -96,6 +96,48 @@ class TestWorkflowControls(unittest.TestCase):
         )
         self.reject("flow-style uses")
 
+    def test_explicit_uses_key_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - ? uses\n    : example/test@v5\n",
+        )
+        self.reject("unsupported YAML key syntax")
+
+    def test_tagged_uses_key_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - !!str uses: example/test@v5\n",
+        )
+        self.reject("unsupported YAML key syntax")
+
+    def test_multiline_uses_value_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - uses:\n      example/test@v5\n",
+        )
+        self.reject("unsupported uses key syntax")
+
+    def test_escaped_uses_key_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            'steps:\n  - "\\u0075ses": example/test@v5\n',
+        )
+        self.reject("unsupported YAML key syntax")
+
+    def test_escaped_flow_uses_key_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            'steps: [{ "\\u0075ses": example/test@v5 }]\n',
+        )
+        self.reject("unsupported YAML key syntax")
+
+    def test_alias_mapping_key_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            'env:\n  KEY: &u "\\u0075ses"\nsteps:\n  - *u: example/test@v5\n',
+        )
+        self.reject("unsupported YAML key syntax")
+
     def test_quoted_uses_key_is_scanned(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
@@ -110,7 +152,7 @@ class TestWorkflowControls(unittest.TestCase):
         )
         self.reject("go install without an exact pinned version")
 
-    def test_go_install_output_version_is_exact(self) -> None:
+    def test_go_install_output_version_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
             "steps:\n"
@@ -121,8 +163,14 @@ class TestWorkflowControls(unittest.TestCase):
             "      TOOL_VERSION: ${{ steps.pins.outputs.tool }}\n"
             '    run: go install "example.test/tool@${TOOL_VERSION}"\n',
         )
-        result = self.gate()
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.reject("go install without an exact pinned version")
+
+    def test_folded_go_install_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - run: >\n      go install\n      example.test/tool@latest\n",
+        )
+        self.reject("folded run scalars are unsupported")
 
     def test_local_action_outside_dot_github_is_scanned(self) -> None:
         self.write(
