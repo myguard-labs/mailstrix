@@ -477,11 +477,10 @@ func foldVBAVarReplaceMatched(src []byte, deadline time.Time, emit func([]byte) 
 	// Phase 2 — resolve one level of trivial alias: identifier = otherIdentifier.
 	for _, m := range reVBAAlias.FindAllSubmatch(src, -1) {
 		name := string(m[1])
-		src2 := string(m[2])
 		if _, exists := varMap[name]; exists {
 			continue // already have a literal binding — don't overwrite
 		}
-		if val, ok := varMap[src2]; ok {
+		if val, ok := varMap[string(m[2])]; ok {
 			varMap[name] = val
 		}
 	}
