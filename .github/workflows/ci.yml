@@ -2,7 +2,7 @@
 # libyara); `lint` + `scanners` run alongside. Deep/slow, low-per-PR-yield checks
 # (asan, codeql, fuzz) run MONTHLY in maintenance.yml, NOT on every PR. Exposed
 # via workflow_call so release.yml runs this same gate before publishing. Build
-# with go 1.25 — the 1.24 branch no longer gets the stdlib security fixes
+# with go 1.26 — older branches no longer get the stdlib security fixes
 # govulncheck enforces.
 name: ci
 on:
@@ -104,7 +104,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ~/go/bin
-          key: gotools-${{ runner.os }}-go1.25-selfhosted-sc${{ steps.toolvers.outputs.staticcheck }}-gv${{ steps.toolvers.outputs.govulncheck }}-gs${{ steps.toolvers.outputs.gosec }}
+          key: gotools-${{ runner.os }}-go1.26-selfhosted-sc${{ steps.toolvers.outputs.staticcheck }}-gv${{ steps.toolvers.outputs.govulncheck }}-gs${{ steps.toolvers.outputs.gosec }}
       # Presence-guarded (not just cache-hit): a cache blob restored from a
       # different runner image can be incomplete, and the self-hosted runner
       # does not have ~/go/bin on PATH by default.
@@ -168,6 +168,7 @@ jobs:
             packaging/deb/rule_source_args_test.sh \
             packaging/deb/filter_rules_test.sh \
             packaging/deb/smoke_shared_test.sh \
+            packaging/deb/benchmark_command_test.sh \
             packaging/deb/dockerignore_test.sh
 
       - name: deb maintainer-script behaviour (upgrade must not disable)
@@ -197,15 +198,18 @@ jobs:
       - name: smoke matrix is a shared script invoked by ci.yml
         run: sh packaging/deb/smoke_shared_test.sh
 
+      - name: maintenance benchmark matches the Docker test contract
+        run: sh packaging/deb/benchmark_command_test.sh
+
       - name: .dockerignore keeps secrets/logs/binaries out of the build context
         run: sh packaging/deb/dockerignore_test.sh
       - name: hadolint (Dockerfile; .hadolint.yaml ignores)
         run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile docker/Dockerfile.release
       - name: osv-scanner (go.mod/go.sum dependency CVEs)
-        # --no-call-analysis=go: the v1.9.2 image bundles Go 1.23.4, which cannot
-        # run govulncheck call-analysis against this go1.25 module (fails "requires
-        # go >= 1.25.0"). Dependency-presence scanning still runs; reachability is
-        # covered by the dedicated govulncheck lint job on the pinned toolchain.
+        # --no-call-analysis=go: the v1.9.2 image bundles Go 1.23.4, which
+        # cannot run govulncheck call-analysis against this go1.26 module
+        # (fails "requires go >= 1.26.0"). Dependency-presence scanning still
+        # runs; the pinned-toolchain govulncheck job covers reachability.
         run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v1.9.2 --no-call-analysis=go --lockfile=go.mod
 
       - name: zizmor (Actions supply-chain hardening)

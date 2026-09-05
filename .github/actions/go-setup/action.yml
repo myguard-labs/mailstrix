@@ -1,6 +1,6 @@
 name: Go + libyara setup
 description: >
-  Set up Go 1.25 (with go.sum module cache) and install libyara-dev — the CGO
+  Set up Go 1.26 (with go.sum module cache) and install libyara-dev — the CGO
   dependency every build-based job needs. Optional extra apt packages via the
   `packages` input (e.g. clang for the ASan job). Factored out so lint/asan/
   codeql/fuzz share one definition instead of repeating setup-go + apt.
@@ -15,12 +15,12 @@ runs:
   steps:
     - uses: actions/setup-go@v5
       with:
-        # Pin the exact patch, not the "1.25" line: a self-hosted runner caches
-        # the toolchain and "1.25" matches a stale cached 1.25.11 without
-        # fetching newer patches, so govulncheck flags stdlib CVEs already fixed
-        # in 1.25.13
+        # Pin the exact patch, not the "1.26" line: a self-hosted runner caches
+        # the toolchain and a minor-only version can match a stale cached patch
+        # without fetching newer patches, so govulncheck flags stdlib CVEs
+        # already fixed in a later patch.
         # For example, GO-2026-5856. Bump this on each stdlib-security patch.
-        go-version: "1.25.13"
+        go-version: "1.26.8"
         cache-dependency-path: go.sum
     - name: install libyara (CGO dep) ${{ inputs.packages }}
       shell: bash
