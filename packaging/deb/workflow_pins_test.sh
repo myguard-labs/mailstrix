@@ -11,9 +11,9 @@
 #      by ordinary review.
 #   2. Every `go install` pins an exact version. `@latest` is the same hole in a
 #      different coat: it silently adopts whatever upstream published most
-#      recently. A ${VAR} ref is accepted — the literal it expands to is pinned
-#      in the workflow (and keyed into the tool cache, so a bump actually takes
-#      effect instead of being masked by a stale cached binary).
+#      recently. The version must be literal at the install site. The analysis-
+#      tool cache hashes its workflow and Go-setup action, so pin or compiler
+#      changes cannot be masked by a stale cached binary.
 #   3. An action must not be pinned to two DIFFERENT SHAs across workflows: one
 #      of them is stale or typo'd, and its jobs die at action resolution before
 #      doing any work.

@@ -5,13 +5,24 @@ The download recipes deliberately accept one fail-fast command shape; changes to
 that shape require updating its positive and negative fixtures together.
 """
 
+# PyYAML is installed by the repository's existing runner-isolation checks.
+# pylint: disable=missing-function-docstring,import-error
+
 import re
+import shlex
 import sys
 import unittest
 from pathlib import Path
 
+import yaml  # type: ignore[import-untyped]
+from yaml.nodes import (  # type: ignore[import-untyped]
+    MappingNode,
+    Node,
+    ScalarNode,
+    SequenceNode,
+)
+
 # Test names state their contract; method docstrings would only duplicate them.
-# pylint: disable=missing-function-docstring
 
 HEX64 = r"[0-9a-f]{64}"
 IMAGE_PINS = {
@@ -32,7 +43,16 @@ IMAGE_PINS = {
 
 def _canonical_image_label(label: str) -> str:
     """Normalize equivalent Docker Hub names for reviewed-pin comparison."""
-    for prefix in ("docker.io/", "index.docker.io/", "registry-1.docker.io/"):
+    for prefix in (
+        "docker.io/",
+        "docker.io:443/",
+        "index.docker.io/",
+        "index.docker.io:443/",
+        "registry-1.docker.io/",
+        "registry-1.docker.io:443/",
+        "registry.hub.docker.com/",
+        "registry.hub.docker.com:443/",
+    ):
         if label.startswith(prefix):
             label = label[len(prefix) :]
             break
@@ -54,10 +74,6 @@ YARA_RECIPE_PATHS = (
     "docker/Dockerfile.release",
     "docker/profile/Dockerfile.profile",
 )
-BLOCK_USES = re.compile(
-    r"""^\s*(?:-\s*)?(?:uses|"uses"|'uses')\s*:\s*(?:"([^"]+)"|'([^']+)'|([^#]+?))\s*(?:#.*)?$"""
-)
-FLOW_USES = re.compile(r"""[{,]\s*(?:uses|"uses"|'uses')\s*:""")
 YARA_URL = (
     '"https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz"'
 )
@@ -140,6 +156,7 @@ def _frontend_errors(frontend: str) -> list[str]:
 def _external_sources(line: str) -> list[str]:
     """Extract image/stage sources from COPY and RUN mount instructions."""
     sources = []
+    line = re.sub(r"^ONBUILD\s+", "", line, flags=re.IGNORECASE)
     if re.match(r"COPY\s", line, re.IGNORECASE):
         sources.extend(re.findall(r"--from=([^\s]+)", line, re.IGNORECASE))
     if re.match(r"RUN\s", line, re.IGNORECASE):
@@ -156,44 +173,47 @@ def _external_source_errors(
     local_images: frozenset[str],
 ) -> list[str]:
     """Validate every external COPY or RUN mount image source."""
-    errors = []
+    errors: list[str] = []
     for raw_source in _external_sources(line):
         source = _expand_args(raw_source, args)
         errors.extend(_docker_image_errors(source, raw_source, stages, local_images))
     return errors
 
 
-def _yaml_uses(text: str) -> tuple[list[tuple[int, str]], list[str]]:
-    """Extract supported block-style uses values and reject flow-style steps."""
-    uses = []
+def _yaml_scalar_values(
+    text: str, wanted_key: str
+) -> tuple[list[tuple[int, str]], list[str]]:
+    """Return decoded scalar values for a key from every nested YAML mapping."""
+    try:
+        document = yaml.compose(text)
+    except yaml.YAMLError as error:
+        return [], [f"invalid YAML: {error}"]
+    values: list[tuple[int, str]] = []
     errors = []
-    for lineno, line in enumerate(text.splitlines(), 1):
-        code = line.split("#", 1)[0]
-        stripped = code.lstrip()
-        unsupported_key = (
-            re.match(r"(?:-\s*)?\?", stripped)
-            or re.search(r'(?:^|[{,])\s*(?:-\s*)?"[^"\n]*\\[^"\n]*"\s*:', stripped)
-            or "!!" in code
-            or re.search(r"(?:^|[{,])\s*(?:-\s*)?\*[A-Za-z0-9_-]+\s*:", stripped)
-        )
-        if unsupported_key:
-            errors.append(f"line {lineno}: unsupported YAML key syntax; use plain keys")
-            continue
-        if FLOW_USES.search(line):
-            errors.append(
-                f"line {lineno}: flow-style uses mappings are unsupported; use block style"
-            )
-            continue
-        match = BLOCK_USES.fullmatch(line)
-        if match:
-            value = next(value for value in match.groups() if value is not None)
-            uses.append((lineno, value.strip()))
-            continue
-        if re.search(r"(?:^|[\s{?])(?:uses|\"uses\"|'uses')(?=\s*:|\s*$)", code):
-            errors.append(
-                f"line {lineno}: unsupported uses key syntax; use a plain block key"
-            )
-    return uses, errors
+
+    def visit(node: Node | None) -> None:
+        if isinstance(node, MappingNode):
+            for key_node, value_node in node.value:
+                if isinstance(key_node, ScalarNode) and key_node.value == wanted_key:
+                    if isinstance(value_node, ScalarNode):
+                        values.append((key_node.start_mark.line + 1, value_node.value))
+                    else:
+                        errors.append(
+                            f"line {key_node.start_mark.line + 1}: "
+                            f"{wanted_key} value must be a scalar"
+                        )
+                visit(value_node)
+        elif isinstance(node, SequenceNode):
+            for child in node.value:
+                visit(child)
+
+    visit(document)
+    return values, errors
+
+
+def _yaml_uses(text: str) -> tuple[list[tuple[int, str]], list[str]]:
+    """Extract decoded uses values from every workflow mapping."""
+    return _yaml_scalar_values(text, "uses")
 
 
 def _local_uses_file(root: Path, value: str) -> Path | None:
@@ -211,26 +231,105 @@ def _local_uses_file(root: Path, value: str) -> Path | None:
     return None
 
 
-def _go_install_errors(root: Path, path: Path, text: str) -> list[str]:
-    """Reject mutable Go tool versions in workflow shell blocks."""
-    errors = []
-    for lineno, line in enumerate(text.splitlines(), 1):
-        if re.match(r"^\s*(?:-\s*)?run\s*:\s*>[+-]?\s*(?:#.*)?$", line):
-            relative = path.relative_to(root)
-            errors.append(
-                f"{relative}:{lineno}: folded run scalars are unsupported; use |"
-            )
+def _logical_shell_lines(script: str) -> list[str]:
+    """Join shell continuations without letting comments consume the next line."""
+    logical = []
+    pending = ""
+    for physical in script.splitlines():
+        line = pending + physical.lstrip() if pending else physical
+        if not line.lstrip().startswith("#") and re.search(r"\\\s*$", line):
+            pending = re.sub(r"\\\s*$", " ", line)
             continue
-        for match in re.finditer(r'go install\s+"?([^"\s]+)', line):
-            ref = match.group(1)
-            exact = re.search(r"@v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$", ref)
-            if exact:
+        logical.append(line)
+        pending = ""
+    if pending:
+        logical.append(pending)
+    return logical
+
+
+def _redirect_token_width(tokens: list[str], index: int) -> int:
+    """Return tokens to skip for a shell redirection at index, or zero."""
+    token = tokens[index]
+    if (
+        token.isdigit()
+        and index + 1 < len(tokens)
+        and re.fullmatch(r"[<>&]+", tokens[index + 1])
+    ):
+        return 1
+    if re.fullmatch(r"[<>&]+", token):
+        return 2
+    return 0
+
+
+def _go_install_refs(line: str) -> tuple[bool, list[str]]:
+    """Use shell tokenization to find direct Go install package arguments."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars="();<>|&")
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    controls = {";", "&", "&&", "|", "||", "(", ")"}
+    found = False
+    refs = []
+    for index, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] != "go":
+            continue
+        cursor = index + 1
+        if cursor < len(tokens) and tokens[cursor] == "-C":
+            cursor += 2
+        elif cursor < len(tokens) and tokens[cursor].startswith("-C="):
+            cursor += 1
+        if cursor >= len(tokens) or tokens[cursor] != "install":
+            continue
+        found = True
+        cursor += 1
+        while cursor < len(tokens) and tokens[cursor] not in controls:
+            redirect_width = _redirect_token_width(tokens, cursor)
+            if redirect_width:
+                cursor += redirect_width
                 continue
-            relative = path.relative_to(root)
-            errors.append(
-                f"{relative}:{lineno}: "
-                f"go install without an exact pinned version: {ref}"
-            )
+            if not tokens[cursor].startswith("-"):
+                refs.append(tokens[cursor])
+            cursor += 1
+    return found, refs
+
+
+def _go_install_errors(root: Path, path: Path, text: str) -> list[str]:
+    """Reject mutable Go tool versions in decoded workflow shell blocks."""
+    errors: list[str] = []
+    relative = path.relative_to(root)
+    runs, parse_errors = _yaml_scalar_values(text, "run")
+    errors.extend(f"{relative}: {error}" for error in parse_errors)
+    for lineno, script in runs:
+        for line in _logical_shell_lines(script):
+            if line.lstrip().startswith("#"):
+                continue
+            if not re.search(r"g.{0,4}o.*in.{0,4}stall", line, re.IGNORECASE):
+                continue
+            try:
+                found, refs = _go_install_refs(line)
+            except ValueError as error:
+                errors.append(f"{relative}:{lineno}: invalid shell quoting: {error}")
+                continue
+            if not found:
+                errors.append(
+                    f"{relative}:{lineno}: possible go install uses unsupported "
+                    "command syntax; use literal command words"
+                )
+                continue
+            if found and not refs:
+                errors.append(
+                    f"{relative}:{lineno}: go install has no package reference"
+                )
+            for ref in refs:
+                exact = re.fullmatch(
+                    r"[^@\s]+@v[0-9]+\.[0-9]+\.[0-9]+"
+                    r"(?:-[0-9A-Za-z.-]+)?(?:\+incompatible)?",
+                    ref,
+                )
+                if not exact:
+                    errors.append(
+                        f"{relative}:{lineno}: "
+                        f"go install without an exact pinned version: {ref}"
+                    )
     return errors
 
 
@@ -261,7 +360,7 @@ def _uses_errors(
                 f"to a full commit SHA: {value}"
             )
         else:
-            pins.append((match.group(1), match.group(2)))
+            pins.append((match.group(1).casefold(), match.group(2)))
     return errors, local_files, pins
 
 
@@ -300,6 +399,56 @@ def workflow_errors(root: Path) -> list[str]:
                 "inconsistent pinned action SHAs: "
                 f"{action} pinned to multiple SHAs: {' '.join(sorted(shas))}"
             )
+    return errors
+
+
+def _tool_cache_errors(root: Path) -> list[str]:
+    """Bind the analysis-tool binary cache to workflow and compiler inputs."""
+    workflow_path = root / ".github/workflows/ci.yml"
+    if not workflow_path.is_file():
+        return []
+    text = workflow_path.read_text(encoding="utf-8")
+    try:
+        document = yaml.compose(text)
+    except yaml.YAMLError as error:
+        return [f"invalid CI workflow YAML: {error}"]
+    expected = (
+        "hashFiles('.github/workflows/ci.yml', '.github/actions/go-setup/action.yml')"
+    )
+    errors = []
+
+    def scalar_field(mapping: MappingNode, name: str) -> str | None:
+        for key_node, value_node in mapping.value:
+            if (
+                isinstance(key_node, ScalarNode)
+                and key_node.value == name
+                and isinstance(value_node, ScalarNode)
+            ):
+                return value_node.value
+        return None
+
+    def visit(node: Node | None) -> None:
+        if isinstance(node, MappingNode):
+            for key_node, value_node in node.value:
+                if (
+                    isinstance(key_node, ScalarNode)
+                    and key_node.value == "with"
+                    and isinstance(value_node, MappingNode)
+                ):
+                    cache_path = scalar_field(value_node, "path")
+                    if cache_path and "~/go/bin" in cache_path.splitlines():
+                        cache_key = scalar_field(value_node, "key") or ""
+                        if expected not in cache_key:
+                            errors.append(
+                                "analysis-tool cache key does not hash workflow "
+                                "and Go setup inputs"
+                            )
+                visit(value_node)
+        elif isinstance(node, SequenceNode):
+            for child in node.value:
+                visit(child)
+
+    visit(document)
     return errors
 
 
@@ -446,6 +595,8 @@ class PinFixtures(unittest.TestCase):
         for instruction in (
             "COPY --from=example.test/tool:1 /bin/tool /bin/tool",
             "RUN --mount=type=bind,from=example.test/tool:1,target=/tool true",
+            "ONBUILD COPY --from=example.test/tool:1 /bin/tool /bin/tool",
+            "ONBUILD RUN --mount=type=bind,from=example.test/tool:1,target=/tool true",
         ):
             self.assertIn(
                 "Docker external base", docker_errors("FROM scratch\n" + instruction)[0]
@@ -474,16 +625,30 @@ class PinFixtures(unittest.TestCase):
             f"FROM golang:${{GO_VERSION}}-bookworm@sha256:{digest}\n"
         )
         self.assertEqual([], docker_errors(recipe))
-        qualified = recipe.replace("FROM golang:", "FROM docker.io/library/golang:")
-        self.assertEqual([], docker_errors(qualified))
+        aliases = (
+            "docker.io/library/golang:",
+            "index.docker.io:443/library/golang:",
+            "registry-1.docker.io:443/library/golang:",
+            "registry.hub.docker.com:443/library/golang:",
+        )
+        qualified = [
+            recipe.replace("FROM golang:", f"FROM {alias}") for alias in aliases
+        ]
+        for candidate in qualified:
+            self.assertEqual([], docker_errors(candidate))
         self.assertIn(
             "label has no reviewed digest",
             docker_errors(recipe.replace("1.25.13", "9.99.99"))[0],
         )
         self.assertIn(
             "label has no reviewed digest",
-            docker_errors(qualified.replace("1.25.13", "9.99.99"))[0],
+            docker_errors(qualified[0].replace("1.25.13", "9.99.99"))[0],
         )
+        for candidate in qualified[1:]:
+            self.assertIn(
+                "label has no reviewed digest",
+                docker_errors(candidate.replace("1.25.13", "9.99.99"))[0],
+            )
         self.assertIn(
             "label/digest pair",
             docker_errors(recipe.replace(digest, "2" * 64))[0],
@@ -589,6 +754,7 @@ def _yara_tree_errors(root: Path, dockerfiles: list[Path]) -> list[str]:
 def check_tree(root: Path) -> list[str]:
     """Scan root/docker/contrib Dockerfiles and recursive GitHub YAML files."""
     errors = workflow_errors(root)
+    errors.extend(_tool_cache_errors(root))
     dockerfiles = sorted(
         [
             *root.glob("Dockerfile*"),

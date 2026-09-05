@@ -94,49 +94,49 @@ class TestWorkflowControls(unittest.TestCase):
             ".github/workflows/ci.yml",
             "jobs:\n  test:\n    steps: [{ uses: example/test@v5 }]\n",
         )
-        self.reject("flow-style uses")
+        self.reject("third-party action(s) not pinned")
 
     def test_explicit_uses_key_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
             "steps:\n  - ? uses\n    : example/test@v5\n",
         )
-        self.reject("unsupported YAML key syntax")
+        self.reject("third-party action(s) not pinned")
 
     def test_tagged_uses_key_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
             "steps:\n  - !!str uses: example/test@v5\n",
         )
-        self.reject("unsupported YAML key syntax")
+        self.reject("third-party action(s) not pinned")
 
     def test_multiline_uses_value_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
             "steps:\n  - uses:\n      example/test@v5\n",
         )
-        self.reject("unsupported uses key syntax")
+        self.reject("third-party action(s) not pinned")
 
     def test_escaped_uses_key_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
             'steps:\n  - "\\u0075ses": example/test@v5\n',
         )
-        self.reject("unsupported YAML key syntax")
+        self.reject("third-party action(s) not pinned")
 
     def test_escaped_flow_uses_key_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
             'steps: [{ "\\u0075ses": example/test@v5 }]\n',
         )
-        self.reject("unsupported YAML key syntax")
+        self.reject("third-party action(s) not pinned")
 
     def test_alias_mapping_key_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
             'env:\n  KEY: &u "\\u0075ses"\nsteps:\n  - *u: example/test@v5\n',
         )
-        self.reject("unsupported YAML key syntax")
+        self.reject("third-party action(s) not pinned")
 
     def test_quoted_uses_key_is_scanned(self) -> None:
         self.write(
@@ -166,11 +166,84 @@ class TestWorkflowControls(unittest.TestCase):
         self.reject("go install without an exact pinned version")
 
     def test_folded_go_install_is_rejected(self) -> None:
+        for header in (">", ">-", ">+", ">2", ">2-", ">-2"):
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: {header}\n      go install\n      example.test/tool@latest\n",
+            )
+            self.reject("go install without an exact pinned version")
+
+    def test_plain_multiline_go_install_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
-            "steps:\n  - run: >\n      go install\n      example.test/tool@latest\n",
+            "steps:\n  - run: go install\n      example.test/tool@latest\n",
         )
-        self.reject("folded run scalars are unsupported")
+        self.reject("go install without an exact pinned version")
+
+    def test_go_install_whitespace_variants_are_rejected(self) -> None:
+        for separator in ("  ", "\t"):
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: |\n      go{separator}install example.test/tool@latest\n",
+            )
+            self.reject("go install without an exact pinned version")
+
+    def test_go_install_shell_continuation_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - run: |\n      go \\\n        install example.test/tool@latest\n",
+        )
+        self.reject("go install without an exact pinned version")
+
+    def test_go_install_shell_quoting_is_rejected(self) -> None:
+        for command in (
+            '"go" "install" example.test/tool@latest',
+            "'go' install example.test/tool@latest",
+            "go 'install' example.test/tool@latest",
+            r"g\o in\stall example.test/tool@latest",
+            'g""o in""stall example.test/tool@latest',
+            "g$'o' in$'stall' example.test/tool@latest",
+        ):
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: |\n      {command}\n",
+            )
+            self.reject("go install")
+
+    def test_go_install_global_directory_flag_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - run: go -C . install example.test/tool@latest\n",
+        )
+        self.reject("go install without an exact pinned version")
+
+    def test_exact_go_versions_with_redirections_are_accepted(self) -> None:
+        for command in (
+            "go install example.test/tool@v1.2.3 2>/dev/null",
+            "go install example.test/tool@v1.2.3 2>>/dev/null",
+            "go install example.test/tool@v2.0.0+incompatible 2>&1",
+        ):
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: |\n      {command}\n",
+            )
+            result = self.gate()
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_comments_cannot_hide_go_install(self) -> None:
+        for content in (
+            "steps:\n  # comment \\\n  - run: go install example.test/tool@latest\n",
+            "steps:\n  - run: |\n      # comment \\\n      go install example.test/tool@latest\n",
+        ):
+            self.write(".github/workflows/ci.yml", content)
+            self.reject("go install without an exact pinned version")
+
+    def test_quoted_multiline_go_install_is_rejected(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            'steps:\n  - run: "go install\n      example.test/tool@latest"\n',
+        )
+        self.reject("go install without an exact pinned version")
 
     def test_local_action_outside_dot_github_is_scanned(self) -> None:
         self.write(
@@ -209,6 +282,40 @@ class TestWorkflowControls(unittest.TestCase):
             "steps:\n  - uses: example/test@" + "b" * 40 + "\n",
         )
         self.reject("inconsistent pinned action SHAs")
+
+    def test_action_identity_case_is_consistent(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - uses: Example/Test@" + "b" * 40 + "\n",
+        )
+        self.reject("inconsistent pinned action SHAs")
+
+    def test_tool_cache_key_tracks_workflow_and_go_setup(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n"
+            "  - uses: example/test@" + "a" * 40 + "\n"
+            "    with:\n"
+            "      path: ~/go/bin\n"
+            "      key: gotools-static\n",
+        )
+        self.reject("cache key does not hash workflow and Go setup inputs")
+
+    def test_tool_cache_expression_in_unrelated_step_is_rejected(self) -> None:
+        expected = (
+            "hashFiles('.github/workflows/ci.yml', "
+            "'.github/actions/go-setup/action.yml')"
+        )
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n"
+            f'  - run: echo "{expected}"\n'
+            "  - uses: example/test@" + "a" * 40 + "\n"
+            "    with:\n"
+            "      path: ~/go/bin\n"
+            "      key: gotools-static\n",
+        )
+        self.reject("cache key does not hash workflow and Go setup inputs")
 
     def test_nested_docker_base_tag(self) -> None:
         self.write("docker/nested/Dockerfile.test", "FROM example.test/base:1\n")

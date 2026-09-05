@@ -32,11 +32,12 @@ matching reviewed entry in `IMAGE_PINS`, `YARA_PINS`, or `NFPM_PINS` in
 
 `sh packaging/deb/workflow_pins_test.sh` checks recursive GitHub workflows and
 composite actions, root Dockerfiles, and Dockerfiles below `docker/` and
-`contrib/`. Write `uses:` steps in block style; flow-style mappings are rejected
-so the static action scanner cannot silently miss them. Its download checks
-accept the reviewed fail-fast command sequence; they do not attempt to interpret
-arbitrary shell programs. Write exact `go install` versions directly at each
-install site; output or environment substitutions are rejected. Run
+`contrib/`. It decodes workflow YAML before inspecting every `uses:` and `run:`
+value, so equivalent block, flow, quoted and multiline forms cannot bypass the
+policy. Its download checks accept the reviewed fail-fast command sequence; they
+do not attempt to interpret arbitrary shell programs. Write exact `go install`
+versions directly at each install site; output or environment substitutions are
+rejected. Run
 `python3 -B packaging/deb/workflow_pins_controls_test.py` to exercise benign
 fixtures for missing pins and checksums. Both commands run in CI.
 
