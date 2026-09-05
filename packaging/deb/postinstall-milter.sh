@@ -27,5 +27,5 @@ if [ -z "$2" ]; then
     echo "Then tell the MTA to use it, e.g. Postfix main.cf:"
     echo "  smtpd_milters = inet:127.0.0.1:8081"
     echo "  milter_default_action = accept"
-    echo "It always ACCEPTS and stamps X-Mailstrix-Status; use header_checks to act on it."
+    echo "It always ACCEPTS and stamps X-Mailstrix-Status; use milter_header_checks to act on it."
 fi

@@ -9,9 +9,9 @@
 //	smtpd_milters = inet:127.0.0.1:8081
 //	non_smtpd_milters = inet:127.0.0.1:8081
 //	milter_default_action = accept     # keep mail flowing if the milter is down
-//	header_checks = pcre:/etc/postfix/header_checks
+//	milter_header_checks = pcre:/etc/postfix/milter_header_checks
 //
-//	# /etc/postfix/header_checks
+//	# /etc/postfix/milter_header_checks
 //	/^X-Mailstrix-Status:\s*infected/  HOLD Mailstrix: malware detected
 //
 // Sendmail speaks the same protocol (this IS the sendmail milter wire protocol):
@@ -75,7 +75,7 @@ var version = "dev"
 
 // Header names. headerPrefix is what we strip from inbound mail before stamping
 // our own: a sender who sets X-Mailstrix-Status: clean must not be able to make
-// a downstream header_checks rule see a forged verdict.
+// a downstream consumer see a forged verdict.
 const (
 	headerPrefix  = "X-Mailstrix-"
 	hdrStatus     = "X-Mailstrix-Status"

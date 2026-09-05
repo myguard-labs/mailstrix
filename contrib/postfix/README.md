@@ -9,7 +9,7 @@ thin and carries **no YARA rules and no libyara** of its own.
                           ▲                    │                       (rules + libyara)
                           │        X-Mailstrix-Status: ... ◀───────────── {matches}
                           │                    │
-                    header_checks ◀────────────┘
+                    milter_header_checks ◀────────────┘
                           │
               infected ─▶ HOLD / REJECT      clean, unknown ─▶ deliver
 ```
@@ -17,8 +17,15 @@ thin and carries **no YARA rules and no libyara** of its own.
 `strix-milter` **always accepts**. It never rejects, defers, discards or
 quarantines — it only stamps `X-Mailstrix-*` headers. A scanner outage, timeout or
 oversized message is just an `unknown` stamp, so a bug here can never eat mail.
-Turning the verdict into policy is `header_checks`' job, where you already express
+Turning the verdict into policy is `milter_header_checks`' job, where you already express
 mail policy and can change it without restarting the filter.
+
+Postfix applies `milter_header_checks` to headers added by a Milter. Its ordinary
+`header_checks` processes incoming message headers and cannot enforce this verdict.
+When upgrading an older example, install the renamed `milter_header_checks` map
+and move the Mailstrix policy to the new check class; keep unrelated incoming
+header policies in `header_checks`. See Postfix's
+[header_checks(5)](https://www.postfix.org/header_checks.5.html).
 
 This is the **SMTP-time, whole-message** path. For per-attachment scanning at SMTP
 time use the [rspamd plugin](../rspamd/); for delivery-time scanning on a Dovecot
@@ -29,7 +36,7 @@ box use [Sieve](../sieve/). They compose.
 | File | Goes to | What it is |
 |------|---------|------------|
 | `main.cf.example` | merge into `/etc/postfix/main.cf` | milter socket + `milter_default_action` + timeouts |
-| `header_checks.example` | `/etc/postfix/header_checks` | turns `X-Mailstrix-Status: infected` into HOLD (or REJECT) |
+| `milter_header_checks.example` | `/etc/postfix/milter_header_checks` | turns `X-Mailstrix-Status: infected` into HOLD (or REJECT) |
 | `sendmail.mc.example` | merge into `/etc/mail/sendmail.mc` | the Sendmail equivalent (`INPUT_MAIL_FILTER`) |
 
 ## Setup
@@ -65,7 +72,7 @@ box use [Sieve](../sieve/). They compose.
 
    ```sh
    # Postfix
-   sudo install -m0644 header_checks.example /etc/postfix/header_checks
+   sudo install -m0644 milter_header_checks.example /etc/postfix/milter_header_checks
    # then merge main.cf.example into /etc/postfix/main.cf
    sudo postfix check && sudo systemctl reload postfix
    ```
@@ -77,6 +84,18 @@ Keep the listener on **loopback or a unix socket**: anyone who can reach it can
 have messages scanned.
 
 ## Test it
+
+The repository integration test builds the current scanner and milter, then runs
+real Postfix with these example files in a disposable container with no network
+access. It checks that harmless EICAR is held, clean mail is not held, and a
+scanner outage still accepts mail with an `unknown` verdict. A stopped milter
+also leaves harmless mail accepted without a verdict:
+
+```sh
+docker build --target test -f docker/Dockerfile -t strixd-test .
+docker build -f contrib/postfix/Dockerfile.integration -t mailstrix-postfix-test contrib/postfix
+timeout 90s docker run --rm --network none mailstrix-postfix-test
+```
 
 ```sh
 # 1. the milter is up and strixd is reachable
@@ -118,7 +137,7 @@ a verdict; `X-Mailstrix-Info` carries the reason (strixd unreachable, message ov
   Sendmail equivalent is `F=` (empty) rather than `F=T`.
 - **`unknown` is not a clean bill of health** — it means *not scanned* (outage,
   oversized, empty). Decide explicitly what to do with it; the shipped
-  `header_checks` delivers it and lets the rest of the stack judge.
+  `milter_header_checks` delivers it and lets the rest of the stack judge.
 - **Forged headers are deleted, not just logged.** A sender shipping their own
   `X-Mailstrix-Status: clean` would otherwise win a first-match header lookup, so
   the milter removes every inbound `X-Mailstrix-*` header before stamping its own,

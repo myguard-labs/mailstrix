@@ -22,5 +22,5 @@ dnl here — only the inet: form above is exercised in this repo's docs; check i
 dnl against your sendmail build before relying on it.
 dnl INPUT_MAIL_FILTER(`strix', `S=local:/run/strix-milter/milter.sock, F=, T=S:30s;R:30s;E:5m')
 
-dnl Sendmail has no header_checks. To act on the verdict, use a ruleset or run
+dnl Sendmail has no milter_header_checks. To act on the verdict, use a ruleset or run
 dnl the check at delivery (procmail/maildrop/Sieve) against X-Mailstrix-Status.
