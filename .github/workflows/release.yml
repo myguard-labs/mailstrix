@@ -86,6 +86,7 @@ jobs:
           set -euo pipefail
           NFPM_VERSION=2.43.0
           curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
+          echo "4a4402f8f9ea87c669d6a62b333f8e268439974754dd886a01731ecaf9fa6d66  /tmp/nfpm.deb" | sha256sum -c -
           sudo dpkg -i /tmp/nfpm.deb
 
       - name: build .deb packages

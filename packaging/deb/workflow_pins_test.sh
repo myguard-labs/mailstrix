@@ -19,17 +19,15 @@
 #      doing any work.
 set -eu
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+scriptdir="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
+root="${1:-$(cd "$scriptdir/../.." && pwd)}"
 wfdir="$root/.github/workflows"
 pairs="$(mktemp)"
 bad="$(mktemp)"
 trap 'rm -f "$pairs" "$bad"' EXIT
 
 wfs=""
-for wf in "$wfdir"/*.yml "$wfdir"/*.yaml; do
-    [ -f "$wf" ] || continue
-    wfs="$wfs $wf"
-done
+wfs="$(find "$wfdir" "$root/.github/actions" -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null)"
 [ -n "$wfs" ] || { echo "FAIL - no workflows found under $wfdir"; exit 1; }
 
 # --- 1. every third-party `uses:` is SHA-pinned -----------------------------
@@ -100,4 +98,5 @@ fi
 echo "ok   - every third-party action is pinned to a full commit SHA"
 echo "ok   - every go install pins an exact version"
 echo "ok   - every SHA-pinned action is consistent across all workflows"
+python3 "$scriptdir/immutable_inputs_test.py" "$root"
 echo "ALL OK"

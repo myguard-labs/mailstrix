@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 # strixd — YARA scanner backend for rspamd.
 #
 # Multi-stage: a Debian builder compiles libyara statically and builds strixd
@@ -11,14 +11,17 @@ ARG GO_VERSION=1.26.8
 ARG YARA_VERSION=4.5.2
 
 # ---- libyara (static) -------------------------------------------------------
-FROM debian:bookworm-slim AS yara
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS yara
 ARG YARA_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential automake libtool make pkg-config \
         libssl-dev curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
-        | tar -xz -C /tmp
+        -o /tmp/yara.tar.gz \
+    && echo "1f87056fcb10ee361936ee7b0548444f7974612ebb0e681734d8de7df055d1ec  /tmp/yara.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/yara.tar.gz -C /tmp \
+    && rm /tmp/yara.tar.gz
 WORKDIR /tmp/yara-${YARA_VERSION}
 # No --enable-magic / --enable-cuckoo: email-attachment scanning needs neither,
 # and dropping them removes the libmagic/libjansson runtime deps so the
@@ -30,7 +33,7 @@ RUN ./bootstrap.sh \
     && make -j"$(nproc)" && make install && ldconfig
 
 # ---- go build ---------------------------------------------------------------
-FROM golang:${GO_VERSION}-bookworm AS build
+FROM golang:${GO_VERSION}-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc pkg-config libssl-dev zlib1g-dev libzstd-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -169,7 +172,7 @@ COPY --from=rules /rules/libyara.version /libyara.version
 COPY --from=rules /rules/sources.json /sources.json
 
 # ---- final (distroless, nonroot) -------------------------------------------
-FROM gcr.io/distroless/base-debian12:nonroot AS final
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
 COPY --from=build /out/strixd /usr/local/bin/strixd
 # strix-scan (the lean CGO-free HTTP client) ships in PATH too, so the same image
 # can both SERVE (strixd) and be a labelling client via `docker exec <ctr>

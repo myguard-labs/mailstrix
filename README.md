@@ -838,6 +838,11 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
 
 ## Build & test
 
+Build images, nested actions and the YARA/nfpm downloads use immutable pins.
+See [build input pins](docker/INPUTS.md) for update sources and validation.
+Changing `GO_VERSION` or `YARA_VERSION` also requires updating the matching
+image digest or archive checksum; a version argument alone is insufficient.
+
 Tests need real libyara, so they run **inside the image build** (CGO, race
 detector) — CI fails on a bad commit before any image is published:
 

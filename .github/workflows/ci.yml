@@ -180,7 +180,9 @@ jobs:
         run: sh packaging/deb/maintscript_test.sh
 
       - name: SHA-pinned actions consistent across workflows
-        run: sh packaging/deb/workflow_pins_test.sh
+        run: |
+          sh packaging/deb/workflow_pins_test.sh
+          python3 -B packaging/deb/workflow_pins_controls_test.py
 
       - name: self-hosted runners use disposable builder slots
         run: sh packaging/deb/runner_isolation_test.sh

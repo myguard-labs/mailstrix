@@ -15,14 +15,17 @@
 # appear — add any new top-cost offender to SLOW_RULE_DENYLIST in fetch-rules.sh.
 ARG YARA_VERSION=4.5.2
 
-FROM debian:bookworm-slim AS yarap
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS yarap
 ARG YARA_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential automake libtool make gcc pkg-config \
         libssl-dev libjansson-dev libmagic-dev curl ca-certificates unzip git \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
-      | tar xz -C /tmp
+        -o /tmp/yara.tar.gz \
+    && echo "1f87056fcb10ee361936ee7b0548444f7974612ebb0e681734d8de7df055d1ec  /tmp/yara.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/yara.tar.gz -C /tmp \
+    && rm /tmp/yara.tar.gz
 WORKDIR /tmp/yara-${YARA_VERSION}
 RUN ./bootstrap.sh \
     && ./configure --enable-profiling --with-crypto \
