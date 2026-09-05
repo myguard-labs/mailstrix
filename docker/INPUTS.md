@@ -30,16 +30,28 @@ When changing an image digest or a YARA/nfpm version and checksum, update its
 matching reviewed entry in `IMAGE_PINS`, `YARA_PINS`, or `NFPM_PINS` in
 `packaging/deb/immutable_inputs_test.py` in the same commit.
 
-`sh packaging/deb/workflow_pins_test.sh` checks recursive GitHub workflows and
-composite actions, root Dockerfiles, and Dockerfiles below `docker/` and
-`contrib/`. It decodes workflow YAML before inspecting every `uses:` and `run:`
-value, so equivalent block, flow, quoted and multiline forms cannot bypass the
-policy. Its download checks accept the reviewed fail-fast command sequence; they
-do not attempt to interpret arbitrary shell programs. Write exact `go install`
-versions directly at each install site; output or environment substitutions are
-rejected. Run
+`sh packaging/deb/workflow_pins_test.sh` checks recursive GitHub workflows,
+composite actions, and Dockerfiles throughout the repository. It decodes
+workflow YAML before inspecting `uses:` and `run:` values in executable schema
+positions (`jobs.*`, `jobs.*.steps`, `runs.steps`, and isolated top-level test
+steps), so equivalent block, flow, quoted and multiline forms cannot bypass the
+policy. Dockerfile discovery excludes `.git`, `.venv`, `node_modules`, `target`,
+`third_party`, and `vendor` dependency/build trees, and skips documentation
+suffixes (`.json`, `.md`, `.rst`, `.txt`, `.yaml`, `.yml`). Its download checks
+accept the reviewed fail-fast command sequence; they do not attempt to interpret
+arbitrary shell programs. Write exact `go install` versions directly at each
+install site; output or environment substitutions are rejected. Run
 `python3 -B packaging/deb/workflow_pins_controls_test.py` to exercise benign
 fixtures for missing pins and checksums. Both commands run in CI.
+
+Any discovered Dockerfile that declares `ARG YARA_VERSION` or downloads from
+`VirusTotal/yara` joins the YARA recipe set and must use the same reviewed
+version and checksum as the three required recipes.
+
+`.github/workflows/release.yml` must exist and contain exactly one
+checksum-verified nfpm download/install recipe. Any nfpm recipe in another
+`.github` YAML file must also be checksum-verified; the single-recipe
+requirement applies only to `release.yml`.
 
 The Postfix integration image may consume the local `strixd-test` image only
 when the expected CI build produces it from this checkout. External bases

@@ -8,14 +8,16 @@ that shape require updating its positive and negative fixtures together.
 # PyYAML is installed by the repository's existing runner-isolation checks.
 # pylint: disable=missing-function-docstring,import-error
 
+import codecs
+import os
 import re
 import shlex
 import sys
 import unittest
 from pathlib import Path
 
-import yaml  # type: ignore[import-untyped]
-from yaml.nodes import (  # type: ignore[import-untyped]
+import yaml
+from yaml.nodes import (
     MappingNode,
     Node,
     ScalarNode,
@@ -41,21 +43,29 @@ IMAGE_PINS = {
 }
 
 
+def _is_default_https_port(port: str) -> bool:
+    """Accept an omitted or ASCII decimal spelling of port 443."""
+    return not port or (port.isascii() and port.isdigit() and int(port) == 443)
+
+
 def _canonical_image_label(label: str) -> str:
     """Normalize equivalent Docker Hub names for reviewed-pin comparison."""
-    for prefix in (
-        "docker.io/",
-        "docker.io:443/",
-        "index.docker.io/",
-        "index.docker.io:443/",
-        "registry-1.docker.io/",
-        "registry-1.docker.io:443/",
-        "registry.hub.docker.com/",
-        "registry.hub.docker.com:443/",
+    authority, separator, remainder = label.partition("/")
+    host, port_separator, port = authority.rpartition(":")
+    if not port_separator:
+        host, port = authority, ""
+    hub_hosts = {
+        "docker.io",
+        "index.docker.io",
+        "registry-1.docker.io",
+        "registry.hub.docker.com",
+    }
+    if (
+        separator
+        and host.casefold().rstrip(".") in hub_hosts
+        and _is_default_https_port(port)
     ):
-        if label.startswith(prefix):
-            label = label[len(prefix) :]
-            break
+        label = remainder
     return "library/" + label if "/" not in label else label
 
 
@@ -74,6 +84,10 @@ YARA_RECIPE_PATHS = (
     "docker/Dockerfile.release",
     "docker/profile/Dockerfile.profile",
 )
+EXCLUDED_TREE_DIRS = frozenset(
+    {".git", ".venv", "node_modules", "target", "third_party", "vendor"}
+)
+DOCUMENT_SUFFIXES = frozenset({".json", ".md", ".rst", ".txt", ".yaml", ".yml"})
 YARA_URL = (
     '"https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz"'
 )
@@ -180,34 +194,85 @@ def _external_source_errors(
     return errors
 
 
-def _yaml_scalar_values(
-    text: str, wanted_key: str
-) -> tuple[list[tuple[int, str]], list[str]]:
-    """Return decoded scalar values for a key from every nested YAML mapping."""
+def _mapping_values(mapping: MappingNode, wanted_key: str) -> list[Node]:
+    """Return direct values for a decoded mapping key, including duplicates."""
+    return [
+        value_node
+        for key_node, value_node in mapping.value
+        if isinstance(key_node, ScalarNode) and key_node.value == wanted_key
+    ]
+
+
+def _mapping_scalar(mapping: MappingNode, name: str) -> str | None:
+    """Return the first direct scalar value for a decoded mapping key."""
+    for key_node, value_node in mapping.value:
+        if (
+            isinstance(key_node, ScalarNode)
+            and key_node.value == name
+            and isinstance(value_node, ScalarNode)
+        ):
+            return str(value_node.value)
+    return None
+
+
+def _execution_mappings(
+    text: str,
+) -> tuple[list[MappingNode], list[MappingNode], list[str]]:
+    """Return workflow job and executable-step mappings without generic descent."""
     try:
         document = yaml.compose(text)
     except yaml.YAMLError as error:
-        return [], [f"invalid YAML: {error}"]
+        return [], [], [f"invalid YAML: {error}"]
+    if not isinstance(document, MappingNode):
+        return [], [], ["workflow document must be a mapping"]
+
+    jobs: list[MappingNode] = []
+    steps: list[MappingNode] = []
+    seen_steps: set[int] = set()
+
+    def add_steps(container: MappingNode) -> None:
+        for sequence in _mapping_values(container, "steps"):
+            if not isinstance(sequence, SequenceNode):
+                continue
+            for child in sequence.value:
+                if isinstance(child, MappingNode) and id(child) not in seen_steps:
+                    seen_steps.add(id(child))
+                    steps.append(child)
+
+    # Top-level steps are accepted for the isolated policy fixtures. Real
+    # workflows use jobs.*.steps and composite actions use runs.steps.
+    add_steps(document)
+    for runs_node in _mapping_values(document, "runs"):
+        if isinstance(runs_node, MappingNode):
+            add_steps(runs_node)
+    for jobs_node in _mapping_values(document, "jobs"):
+        if not isinstance(jobs_node, MappingNode):
+            continue
+        for _, job_node in jobs_node.value:
+            if isinstance(job_node, MappingNode):
+                jobs.append(job_node)
+                add_steps(job_node)
+    return jobs, steps, []
+
+
+def _yaml_scalar_values(
+    text: str, wanted_key: str
+) -> tuple[list[tuple[int, str]], list[str]]:
+    """Return decoded run/uses values only from executable schema positions."""
+    jobs, steps, errors = _execution_mappings(text)
     values: list[tuple[int, str]] = []
-    errors = []
-
-    def visit(node: Node | None) -> None:
-        if isinstance(node, MappingNode):
-            for key_node, value_node in node.value:
-                if isinstance(key_node, ScalarNode) and key_node.value == wanted_key:
-                    if isinstance(value_node, ScalarNode):
-                        values.append((key_node.start_mark.line + 1, value_node.value))
-                    else:
-                        errors.append(
-                            f"line {key_node.start_mark.line + 1}: "
-                            f"{wanted_key} value must be a scalar"
-                        )
-                visit(value_node)
-        elif isinstance(node, SequenceNode):
-            for child in node.value:
-                visit(child)
-
-    visit(document)
+    mappings = steps if wanted_key == "run" else [*jobs, *steps]
+    for mapping in mappings:
+        for key_node, value_node in mapping.value:
+            if not isinstance(key_node, ScalarNode) or key_node.value != wanted_key:
+                continue
+            if isinstance(value_node, ScalarNode):
+                values.append((key_node.start_mark.line + 1, str(value_node.value)))
+            else:
+                errors.append(
+                    f"line {key_node.start_mark.line + 1}: "
+                    f"{wanted_key} value must be a scalar"
+                )
     return values, errors
 
 
@@ -292,6 +357,72 @@ def _go_install_refs(line: str) -> tuple[bool, list[str]]:
     return found, refs
 
 
+def _without_empty_shell_expansions(line: str) -> str:
+    """Expose command words split by empty or ANSI-C Bash expansions."""
+
+    def decode_ansi(match: re.Match[str]) -> str:
+        try:
+            return codecs.decode(match.group(1), "unicode_escape")
+        except (UnicodeDecodeError, ValueError, DeprecationWarning):
+            return match.group(1)
+
+    line = re.sub(r"\$\{[^{}]*\}", "", line)
+    line = re.sub(r"\$'([^'\\]*(?:\\.[^'\\]*)*)'", decode_ansi, line)
+    return re.sub(r'\$"([^"\\]*(?:\\.[^"\\]*)*)"', r"\1", line)
+
+
+def _has_substituted_install_command(line: str) -> bool:
+    """Reject a dynamically constructed command word immediately before install."""
+    dynamic_word = (
+        r"(?:\S*\$\([^)]*\)\S*|\S*`[^`]*`\S*|"
+        r"\S*\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)\S*)"
+    )
+    return bool(
+        re.search(
+            r"(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+            + dynamic_word
+            + r"\s+install(?:\s|$)",
+            line,
+        )
+    )
+
+
+def _go_install_line_errors(location: str, line: str) -> list[str]:
+    """Validate literal Go install arguments on one logical shell line."""
+    errors: list[str] = []
+    try:
+        found, refs = _go_install_refs(line)
+    except ValueError as error:
+        if "go" in line and "install" in line:
+            errors.append(f"{location}: invalid shell quoting: {error}")
+        return errors
+    if not found:
+        normalized = _without_empty_shell_expansions(line)
+        try:
+            expanded_command, _ = _go_install_refs(normalized)
+        except ValueError:
+            expanded_command = False
+        if expanded_command or _has_substituted_install_command(line):
+            errors.append(
+                f"{location}: possible go install uses unsupported command syntax; "
+                "use literal command words"
+            )
+        return errors
+    if not refs:
+        errors.append(f"{location}: go install has no package reference")
+    for ref in refs:
+        exact = re.fullmatch(
+            r"[^@\s]+@v[0-9]+\.[0-9]+\.[0-9]+"
+            r"(?:-[0-9A-Za-z.-]+)?(?:\+incompatible)?",
+            ref,
+        )
+        if not exact:
+            errors.append(
+                f"{location}: go install without an exact pinned version: {ref}"
+            )
+    return errors
+
+
 def _go_install_errors(root: Path, path: Path, text: str) -> list[str]:
     """Reject mutable Go tool versions in decoded workflow shell blocks."""
     errors: list[str] = []
@@ -300,37 +431,14 @@ def _go_install_errors(root: Path, path: Path, text: str) -> list[str]:
     errors.extend(f"{relative}: {error}" for error in parse_errors)
     for lineno, script in runs:
         for line in _logical_shell_lines(script):
-            if line.lstrip().startswith("#"):
-                continue
-            if not re.search(r"g.{0,4}o.*in.{0,4}stall", line, re.IGNORECASE):
-                continue
-            try:
-                found, refs = _go_install_refs(line)
-            except ValueError as error:
-                errors.append(f"{relative}:{lineno}: invalid shell quoting: {error}")
-                continue
-            if not found:
-                errors.append(
-                    f"{relative}:{lineno}: possible go install uses unsupported "
-                    "command syntax; use literal command words"
-                )
-                continue
-            if found and not refs:
-                errors.append(
-                    f"{relative}:{lineno}: go install has no package reference"
-                )
-            for ref in refs:
-                exact = re.fullmatch(
-                    r"[^@\s]+@v[0-9]+\.[0-9]+\.[0-9]+"
-                    r"(?:-[0-9A-Za-z.-]+)?(?:\+incompatible)?",
-                    ref,
-                )
-                if not exact:
-                    errors.append(
-                        f"{relative}:{lineno}: "
-                        f"go install without an exact pinned version: {ref}"
-                    )
+            if not line.lstrip().startswith("#"):
+                errors.extend(_go_install_line_errors(f"{relative}:{lineno}", line))
     return errors
+
+
+def _action_repository(action: str) -> str:
+    """Return the case-insensitive repository that a commit SHA pins."""
+    return "/".join(part.casefold() for part in action.split("/")[:2])
 
 
 def _uses_errors(
@@ -360,7 +468,7 @@ def _uses_errors(
                 f"to a full commit SHA: {value}"
             )
         else:
-            pins.append((match.group(1).casefold(), match.group(2)))
+            pins.append((_action_repository(match.group(1)), match.group(2)))
     return errors, local_files, pins
 
 
@@ -385,7 +493,7 @@ def workflow_errors(root: Path) -> list[str]:
         if path in seen:
             continue
         seen.add(path)
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
         uses_errors, local_files, pins = _uses_errors(root, path, text)
         errors.extend(uses_errors)
         queued.extend(local_files)
@@ -402,54 +510,71 @@ def workflow_errors(root: Path) -> list[str]:
     return errors
 
 
+def _cache_path_covers_go_bin(cache_path: str | None) -> bool:
+    """Return whether an actions/cache path includes the Go binary directory."""
+    entries = [
+        re.sub(
+            r"/{2,}",
+            "/",
+            re.sub(
+                r"^(?:\$\{\{\s*env\.HOME\s*\}\}|\$\{HOME\}|\$HOME"
+                r"|/home/[^/]+|/root)/",
+                "~/",
+                entry.strip(),
+                flags=re.IGNORECASE,
+            ),
+        ).rstrip("/")
+        for entry in (cache_path or "").splitlines()
+        if entry.strip()
+    ]
+    entries = [
+        re.sub(
+            r"^(?:\$\{GOPATH\}|\$GOPATH)/",
+            "~/go/",
+            entry,
+            flags=re.IGNORECASE,
+        )
+        for entry in entries
+    ]
+    return any(
+        entry in {"~/go", "~/go/bin"}
+        or entry.startswith(("~/go/bin/", "~/go/*", "~/go/**"))
+        for entry in entries
+    )
+
+
+def _cache_step_has_unbound_key(step: MappingNode, expected: re.Pattern[str]) -> bool:
+    """Return whether one Go-tool cache step lacks the required hash expression."""
+    uses = _mapping_scalar(step, "uses") or ""
+    if not re.fullmatch(r"(?i)actions/cache(?:/(?:restore|save))?@[0-9a-f]{40}", uses):
+        return False
+    for with_node in _mapping_values(step, "with"):
+        if isinstance(with_node, MappingNode) and _cache_path_covers_go_bin(
+            _mapping_scalar(with_node, "path")
+        ):
+            return not expected.search(_mapping_scalar(with_node, "key") or "")
+    return False
+
+
 def _tool_cache_errors(root: Path) -> list[str]:
     """Bind the analysis-tool binary cache to workflow and compiler inputs."""
     workflow_path = root / ".github/workflows/ci.yml"
     if not workflow_path.is_file():
         return []
-    text = workflow_path.read_text(encoding="utf-8")
-    try:
-        document = yaml.compose(text)
-    except yaml.YAMLError as error:
-        return [f"invalid CI workflow YAML: {error}"]
-    expected = (
-        "hashFiles('.github/workflows/ci.yml', '.github/actions/go-setup/action.yml')"
+    _, steps, parse_errors = _execution_mappings(
+        workflow_path.read_text(encoding="utf-8", errors="replace")
     )
-    errors = []
-
-    def scalar_field(mapping: MappingNode, name: str) -> str | None:
-        for key_node, value_node in mapping.value:
-            if (
-                isinstance(key_node, ScalarNode)
-                and key_node.value == name
-                and isinstance(value_node, ScalarNode)
-            ):
-                return value_node.value
-        return None
-
-    def visit(node: Node | None) -> None:
-        if isinstance(node, MappingNode):
-            for key_node, value_node in node.value:
-                if (
-                    isinstance(key_node, ScalarNode)
-                    and key_node.value == "with"
-                    and isinstance(value_node, MappingNode)
-                ):
-                    cache_path = scalar_field(value_node, "path")
-                    if cache_path and "~/go/bin" in cache_path.splitlines():
-                        cache_key = scalar_field(value_node, "key") or ""
-                        if expected not in cache_key:
-                            errors.append(
-                                "analysis-tool cache key does not hash workflow "
-                                "and Go setup inputs"
-                            )
-                visit(value_node)
-        elif isinstance(node, SequenceNode):
-            for child in node.value:
-                visit(child)
-
-    visit(document)
-    return errors
+    if parse_errors:
+        return parse_errors
+    expected = re.compile(
+        r"\$\{\{\s*hashFiles\(\s*'\.github/workflows/ci\.yml'\s*,\s*"
+        r"'\.github/actions/go-setup/action\.yml'\s*\)\s*\}\}"
+    )
+    return [
+        "analysis-tool cache key does not hash workflow and Go setup inputs"
+        for step in steps
+        if _cache_step_has_unbound_key(step, expected)
+    ]
 
 
 def docker_errors(text: str, local_images: frozenset[str] = frozenset()) -> list[str]:
@@ -483,7 +608,7 @@ def docker_errors(text: str, local_images: frozenset[str] = frozenset()) -> list
                 stages.add(fields[3].lower())
         errors.extend(_external_source_errors(line, args, stages, local_images))
         if (
-            "github.com/VirusTotal/yara/" in line
+            "virustotal/yara/" in line.casefold()
             and not line.startswith("#")
             and not re.fullmatch(YARA_RECIPE, line)
         ):
@@ -524,36 +649,58 @@ def _nfpm_pin_error(lines: list[str], recipe: str) -> str | None:
     return None
 
 
-def release_errors(text: str) -> list[str]:
-    """Require the nfpm download/check/install sequence in a strict shell step."""
-    errors = []
-    # Inspect each workflow literal run block without treating comments or other
-    # steps as evidence that this download was checked.
-    blocks = re.findall(r"(?m)^( +)run: \|\s*\n((?:\1 +[^\n]*\n|\s*\n)*)", text + "\n")
+def _nfpm_block_result(block: str) -> tuple[int, int, list[str]]:
+    """Count nfpm references and valid recipes in one literal shell block."""
     downloads = 0
     checked = 0
-    pin_errors = []
-    for _, block in blocks:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        downloads += sum("github.com/goreleaser/nfpm/" in line for line in lines)
-        for index, line in enumerate(lines):
-            if "github.com/goreleaser/nfpm/" not in line:
-                continue
-            recipe = "\n".join(lines[index : index + 3])
-            if lines[0] == "set -euo pipefail" and re.fullmatch(NFPM_RECIPE, recipe):
-                checked += 1
-                pin_error = _nfpm_pin_error(lines, recipe)
-                if pin_error:
-                    pin_errors.append(pin_error)
+    pin_errors: list[str] = []
+    lines = [
+        line.strip()
+        for line in block.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    downloads += sum("goreleaser/nfpm/" in line.casefold() for line in lines)
+    for index, line in enumerate(lines):
+        if "goreleaser/nfpm/" not in line.casefold():
+            continue
+        recipe = "\n".join(lines[index : index + 3])
+        if lines[0] == "set -euo pipefail" and re.fullmatch(NFPM_RECIPE, recipe):
+            checked += 1
+            pin_error = _nfpm_pin_error(lines, recipe)
+            if pin_error:
+                pin_errors.append(pin_error)
+    return downloads, checked, pin_errors
+
+
+def release_errors(text: str, *, required: bool = False) -> list[str]:
+    """Require the nfpm download/check/install sequence in a strict shell step."""
+    errors = []
+    runs, parse_errors = _yaml_scalar_values(text, "run")
+    errors.extend(parse_errors)
+    downloads = 0
+    checked = 0
+    pin_errors: list[str] = []
+    for _, block in runs:
+        block_downloads, block_checked, block_pin_errors = _nfpm_block_result(block)
+        downloads += block_downloads
+        checked += block_checked
+        pin_errors.extend(block_pin_errors)
     # Count across the whole document as well, so an unsupported run style fails
     # closed instead of disappearing from the parsed block set.
     total = sum(
-        "github.com/goreleaser/nfpm/" in line
+        "goreleaser/nfpm/" in line.casefold()
         for line in text.splitlines()
         if not line.lstrip().startswith("#")
     )
-    installs = len(re.findall(r"(?m)^\s*sudo dpkg -i /tmp/nfpm\.deb\s*$", text))
-    if total != checked or downloads != checked or installs != checked:
+    installs = len(
+        re.findall(r"(?m)^\s*sudo dpkg (?:-i|--install) /tmp/nfpm\.deb\s*$", text)
+    )
+    if (
+        total != checked
+        or downloads != checked
+        or installs != checked
+        or (required and checked != 1)
+    ):
         errors.append("nfpm download must verify a pinned checksum before sudo install")
     errors.extend(pin_errors)
     return errors
@@ -571,11 +718,11 @@ class PinFixtures(unittest.TestCase):
         "&& tar -xzf /tmp/yara.tar.gz -C /tmp && rm /tmp/yara.tar.gz"
     )
     nfpm = (
-        "      run: |\n        set -euo pipefail\n"
-        f"        NFPM_VERSION={nfpm_version}\n"
-        f"        curl -fsSL {NFPM_URL} -o /tmp/nfpm.deb\n"
-        f'        echo "{nfpm_digest}  /tmp/nfpm.deb" | sha256sum -c -\n'
-        "        sudo dpkg -i /tmp/nfpm.deb\n"
+        "steps:\n  - run: |\n      set -euo pipefail\n"
+        f"      NFPM_VERSION={nfpm_version}\n"
+        f"      curl -fsSL {NFPM_URL} -o /tmp/nfpm.deb\n"
+        f'      echo "{nfpm_digest}  /tmp/nfpm.deb" | sha256sum -c -\n'
+        "      sudo dpkg -i /tmp/nfpm.deb\n"
     )
 
     def test_external_and_local_stages(self) -> None:
@@ -630,6 +777,9 @@ class PinFixtures(unittest.TestCase):
             "index.docker.io:443/library/golang:",
             "registry-1.docker.io:443/library/golang:",
             "registry.hub.docker.com:443/library/golang:",
+            "REGISTRY-1.DOCKER.IO/library/golang:",
+            "docker.io:0443/library/golang:",
+            "docker.io./library/golang:",
         )
         qualified = [
             recipe.replace("FROM golang:", f"FROM {alias}") for alias in aliases
@@ -709,7 +859,7 @@ def _local_images_for(root: Path, path: Path, text: str) -> frozenset[str]:
     ci_workflow = root / ".github/workflows/ci.yml"
     if not ci_workflow.is_file():
         return frozenset()
-    workflow = ci_workflow.read_text(encoding="utf-8")
+    workflow = ci_workflow.read_text(encoding="utf-8", errors="replace")
     workflow = re.sub(r"[ \t]*\\\n\s*", " ", workflow)
     producer = re.search(
         r"(?m)^\s*docker buildx build --target test -f docker/Dockerfile "
@@ -721,22 +871,30 @@ def _local_images_for(root: Path, path: Path, text: str) -> frozenset[str]:
     return frozenset()
 
 
-def _yara_tree_errors(root: Path, dockerfiles: list[Path]) -> list[str]:
+def _yara_recipe_paths(root: Path, dockerfiles: dict[Path, str]) -> set[Path]:
+    """Return required and discovered Dockerfiles that should build YARA."""
+    required = [root / relative for relative in YARA_RECIPE_PATHS]
+    paths = {path for path in required if path in dockerfiles}
+    for path, text in dockerfiles.items():
+        if re.search(r"(?m)^ARG YARA_VERSION(?:=|$)", text) or any(
+            "virustotal/yara/" in line.casefold() and not line.lstrip().startswith("#")
+            for line in text.splitlines()
+        ):
+            paths.add(path)
+    return paths
+
+
+def _yara_tree_errors(root: Path, dockerfiles: dict[Path, str]) -> list[str]:
     """Require every YARA recipe to share one reviewed version/checksum."""
     required = [root / relative for relative in YARA_RECIPE_PATHS]
-    missing = [path for path in required if not path.is_file()]
+    missing = [path for path in required if path not in dockerfiles]
     errors = [
         f"missing required YARA build recipe: {path.relative_to(root)}"
         for path in missing
     ]
-    paths = {
-        path
-        for path in dockerfiles
-        if re.search(r"(?m)^ARG YARA_VERSION(?:=|$)", path.read_text(encoding="utf-8"))
-    }
     pins = {}
-    for path in sorted(paths):
-        pin = yara_pin(path.read_text(encoding="utf-8"))
+    for path in sorted(_yara_recipe_paths(root, dockerfiles)):
+        pin = yara_pin(dockerfiles[path])
         if pin is None:
             errors.append(f"unreadable YARA build pin: {path.relative_to(root)}")
         else:
@@ -751,21 +909,45 @@ def _yara_tree_errors(root: Path, dockerfiles: list[Path]) -> list[str]:
     return []
 
 
+def _is_dockerfile_path(root: Path, path: Path) -> bool:
+    """Recognize executable Dockerfile/Containerfile naming conventions."""
+    name = path.name.casefold()
+    return (
+        path.is_file()
+        and not EXCLUDED_TREE_DIRS.intersection(path.relative_to(root).parts)
+        and path.suffix.casefold() not in DOCUMENT_SUFFIXES
+        and (
+            name.startswith(("dockerfile", "containerfile"))
+            or name.endswith((".dockerfile", ".containerfile"))
+        )
+    )
+
+
+def _candidate_files(root: Path) -> list[Path]:
+    """Walk project-owned paths without descending into dependency/build trees."""
+    files: list[Path] = []
+    for parent, directories, names in os.walk(root):
+        directories[:] = [
+            directory
+            for directory in directories
+            if directory not in EXCLUDED_TREE_DIRS
+        ]
+        files.extend(Path(parent) / name for name in names)
+    return sorted(files)
+
+
 def check_tree(root: Path) -> list[str]:
-    """Scan root/docker/contrib Dockerfiles and recursive GitHub YAML files."""
+    """Scan repository-wide Dockerfiles and recursive GitHub YAML files."""
     errors = workflow_errors(root)
     errors.extend(_tool_cache_errors(root))
-    dockerfiles = sorted(
-        [
-            *root.glob("Dockerfile*"),
-            *root.glob("docker/**/Dockerfile*"),
-            *root.glob("contrib/**/Dockerfile*"),
-        ]
-    )
+    dockerfiles = {
+        path: path.read_text(encoding="utf-8", errors="replace")
+        for path in _candidate_files(root)
+        if _is_dockerfile_path(root, path)
+    }
     if not dockerfiles:
         errors.append("no Dockerfiles found")
-    for path in dockerfiles:
-        text = path.read_text(encoding="utf-8")
+    for path, text in dockerfiles.items():
         # The Postfix integration image consumes binaries built from this
         # checkout by CI. Only that exact producer/consumer pair is exempt;
         # other ARG-based FROM references must carry literal digest pins.
@@ -778,11 +960,19 @@ def check_tree(root: Path) -> list[str]:
             )
         )
     errors.extend(_yara_tree_errors(root, dockerfiles))
+    release_path = root / ".github/workflows/release.yml"
+    if not release_path.is_file():
+        errors.append(
+            "missing required nfpm release workflow: .github/workflows/release.yml"
+        )
     for path in sorted((root / ".github").rglob("*")):
         if path.suffix in {".yml", ".yaml"} and path.is_file():
             errors.extend(
                 f"{path.relative_to(root)}: {error}"
-                for error in release_errors(path.read_text(encoding="utf-8"))
+                for error in release_errors(
+                    path.read_text(encoding="utf-8", errors="replace"),
+                    required=path == release_path,
+                )
             )
     return errors
 
