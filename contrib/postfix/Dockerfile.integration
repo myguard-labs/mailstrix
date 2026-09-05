@@ -1,7 +1,7 @@
 # Build the current docker/Dockerfile test target first; use its real binaries.
 ARG BUILD_IMAGE=strixd-test
 FROM ${BUILD_IMAGE} AS binaries
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
