@@ -26,11 +26,16 @@ Use `docker buildx imagetools inspect IMAGE:TAG` to resolve a replacement index
 and check its platform list before updating a digest. Compare downloaded YARA
 and nfpm bytes against their reviewed checksums before extraction or installation.
 The three YARA build recipes must change together.
+When changing an image digest or a YARA/nfpm version and checksum, update its
+matching reviewed entry in `IMAGE_PINS`, `YARA_PINS`, or `NFPM_PINS` in
+`packaging/deb/immutable_inputs_test.py` in the same commit.
 
 `sh packaging/deb/workflow_pins_test.sh` checks recursive GitHub workflows and
 composite actions, root Dockerfiles, and Dockerfiles below `docker/` and
-`contrib/`. Its download checks accept the reviewed fail-fast command sequence;
-they do not attempt to interpret arbitrary shell programs. Run
+`contrib/`. Write `uses:` steps in block style; flow-style mappings are rejected
+so the static action scanner cannot silently miss them. Its download checks
+accept the reviewed fail-fast command sequence; they do not attempt to interpret
+arbitrary shell programs. Run
 `python3 -B packaging/deb/workflow_pins_controls_test.py` to exercise benign
 fixtures for missing pins and checksums. Both commands run in CI.
 
