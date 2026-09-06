@@ -64,9 +64,36 @@ mailstrix {
 }
 ```
 
-The timeout must exceed the scanner's queue plus scan timeout (defaults total
-9 seconds). Align size limits with your mail policy; the example caps each
-request at 8 MiB. Rspamd transport errors do not add a malware score.
+Before using this block with **any of the three Rspamd recipes**, check the
+whole scan deadline chain. The plugin's 10-second HTTP timeout must exceed the
+scanner's queue plus scan timeout (defaults total 9 seconds), but must also fit
+inside the effective Rspamd task deadline with time left for other filters and
+overhead. Upstream documents an 8-second `task_timeout` default for both the
+[normal worker](https://docs.rspamd.com/workers/normal/) and
+[controller scan requests](https://docs.rspamd.com/workers/controller/).
+That default is too short for this example's full scan budget. A worker's
+`timeout` is its protocol I/O timeout; increasing it alone does not extend
+`task_timeout`.
+
+Inspect `rspamadm configdump worker options` locally in the filtering container
+and compare the effective settings with your installed release's defaults; keep
+configuration dumps private. Trace the MTA's actual scan route: the
+[proxy worker](https://docs.rspamd.com/workers/rspamd_proxy/) can forward to a
+normal scanner or scan itself with `self_scan`. Adjust the task deadline for
+the worker that actually scans, including applicable
+[global task options](https://docs.rspamd.com/configuration/options/), through
+the platform's persistent configuration. Changing an unused normal worker
+does not change a self-scan proxy's deadline. Check the controller separately
+for WebUI/`rspamc` scans, and allow the complete task budget plus transport
+overhead in the upstream proxy and MTA response timeouts.
+
+If those outer deadlines must stay fixed, reduce the scanner's
+`MAILSTRIX_BACKEND_TIMEOUT` and `MAILSTRIX_SCAN_TIMEOUT` and the plugin timeout
+together so that the entire budget fits. A shorter budget can leave more scans
+unfinished; confirm the resulting timeout policy in staging rather than treating
+an interrupted scan as clean. Align size limits with your mail policy; the
+example caps each request at 8 MiB. Rspamd transport errors do not add a malware
+score.
 
 ### Mailcow
 
