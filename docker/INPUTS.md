@@ -1,7 +1,7 @@
 # Build input pins
 
 Dockerfiles pin external images by multi-platform index digest. The selected
-Debian bookworm-slim, Go 1.25.13-bookworm, distroless base-debian12:nonroot and
+Debian bookworm-slim, Go 1.26.8-bookworm, distroless base-debian12:nonroot and
 Dockerfile frontend indexes include both linux/amd64 and linux/arm64.
 Tags remain readable version labels; the digest selects the actual content.
 Update both together when changing Go versions.
@@ -9,7 +9,7 @@ Update both together when changing Go versions.
 The input sources checked on 2026-09-05 were:
 
 - Debian and Go: the official `library/debian:bookworm-slim` and
-  `library/golang:1.25.13-bookworm` manifests on Docker Hub.
+  `library/golang:1.26.8-bookworm` manifests on Docker Hub.
 - Runtime: `gcr.io/distroless/base-debian12:nonroot` from the
   [distroless project](https://github.com/GoogleContainerTools/distroless).
 - Build frontend: the official `docker/dockerfile:1` manifest on Docker Hub.

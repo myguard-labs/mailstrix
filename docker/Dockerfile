@@ -33,7 +33,7 @@ RUN ./bootstrap.sh \
     && make -j"$(nproc)" && make install && ldconfig
 
 # ---- go build ---------------------------------------------------------------
-FROM golang:${GO_VERSION}-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS build
+FROM golang:${GO_VERSION}-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc pkg-config libssl-dev zlib1g-dev libzstd-dev \
     && rm -rf /var/lib/apt/lists/*

@@ -92,6 +92,14 @@ jobs:
       # recompiled from source every run (was the ~7-8 min lint bottleneck —
       # go-setup already caches modules + build, not these tool binaries). Hashing
       # this workflow makes every reviewed install-pin change miss the cache.
+      - name: pinned analysis-tool versions
+        id: toolvers
+        run: |
+          {
+            echo "staticcheck=v0.7.0"
+            echo "govulncheck=v1.6.0"
+            echo "gosec=v2.27.1"
+          } >> "$GITHUB_OUTPUT"
       - name: cache go analysis tools
         id: gotools
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
@@ -102,10 +110,12 @@ jobs:
       # different runner image can be incomplete, and the self-hosted runner
       # does not have ~/go/bin on PATH by default.
       - name: install analysis tools
+        env:
+          GOTOOLS_CACHE_HIT: ${{ steps.gotools.outputs.cache-hit }}
         run: |
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/go/bin:$PATH"
-          if [ "${{ steps.gotools.outputs.cache-hit }}" != true ]; then
+          if [ "$GOTOOLS_CACHE_HIT" != true ]; then
             rm -f "$HOME/go/bin/staticcheck" \
               "$HOME/go/bin/govulncheck" "$HOME/go/bin/gosec"
           fi
