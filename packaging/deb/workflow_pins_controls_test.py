@@ -613,6 +613,18 @@ class TestWorkflowControls(unittest.TestCase):
         self.write("vendor/example/build.yml", "FROM example.test/base:latest\n")
         self.reject("Docker external base must have a sha256 digest")
 
+    def test_nested_shell_dockerfile_overrides_tree_exclusions(self) -> None:
+        self.write("vendor/example/build.yml", "FROM example.test/base:latest\n")
+        for shell in ("sh", "bash", "dash"):
+            for flags in ("-c", "-ec", "-cex"):
+                self.write(
+                    ".github/workflows/ci.yml",
+                    "steps:\n"
+                    f"  - run: {shell} {flags} "
+                    "'docker build -f vendor/example/build.yml .'\n",
+                )
+                self.reject("Docker external base must have a sha256 digest")
+
     def test_wrapped_docker_build_file_is_scanned(self) -> None:
         self.write("vendor/example/build.yml", "FROM example.test/base:latest\n")
         for command in (

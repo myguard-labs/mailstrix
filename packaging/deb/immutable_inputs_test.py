@@ -1229,7 +1229,7 @@ def _dockerfile_option(arguments: list[str]) -> str | None:
 
 
 def _dockerfile_values(line: str) -> list[str]:
-    """Extract explicit Dockerfile paths from one shell command line."""
+    """Extract explicit Dockerfile paths, including literal shell -c payloads."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars="();<>|&")
     lexer.whitespace_split = True
     values: list[str] = []
@@ -1240,6 +1240,10 @@ def _dockerfile_values(line: str) -> list[str]:
         value = _dockerfile_option(arguments)
         if value is not None:
             values.append(value)
+    for payload in _shell_c_payloads(line):
+        for nested_line in _logical_shell_lines(payload):
+            if not nested_line.lstrip().startswith("#"):
+                values.extend(_dockerfile_values(nested_line))
     return values
 
 
