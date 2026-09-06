@@ -88,11 +88,10 @@ jobs:
       # merely broken upstream release change what CI runs, with no diff and no
       # review — the same supply-chain hole as an unpinned action.
       #
-      # The versions are part of the CACHE KEY on purpose. The install step below is
-      # presence-guarded (`command -v ... ||`), so a cached ~/go/bin would otherwise
-      # keep serving the OLD binary forever and bumping a pin here would silently do
-      # nothing. Keying on the versions means changing a pin misses the cache and
-      # rebuilds that tool, which is the only thing that makes the pin real.
+      # Cache the compiled analysis-tool binaries in ~/go/bin so they aren't
+      # recompiled from source every run (was the ~7-8 min lint bottleneck —
+      # go-setup already caches modules + build, not these tool binaries). Hashing
+      # this workflow makes every reviewed install-pin change miss the cache.
       - name: pinned analysis-tool versions
         id: toolvers
         run: |
@@ -101,29 +100,31 @@ jobs:
             echo "govulncheck=v1.6.0"
             echo "gosec=v2.27.1"
           } >> "$GITHUB_OUTPUT"
-      # Cache the compiled analysis-tool binaries in ~/go/bin so they aren't
-      # recompiled from source every run (was the ~7-8 min lint bottleneck —
-      # go-setup already caches modules + build, not these tool binaries).
       - name: cache go analysis tools
         id: gotools
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ~/go/bin
-          key: gotools-${{ runner.os }}-go1.26-selfhosted-sc${{ steps.toolvers.outputs.staticcheck }}-gv${{ steps.toolvers.outputs.govulncheck }}-gs${{ steps.toolvers.outputs.gosec }}
+          key: gotools-${{ runner.os }}-go1.26-selfhosted-sc${{ steps.toolvers.outputs.staticcheck }}-gv${{ steps.toolvers.outputs.govulncheck }}-gs${{ steps.toolvers.outputs.gosec }}-${{ hashFiles('.github/workflows/ci.yml', '.github/actions/go-setup/action.yml') }}
       # Presence-guarded (not just cache-hit): a cache blob restored from a
       # different runner image can be incomplete, and the self-hosted runner
       # does not have ~/go/bin on PATH by default.
       - name: install analysis tools
         env:
-          STATICCHECK_VERSION: ${{ steps.toolvers.outputs.staticcheck }}
-          GOVULNCHECK_VERSION: ${{ steps.toolvers.outputs.govulncheck }}
-          GOSEC_VERSION: ${{ steps.toolvers.outputs.gosec }}
+          GOTOOLS_CACHE_HIT: ${{ steps.gotools.outputs.cache-hit }}
         run: |
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/go/bin:$PATH"
-          command -v staticcheck >/dev/null || go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
-          command -v govulncheck >/dev/null || go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
-          command -v gosec >/dev/null || go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          if [ "$GOTOOLS_CACHE_HIT" != true ]; then
+            rm -f "$HOME/go/bin/staticcheck" \
+              "$HOME/go/bin/govulncheck" "$HOME/go/bin/gosec"
+          fi
+          [ -x "$HOME/go/bin/staticcheck" ] ||
+            go install "honnef.co/go/tools/cmd/staticcheck@v0.7.0"
+          [ -x "$HOME/go/bin/govulncheck" ] ||
+            go install "golang.org/x/vuln/cmd/govulncheck@v1.6.0"
+          [ -x "$HOME/go/bin/gosec" ] ||
+            go install "github.com/securego/gosec/v2/cmd/gosec@v2.27.1"
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd internal)
@@ -180,7 +181,9 @@ jobs:
         run: sh packaging/deb/maintscript_test.sh
 
       - name: SHA-pinned actions consistent across workflows
-        run: sh packaging/deb/workflow_pins_test.sh
+        run: |
+          sh packaging/deb/workflow_pins_test.sh
+          python3 -B packaging/deb/workflow_pins_controls_test.py
 
       - name: self-hosted runners use disposable builder slots
         run: sh packaging/deb/runner_isolation_test.sh
