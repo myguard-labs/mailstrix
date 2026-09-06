@@ -57,6 +57,34 @@ func TestWriteWithBackupKeepsLivePresent(t *testing.T) {
 	}
 }
 
+func TestWriteWithBackupCleansTempWhenBackupRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "feed")
+	if err := os.WriteFile(p, []byte("old-live"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bakDir := p + BackupSuffix
+	if err := os.Mkdir(bakDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(bakDir, "keep")
+	if err := os.WriteFile(marker, []byte("old-backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWithBackup(p, []byte("new-live"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(p); err != nil || string(b) != "new-live" {
+		t.Fatalf("live = %q, %v; want new-live", b, err)
+	}
+	if b, err := os.ReadFile(marker); err != nil || string(b) != "old-backup" {
+		t.Fatalf("backup marker = %q, %v; want retained directory", b, err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, ".atomicio-bak-*.tmp")); err != nil || len(matches) != 0 {
+		t.Fatalf("temporary backups = %v, %v; want none", matches, err)
+	}
+}
+
 func TestWriteWithBackupPerm(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f")
 	if err := WriteWithBackup(p, []byte("x"), 0o600); err != nil {

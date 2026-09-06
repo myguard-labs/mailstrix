@@ -1,8 +1,8 @@
 # osv-scanner reads the `go` directive in go.mod as the Go stdlib version and
-# reports every toolchain CVE fixed in a later 1.25.x patch. The directive is a
-# minimum-language-version floor (forced to 1.25.0 by a dependency's own go.mod),
+# reports every toolchain CVE fixed in a later 1.26.x patch. The directive is a
+# minimum-language-version floor (forced to 1.26.0 by a dependency's own go.mod),
 # NOT the toolchain that builds the release: the Dockerfile build stage uses the
-# `golang:1.25` image, which tracks the latest patched 1.25.x, and the final
+# exact patched Go toolchain pinned in docker/Dockerfile, and the final
 # image ships only that statically linked binary. So stdlib-patch CVEs flagged
 # against the floor directive are not a property of the shipped artifact.
 # Ignore the synthetic `stdlib` package; real dependency CVEs are still scanned.
@@ -10,9 +10,9 @@
 ecosystem = "Go"
 name = "stdlib"
 ignore = true
-reason = "go.mod `go` directive is a language-version floor, not the build toolchain; release is built with the latest patched golang:1.25 image."
+reason = "go.mod `go` directive is a language-version floor, not the build toolchain; release is built with the exact patched Go version pinned in docker/Dockerfile."
 
-# GO-2026-5932 (golang.org/x/crypto 0.55.0) has no fixed upstream version and the
+# GO-2026-5932 (golang.org/x/crypto 0.56.0) has no fixed upstream version and the
 # dedicated govulncheck lint job confirms the affected symbol is NOT reached
 # (imported, not called). With call-analysis disabled here (bundled Go too old),
 # osv-scanner cannot apply that reachability filter itself, so ignore it

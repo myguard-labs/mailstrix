@@ -67,9 +67,11 @@ func WriteWithBackup(path string, data []byte, perm os.FileMode) (err error) {
 				_ = bakTmp.Close()
 			}
 			if e == nil {
-				_ = os.Chmod(bakName, perm)
-				_ = os.Rename(bakName, path+BackupSuffix)
-			} else {
+				if e = os.Chmod(bakName, perm); e == nil {
+					e = os.Rename(bakName, path+BackupSuffix)
+				}
+			}
+			if e != nil {
 				_ = os.Remove(bakName)
 			}
 		}

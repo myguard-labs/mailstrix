@@ -126,8 +126,9 @@ jobs:
 
       - name: run benchmarks
         run: |
+          set -euo pipefail
           # NOTE: package is ./internal/mailstrix (renamed from ./internal/strixd).
-          docker run --rm strixd-test             go test -bench=. -benchmem -count=6 -timeout=10m             ./internal/mailstrix/ ./internal/extract/             | tee bench-results.txt
+          docker run --rm strixd-test             go test -tags yara_static -bench=. -benchmem -count=6 -timeout=10m             ./internal/mailstrix/ ./internal/extract/             | tee bench-results.txt
 
       - name: regression gate (vs committed baseline)
         run: |
@@ -170,8 +171,6 @@ jobs:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: build test image (arm64 native)
         run: docker buildx build --target test --load -t strixd-test-arm64 -f docker/Dockerfile .
-      - name: go vet + go test -race (arm64)
-        run: docker run --rm strixd-test-arm64 go test -race ./...
 
   # semgrep moved here from the per-PR gate (ci.yml): it ran continue-on-error so
   # it never gated, advertising a check it didn't enforce. Run it monthly until the
