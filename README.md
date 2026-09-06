@@ -838,6 +838,9 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
 
 ## Build & test
 
+See the [runner contract](.github/runner/README.md) for physical-slot restoration
+checks, retry requirements and live negative-control acceptance.
+
 Build images, nested actions and the YARA/nfpm downloads use immutable pins.
 See [build input pins](docker/INPUTS.md) for update sources and validation.
 Changing `GO_VERSION` or `YARA_VERSION` also requires updating the matching
