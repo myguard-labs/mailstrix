@@ -10,6 +10,7 @@ that shape require updating its positive and negative fixtures together.
 
 import codecs
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -49,7 +50,7 @@ def _is_default_https_port(port: str) -> bool:
 
 
 def _canonical_image_label(label: str) -> str:
-    """Normalize equivalent Docker Hub names for reviewed-pin comparison."""
+    """Normalize equivalent registry authorities for reviewed-pin comparison."""
     authority, separator, remainder = label.partition("/")
     host, port_separator, port = authority.rpartition(":")
     if not port_separator:
@@ -66,6 +67,12 @@ def _canonical_image_label(label: str) -> str:
         and _is_default_https_port(port)
     ):
         label = remainder
+    elif separator and (
+        "." in host or port_separator or host.casefold() == "localhost"
+    ):
+        canonical_host = host.casefold().rstrip(".")
+        canonical_port = "" if _is_default_https_port(port) else ":" + port
+        label = canonical_host + canonical_port + "/" + remainder
     return "library/" + label if "/" not in label else label
 
 
@@ -152,11 +159,14 @@ def _docker_image_errors(
     stages: set[str],
     local_images: frozenset[str],
 ) -> list[str]:
-    """Validate one FROM image after Docker ARG expansion."""
-    if image.lower() in stages or raw_image in local_images:
+    """Validate one image token without trusting overridable ARG defaults."""
+    if raw_image.lower() in stages or raw_image in local_images:
         return []
-    if not re.fullmatch(r"\S+@sha256:" + HEX64, image):
-        return ["Docker external base must have a sha256 digest: " + image]
+    if not re.fullmatch(r"\S+@sha256:" + HEX64, raw_image):
+        return [
+            "Docker external base must have a sha256 digest; use a literal token: "
+            + image
+        ]
     return _pin_association_errors(image)
 
 
@@ -171,6 +181,8 @@ def _external_sources(line: str) -> list[str]:
     """Extract image/stage sources from COPY and RUN mount instructions."""
     sources = []
     line = re.sub(r"^ONBUILD\s+", "", line, flags=re.IGNORECASE)
+    line = re.sub(r",\s+", ",", line)
+    line = re.sub(r"(--from=)\s+", r"\1", line, flags=re.IGNORECASE)
     if re.match(r"COPY\s", line, re.IGNORECASE):
         sources.extend(re.findall(r"--from=([^\s]+)", line, re.IGNORECASE))
     if re.match(r"RUN\s", line, re.IGNORECASE):
@@ -326,34 +338,107 @@ def _redirect_token_width(tokens: list[str], index: int) -> int:
     return 0
 
 
+def _shell_commands(tokens: list[str]) -> list[list[str]]:
+    """Split shell tokens at control operators without interpreting arguments."""
+    controls = {";", "&", "&&", "|", "||", "(", ")"}
+    commands: list[list[str]] = []
+    start = 0
+    for index, token in enumerate(tokens):
+        if token not in controls:
+            continue
+        if start < index:
+            commands.append(tokens[start:index])
+        start = index + 1
+    if start < len(tokens):
+        commands.append(tokens[start:])
+    return commands
+
+
+def _command_word_index(command: list[str]) -> int | None:
+    """Return the executable word after assignments and simple shell wrappers."""
+    index = 0
+    keywords = {"!", "do", "elif", "else", "if", "then", "until", "while"}
+    wrappers = {"command", "exec", "nohup"}
+    while index < len(command):
+        token = command[index]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
+            index += 1
+            continue
+        if token in keywords:
+            index += 1
+            continue
+        if token in wrappers:
+            index += 1
+            while index < len(command) and command[index].startswith("-"):
+                index += 1
+            continue
+        if token == "env":
+            index += 1
+            while index < len(command) and (
+                command[index].startswith("-")
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[index])
+            ):
+                index += 1
+            continue
+        return index
+    return None
+
+
+def _literal_go_index(command: list[str]) -> int | None:
+    """Locate a literal Go executable unless the command only prints arguments."""
+    command_index = _command_word_index(command)
+    if command_index is None:
+        return None
+    if command[command_index].rsplit("/", 1)[-1] in {"echo", "printf", "set"}:
+        return None
+    return next(
+        (
+            position
+            for position in range(command_index, len(command))
+            if command[position].rsplit("/", 1)[-1] == "go"
+        ),
+        None,
+    )
+
+
+def _go_package_refs(command: list[str], start: int) -> list[str]:
+    """Return non-option package words, excluding shell redirections."""
+    refs: list[str] = []
+    for position in range(start, len(command)):
+        if _redirect_token_width(command, position):
+            continue
+        if position and _redirect_token_width(command, position - 1) > 1:
+            continue
+        if not command[position].startswith("-"):
+            refs.append(command[position])
+    return refs
+
+
+def _go_install_from_command(command: list[str]) -> tuple[bool, list[str]]:
+    """Return direct Go install references from one executable command."""
+    index = _literal_go_index(command)
+    if index is None:
+        return False, []
+    cursor = index + 1
+    if cursor < len(command) and command[cursor] == "-C":
+        cursor += 2
+    elif cursor < len(command) and command[cursor].startswith("-C="):
+        cursor += 1
+    if cursor >= len(command) or command[cursor] != "install":
+        return False, []
+    return True, _go_package_refs(command, cursor + 1)
+
+
 def _go_install_refs(line: str) -> tuple[bool, list[str]]:
     """Use shell tokenization to find direct Go install package arguments."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars="();<>|&")
     lexer.whitespace_split = True
-    tokens = list(lexer)
-    controls = {";", "&", "&&", "|", "||", "(", ")"}
     found = False
-    refs = []
-    for index, token in enumerate(tokens):
-        if token.rsplit("/", 1)[-1] != "go":
-            continue
-        cursor = index + 1
-        if cursor < len(tokens) and tokens[cursor] == "-C":
-            cursor += 2
-        elif cursor < len(tokens) and tokens[cursor].startswith("-C="):
-            cursor += 1
-        if cursor >= len(tokens) or tokens[cursor] != "install":
-            continue
-        found = True
-        cursor += 1
-        while cursor < len(tokens) and tokens[cursor] not in controls:
-            redirect_width = _redirect_token_width(tokens, cursor)
-            if redirect_width:
-                cursor += redirect_width
-                continue
-            if not tokens[cursor].startswith("-"):
-                refs.append(tokens[cursor])
-            cursor += 1
+    refs: list[str] = []
+    for command in _shell_commands(list(lexer)):
+        command_found, command_refs = _go_install_from_command(command)
+        found = found or command_found
+        refs.extend(command_refs)
     return found, refs
 
 
@@ -363,7 +448,7 @@ def _without_empty_shell_expansions(line: str) -> str:
     def decode_ansi(match: re.Match[str]) -> str:
         try:
             return codecs.decode(match.group(1), "unicode_escape")
-        except (UnicodeDecodeError, ValueError, DeprecationWarning):
+        except (UnicodeDecodeError, ValueError):
             return match.group(1)
 
     line = re.sub(r"\$\{[^{}]*\}", "", line)
@@ -371,23 +456,103 @@ def _without_empty_shell_expansions(line: str) -> str:
     return re.sub(r'\$"([^"\\]*(?:\\.[^"\\]*)*)"', r"\1", line)
 
 
+def _is_dynamic_shell_word(word: str) -> bool:
+    """Return whether a shell word contains parameter or command expansion."""
+    return "$" in word or "`" in word
+
+
 def _has_substituted_install_command(line: str) -> bool:
-    """Reject a dynamically constructed command word immediately before install."""
+    """Reject dynamic command or Go subcommand words that can become install."""
     dynamic_word = (
         r"(?:\S*\$\([^)]*\)\S*|\S*`[^`]*`\S*|"
         r"\S*\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)\S*)"
     )
-    return bool(
-        re.search(
-            r"(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
-            + dynamic_word
-            + r"\s+install(?:\s|$)",
+    prefix = r"(?:^|[;&|()]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+    literal_go = r"(?:\S*/)?go"
+    directory_flag = r"(?:\s+-C(?:=\S+|\s+\S+))?"
+    if bool(
+        re.search(prefix + literal_go + directory_flag + r"\s+" + dynamic_word, line)
+        or re.search(
+            prefix + dynamic_word + r"\s+(?:install|" + dynamic_word + r")",
             line,
         )
-    )
+    ):
+        return True
+    lexer = shlex.shlex(line, posix=True, punctuation_chars="();<>|&")
+    lexer.whitespace_split = True
+    for command in _shell_commands(list(lexer)):
+        index = _command_word_index(command)
+        if index is None or command[index].rsplit("/", 1)[-1] in {
+            "echo",
+            "printf",
+            "set",
+        }:
+            continue
+        for position in range(index, len(command) - 1):
+            word = command[position]
+            following = command[position + 1]
+            if word.rsplit("/", 1)[-1] == "go" and _is_dynamic_shell_word(
+                following
+            ):
+                return True
+            if (
+                position == index
+                and _is_dynamic_shell_word(word)
+                and (following == "install" or _is_dynamic_shell_word(following))
+            ):
+                return True
+    return False
 
 
-def _go_install_line_errors(location: str, line: str) -> list[str]:
+def _shell_c_payloads(line: str) -> list[str]:
+    """Return literal command strings passed to supported POSIX-like shells."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars="();<>|&")
+    lexer.whitespace_split = True
+    payloads: list[str] = []
+    for command in _shell_commands(list(lexer)):
+        index = _command_word_index(command)
+        if index is None or command[index].rsplit("/", 1)[-1] not in {
+            "bash",
+            "dash",
+            "sh",
+        }:
+            continue
+        option = next(
+            (
+                position
+                for position in range(index + 1, len(command))
+                if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", command[position])
+            ),
+            None,
+        )
+        if option is None:
+            continue
+        cursor = option + 1
+        while cursor < len(command) and command[cursor].startswith("-"):
+            cursor += 1
+        if cursor < len(command):
+            payloads.append(command[cursor])
+    return payloads
+
+
+def _nested_shell_errors(location: str, line: str, nesting: int) -> list[str]:
+    """Inspect literal shell -c payloads, failing closed at the depth bound."""
+    payloads = _shell_c_payloads(line)
+    if payloads and nesting >= 4:
+        return [f"{location}: nested shell commands exceed the inspected depth"]
+    errors: list[str] = []
+    for payload in payloads:
+        for nested_line in _logical_shell_lines(payload):
+            if not nested_line.lstrip().startswith("#"):
+                errors.extend(
+                    _go_install_line_errors(location, nested_line, nesting + 1)
+                )
+    return errors
+
+
+def _go_install_line_errors(
+    location: str, line: str, nesting: int = 0
+) -> list[str]:
     """Validate literal Go install arguments on one logical shell line."""
     errors: list[str] = []
     try:
@@ -396,6 +561,7 @@ def _go_install_line_errors(location: str, line: str) -> list[str]:
         if "go" in line and "install" in line:
             errors.append(f"{location}: invalid shell quoting: {error}")
         return errors
+    nested_errors = _nested_shell_errors(location, line, nesting)
     if not found:
         normalized = _without_empty_shell_expansions(line)
         try:
@@ -407,7 +573,7 @@ def _go_install_line_errors(location: str, line: str) -> list[str]:
                 f"{location}: possible go install uses unsupported command syntax; "
                 "use literal command words"
             )
-        return errors
+        return errors + nested_errors
     if not refs:
         errors.append(f"{location}: go install has no package reference")
     for ref in refs:
@@ -420,7 +586,7 @@ def _go_install_line_errors(location: str, line: str) -> list[str]:
             errors.append(
                 f"{location}: go install without an exact pinned version: {ref}"
             )
-    return errors
+    return errors + nested_errors
 
 
 def _go_install_errors(root: Path, path: Path, text: str) -> list[str]:
@@ -472,31 +638,43 @@ def _uses_errors(
     return errors, local_files, pins
 
 
-def workflow_errors(root: Path) -> list[str]:
-    """Recursively enforce action and Go-tool pins from every workflow entry."""
-    errors: list[str] = []
+def _workflow_entry_paths(root: Path) -> list[Path]:
+    """Return workflow and recursively reachable local-action manifests."""
     workflows = sorted((root / ".github/workflows").glob("*.yml"))
     workflows += sorted((root / ".github/workflows").glob("*.yaml"))
-    if not workflows:
-        return [f"no workflows found under {root / '.github/workflows'}"]
-
     actions_root = root / ".github/actions"
     queued = list(workflows)
     if actions_root.is_dir():
         queued.extend(sorted(actions_root.rglob("*.yml")))
         queued.extend(sorted(actions_root.rglob("*.yaml")))
-
-    seen = set()
-    action_pins: dict[str, set[str]] = {}
+    seen: set[Path] = set()
     while queued:
         path = queued.pop(0)
         if path in seen:
             continue
         seen.add(path)
+        uses, _ = _yaml_uses(path.read_text(encoding="utf-8", errors="replace"))
+        for _, value in uses:
+            if value.startswith("./"):
+                manifest = _local_uses_file(root, value)
+                if manifest is not None:
+                    queued.append(manifest)
+    return sorted(seen)
+
+
+def workflow_errors(root: Path) -> list[str]:
+    """Recursively enforce action and Go-tool pins from every workflow entry."""
+    workflows = list((root / ".github/workflows").glob("*.yml"))
+    workflows += list((root / ".github/workflows").glob("*.yaml"))
+    if not workflows:
+        return [f"no workflows found under {root / '.github/workflows'}"]
+    paths = _workflow_entry_paths(root)
+    errors: list[str] = []
+    action_pins: dict[str, set[str]] = {}
+    for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
-        uses_errors, local_files, pins = _uses_errors(root, path, text)
+        uses_errors, _, pins = _uses_errors(root, path, text)
         errors.extend(uses_errors)
-        queued.extend(local_files)
         for action, sha in pins:
             action_pins.setdefault(action, set()).add(sha)
         errors.extend(_go_install_errors(root, path, text))
@@ -512,6 +690,8 @@ def workflow_errors(root: Path) -> list[str]:
 
 def _cache_path_covers_go_bin(cache_path: str | None) -> bool:
     """Return whether an actions/cache path includes the Go binary directory."""
+    # Canonicalize home aliases before GOPATH and dot segments so every form
+    # reaches the same ~/go path without allowing normpath to erase the alias.
     entries = [
         re.sub(
             r"/{2,}",
@@ -528,11 +708,14 @@ def _cache_path_covers_go_bin(cache_path: str | None) -> bool:
         if entry.strip()
     ]
     entries = [
-        re.sub(
-            r"^(?:\$\{GOPATH\}|\$GOPATH)/",
-            "~/go/",
-            entry,
-            flags=re.IGNORECASE,
+        posixpath.normpath(
+            re.sub(
+                r"^(?:\$\{\{\s*env\.GOPATH\s*\}\}|\$\{GOPATH\}|\$GOPATH)"
+                r"(?=/|$)",
+                "~/go",
+                entry,
+                flags=re.IGNORECASE,
+            )
         )
         for entry in entries
     ]
@@ -546,14 +729,21 @@ def _cache_path_covers_go_bin(cache_path: str | None) -> bool:
 def _cache_step_has_unbound_key(step: MappingNode, expected: re.Pattern[str]) -> bool:
     """Return whether one Go-tool cache step lacks the required hash expression."""
     uses = _mapping_scalar(step, "uses") or ""
-    if not re.fullmatch(r"(?i)actions/cache(?:/(?:restore|save))?@[0-9a-f]{40}", uses):
-        return False
+    is_cache = bool(
+        re.fullmatch(r"(?i)actions/cache(?:/(?:restore|save))?@[0-9a-f]{40}", uses)
+    )
+    is_gotools = _mapping_scalar(step, "id") == "gotools"
+    if not is_cache:
+        return is_gotools
     for with_node in _mapping_values(step, "with"):
-        if isinstance(with_node, MappingNode) and _cache_path_covers_go_bin(
-            _mapping_scalar(with_node, "path")
-        ):
+        if not isinstance(with_node, MappingNode):
+            continue
+        covers_go_bin = _cache_path_covers_go_bin(_mapping_scalar(with_node, "path"))
+        if is_gotools and not covers_go_bin:
+            return True
+        if covers_go_bin:
             return not expected.search(_mapping_scalar(with_node, "key") or "")
-    return False
+    return is_gotools
 
 
 def _tool_cache_errors(root: Path) -> list[str]:
@@ -577,6 +767,40 @@ def _tool_cache_errors(root: Path) -> list[str]:
     ]
 
 
+def _docker_logical_text(text: str) -> str:
+    """Join Dockerfile continuations using its declared parser escape."""
+    escape = "\\"
+    for physical in text.splitlines():
+        directive = re.fullmatch(
+            r"[ \t]*#[ \t]*([A-Za-z]+)[ \t]*=[ \t]*(\S+)[ \t]*", physical
+        )
+        if directive is None:
+            break
+        if directive.group(1).casefold() == "escape" and directive.group(2) in {
+            "\\",
+            "`",
+        }:
+            escape = directive.group(2)
+
+    continuation = re.compile(
+        r"[ \t]*" + re.escape(escape) + r"[ \t]*\r?$"
+    )
+    logical: list[str] = []
+    pending = ""
+    for physical in text.splitlines():
+        if pending and physical.lstrip().startswith("#"):
+            continue
+        line = pending + physical.lstrip() if pending else physical
+        if not line.lstrip().startswith("#") and continuation.search(line):
+            pending = continuation.sub(" ", line)
+            continue
+        logical.append(line)
+        pending = ""
+    if pending:
+        logical.append(pending)
+    return "\n".join(logical)
+
+
 def docker_errors(text: str, local_images: frozenset[str] = frozenset()) -> list[str]:
     """Require immutable external images and checked YARA extraction."""
     errors = []
@@ -585,7 +809,7 @@ def docker_errors(text: str, local_images: frozenset[str] = frozenset()) -> list
     args = {}
     yara_recipes = 0
     # Join only Docker continuation lines; command chaining remains significant.
-    logical = re.sub(r"[ \t]*\\\n\s*", " ", text)
+    logical = _docker_logical_text(text)
     for line in logical.splitlines():
         line = line.strip()
         yara_recipes += bool(re.fullmatch(YARA_RECIPE, line))
@@ -623,7 +847,7 @@ def docker_errors(text: str, local_images: frozenset[str] = frozenset()) -> list
 def yara_pin(text: str) -> tuple[str, str] | None:
     """Return the single checked YARA version/checksum tuple from a recipe."""
     version = re.search(r"(?m)^ARG YARA_VERSION=([^\s]+)$", text)
-    logical = re.sub(r"[ \t]*\\\n\s*", " ", text)
+    logical = _docker_logical_text(text)
     checksums = []
     for line in logical.splitlines():
         line = line.strip()
@@ -751,6 +975,23 @@ class PinFixtures(unittest.TestCase):
             pinned = instruction.replace(":1", f":1@sha256:{self.digest}")
             self.assertEqual([], docker_errors("FROM scratch\n" + pinned))
 
+    def test_nested_shell_payload_uses_logical_line_rules(self) -> None:
+        command = (
+            "sh -ec '# setup\n"
+            "go \\\n"
+            "  install example.test/tool@latest'"
+        )
+        self.assertIn(
+            "exact pinned version",
+            _go_install_line_errors("fixture", command)[0],
+        )
+
+    def test_nested_shell_depth_limit_fails_closed(self) -> None:
+        self.assertIn(
+            "exceed the inspected depth",
+            _go_install_line_errors("fixture", "sh -c 'echo safe'", nesting=4)[0],
+        )
+
     def test_frontend(self) -> None:
         self.assertEqual(
             [], docker_errors(f"# syntax=example.test/frontend:1@sha256:{self.digest}")
@@ -866,8 +1107,8 @@ def _local_images_for(root: Path, path: Path, text: str) -> frozenset[str]:
         r"-t strixd-test --load(?: [^\n]*?)? \.$",
         workflow,
     )
-    if producer and re.search(r"(?m)^ARG BUILD_IMAGE=strixd-test$", text):
-        return frozenset({"${BUILD_IMAGE}"})
+    if producer and re.search(r"(?mi)^FROM\s+strixd-test(?:\s+AS\s+\S+)?$", text):
+        return frozenset({"strixd-test"})
     return frozenset()
 
 
@@ -936,14 +1177,124 @@ def _candidate_files(root: Path) -> list[Path]:
     return sorted(files)
 
 
+def _docker_build_arguments(command: list[str]) -> list[str] | None:
+    """Return arguments after an executable docker build/buildx build command."""
+    index = _command_word_index(command)
+    if index is None or command[index].rsplit("/", 1)[-1] in {
+        "echo",
+        "printf",
+        "set",
+    }:
+        return None
+    index = next(
+        (
+            position
+            for position in range(index, len(command))
+            if command[position].rsplit("/", 1)[-1] == "docker"
+        ),
+        None,
+    )
+    if index is None:
+        return None
+    arguments = command[index + 1 :]
+    value_options = {
+        "--config",
+        "--context",
+        "--host",
+        "--log-level",
+        "-H",
+        "-c",
+        "-l",
+    }
+    while arguments and arguments[0].startswith("-"):
+        consumes_value = arguments[0] in value_options
+        arguments = arguments[2 if consumes_value else 1 :]
+    if arguments[:2] == ["buildx", "build"]:
+        return arguments[2:]
+    if arguments[:1] == ["build"]:
+        return arguments[1:]
+    return None
+
+
+def _dockerfile_option(arguments: list[str]) -> str | None:
+    """Return the first explicit Dockerfile option value."""
+    for position, argument in enumerate(arguments):
+        if argument in {"-f", "--file"}:
+            return arguments[position + 1] if position + 1 < len(arguments) else ""
+        if argument.startswith("--file="):
+            return argument.partition("=")[2]
+        if argument.startswith("-f") and len(argument) > 2:
+            return argument[2:]
+    return None
+
+
+def _dockerfile_values(line: str) -> list[str]:
+    """Extract explicit Dockerfile paths from one shell command line."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars="();<>|&")
+    lexer.whitespace_split = True
+    values: list[str] = []
+    for command in _shell_commands(list(lexer)):
+        arguments = _docker_build_arguments(command)
+        if arguments is None:
+            continue
+        value = _dockerfile_option(arguments)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _resolve_dockerfile(
+    root: Path, location: str, value: str
+) -> tuple[Path | None, str | None]:
+    """Resolve one literal repository-local Dockerfile selection."""
+    if not value or "$" in value or "`" in value:
+        return None, f"{location}: Docker build file path must be literal"
+    candidate = (root / value).resolve()
+    if not candidate.is_relative_to(root.resolve()):
+        return None, f"{location}: Docker build file escapes repository: {value}"
+    if not candidate.is_file():
+        return None, f"{location}: Docker build file does not exist: {value}"
+    return candidate, None
+
+
+def _workflow_dockerfile_references(root: Path) -> tuple[set[Path], list[str]]:
+    """Resolve literal Dockerfiles selected by executable workflow build commands."""
+    referenced: set[Path] = set()
+    errors: list[str] = []
+    for workflow in _workflow_entry_paths(root):
+        runs, _ = _yaml_scalar_values(
+            workflow.read_text(encoding="utf-8", errors="replace"), "run"
+        )
+        for lineno, script in runs:
+            for line in _logical_shell_lines(script):
+                try:
+                    values = _dockerfile_values(line)
+                except ValueError:
+                    continue
+                for value in values:
+                    location = f"{workflow.relative_to(root)}:{lineno}"
+                    candidate, error = _resolve_dockerfile(root, location, value)
+                    if error:
+                        errors.append(error)
+                    elif candidate:
+                        referenced.add(candidate)
+    return referenced, errors
+
+
 def check_tree(root: Path) -> list[str]:
     """Scan repository-wide Dockerfiles and recursive GitHub YAML files."""
+    root = root.resolve()
     errors = workflow_errors(root)
     errors.extend(_tool_cache_errors(root))
+    referenced_dockerfiles, reference_errors = _workflow_dockerfile_references(root)
+    errors.extend(reference_errors)
+    discovered_dockerfiles = {
+        path for path in _candidate_files(root) if _is_dockerfile_path(root, path)
+    }
+    discovered_dockerfiles.update(referenced_dockerfiles)
     dockerfiles = {
         path: path.read_text(encoding="utf-8", errors="replace")
-        for path in _candidate_files(root)
-        if _is_dockerfile_path(root, path)
+        for path in sorted(discovered_dockerfiles)
     }
     if not dockerfiles:
         errors.append("no Dockerfiles found")

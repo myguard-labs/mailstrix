@@ -37,10 +37,20 @@ positions (`jobs.*`, `jobs.*.steps`, `runs.steps`, and isolated top-level test
 steps), so equivalent block, flow, quoted and multiline forms cannot bypass the
 policy. Dockerfile discovery excludes `.git`, `.venv`, `node_modules`, `target`,
 `third_party`, and `vendor` dependency/build trees, and skips documentation
-suffixes (`.json`, `.md`, `.rst`, `.txt`, `.yaml`, `.yml`). Its download checks
-accept the reviewed fail-fast command sequence; they do not attempt to interpret
-arbitrary shell programs. Write exact `go install` versions directly at each
-install site; output or environment substitutions are rejected. Run
+suffixes (`.json`, `.md`, `.rst`, `.txt`, `.yaml`, `.yml`). Both exclusions are
+overridden when an executable workflow or reachable composite action selects the
+file with `docker [buildx] build` (`-f PATH`, `-fPATH`, `--file PATH`, or
+`--file=PATH`). Docker
+continuations honor the declared `# escape=` parser directive, and reviewed
+registry authorities are compared case-insensitively with default HTTPS ports
+normalized. Its download checks accept the reviewed fail-fast command sequence;
+they do not attempt to interpret arbitrary shell programs. Write exact
+`go install` versions directly at each install site; dynamic command or
+subcommand words and output or environment substitutions are rejected. Literal
+commands passed to `sh -c`, `bash -c`, or `dash -c` are inspected recursively.
+External image tokens must contain their literal digest, and repository-produced
+image names must be literal too; an `ARG` default is not immutable because
+`--build-arg` can replace it. Run
 `python3 -B packaging/deb/workflow_pins_controls_test.py` to exercise benign
 fixtures for missing pins and checksums. Both commands run in CI.
 

@@ -236,6 +236,80 @@ class TestWorkflowControls(unittest.TestCase):
             )
             self.reject(marker)
 
+    def test_dynamic_go_subcommands_are_rejected(self) -> None:
+        commands = (
+            "go ${CMD:-install} example.test/tool@latest",
+            "go inst${X:-all} example.test/tool@latest",
+            "go ins$(printf tall) example.test/tool@latest",
+            "go ins`printf tall` example.test/tool@latest",
+            "$GO $INSTALL example.test/tool@latest",
+            "${GO} ${INSTALL} example.test/tool@latest",
+            "$(printf go) $(printf install) example.test/tool@latest",
+        )
+        for command in commands:
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: |\n      {command}\n",
+            )
+            self.reject("unsupported command syntax")
+
+    def test_nested_shell_go_install_is_rejected(self) -> None:
+        for shell in ("sh", "bash", "dash"):
+            self.write(
+                ".github/workflows/ci.yml",
+                "steps:\n"
+                f"  - run: {shell} -c 'go install example.test/tool@latest'\n",
+            )
+            self.reject("go install without an exact pinned version")
+
+    def test_nested_shell_flag_clusters_are_rejected(self) -> None:
+        for flags in ("-cx", "-ec", "-cex"):
+            self.write(
+                ".github/workflows/ci.yml",
+                "steps:\n"
+                f"  - run: sh {flags} 'go install example.test/tool@latest'\n",
+            )
+            self.reject("go install without an exact pinned version")
+
+    def test_nested_shell_options_after_c_are_rejected(self) -> None:
+        for shell in ("sh", "bash", "dash"):
+            self.write(
+                ".github/workflows/ci.yml",
+                "steps:\n"
+                f"  - run: {shell} -c -x "
+                "'go install example.test/tool@latest'\n",
+            )
+            self.reject("go install without an exact pinned version")
+
+    def test_go_install_through_wrappers_is_rejected(self) -> None:
+        commands = (
+            "sudo go install example.test/tool@latest",
+            "sudo -u root go install example.test/tool@latest",
+            "timeout 60 go install example.test/tool@latest",
+            "time go install example.test/tool@latest",
+            "stdbuf -oL go install example.test/tool@latest",
+            "xargs go install example.test/tool@latest",
+        )
+        for command in commands:
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: {command}\n",
+            )
+            self.reject("go install without an exact pinned version")
+
+    def test_go_install_argument_text_is_accepted(self) -> None:
+        for command in (
+            "echo go install example.test/tool@latest",
+            "printf '%s\\n' go install example.test/tool@latest",
+            "set -- go install example.test/tool@latest",
+        ):
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: {command}\n",
+            )
+            result = self.gate()
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_go_install_global_directory_flag_is_rejected(self) -> None:
         self.write(
             ".github/workflows/ci.yml",
@@ -374,6 +448,15 @@ class TestWorkflowControls(unittest.TestCase):
             "/root/go/bin",
             "$GOPATH/bin",
             "${GOPATH}/bin",
+            "${{ env.GOPATH }}/bin",
+            "$GOPATH",
+            "${GOPATH}",
+            "${{ env.GOPATH }}",
+            "${{env.GOPATH}}/bin",
+            "${{  env.gopath  }}/bin",
+            "~/go/./bin",
+            "~/go/x/../bin",
+            "/home/runner/go/./bin",
         ):
             self.write(
                 ".github/workflows/ci.yml",
@@ -384,6 +467,18 @@ class TestWorkflowControls(unittest.TestCase):
                 "      key: gotools-static\n",
             )
             self.reject("cache key does not hash workflow and Go setup inputs")
+
+    def test_gotools_cache_id_cannot_hide_its_path(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n"
+            "  - id: gotools\n"
+            "    uses: actions/cache@" + "a" * 40 + "\n"
+            "    with:\n"
+            "      path: ${{ env.CUSTOM_TOOLS }}\n"
+            "      key: gotools-static\n",
+        )
+        self.reject("cache key does not hash workflow and Go setup inputs")
 
     def test_unrelated_cache_path_is_ignored(self) -> None:
         self.write(
@@ -461,6 +556,14 @@ class TestWorkflowControls(unittest.TestCase):
         self.write("docker/nested/Dockerfile.test", "FROM example.test/base:1\n")
         self.reject("Docker external base must have a sha256 digest")
 
+    def test_build_arg_cannot_override_external_base(self) -> None:
+        self.write(
+            "docker/nested/Dockerfile.test",
+            "ARG BASE=example.test/base:1@sha256:" + "1" * 64 + "\n"
+            "FROM ${BASE}\n",
+        )
+        self.reject("use a literal token")
+
     def test_dockerfile_outside_known_directories(self) -> None:
         for name in (
             "Dockerfile",
@@ -491,6 +594,125 @@ class TestWorkflowControls(unittest.TestCase):
         result = self.gate()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_explicit_workflow_dockerfile_is_always_scanned(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - run: docker build -f packaging/tools/Dockerfile.yml .\n",
+        )
+        self.write(
+            "packaging/tools/Dockerfile.yml", "FROM example.test/base:latest\n"
+        )
+        self.reject("Docker external base must have a sha256 digest")
+
+    def test_explicit_dockerfile_overrides_tree_exclusions(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - run: docker buildx build "
+            "--file=vendor/example/build.yml .\n",
+        )
+        self.write("vendor/example/build.yml", "FROM example.test/base:latest\n")
+        self.reject("Docker external base must have a sha256 digest")
+
+    def test_wrapped_docker_build_file_is_scanned(self) -> None:
+        self.write("vendor/example/build.yml", "FROM example.test/base:latest\n")
+        for command in (
+            "sudo docker build -f vendor/example/build.yml .",
+            "timeout 600 docker buildx build --file=vendor/example/build.yml .",
+        ):
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: {command}\n",
+            )
+            self.reject("Docker external base must have a sha256 digest")
+
+    def test_docker_global_options_do_not_hide_build_file(self) -> None:
+        self.write("vendor/example/build.yml", "FROM example.test/base:latest\n")
+        for command in (
+            "docker --context ci build -f vendor/example/build.yml .",
+            (
+                "docker --log-level debug buildx build "
+                "--file=vendor/example/build.yml ."
+            ),
+            (
+                "docker -H unix:///run/docker.sock build "
+                "-fvendor/example/build.yml ."
+            ),
+        ):
+            self.write(
+                ".github/workflows/ci.yml",
+                f"steps:\n  - run: {command}\n",
+            )
+            self.reject("Docker external base must have a sha256 digest")
+
+    def test_reachable_external_composite_dockerfile_is_scanned(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "steps:\n  - uses: ./ci/actions/build\n",
+        )
+        self.write(
+            "ci/actions/build/action.yml",
+            "runs:\n"
+            "  using: composite\n"
+            "  steps:\n"
+            "    - shell: sh\n"
+            "      run: docker build -f vendor/example/build.yml .\n",
+        )
+        self.write("vendor/example/build.yml", "FROM example.test/base:latest\n")
+        self.reject("Docker external base must have a sha256 digest")
+
+    def test_backtick_escape_cannot_hide_external_mount_source(self) -> None:
+        for instruction in (
+            "RUN --mount=type=bind,`\n    from=alpine:3.20,target=/src true",
+            "COPY --from=`\n    alpine:3.20 /src /dest",
+        ):
+            self.write(
+                "packaging/tools/Dockerfile.escape",
+                "# escape=`\nFROM scratch\n" + instruction + "\n",
+            )
+            self.reject("Docker external base must have a sha256 digest")
+
+    def test_docker_comments_never_continue(self) -> None:
+        for directive, escape in (("", "\\"), ("# escape=`\n", "`")):
+            self.write(
+                "packaging/tools/Dockerfile.comment",
+                directive
+                + "FROM scratch\n"
+                + f"# harmless note {escape}\n"
+                + "FROM example.test/base:latest\n",
+            )
+            self.reject("Docker external base must have a sha256 digest")
+
+    def test_comments_inside_docker_continuations_are_skipped(self) -> None:
+        for directive, escape in (("", "\\"), ("# escape=`\n", "`")):
+            self.write(
+                "packaging/tools/Dockerfile.comment",
+                directive
+                + "FROM scratch\n"
+                + f"RUN --mount=type=bind,{escape}\n"
+                + "    # harmless note\n"
+                + "    from=alpine:3.20,target=/src true\n",
+            )
+            self.reject("Docker external base must have a sha256 digest")
+
+    def test_reviewed_gcr_image_aliases_remain_bound(self) -> None:
+        digest = immutable_inputs.IMAGE_PINS[
+            "gcr.io/distroless/base-debian12:nonroot"
+        ]
+        for host in ("GCR.IO", "gcr.io:443", "gcr.io:0443", "gcr.io."):
+            self.write(
+                "packaging/tools/Dockerfile.gcr",
+                f"FROM {host}/distroless/base-debian12:nonroot@sha256:"
+                + "2" * 64
+                + "\n",
+            )
+            self.reject("label/digest pair does not match the reviewed pin")
+            self.write(
+                "packaging/tools/Dockerfile.gcr",
+                f"FROM {host}/distroless/base-debian12:nonroot@sha256:{digest}\n",
+            )
+            result = self.gate()
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_contrib_docker_base_tag(self) -> None:
         self.write(
             "contrib/postfix/Dockerfile.integration", "FROM example.test/base:1\n"
@@ -506,15 +728,23 @@ class TestWorkflowControls(unittest.TestCase):
         )
         self.write(
             "contrib/postfix/Dockerfile.integration",
-            "ARG BUILD_IMAGE=strixd-test\nFROM ${BUILD_IMAGE} AS binaries\n",
+            "FROM strixd-test AS binaries\n",
         )
         result = self.gate()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_build_arg_cannot_override_local_integration_image(self) -> None:
+        self.write(
+            ".github/workflows/ci.yml",
+            "      run: |\n"
+            "        docker buildx build --target test -f docker/Dockerfile "
+            "-t strixd-test --load .\n",
+        )
         self.write(
             "contrib/postfix/Dockerfile.integration",
-            "ARG BUILD_IMAGE=example.test/external:1\nFROM ${BUILD_IMAGE} AS binaries\n",
+            "ARG BUILD_IMAGE=strixd-test\nFROM ${BUILD_IMAGE} AS binaries\n",
         )
-        self.reject("Docker external base must have a sha256 digest")
+        self.reject("use a literal token")
 
     def test_local_image_requires_ci_producer(self) -> None:
         self.write(
@@ -635,6 +865,7 @@ class TestWorkflowControls(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_nfpm_yaml_block_scalar_variants_are_accepted(self) -> None:
+        # The fixture body uses the two-space indentation selected by |2.
         for header in ("|-", "|+", "|2"):
             content = immutable_inputs.PinFixtures.nfpm.replace(
                 "run: |", f"run: {header}"
