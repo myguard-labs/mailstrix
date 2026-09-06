@@ -41,7 +41,7 @@ compiles those rules — libyara modules and all — and runs them over your mai
 - **Postfix / Sendmail (milter)** — the lean
   [`strix-milter`](#milter-for-postfix--sendmail-strix-milter) runs on the MTA host,
   POSTs each message to strixd and stamps the verdict as a header. It **always
-  accepts**; your `header_checks` decides what to do about it
+  accepts**; your `milter_header_checks` decides what to do about it
   ([`contrib/postfix/`](contrib/postfix/)).
 - **ICAP** — set `MAILSTRIX_ICAP_ADDR` and strixd also speaks ICAP (RFC 3507) so an
   ICAP-aware proxy or content-filter (Squid, c-icap) scans REQMOD/RESPMOD bodies
@@ -352,7 +352,7 @@ sudoedit /etc/mailstrix/strix-milter.env     # set MAILSTRIX_URL (+ MAILSTRIX_TO
 sudo systemctl enable --now strix-milter
 ```
 
-Ready-to-copy MTA config (Postfix `main.cf` + `header_checks`, the Sendmail
+Ready-to-copy MTA config (Postfix `main.cf` + `milter_header_checks`, the Sendmail
 `INPUT_MAIL_FILTER`, and a setup/test walkthrough) lives in
 **[`contrib/postfix/`](contrib/postfix/)**.
 
@@ -394,11 +394,11 @@ body alone would strip the MIME framing (`Content-Type`, `boundary`,
 smtpd_milters     = inet:127.0.0.1:8081
 non_smtpd_milters = inet:127.0.0.1:8081
 milter_default_action = accept       # keep mail flowing if the milter is down
-header_checks = pcre:/etc/postfix/header_checks
+milter_header_checks = pcre:/etc/postfix/milter_header_checks
 ```
 
 ```pcre
-# /etc/postfix/header_checks — hold anything the scanner called infected
+# /etc/postfix/milter_header_checks — hold anything the scanner called infected
 /^X-Mailstrix-Status:\s*infected/   HOLD Mailstrix: malware detected
 ```
 
@@ -890,7 +890,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] Tiered scoring (`STRIX_MALWARE`/`_EXPLOIT`/`_PHISHING`/`STRIX`/`_SUSPICIOUS` + `URLHAUS_MALWARE_URL`)
 - [x] SIGHUP rule reload (atomic swap, keeps old rules on a bad edit); `fetch-rules` out-of-image updates
 - [x] `strix-scan` lean CGO-free Sieve/LDA client ([`contrib/sieve/`](contrib/sieve/))
-- [x] **`strix-milter` lean CGO-free Postfix/Sendmail milter** — buffers each message, POSTs it to strixd, stamps `X-Mailstrix-Status`/`-Rules`/`-Family`; **always accepts** (the MTA's `header_checks` turns the verdict into policy), so a scanner outage can never block mail ([milter](#milter-for-postfix--sendmail-strix-milter))
+- [x] **`strix-milter` lean CGO-free Postfix/Sendmail milter** — buffers each message, POSTs it to strixd, stamps `X-Mailstrix-Status`/`-Rules`/`-Family`; **always accepts** (the MTA's `milter_header_checks` turns the verdict into policy), so a scanner outage can never block mail ([milter](#milter-for-postfix--sendmail-strix-milter))
 - [x] UserForm hidden-string extraction (carves payload strings from VBA UserForm `o`/`f`/`\x03VBFrame` OLE2 streams; `Maldoc_UserForm_Payload` rule)
 - [x] Document-properties string extraction (OOXML `docProps/`, `customXml/`, `word/settings.xml` docVars; OLE2 `\x05SummaryInformation`; `Maldoc_DocProps_Payload` rule)
 - [x] PE/ELF structural analysis of carved/embedded binaries (`saferwall/pe`, fail-open): section entropy (`PE-SECTION-PACKED` ≥7.2 / `-HIGH-ENTROPY` ≥7.0), `PE-OVERLAY`, `PE-VIRTUAL-SECTION` (FormBook `.ndata`), `PE-DOTNET` (CLR), `PE-ANOMALY`; header-validated `ELF-EXECUTABLE` → `pe_structural.yara`
@@ -956,7 +956,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 - **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
 - **[SpamAssassin plugin](contrib/spamassassin/)** — scan each message through strixd and score a YARA match.
 - **[Dovecot/Sieve example](contrib/sieve/)** — quarantine a match with the `strix-scan` client.
-- **[Milter for Postfix / Sendmail](#milter-for-postfix--sendmail-strix-milter)** — stamp a verdict header with `strix-milter` and let `header_checks` act on it.
+- **[Milter for Postfix / Sendmail](#milter-for-postfix--sendmail-strix-milter)** — stamp a verdict header with `strix-milter` and let `milter_header_checks` act on it.
 - **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/articles/yara-malware-scanning-mailstrix/) — the why and how, on deb.myguard.nl.
 - **Docker Hub:** [`myguard-labs/mailstrix`](https://hub.docker.com/r/myguard-labs/mailstrix).
 

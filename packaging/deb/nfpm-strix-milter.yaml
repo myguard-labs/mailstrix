@@ -14,8 +14,9 @@ description: |
   Lean CGO-free milter that buffers each message, POSTs it to a strixd daemon's
   /scan endpoint, and stamps the verdict as X-Mailstrix-* headers. It ALWAYS
   accepts the message: turning a verdict into policy (hold, quarantine, reject)
-  is left to the MTA's own header_checks, so a scanner outage can never block
-  mail. Runs on the MTA host; the YARA rules and extractors stay in strixd.
+  is left to the MTA (Postfix milter_header_checks), so a scanner outage can
+  never block mail. Runs on the MTA host; the YARA rules and extractors stay in
+  strixd.
 homepage: https://github.com/myguard-labs/mailstrix
 license: MIT
 depends:

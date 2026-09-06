@@ -60,6 +60,11 @@ jobs:
             --build-arg CACHEBUST=rules-${{ hashFiles('docker/local-rules/**','docker/fetch-rules.sh','docker/compile-rules.sh','docker/Dockerfile') }} \
             .
 
+      - name: Postfix milter policy integration (isolated, harmless messages)
+        run: |
+          docker build -f contrib/postfix/Dockerfile.integration -t mailstrix-postfix-test contrib/postfix
+          timeout 90s docker run --rm --network none mailstrix-postfix-test
+
       - name: trivy image scan (HIGH,CRITICAL)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \

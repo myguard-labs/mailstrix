@@ -1,0 +1,13 @@
+# Build the current docker/Dockerfile test target first; use its real binaries.
+ARG BUILD_IMAGE=strixd-test
+FROM ${BUILD_IMAGE} AS binaries
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        postfix postfix-pcre python3 libssl3 zlib1g libzstd1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=binaries /out/strixd /out/strix-milter /usr/local/bin/
+COPY main.cf.example milter_header_checks.example /fixture/
+COPY policy_test.py /fixture/policy_test.py
+ENTRYPOINT ["python3", "/fixture/policy_test.py"]

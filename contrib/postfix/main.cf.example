@@ -1,7 +1,7 @@
 # strix-milter wiring for Postfix — merge into /etc/postfix/main.cf.
 #
 # strix-milter never rejects, defers or discards. It stamps X-Mailstrix-* and
-# always accepts; header_checks below is what turns a verdict into policy.
+# always accepts; milter_header_checks below is what turns a verdict into policy.
 
 # The milter socket. Must match MAILSTRIX_MILTER_LISTEN in
 # /etc/mailstrix/strix-milter.env (default inet:127.0.0.1:8081).
@@ -23,4 +23,4 @@ milter_connect_timeout = 30s
 milter_command_timeout = 30s
 milter_content_timeout = 300s
 
-header_checks = pcre:/etc/postfix/header_checks
+milter_header_checks = pcre:/etc/postfix/milter_header_checks
