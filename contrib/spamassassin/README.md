@@ -108,6 +108,9 @@ spam threshold on their own. Tune in `mailstrix.cf`; per-rule scoring via the
 
 ## See also
 
+- [Proxmox Mail Gateway recipe](../integrations/README.md#proxmox-mail-gateway)
+  for PMG's custom configuration and cluster handling.
+
 - **[Main README](../../README.md)** — the `strixd serve` scanner this talks to.
 - **[rspamd plugin](../rspamd/)** — the async `mailstrix.lua` scorer for rspamd.
 - **[Dovecot/Sieve example](../sieve/)** — quarantine a match at delivery with

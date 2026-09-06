@@ -811,6 +811,9 @@ helm install strixd ./contrib/deploy/helm/strixd --set token.value=$(openssl ran
 
 ## Wiring it into rspamd
 
+For packaged mail stacks, see the [Mailcow, docker-mailserver, Mailu and Proxmox
+Mail Gateway recipes](contrib/integrations/README.md).
+
 The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd side needs:
 
 - [`plugins/mailstrix.lua`](contrib/rspamd/plugins/mailstrix.lua) — the async plugin that POSTs to
@@ -832,7 +835,7 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
   Tiers stack, capped by the group `max_score`. The classifier lives in the
   plugin, so retuning is just an rspamd reload (no strixd rebuild).
 - [`rspamd.conf.local`](contrib/rspamd/rspamd.conf.local) — how to load a custom lua
-  module (inline `yara { }` block + explicit `lua =` include).
+  module (inline `mailstrix { }` block + explicit `lua =` include).
 - [`local.d/groups.conf`](contrib/rspamd/local.d/groups.conf) — the per-tier weights.
   Set any to `0.0` for a cautious log-only first run.
 
