@@ -399,7 +399,9 @@ func rc4MD5Decrypt(password string, salt, ciphertext []byte) []byte {
 // keySize is in bits (typically 40 or 128). block is the 512-byte chunk index.
 func rc4SHA1MakeKey(password string, salt []byte, keySize int, block uint32) []byte {
 	pw := []byte(pwUTF16LE(password))
-	h0 := sha1.Sum(append(salt, pw...)) //#nosec G401 -- protocol-mandated SHA1
+	// Salt can share its backing array with the encrypted verifier that follows
+	// it. Keep password concatenation from overwriting those caller-owned bytes.
+	h0 := sha1.Sum(append(salt[:len(salt):len(salt)], pw...)) //#nosec G401 -- protocol-mandated SHA1
 	var blockBytes [4]byte
 	binary.LittleEndian.PutUint32(blockBytes[:], block)
 	hfinal := sha1.Sum(append(h0[:], blockBytes[:]...)) //#nosec G401 -- protocol-mandated SHA1
