@@ -1,2 +1,10 @@
+---
 self-hosted-runner:
-  labels: [builder02, b02lxc, lxc, docker]
+  labels:
+    - builder02
+    - b02lxc
+    - lxc
+    - docker
+    - ci-slot-builder02-runner-01
+    - ci-slot-builder02-docker-01
+    - ci-slot-builder02-runner-02

@@ -10,6 +10,16 @@ name: runner isolation
       - '.github/workflows/**'
       - 'packaging/deb/runner_isolation_test.sh'
   workflow_dispatch:
+    inputs:
+      cross_slot_control:
+        description: 'Run the cross-slot negative control (expected failure)'
+        type: boolean
+        default: false
+
+# Hold the complete pairs across refs and attempts; service locking is separate.
+concurrency:
+  group: mailstrix-runner-isolation-physical-slots
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -20,14 +30,18 @@ jobs:
       - self-hosted
       - b02lxc
       - lxc
+      - ci-slot-builder02-runner-01
     timeout-minutes: 5
+    outputs:
+      tuple: ${{ steps.leave.outputs.tuple }}
     steps:
       # yamllint disable rule:line-length
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       # yamllint enable rule:line-length
       - name: leave host state outside the work directory
+        id: leave
         shell: bash
-        run: .github/runner/isolation-canary.sh leave lxc
+        run: .github/runner/isolation-canary.sh leave lxc builder02-runner-01
 
   prove-lxc-restore:
     needs: leave-lxc-state
@@ -35,6 +49,7 @@ jobs:
       - self-hosted
       - b02lxc
       - lxc
+      - ci-slot-builder02-runner-01
     timeout-minutes: 5
     steps:
       # yamllint disable rule:line-length
@@ -42,21 +57,27 @@ jobs:
       # yamllint enable rule:line-length
       - name: prove pristine restore
         shell: bash
-        run: .github/runner/isolation-canary.sh prove lxc
+        env:
+          LEAVE_TUPLE: ${{ needs.leave-lxc-state.outputs.tuple }}
+        run: .github/runner/isolation-canary.sh prove lxc builder02-runner-01
 
   leave-docker-state:
     runs-on:
       - self-hosted
       - builder02
       - docker
+      - ci-slot-builder02-docker-01
     timeout-minutes: 5
+    outputs:
+      tuple: ${{ steps.leave.outputs.tuple }}
     steps:
       # yamllint disable rule:line-length
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       # yamllint enable rule:line-length
       - name: leave host state outside the work directory
+        id: leave
         shell: bash
-        run: .github/runner/isolation-canary.sh leave docker
+        run: .github/runner/isolation-canary.sh leave docker builder02-docker-01
 
   prove-docker-restore:
     needs: leave-docker-state
@@ -64,6 +85,7 @@ jobs:
       - self-hosted
       - builder02
       - docker
+      - ci-slot-builder02-docker-01
     timeout-minutes: 5
     steps:
       # yamllint disable rule:line-length
@@ -71,4 +93,27 @@ jobs:
       # yamllint enable rule:line-length
       - name: prove pristine restore
         shell: bash
-        run: .github/runner/isolation-canary.sh prove docker
+        env:
+          LEAVE_TUPLE: ${{ needs.leave-docker-state.outputs.tuple }}
+        run: .github/runner/isolation-canary.sh prove docker builder02-docker-01
+
+  cross-slot-negative-control:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+      inputs.cross_slot_control }}
+    needs: leave-lxc-state
+    runs-on:
+      - self-hosted
+      - b02lxc
+      - lxc
+      - ci-slot-builder02-runner-02
+    timeout-minutes: 5
+    steps:
+      # yamllint disable rule:line-length
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+      # yamllint enable rule:line-length
+      - name: reject another physical slot before checking absence
+        shell: bash
+        env:
+          LEAVE_TUPLE: ${{ needs.leave-lxc-state.outputs.tuple }}
+        run: .github/runner/isolation-canary.sh prove lxc builder02-runner-01
