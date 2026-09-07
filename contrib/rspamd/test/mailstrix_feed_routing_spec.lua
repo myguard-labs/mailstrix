@@ -95,6 +95,18 @@ end
 
 local groups = slurp(here .. "/../local.d/groups.conf")
 check(groups ~= nil, "groups.conf readable")
+local sample = slurp(here .. "/../rspamd.conf.local")
+check(sample ~= nil, "rspamd.conf.local readable")
+if sample and plugin and groups then
+  -- Read active assignments, not comments or a mirrored default constant.
+  local configured = sample:match('\n%s*symbol%s*=%s*"([%w_]+)"%s*;')
+  local default = plugin:match('\n%s*symbol%s*=%s*"([%w_]+)"%s*,')
+  check(configured ~= nil and configured == default,
+    "sample symbol must match the plugin default")
+  local block = configured and groups:match('"' .. configured .. '"%s*{([^{}]*)}')
+  check(block ~= nil and block:find("weight%s*=") ~= nil,
+    "sample symbol must have a weighted groups.conf entry")
+end
 if groups then
   -- Assert each feed symbol has a weight line within its block.
   local function has_weighted_symbol(name)

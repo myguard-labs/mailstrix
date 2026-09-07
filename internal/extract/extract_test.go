@@ -145,6 +145,9 @@ func TestVersionSet(t *testing.T) {
 	if !strings.Contains(Version, "+msixfields") {
 		t.Error("extract.Version does not invalidate pre-MSIX-field cache entries")
 	}
+	if !strings.Contains(Version, "+launcherutf16") {
+		t.Error("extract.Version does not invalidate pre-UTF-16-launcher cache entries")
+	}
 }
 
 // codes() must bound the OLE2-path macro output three ways (ROBUST-BOUNDS), so a

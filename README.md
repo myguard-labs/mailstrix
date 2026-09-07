@@ -640,6 +640,13 @@ rules), merging and de-duplicating matches:
   attachments. A local rule scores suspicious PowerShell DeepLink arguments at
   50; format presence, remote icons and executable-looking URLs alone add no
   score. Extraction never opens a target.
+  Launcher enrichment accepts UTF-8 and BOM-signalled UTF-16LE/BE. UTF-16
+  normalization rejects odd byte counts and unpaired surrogates, with separate
+  1 MiB limits on original and decoded bytes. For UTF-16 input, XML encoding
+  declarations must name UTF-16 or the endian-specific encoding matching the
+  BOM; declarations are limited to 8 KiB of decoded text. A failed normalization
+  emits no fields.
+  BOM-less UTF-16 still has generic text recovery but no launcher enrichment.
   Recognition and extraction inspect at most 1 MiB; INI records/XML tokens are
   capped at 4096, XML depth at 64, fields at 32 and values at 4 KiB.
   For XML, malformed or oversized input contributes no fields; token, depth and
