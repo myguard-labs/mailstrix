@@ -883,6 +883,11 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
 
 ## Build & test
 
+The [reproducible detection baseline](tools/parity/README.md) runs generated inert
+fixtures through Mailstrix and reports explicitly labelled indicator results.
+External corpus manifests are integrity-checked only; cross-tool parity and
+real-world precision remain unmeasured.
+
 See the [runner contract](.github/runner/README.md) for physical-slot restoration
 checks, retry requirements and live negative-control acceptance.
 
