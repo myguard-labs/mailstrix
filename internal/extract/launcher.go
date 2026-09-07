@@ -7,11 +7,15 @@ package extract
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const (
@@ -62,11 +66,93 @@ func fromLauncherFields(buf []byte, res *Result, deadline time.Time) {
 	if expired(deadline) || len(res.Streams) >= maxStreams {
 		return
 	}
+	buf = launcherText(buf, deadline)
 	if isSettingContent(buf) {
 		fromSettingContent(buf, res, deadline)
 	} else if isURLShortcut(buf) {
 		fromURLShortcut(buf, res, deadline)
 	}
+}
+
+// launcherText normalizes only BOM-signalled UTF-16. Invalid units, odd input,
+// either byte cap or the deadline discard enrichment, not generic text recovery.
+// UTF-8 input retains the existing recognizer and extraction limits.
+func launcherText(buf []byte, deadline time.Time) []byte {
+	if !bytes.HasPrefix(buf, utf16LEBOM) && !bytes.HasPrefix(buf, utf16BEBOM) {
+		return buf
+	}
+	if len(buf) > maxLauncherBytes || len(buf)%2 != 0 || expired(deadline) {
+		return nil
+	}
+	order := binary.ByteOrder(binary.LittleEndian)
+	charset := "utf-16le"
+	if buf[0] == 0xfe {
+		order, charset = binary.BigEndian, "utf-16be"
+	}
+	out := make([]byte, 0, len(buf))
+	for i := 2; i < len(buf); i += 2 {
+		if expired(deadline) {
+			return nil
+		}
+		u := order.Uint16(buf[i:])
+		r := rune(u)
+		if u >= 0xd800 && u <= 0xdbff {
+			if i+3 >= len(buf) {
+				return nil
+			}
+			v := order.Uint16(buf[i+2:])
+			if v < 0xdc00 || v > 0xdfff {
+				return nil
+			}
+			r = utf16.DecodeRune(r, rune(v))
+			i += 2
+		} else if u >= 0xdc00 && u <= 0xdfff {
+			return nil
+		}
+		if len(out)+utf8.RuneLen(r) > maxLauncherBytes {
+			return nil
+		}
+		out = utf8.AppendRune(out, r)
+	}
+	return launcherXMLDeclaration(out, charset)
+}
+
+var launcherEncoding = regexp.MustCompile(`(?:^|[\t\r\n ])encoding[\t\r\n ]*=[\t\r\n ]*(?:"([^"]*)"|'([^']*)')`)
+
+// Keep the XML declaration intact except for its encoding value: the ordinary
+// XML decoder still checks syntax/version. An encoding label must agree with
+// the observed BOM. No declaration, or one without an encoding, needs rewriting.
+func launcherXMLDeclaration(buf []byte, charset string) []byte {
+	if !bytes.HasPrefix(buf, []byte("<?xml")) || len(buf) > 5 && !bytes.ContainsAny(buf[5:6], " \t\r\n") {
+		return buf
+	}
+	head := buf
+	if len(head) > maxLauncherLineLen {
+		head = head[:maxLauncherLineLen]
+	}
+	end := bytes.Index(head, []byte("?>"))
+	if end < 0 {
+		return nil
+	}
+	matches := launcherEncoding.FindAllSubmatchIndex(head[:end], 2)
+	if len(matches) == 0 {
+		return buf
+	}
+	if len(matches) != 1 {
+		return nil
+	}
+	m := matches[0]
+	start, stop := m[2], m[3]
+	if start < 0 {
+		start, stop = m[4], m[5]
+	}
+	label := string(buf[start:stop])
+	if !strings.EqualFold(label, "utf-16") && !strings.EqualFold(label, charset) {
+		return nil
+	}
+	// All accepted source labels are longer than UTF-8, so replacement shrinks.
+	out := append(buf[:start], []byte("utf-8")...)
+	return append(out, buf[stop:]...)
 }
 
 // launcherHeadHasLine reports whether want (lowercase) appears as a trimmed,

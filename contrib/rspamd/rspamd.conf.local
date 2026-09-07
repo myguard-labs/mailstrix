@@ -29,7 +29,7 @@ mailstrix {
   # little HTTP/JSON overhead before this timeout expires.
   timeout = 10.0;
   max_size = 8388608;
-  symbol = "STRIX_MATCH";
+  symbol = "STRIX";
   scan_message = true;
   scan_parts = true;
   min_part_size = 64;
