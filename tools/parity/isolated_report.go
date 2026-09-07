@@ -34,7 +34,7 @@ const isolatedEnvelope = "docker-local-cgroup2-v1;linux/amd64;network=none;reado
 
 func isolatedCorpus(root *os.Root, m manifest, hash string, d isolatedDocker, observe func(sample, []byte) observation) isolatedReport {
 	started := time.Now()
-	r := isolatedReport{Schema: "mailstrix-isolated-v1", ManifestSHA256: hash, ImageID: d.image, Worker: d.identity, HostGoVersion: runtime.Version(), Envelope: isolatedEnvelope, EnvelopeSHA256: digest([]byte(isolatedEnvelope)), Effort: scanEffort, ScanBudgetMS: 8000, HostBudgetMS: isolatedBudget.Milliseconds(), Complete: true,
+	r := isolatedReport{Schema: "mailstrix-isolated-v1", ManifestSHA256: hash, ImageID: d.image, Worker: d.identity, HostGoVersion: runtime.Version(), Envelope: isolatedEnvelope, EnvelopeSHA256: digest([]byte(isolatedEnvelope)), Effort: scanEffort, ScanBudgetMS: isolatedScanBudget.Milliseconds(), HostBudgetMS: d.effectiveBudget().Milliseconds(), Complete: true,
 		Limits: "explicit symbol labels only; real-world precision and thresholds unmeasured; local image and worker checksums are identity, not source-to-binary attestation; kernel and Docker daemon trusted"}
 	r.Runtime = d.runtime
 	// This concrete string/slice structure has no fallible JSON marshaler.

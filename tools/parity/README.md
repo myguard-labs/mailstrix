@@ -69,11 +69,14 @@ checksum and base images use the existing Dockerfile pins. The production `final
 image is unchanged. Unlike `run -rules`, `run-isolated` has no mutable rule-directory
 option. Custom trusted rules require a separately reviewed image build.
 
-Linux/amd64 and a local Docker daemon with cgroup v2, memory/swap, CPU, PID and
-built-in seccomp support are required. Tags, registry references, missing images,
-images declaring volumes and unavailable controls fail setup. The trusted local
-daemon is addressed through `/var/run/docker.sock`; Docker host/context variables
-and the caller's credentials are not forwarded. The selected image and its baked
+Linux/amd64 and a local Docker daemon with cgroup v2, memory/swap, CPU and PID
+controls are required. The recognized Docker info security option is exactly
+`name=seccomp,profile=builtin`, qualified locally with Docker 29.6.2. The older
+`name=seccomp,profile=default` metadata is unqualified and rejected; no minimum
+Docker release is claimed. Tags, registry references, missing images, images
+declaring volumes and unavailable controls fail setup. The trusted local daemon
+is addressed through `/var/run/docker.sock`; Docker host/context variables and
+the caller's credentials are not forwarded. The selected image and its baked
 configuration are trusted inputs. This is container isolation, not a VM or a
 defense against kernel or container-runtime vulnerabilities.
 

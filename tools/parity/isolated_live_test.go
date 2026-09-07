@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -189,17 +190,98 @@ func liveProbeInput(t *testing.T, r inertProbeRequest) []byte {
 
 func assertLiveAbsent(t *testing.T, d isolatedDocker, names []string) {
 	t.Helper()
+	if err := liveAbsenceError(d, names); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func liveAbsenceError(d isolatedDocker, names []string) error {
 	for _, name := range slices.Backward(names) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		b, status := d.call(ctx, nil, "ps", "--all", "--quiet", "--filter", "name=^/"+name+"$")
 		cancel()
 		if status != "ok" || len(bytes.TrimSpace(b)) != 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			running, _ := d.call(ctx, nil, "inspect", "--format={{.State.Running}}", name)
+			running, inspectStatus := d.call(ctx, nil, "inspect", "--format={{.State.Running}}", name)
 			cancel()
-			t.Fatalf("owned container remains after launch: %s (%s; running=%s)", name, status, bytes.TrimSpace(running))
+			return fmt.Errorf("owned container remains after launch: %s (%s; inspect=%s; running=%s)", name, status, inspectStatus, bytes.TrimSpace(running))
 		}
 	}
+	return nil
+}
+
+func shellLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func recordCLIDockerNames(t *testing.T, lieAboutCleanup bool) (string, func()) {
+	t.Helper()
+	realDocker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realDocker, err = filepath.Abs(realDocker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	record := filepath.Join(dir, "created-names")
+	cleanup := "0"
+	if lieAboutCleanup {
+		cleanup = "1"
+	}
+	script := "#!/bin/sh\nset -eu\n" +
+		"if [ \"$#\" -ge 5 ] && [ \"$3\" = create ] && [ \"$4\" = --name ]; then\n" +
+		"\tprintf '%s\\n' \"$5\" >> " + shellLiteral(record) + "\n" +
+		"fi\n" +
+		"if [ " + cleanup + " = 1 ] && [ \"$#\" -ge 3 ] && { [ \"$3\" = rm ] || [ \"$3\" = ps ]; }; then\n" +
+		"\texit 0\n" +
+		"fi\nexec " + shellLiteral(realDocker) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	originalPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", dir+string(os.PathListSeparator)+originalPath); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() {
+		if err := os.Setenv("PATH", originalPath); err != nil {
+			t.Errorf("restore PATH: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		restore()
+		b, err := os.ReadFile(record)
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if err != nil {
+			t.Errorf("read CLI-owned container names for teardown: %v", err)
+			return
+		}
+		d := isolatedDocker{}
+		for _, name := range strings.Fields(string(b)) {
+			if !d.cleanup(name) {
+				t.Errorf("qualification could not remove CLI-owned container %s", name)
+			}
+		}
+	})
+	return record, restore
+}
+
+func recordedCLINames(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := strings.Fields(string(b))
+	for _, name := range names {
+		if !strings.HasPrefix(name, "mailstrix-isolated-") {
+			t.Fatalf("unexpected recorded container name %q", name)
+		}
+	}
+	return names
 }
 
 func TestIsolatedLiveControls(t *testing.T) {
@@ -279,6 +361,46 @@ func TestIsolatedLiveResourceBounds(t *testing.T) {
 	}
 }
 
+func TestIsolatedLiveAbsenceOracleRejectsOwnedContainer(t *testing.T) {
+	d, lifecycleNames := liveIsolatedDocker(t, "PARITY_PROBE_IMAGE")
+	name := fmt.Sprintf("mailstrix-isolated-oracle-%d", os.Getpid())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	containerID, status := d.call(ctx, nil, d.args(name)...)
+	cancel()
+	if status != "ok" || len(bytes.TrimSpace(containerID)) == 0 {
+		t.Fatalf("create stopped oracle control: status=%s id=%q", status, containerID)
+	}
+	err := liveAbsenceError(isolatedDocker{}, []string{name})
+	if err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("absence oracle accepted its owned stopped container: %v", err)
+	}
+	assertLiveAbsent(t, d, (*lifecycleNames)[:len(*lifecycleNames)-1])
+	t.Logf("absence oracle rejected owned stopped container: %v", err)
+}
+
+func TestIsolatedLiveCLIAbsenceOracleControl(t *testing.T) {
+	d, lifecycleNames := liveIsolatedDocker(t, "PARITY_WORKER_IMAGE")
+	m, hash, root := generated(t)
+	cliRecord, restorePath := recordCLIDockerNames(t, true)
+	var stdout, stderr bytes.Buffer
+	code := isolatedCLI([]string{"-manifest", filepath.Join(root.Name(), "manifest.json"), "-corpus-root", root.Name(), "-engine-image", d.image}, &stdout, &stderr)
+	restorePath()
+	var report isolatedReport
+	if code != 0 || json.Unmarshal(stdout.Bytes(), &report) != nil || report.ManifestSHA256 != hash {
+		t.Fatalf("lying-cleanup CLI control did not complete: code=%d summary=%s", code, stderr.String())
+	}
+	names := recordedCLINames(t, cliRecord)
+	if len(names) != len(m.Samples)+1 {
+		t.Fatalf("lying-cleanup CLI created %d containers, want identity plus %d samples", len(names), len(m.Samples))
+	}
+	err := liveAbsenceError(isolatedDocker{}, names)
+	if err == nil || !strings.Contains(err.Error(), names[len(names)-1]) {
+		t.Fatalf("independent daemon oracle accepted CLI-owned stopped containers: %v", err)
+	}
+	assertLiveAbsent(t, d, *lifecycleNames)
+	t.Logf("independent daemon oracle rejected CLI-owned stopped container: %v", err)
+}
+
 func TestIsolatedLiveGeneratedParity(t *testing.T) {
 	d, names := liveIsolatedDocker(t, "PARITY_WORKER_IMAGE")
 	m, hash, root := generated(t)
@@ -320,9 +442,16 @@ func TestIsolatedLiveGeneratedParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
+	cliRecord, restorePath := recordCLIDockerNames(t, false)
 	code := isolatedCLI([]string{"-manifest", filepath.Join(root.Name(), "external-manifest.json"), "-corpus-root", root.Name(), "-engine-image", d.image}, &stdout, &stderr)
+	restorePath()
 	if code != 0 || !strings.Contains(stderr.String(), "isolated Mailstrix: 6 unique samples, 0 duplicates; complete=true; labelled gate=true") {
 		t.Fatalf("external CLI failed: code=%d summary=%s", code, stderr.String())
+	}
+	cliNames := recordedCLINames(t, cliRecord)
+	cliDocker := isolatedDocker{}
+	if len(cliNames) != len(m.Samples)+1 {
+		t.Fatalf("isolated CLI created %d containers, want identity plus %d samples", len(cliNames), len(m.Samples))
 	}
 	var external isolatedReport
 	if err := json.Unmarshal(stdout.Bytes(), &external); err != nil {
@@ -335,5 +464,6 @@ func TestIsolatedLiveGeneratedParity(t *testing.T) {
 		t.Fatal("wrong report contract")
 	}
 	assertLiveAbsent(t, d, *names)
+	assertLiveAbsent(t, cliDocker, cliNames)
 	t.Logf("six generated observations and external-metadata counterparts agree; worker=%+v", d.identity)
 }

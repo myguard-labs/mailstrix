@@ -86,6 +86,20 @@ jobs:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: qualify optional Mailstrix isolation with inert fixtures
         run: bash scripts/qualify-parity-isolation.sh "$RUNNER_TEMP/parity-isolation"
+      - name: retain failed isolation qualification logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: parity-isolation-failure
+          path: |
+            ${{ runner.temp }}/parity-isolation/parity-runtime.log
+            ${{ runner.temp }}/parity-isolation/parity-probe-runtime.log
+            ${{ runner.temp }}/parity-isolation/parity-qualification-bin.log
+            ${{ runner.temp }}/parity-isolation/qualification.log
+            ${{ runner.temp }}/parity-isolation/parity-runtime.id
+            ${{ runner.temp }}/parity-isolation/parity-probe-runtime.id
+          retention-days: 7
+          if-no-files-found: warn
 
   lint:
     runs-on: [self-hosted, builder02, docker]
@@ -185,7 +199,8 @@ jobs:
             packaging/deb/filter_rules_test.sh \
             packaging/deb/smoke_shared_test.sh \
             packaging/deb/benchmark_command_test.sh \
-            packaging/deb/dockerignore_test.sh
+            packaging/deb/dockerignore_test.sh \
+            packaging/deb/dockerignore_collision_test.sh
 
       - name: deb maintainer-script behaviour (upgrade must not disable)
         run: sh packaging/deb/maintscript_test.sh
@@ -199,6 +214,9 @@ jobs:
         run: |
           sh packaging/deb/workflow_pins_test.sh
           python3 -B packaging/deb/workflow_pins_controls_test.py
+
+      - name: parity qualification failure artifacts stay bounded
+        run: python3 -B packaging/deb/parity_qualification_artifact_test.py
 
       - name: self-hosted runners use disposable builder slots
         run: sh packaging/deb/runner_isolation_test.sh
@@ -225,7 +243,9 @@ jobs:
         run: sh packaging/deb/benchmark_command_test.sh
 
       - name: .dockerignore keeps secrets/logs/binaries out of the build context
-        run: sh packaging/deb/dockerignore_test.sh
+        run: |
+          sh packaging/deb/dockerignore_test.sh
+          sh packaging/deb/dockerignore_collision_test.sh
       - name: hadolint (Dockerfile; .hadolint.yaml ignores)
         run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile docker/Dockerfile.release
       - name: osv-scanner (go.mod/go.sum dependency CVEs)

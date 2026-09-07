@@ -17,6 +17,13 @@ import (
 
 const isolatedBudget = 30 * time.Second
 
+func (d isolatedDocker) effectiveBudget() time.Duration {
+	if d.budget != 0 {
+		return d.budget
+	}
+	return isolatedBudget
+}
+
 // A backend owns a sequential lifecycle: setup -> ready -> created -> verified
 // -> running -> removed -> ready. Only this parent talks to Docker. Sample bytes
 // are sent after verification. Every launch (including failed create/start)
@@ -159,11 +166,7 @@ func (d isolatedDocker) launch(input []byte) (output []byte, status string) {
 		return nil, "setup_error"
 	}
 	name := "mailstrix-isolated-" + hex.EncodeToString(nonce[:])
-	budget := d.budget
-	if budget == 0 {
-		budget = isolatedBudget
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(context.Background(), d.effectiveBudget())
 	defer cancel()
 	defer func() {
 		if !d.cleanup(name) {
