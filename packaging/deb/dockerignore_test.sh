@@ -32,7 +32,7 @@ for sentinel in tools/private-corpus.sentinel.json \
     tools/parity/testdata/private-corpus.sentinel.json \
     tools/parity/private-corpus-sentinel; do
     if [ -e "$root/$sentinel" ] || [ -L "$root/$sentinel" ]; then
-        echo "FAIL - private-corpus sentinel path already exists"
+        echo "FAIL - private-corpus sentinel path already exists: $sentinel"
         exit 1
     fi
 done
