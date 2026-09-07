@@ -179,6 +179,17 @@ func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int,
 		if len(data) == 0 {
 			continue
 		}
+		// MSIX shares OPC names with Office. Add only manifest metadata here;
+		// preserve the existing carrier-only policy for all sibling payloads.
+		if f.Name == msixManifestName {
+			fields := msixManifestFields(data, maxStreams-len(res.Streams), deadline)
+			if len(fields) != 0 {
+				b.members++
+				b.total += len(data)
+				res.Streams = append(res.Streams, fields...)
+				continue
+			}
+		}
 		// Only route members that are themselves a recognised carrier; a non-carrier
 		// (ordinary attached text/image) matches no magic in extractChild and would
 		// just be appended as a raw stream — which for an Office sibling is exactly
@@ -347,7 +358,7 @@ func unpackZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 			}
 			// Emit the payload BEFORE the marker so a maxStreams cap hit can never
 			// drop the decrypted dropper in favour of the marker.
-			emitMember(plain, res, b, depth, deadline)
+			emitZipMember(f.Name, plain, res, b, depth, deadline)
 			markDecryptedArchive(res)
 			continue
 		}
@@ -360,7 +371,7 @@ func unpackZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 		}
 		data := readMember(rc, f.UncompressedSize64)
 		_ = rc.Close()
-		emitMember(data, res, b, depth, deadline)
+		emitZipMember(f.Name, data, res, b, depth, deadline)
 	}
 }
 

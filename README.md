@@ -647,6 +647,27 @@ rules), merging and de-duplicating matches:
   and values are truncated to their caps.
   INI extraction retains fields collected before its limits. Raw scanning still
   runs when launcher recognition or extraction reaches a limit.
+- **MSIX manifest fields** — existing ZIP walkers, including nested packages
+  and packages carrying `[Content_Types].xml`, enrich a root `AppxManifest.xml`.
+  Supported Windows 10 foundation namespace paths expose Identity Name,
+  Publisher, Version, ProcessorArchitecture and ResourceId; Applications /
+  Application Id, Executable, EntryPoint and StartPage; and the UAP
+  `windows.protocol` Extension / Protocol Name. Combined `MSIX-IDENTITY`,
+  `MSIX-APPLICATION` and `MSIX-PROTOCOL` field/value streams contain untrusted
+  declarations, not verified publisher identities or risk scores. Recognition
+  checks selected namespaces, paths and attributes, not full XSD conformance,
+  package signatures or executable existence. See Microsoft's
+  [identity schema](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-f-identity),
+  [application schema](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-f-application)
+  and [protocol schema](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-uap-protocol).
+  Malformed XML or exceeded 1 MiB input, 4096-token, 32-level, 64-attributes-per-element
+  or deadline budgets contribute no fields; output is capped at 32 fields,
+  2048 bytes per value and the shared stream limit. UTF-8-compatible XML only.
+  Payload selection remains unchanged. A recognized OPC manifest charges one
+  member and its input bytes to the shared archive budget; a generic ZIP
+  manifest is already charged as a raw member. This is limited metadata
+  enrichment, with no filesystem unpacking or execution and
+  no new payload-extraction guarantee. Raw scanning still runs.
 - **Static decode pass** — over the raw body and every extracted stream, the
   long base64/hex runs are decoded and any whole-buffer reverse (VBA
   `StrReverse`) is undone, then the decoded blobs are re-scanned. This is
@@ -965,7 +986,9 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [ ] **FP auto-tuning** — derive the empirical rule denylist from the rspamd ham corpus instead of the 3 hand-curated entries
 - [x] ~~Batch `.bat` echo-redirect dropper carving~~ — shipped (see above)
 - [x] ~~JAR / APK member unpacking (`META-INF/`-only zip no longer mis-classified as Office)~~ — shipped (see above)
-- [ ] CHM / MSIX extraction; `.url`/`.settingcontent-ms` launcher fields
+- [x] MSIX manifest fields: bounded metadata enrichment in existing ZIP walkers
+  (see above); payload extraction remains limited to existing archive behavior
+- [ ] CHM extraction
 - [ ] Shared-formula (`SHRFMLA`) resolution wired into the XLM emulator
 - [ ] Sample-gated legacy XLM/BIFF edge cases (CSV-DDE-XLSB `sbt=1`, per-funcid `ptgFunc` arity, BIFF CONTINUE reassembly)
 
