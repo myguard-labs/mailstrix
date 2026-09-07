@@ -78,6 +78,15 @@ jobs:
       - name: smoke matrix (HTTP contract + every rule/extractor channel)
         run: scripts/smoke.sh strixd:ci
 
+  parity-isolation:
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - name: qualify optional Mailstrix isolation with inert fixtures
+        run: bash scripts/qualify-parity-isolation.sh "$RUNNER_TEMP/parity-isolation"
+
   lint:
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
@@ -155,6 +164,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 \
             scripts/smoke.sh \
+            scripts/qualify-parity-isolation.sh \
             contrib/spamassassin/t/sa-lint.sh \
             docker/fetch-rules.sh \
             docker/fetch-rules_test.sh \
