@@ -459,3 +459,31 @@ func TestIsolatedSummaryReproducible(t *testing.T) {
 		t.Fatal("report conflates contracts")
 	}
 }
+
+func TestIsolatedReportBudgets(t *testing.T) {
+	m, hash, root := generated(t)
+	for _, tc := range []struct {
+		name string
+		d    isolatedDocker
+		want time.Duration
+	}{
+		{"default", isolatedTestDocker(), isolatedBudget},
+		{"test override", func() isolatedDocker {
+			d := isolatedTestDocker()
+			d.budget = 275 * time.Millisecond
+			return d
+		}(), 275 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := isolatedCorpus(root, m, hash, tc.d, func(sample, []byte) observation {
+				return observation{Status: "ok"}
+			})
+			if r.ScanBudgetMS != isolatedScanBudget.Milliseconds() {
+				t.Fatalf("scan budget=%d, want %d", r.ScanBudgetMS, isolatedScanBudget.Milliseconds())
+			}
+			if r.HostBudgetMS != tc.want.Milliseconds() {
+				t.Fatalf("host budget=%d, want %d", r.HostBudgetMS, tc.want.Milliseconds())
+			}
+		})
+	}
+}

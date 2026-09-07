@@ -22,6 +22,7 @@ const (
 	isolatedHeaderLimit = 4096
 	isolatedSymbolLimit = 4096
 	isolatedRulesDir    = "/usr/share/mailstrix/parity-rules"
+	isolatedScanBudget  = 8 * time.Second
 )
 
 // Set only by the optional image build; ordinary host builds cannot claim the
@@ -178,7 +179,7 @@ func isolatedWorker(in io.Reader, out io.Writer) int {
 		return 2
 	}
 	// Fixed configuration: no feed, cache, password guessing or environment loader.
-	cfg := &mailstrix.Config{RulesDir: isolatedRulesDir, ScanTimeout: 8 * time.Second, EffortMax: scanEffort}
+	cfg := &mailstrix.Config{RulesDir: isolatedRulesDir, ScanTimeout: isolatedScanBudget, EffortMax: scanEffort}
 	scanner, diagnostic, err := newParityScanner(cfg)
 	if err != nil {
 		return 2
