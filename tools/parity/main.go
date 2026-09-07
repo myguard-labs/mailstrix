@@ -1,6 +1,6 @@
 // parity evaluates the reproducible inert corpus against Mailstrix itself.
-// External corpora can be checked for integrity, but execution is deliberately
-// restricted to generator bytes until whole-process resource isolation lands.
+// Mailstrix execution is restricted to generator bytes. The separate opt-in
+// comparison command isolates native third-party Office observations in Docker.
 package main
 
 import (
@@ -17,6 +17,8 @@ import (
 
 	"github.com/myguard-labs/mailstrix/internal/mailstrix"
 )
+
+const scanEffort = 10
 
 type report struct {
 	SchemaVersion       int               `json:"schema_version"`
@@ -50,7 +52,7 @@ func printError(w io.Writer, message any) {
 
 func cli(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printError(stderr, "usage: parity generate|check|run [options]")
+		printError(stderr, "usage: parity generate|check|run|compare [options]")
 		return 2
 	}
 	f := flag.NewFlagSet("parity", flag.ContinueOnError)
@@ -59,6 +61,7 @@ func cli(args []string, stdout, stderr io.Writer) int {
 	manifestPath := f.String("manifest", "", "v1 corpus manifest")
 	rootPath := f.String("corpus-root", "", "caller-owned corpus directory")
 	rules := f.String("rules", "docker/local-rules", "trusted local YARA source directory (run)")
+	adapter := f.String("adapter", "both", "opt-in local comparator: oletools, olefy or both (compare only)")
 	if err := f.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -71,7 +74,11 @@ func cli(args []string, stdout, stderr io.Writer) int {
 			printError(stderr, "generate requires -out (new directory)")
 			return 2
 		}
-		if err := generate(*out); err != nil {
+		fixtures, err := syntheticFixtures()
+		if err == nil {
+			err = generateFixtures(*out, fixtures)
+		}
+		if err != nil {
 			// Retain the operation and OS cause without publishing a caller's path.
 			var pathErr *os.PathError
 			if errors.As(err, &pathErr) {
@@ -80,17 +87,17 @@ func cli(args []string, stdout, stderr io.Writer) int {
 			printError(stderr, fmt.Errorf("generation failed: %w", err))
 			return 2
 		}
-		if _, err := fmt.Fprintln(stderr, "generated 6 inert fixtures and manifest v1"); err != nil {
+		if _, err := fmt.Fprintf(stderr, "generated %d inert fixtures and manifest v1\n", len(fixtures)); err != nil {
 			return 2
 		}
 		return 0
 	}
-	if args[0] != "check" && args[0] != "run" {
+	if args[0] != "check" && args[0] != "run" && args[0] != "compare" {
 		printError(stderr, "unknown command")
 		return 2
 	}
 	if *manifestPath == "" || *rootPath == "" {
-		printError(stderr, "check/run require -manifest and -corpus-root")
+		printError(stderr, "check/run/compare require -manifest and -corpus-root")
 		return 2
 	}
 	m, hash, err := loadManifest(*manifestPath)
@@ -105,6 +112,9 @@ func cli(args []string, stdout, stderr io.Writer) int {
 	}
 	// Read-only handles have no buffered writes to lose on close.
 	defer func() { _ = root.Close() }()
+	if args[0] == "compare" {
+		return compareCLI(root, m, hash, *adapter, stdout, stderr)
+	}
 	if args[0] == "check" {
 		if err := validateFiles(root, m); err != nil {
 			printError(stderr, err)
@@ -172,7 +182,7 @@ func run(root *os.Root, m manifest, hash, rules string) (report, error) {
 	}
 	// Explicit configuration prevents credentials, live feeds, cache state and
 	// caller environment variables from changing the baseline's observations.
-	cfg := &mailstrix.Config{RulesDir: rules, ScanTimeout: 8 * time.Second, EffortMax: 10}
+	cfg := &mailstrix.Config{RulesDir: rules, ScanTimeout: 8 * time.Second, EffortMax: scanEffort}
 	var diagnostic atomic.Bool
 	scanner, err := mailstrix.NewScanner(cfg, func(format string, _ ...any) {
 		// Only these exact success notifications are routine at startup.
@@ -217,8 +227,8 @@ func run(root *os.Root, m manifest, hash, rules string) (report, error) {
 	}
 	r = report{SchemaVersion: 1, Scope: "synthetic indicator regression only", ManifestSHA256: hash, Generator: generatorRevision,
 		GoVersion: runtime.Version(), Platform: runtime.GOOS + "/" + runtime.GOARCH, BuildRevision: "unknown", RulesFingerprint: scanner.Fingerprint(),
-		Effort: 10, ScanBudgetMS: 8000, ElapsedMS: time.Since(started).Milliseconds(), Feeds: "disabled", Summary: summarize(m, observations),
-		Comparators:         map[string]string{"oletools": "not_run: immutable oracle pins and adapter pending", "olefy": "not_run: immutable oracle pins and adapter pending", "clamav": "not_run: complementary comparator pending"},
+		Effort: cfg.EffortMax, ScanBudgetMS: cfg.ScanTimeout.Milliseconds(), ElapsedMS: time.Since(started).Milliseconds(), Feeds: "disabled", Summary: summarize(m, observations),
+		Comparators:         map[string]string{"oletools": "not_run: use opt-in compare command", "olefy": "not_run: use opt-in compare command", "clamav": "not_run: complementary comparator pending"},
 		RealWorldThresholds: "unmeasured; no representative labelled external corpus"}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, setting := range info.Settings {
@@ -236,7 +246,7 @@ func run(root *os.Root, m manifest, hash, rules string) (report, error) {
 func observe(scanner *mailstrix.Scanner, b []byte, format string) observation {
 	ext := map[string]string{"mime": "eml", "office": "docx", "pdf": "pdf", "html": "html", "image": "png"}[format]
 	meta := mailstrix.NewScanMeta("synthetic." + ext)
-	meta.Effort = 10
+	meta.Effort = scanEffort
 	beforeRaw, beforeExtract := scanner.RawScanErrs(), scanner.ExtractMetrics()
 	matches, err := scanner.Scan(b, meta)
 	afterExtract := scanner.ExtractMetrics()
