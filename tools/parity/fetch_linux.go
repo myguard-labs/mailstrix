@@ -13,6 +13,7 @@ func fetchPlatformSupported() bool { return true }
 // NONBLOCK prevents an input replaced with a FIFO from hanging before f.Stat.
 // NOFOLLOW prevents a last-component symlink from changing the selected file.
 func openFetchInput(name string) (*os.File, error) {
+	// #nosec G304 -- explicit caller-selected local manifest/plan path; never derived from downloaded content. readFetchJSON checks regular-file type and bounds.
 	return os.OpenFile(name, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
 }
 

@@ -19,6 +19,16 @@
 !internal/**
 !third_party
 !third_party/**
+!tools
+tools/**
+!tools/parity
+tools/parity/**
+!tools/parity/*.go
+!tools/parity/comparator-pins.json
+!tools/parity/comparator_runner.py
+!tools/parity/testdata
+tools/parity/testdata/**
+!tools/parity/testdata/synthetic-baseline-v1.json
 
 # ---- rules pipeline (all three Dockerfiles: docker/fetch-rules.sh etc.) ----
 !docker

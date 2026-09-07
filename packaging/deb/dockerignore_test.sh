@@ -13,8 +13,9 @@
 # asserts none of the sentinels reach /ctx. Mutation-tested: deleting the `*`
 # deny-all line from .dockerignore makes every absence assertion fail (the
 # context grows from ~300 to ~420 entries and all five sentinels appear). The
-# sentinels are denied by that one line, not by per-category deny rules —
-# there are none — so `*` is the assertion these tests actually bind to.
+# original root sentinels bind to that deny-all line. Parity sentinels also
+# check the nested exclusions needed after allowing their parent directories;
+# removing an embedded-asset allowance tests the positive side of that contract.
 set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -25,6 +26,17 @@ command -v docker >/dev/null 2>&1 || { echo "SKIP - docker not available"; exit 
 
 [ -e "$root/.dockerignore" ] || { echo "FAIL - .dockerignore missing at repo root"; exit 1; }
 
+# Refuse collisions before installing cleanup: these names are not ours yet.
+for sentinel in tools/private-corpus.sentinel.json \
+    tools/parity/private-corpus.sentinel.json \
+    tools/parity/testdata/private-corpus.sentinel.json \
+    tools/parity/private-corpus-sentinel; do
+    if [ -e "$root/$sentinel" ] || [ -L "$root/$sentinel" ]; then
+        echo "FAIL - private-corpus sentinel path already exists"
+        exit 1
+    fi
+done
+
 tmpdir="$(mktemp -d)"
 cleanup() {
     rc=$?
@@ -32,9 +44,14 @@ cleanup() {
           "$root/.env.sentinel" \
           "$root/secrets-sentinel/sentinel.token" \
           "$root/rules-sentinel/sentinel.yara" \
+          "$root/tools/private-corpus.sentinel.json" \
+          "$root/tools/parity/private-corpus.sentinel.json" \
+          "$root/tools/parity/testdata/private-corpus.sentinel.json" \
+          "$root/tools/parity/private-corpus-sentinel/sample.go" \
           "$root/build.log.sentinel" 2>/dev/null || true
     rmdir "$root/secrets-sentinel" 2>/dev/null || true
     rmdir "$root/rules-sentinel" 2>/dev/null || true
+    rmdir "$root/tools/parity/private-corpus-sentinel" 2>/dev/null || true
     docker image rm -f dockerignore-ctx-probe >/dev/null 2>&1 || true
     rm -rf "$tmpdir"
     exit "$rc"
@@ -49,6 +66,11 @@ echo "SECRET=x" > "$root/.env.sentinel"               # env/secret file
 echo "shh" > "$root/secrets-sentinel/sentinel.token"           # token under a secrets-style dir
 echo "rule sentinel" > "$root/rules-sentinel/sentinel.yara"  # transient rule dir
 echo "log line" > "$root/build.log.sentinel"          # build/test log
+mkdir -p "$root/tools/parity/private-corpus-sentinel"
+echo "inert" > "$root/tools/private-corpus.sentinel.json"
+echo "inert" > "$root/tools/parity/private-corpus.sentinel.json"
+echo "inert" > "$root/tools/parity/testdata/private-corpus.sentinel.json"
+echo "inert" > "$root/tools/parity/private-corpus-sentinel/sample.go"
 
 probe_dockerfile="$tmpdir/Dockerfile.probe"
 cat > "$probe_dockerfile" <<'EOF'
@@ -85,6 +107,10 @@ check_absent '\.env\.sentinel' 'env/secret file sentinel'
 check_absent 'secrets-sentinel/sentinel\.token' 'token under a secrets-style dir'
 check_absent 'rules-sentinel/sentinel\.yara' 'transient rule-dir sentinel'
 check_absent 'build\.log\.sentinel' 'log file sentinel'
+check_absent 'tools/private-corpus\.sentinel\.json' 'private tools manifest sentinel'
+check_absent 'tools/parity/private-corpus\.sentinel\.json' 'private parity manifest sentinel'
+check_absent 'tools/parity/testdata/private-corpus\.sentinel\.json' 'private parity testdata sentinel'
+check_absent 'tools/parity/private-corpus-sentinel' 'private parity subtree sentinel'
 
 # Real files docker/Dockerfile's `build`/`test` stage COPY . . actually needs
 # must still be present, so a deny-by-default .dockerignore can't silently
@@ -105,6 +131,12 @@ check_present 'internal' 'internal/'
 check_present 'docker/Dockerfile' 'docker/Dockerfile'
 check_present 'docker/fetch-rules\.sh' 'docker/fetch-rules.sh'
 check_present 'scripts/smoke\.sh' 'scripts/smoke.sh'
+check_present 'tools/parity/main\.go' 'parity Go command'
+check_present 'tools/parity/fetch_linux\.go' 'parity direct dependency consumer'
+check_present 'tools/parity/parity_test\.go' 'parity Go tests'
+check_present 'tools/parity/comparator-pins\.json' 'embedded comparator pins'
+check_present 'tools/parity/comparator_runner\.py' 'embedded comparator runner'
+check_present 'tools/parity/testdata/synthetic-baseline-v1\.json' 'synthetic parity expectation'
 
 if [ "$fail" -eq 0 ]; then
     echo "ALL OK"
