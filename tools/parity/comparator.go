@@ -236,6 +236,7 @@ func (d dockerComparator) commandContext(ctx context.Context, args ...string) *e
 // dockerCommand deliberately ignores Docker context/host environment variables:
 // caller-owned documents may only go to the host's local Unix socket daemon.
 func dockerCommand(ctx context.Context, args ...string) *exec.Cmd {
+	// #nosec G204 -- argv uses fixed flags, embedded pins/script, allowlisted adapters and random hex names; document bytes go only to stdin, without a shell.
 	cmd := exec.CommandContext(ctx, "docker", append([]string{"--host", dockerSocket}, args...)...)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
 	cmd.WaitDelay = time.Second
