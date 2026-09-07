@@ -1,0 +1,245 @@
+{
+  "captured_date": "2026-09-07",
+  "scope": "Historical synthetic-only run; not representative precision or a release threshold",
+  "observed_clean_checkout": "aed1f79318e20ea1a589f29681624b5fa06d8d8b",
+  "binary_sha256": "549d546bbfc36c73b5990152f6c8309145dbe3c37a85ae9341a8eae1c7eb6611",
+  "binary_build_command": "go build -o <capture>/parity ./tools/parity",
+  "binary_embedded_vcs_revision": "unavailable",
+  "identity_limit": "The checkout was observed clean before build and after run; the binary has no embedded VCS revision. The checksum identifies the measured binary, not independently verified source correspondence.",
+  "libyara": {
+    "linked_soname": "libyara.so.10",
+    "linked_file_sha256": "ff27fef71a541f735c8b53c85f8423954da36284c96d01e0485910773ac5a743",
+    "pkg_config_version": "4.5.2",
+    "version_limit": "Version is pkg-config metadata; linked library identity was separately observed with ldd and sha256sum."
+  },
+  "rules_selection": "docker/local-rules/pdf_indicators.yara only",
+  "report": {
+    "schema_version": 1,
+    "scope": "synthetic indicator regression only",
+    "manifest_sha256": "307d1087dbecc47c00ffe529035f70366e6208eea140c6e1c264f0ce4084d9ca",
+    "generator": "synthetic-v1",
+    "go_version": "go1.26.8",
+    "platform": "linux/amd64",
+    "build_revision": "unknown",
+    "build_modified": false,
+    "rules_fingerprint": "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16:71266a6fd124eabc:ab8238ce64eb9596:0000000000000000:2403522c88b33dc4",
+    "effort": 10,
+    "scan_budget_ms": 8000,
+    "elapsed_ms": 0,
+    "feeds": "disabled",
+    "summary": {
+      "unique_samples": 6,
+      "duplicates": 0,
+      "statuses": {
+        "ok": 6
+      },
+      "symbols": [
+        {
+          "partition": "synthetic-clean",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_Additional_Actions"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 5,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-clean",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_EmbeddedFile"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 5,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-clean",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_HexObfuscatedName"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 5,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-clean",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_JBIG2"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 5,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-clean",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_Launch_Action"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 5,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-clean",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_ObjStm"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 5,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-clean",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_OpenAction_JS"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 5,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-indicator",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_Additional_Actions"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 1,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-indicator",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_EmbeddedFile"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 1,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-indicator",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_HexObfuscatedName"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 1,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-indicator",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_JBIG2"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 1,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-indicator",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_Launch_Action"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 1,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-indicator",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_ObjStm"
+          },
+          "tp": 0,
+          "fp": 0,
+          "fn": 0,
+          "tn": 1,
+          "excluded": 0,
+          "precision": null,
+          "recall": null
+        },
+        {
+          "partition": "synthetic-indicator",
+          "symbol": {
+            "namespace": "pdf_indicators.yara",
+            "rule": "PDF_OpenAction_JS"
+          },
+          "tp": 1,
+          "fp": 0,
+          "fn": 0,
+          "tn": 0,
+          "excluded": 0,
+          "precision": 1,
+          "recall": 1
+        }
+      ],
+      "unlabelled_matches": 0,
+      "labelled_nonregression_pass": true
+    },
+    "comparators": {
+      "clamav": "not_run: complementary comparator pending",
+      "olefy": "not_run: use opt-in compare command",
+      "oletools": "not_run: use opt-in compare command"
+    },
+    "real_world_precision": null,
+    "real_world_thresholds": "unmeasured; no representative labelled external corpus"
+  }
+}

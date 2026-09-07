@@ -1,0 +1,210 @@
+{
+  "generator": "synthetic-v1",
+  "summary": {
+    "unique_samples": 6,
+    "duplicates": 0,
+    "statuses": {
+      "ok": 6
+    },
+    "symbols": [
+      {
+        "partition": "synthetic-clean",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_Additional_Actions"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-clean",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_EmbeddedFile"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-clean",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_HexObfuscatedName"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-clean",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_JBIG2"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-clean",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_Launch_Action"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-clean",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_ObjStm"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-clean",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_OpenAction_JS"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-indicator",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_Additional_Actions"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 1,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-indicator",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_EmbeddedFile"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 1,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-indicator",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_HexObfuscatedName"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 1,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-indicator",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_JBIG2"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 1,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-indicator",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_Launch_Action"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 1,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-indicator",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_ObjStm"
+        },
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 1,
+        "excluded": 0,
+        "precision": null,
+        "recall": null
+      },
+      {
+        "partition": "synthetic-indicator",
+        "symbol": {
+          "namespace": "pdf_indicators.yara",
+          "rule": "PDF_OpenAction_JS"
+        },
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "tn": 0,
+        "excluded": 0,
+        "precision": 1,
+        "recall": 1
+      }
+    ],
+    "unlabelled_matches": 0,
+    "labelled_nonregression_pass": true
+  }
+}
