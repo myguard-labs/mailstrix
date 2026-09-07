@@ -136,8 +136,11 @@ containing only that revision's `pdf_indicators.yara`. Record `go version`,
 `go version -m <binary>`, `sha256sum <binary>`, `pkg-config --modversion yara`,
 and the SHA-256 of the libyara file resolved by `ldd <binary>`. Preserve the JSON
 report and record whether the checkout was clean before building and after running.
-Timing and executable hashes can vary across builds; neither is a performance
-threshold. The exact synthetic semantic matrix is the test gate. This receipt
+Timing, executable hashes and embedded VCS fields can vary across builds. Go's
+default `-buildvcs=auto` may stamp a revision in another checkout even though the
+captured binary lacks one; retain the metadata actually emitted by each build.
+Timing is not a performance threshold. The exact synthetic semantic matrix is
+the test gate. This receipt
 does not complete representative corpus thresholds, external evaluation or
 cross-tool parity; real-world precision remains unmeasured.
 
