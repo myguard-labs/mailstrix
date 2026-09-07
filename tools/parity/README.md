@@ -112,6 +112,38 @@ explicitly unmeasured. Timing is diagnostic, with no performance threshold.
 
 ## Privacy and reproducibility
 
+The synthetic expectation is frozen in
+[synthetic-baseline-v1.json](testdata/synthetic-baseline-v1.json): seven absent
+indicators for each of five clean fixtures, and one present plus six absent
+indicators for the inert PDF. Its 14 partition/symbol rows come from construction,
+not measured scanner output. `TestSyntheticScannerBaseline` compares every keyed
+row and the complete sample/status population against actual scanner results.
+Changes to this expectation require reviewing the fixture construction and labels;
+do not regenerate it from observations to make a failing test pass.
+
+[The historical receipt](baselines/synthetic-aed1f79.json) records the first frozen
+synthetic run from clean revision `aed1f79318e20ea1a589f29681624b5fa06d8d8b`,
+using only `docker/local-rules/pdf_indicators.yara` copied into an otherwise empty
+rules directory. It contains aggregate report-v1 output, the measured executable
+and linked libyara SHA-256 identities, and tool metadata. Its binary did not embed
+a VCS revision: the recorded clean checkout is an observation, not independent
+binary-to-source verification. The libyara version is explicitly pkg-config
+metadata; the linked library hash identifies the file observed through `ldd`.
+
+To repeat that historical run, build that revision in a clean checkout using the
+Run commands above, replacing `-rules docker/local-rules` with an empty directory
+containing only that revision's `pdf_indicators.yara`. Record `go version`,
+`go version -m <binary>`, `sha256sum <binary>`, `pkg-config --modversion yara`,
+and the SHA-256 of the libyara file resolved by `ldd <binary>`. Preserve the JSON
+report and record whether the checkout was clean before building and after running.
+Timing, executable hashes and embedded VCS fields can vary across builds. Go's
+default `-buildvcs=auto` may stamp a revision in another checkout even though the
+captured binary lacks one; retain the metadata actually emitted by each build.
+Timing is not a performance threshold. The exact synthetic semantic matrix is
+the test gate. This receipt
+does not complete representative corpus thresholds, external evaluation or
+cross-tool parity; real-world precision remains unmeasured.
+
 Keep restricted manifests, hashes, paths, evidence and payloads outside Git.
 Private hashes can themselves disclose membership; only publish them after an
 explicit privacy review. The aggregate report omits sample IDs, hashes, locators,

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -253,6 +255,57 @@ func TestSummaryGroundTruth(t *testing.T) {
 	}
 }
 
+// This frozen matrix comes from fixture construction, not scanner observations.
+func loadSyntheticBaseline(t *testing.T) summary {
+	t.Helper()
+	b, err := os.ReadFile("testdata/synthetic-baseline-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var baseline struct {
+		Generator string  `json:"generator"`
+		Summary   summary `json:"summary"`
+	}
+	if err := json.Unmarshal(b, &baseline); err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Generator != generatorRevision || len(baseline.Summary.Symbols) != 14 {
+		t.Fatal("synthetic baseline requires reviewed generator and 14-row matrix")
+	}
+	return baseline.Summary
+}
+
+func matchSyntheticBaseline(got, want summary) error {
+	type key struct{ partition, namespace, rule string }
+	index := func(rows []symbolCounts) (map[key]symbolCounts, error) {
+		out := make(map[key]symbolCounts, len(rows))
+		for _, row := range rows {
+			k := key{row.Partition, row.Symbol.Namespace, row.Symbol.Rule}
+			if _, exists := out[k]; exists {
+				return nil, fmt.Errorf("duplicate synthetic baseline row: %+v", k)
+			}
+			out[k] = row
+		}
+		return out, nil
+	}
+	g, err := index(got.Symbols)
+	if err != nil {
+		return err
+	}
+	w, err := index(want.Symbols)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(g, w) {
+		return errors.New("synthetic baseline symbol/partition matrix differs")
+	}
+	got.Symbols, want.Symbols = nil, nil
+	if !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("synthetic baseline population/status differs: got %+v, want %+v", got, want)
+	}
+	return nil
+}
+
 // This enters the production extractor and YARA scanner using a shipped rule,
 // not a fake match returned from the fixture's source label.
 func TestSyntheticScannerBaseline(t *testing.T) {
@@ -261,6 +314,36 @@ func TestSyntheticScannerBaseline(t *testing.T) {
 	r, err := run(root, m, hash, rules)
 	if err != nil {
 		t.Fatal(err)
+	}
+	want := loadSyntheticBaseline(t)
+	if err := matchSyntheticBaseline(r.Summary, want); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt actual scanner results, preserving aggregate TP/TN for the
+	// reassociation cases. Each must fail the frozen keyed matrix/population.
+	for name, mutate := range map[string]func(*summary){
+		"symbol-reassociation": func(s *summary) {
+			s.Symbols[12].Symbol, s.Symbols[13].Symbol = s.Symbols[13].Symbol, s.Symbols[12].Symbol
+		},
+		"partition-reassociation": func(s *summary) {
+			s.Symbols[0].Partition, s.Symbols[7].Partition = s.Symbols[7].Partition, s.Symbols[0].Partition
+		},
+		"missing-symbol":   func(s *summary) { s.Symbols = s.Symbols[:13] },
+		"duplicate-symbol": func(s *summary) { s.Symbols = append(s.Symbols, s.Symbols[0]) },
+		"missing-status":   func(s *summary) { delete(s.Statuses, "ok") },
+		"extra-status":     func(s *summary) { s.Statuses["timeout"] = 1 },
+		"excluded":         func(s *summary) { s.Symbols[0].Excluded = 1 },
+		"missing-sample":   func(s *summary) { s.UniqueSamples-- },
+	} {
+		t.Run(name, func(t *testing.T) {
+			altered := r.Summary
+			altered.Symbols = slices.Clone(r.Summary.Symbols)
+			altered.Statuses = map[string]int{"ok": 6}
+			mutate(&altered)
+			if err := matchSyntheticBaseline(altered, want); err == nil {
+				t.Fatal("corrupted actual scanner baseline accepted")
+			}
+		})
 	}
 	if !r.Summary.Pass || r.Summary.Statuses["ok"] != 6 {
 		t.Fatalf("synthetic baseline failed: %+v", r.Summary)

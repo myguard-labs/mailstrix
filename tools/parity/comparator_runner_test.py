@@ -5,7 +5,6 @@ import io
 import json
 import subprocess
 import unittest
-from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import Mock, mock_open, patch
 
@@ -98,6 +97,62 @@ class OlefyTests(unittest.TestCase):
         self.assertEqual(self.observe(), ("tool_error", ""))
 
 
+class EnvelopeBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.identity = {"oletools_version": "pinned", "olefy_sha256": "a" * 64}
+
+    def emit(self, output, status="ok", identity=None):
+        stream = io.BytesIO()
+        with patch.object(runner.sys, "stdout", SimpleNamespace(buffer=stream)):
+            runner.emit_envelope(self.identity if identity is None else identity,
+                                 status, output)
+        raw = stream.getvalue()
+        self.assertLessEqual(len(raw), runner.MAX_ENVELOPE)
+        self.assertTrue(raw.endswith(b"\n"))
+        return raw, json.loads(raw)
+
+    def test_unicode_raw_response_fits_without_ascii_expansion(self):
+        output = json.dumps(["é" * 500000], ensure_ascii=False)
+        self.assertLessEqual(len(output.encode("utf-8")), runner.MAX_OUTPUT)
+        raw, envelope = self.emit(output)
+        self.assertEqual(envelope["status"], "ok")
+        self.assertEqual(envelope["output"], output)
+        self.assertIn("é".encode(), raw)
+
+    def test_ascii_escaping_overflow_discards_output(self):
+        output = json.dumps("\\" * ((runner.MAX_OUTPUT - 2) // 2))
+        self.assertEqual(len(output.encode("utf-8")), runner.MAX_OUTPUT)
+        raw, envelope = self.emit(output)
+        self.assertEqual(envelope, {"identity": self.identity,
+                                    "status": "output_limit", "output": ""})
+        self.assertLess(len(raw), 256)
+
+    def test_exact_byte_boundary_includes_newline(self):
+        output = json.dumps(["é" * 100], ensure_ascii=False)
+        raw, _ = self.emit(output)
+        for budget, status in ((len(raw), "ok"), (len(raw) - 1, "output_limit")):
+            with self.subTest(budget=budget), patch.object(runner, "MAX_ENVELOPE", budget):
+                _, envelope = self.emit(output)
+                self.assertEqual(envelope["status"], status)
+                self.assertEqual(envelope["output"], output if status == "ok" else "")
+
+    def test_error_and_identity_envelopes_are_bounded(self):
+        for status in ("identity_error", "pin_mismatch", "tool_error", "timeout",
+                       "input_error", "output_limit"):
+            with self.subTest(status=status):
+                _, envelope = self.emit("", status=status)
+                self.assertEqual(envelope["status"], status)
+        for version in ("é" * runner.MAX_ENVELOPE, "\ud800"):
+            with self.subTest(oversized=len(version) > 1):
+                raw, envelope = self.emit("", status="identity_error",
+                                          identity={"oletools_version": version,
+                                                    "olefy_sha256": "a" * 64})
+                self.assertEqual(envelope, {"identity": {"oletools_version": "",
+                                                         "olefy_sha256": ""},
+                                            "status": "identity_error", "output": ""})
+                self.assertLess(len(raw), 128)
+
+
 class IdentityAndEnvelopeTests(unittest.TestCase):
     def invoke(self, data=b"inert", probe=None, error=None):
         probe = probe or {}
@@ -105,7 +160,7 @@ class IdentityAndEnvelopeTests(unittest.TestCase):
         source_hash = hashlib.sha256(source).hexdigest()
         stream = Mock()
         stream.read.return_value = data
-        output = io.StringIO()
+        output = io.BytesIO()
         argv = ["runner", "oletools", "pinned", probe.get("expected_hash", source_hash)]
         opened = mock_open(read_data=source)
         if "read_error" in probe:
@@ -121,7 +176,7 @@ class IdentityAndEnvelopeTests(unittest.TestCase):
                 patch.object(runner.sys, "stdin", SimpleNamespace(buffer=stream)), \
                 patch.object(runner, "direct", return_value=("ok", "[]"),
                              side_effect=error) as direct, \
-                redirect_stdout(output):
+                patch.object(runner.sys, "stdout", SimpleNamespace(buffer=output)):
             runner.main()
         limit.assert_called_once_with(runner.resource.RLIMIT_FSIZE,
                                       (runner.MAX_INPUT + 1, runner.MAX_INPUT + 1))

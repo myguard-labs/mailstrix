@@ -17,6 +17,9 @@ import time
 
 MAX_INPUT = 16 << 20
 MAX_OUTPUT = 1 << 20
+# Includes JSON escaping, identity fields and the terminating newline. Keep in
+# sync with comparatorOutputLimit in comparator.go; the raw cap is independent.
+MAX_ENVELOPE = 2 << 20
 SCAN_SECONDS = 8
 OLEVBA = os.path.join(os.path.dirname(sys.executable), "olevba")
 
@@ -104,6 +107,29 @@ def olefy(data):
         return "ok", raw[:-4].decode("utf-8")
 
 
+def emit_envelope(identity, status, output):
+    def encode(envelope):
+        return (json.dumps(envelope, ensure_ascii=False) + "\n").encode("utf-8")
+
+    envelope = {"identity": identity, "status": status, "output": output}
+    try:
+        raw = encode(envelope)
+        if len(raw) > MAX_ENVELOPE:
+            envelope.update(status="output_limit", output="")
+            raw = encode(envelope)
+        if len(raw) <= MAX_ENVELOPE:
+            sys.stdout.buffer.write(raw)
+            return
+    except UnicodeError:
+        # Fail closed through the fixed identity_error envelope below.
+        pass
+    # Even error/probe metadata must fit. Discard unrepresentable or oversized
+    # identity rather than writing a partial envelope or leaking its contents.
+    raw = encode({"identity": {"oletools_version": "", "olefy_sha256": ""},
+                  "status": "identity_error", "output": ""})
+    sys.stdout.buffer.write(raw)
+
+
 def main():
     # Enforced on the children too. /tmp and cgroup limits additionally bound
     # aggregate file space, memory and processes; the host enforces wall time.
@@ -116,7 +142,7 @@ def main():
             with open("/usr/local/bin/olefy.py", "rb") as source:
                 identity["olefy_sha256"] = hashlib.sha256(source.read()).hexdigest()
         except (importlib.metadata.PackageNotFoundError, OSError):
-            print(json.dumps({"identity": identity, "status": "identity_error", "output": ""}))
+            emit_envelope(identity, "identity_error", "")
             return
         if identity["oletools_version"] != sys.argv[2] or identity["olefy_sha256"] != sys.argv[3]:
             status = "pin_mismatch"
@@ -135,7 +161,7 @@ def main():
         status = "timeout"
     except (OSError, UnicodeError, ValueError):
         status = "tool_error"
-    print(json.dumps({"identity": identity, "status": status, "output": output}))
+    emit_envelope(identity, status, output)
 
 
 if __name__ == "__main__":
