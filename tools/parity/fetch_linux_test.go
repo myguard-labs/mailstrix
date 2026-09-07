@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,43 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func TestFetchPublicationErrnoDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"missing syscall", unix.ENOSYS, "fetch publication unsupported by kernel or filesystem\n"},
+		{"unsupported flags", unix.EINVAL, "fetch publication unsupported by kernel or filesystem\n"},
+		{"unsupported operation", unix.EOPNOTSUPP, "fetch publication unsupported by kernel or filesystem\n"},
+		{"permission", unix.EACCES, "fetch publication failed\n"},
+		{"exists", unix.EEXIST, "fetch publication failed\n"},
+		{"full", unix.ENOSPC, "fetch publication failed\n"},
+		{"private error", errors.New("PRIVATE-path"), "fetch publication failed\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := inertFetchFixture(t)
+			ops := f.ops(t)
+			calls := 0
+			ops.publish = func(parent *os.Root, staged, destination string) error {
+				return publishFetchWith(parent, staged, destination, func(oldfd int, oldname string, newfd int, newname string, flags uint) error {
+					calls++
+					if oldfd != newfd || oldname == newname || filepath.Base(oldname) != oldname || filepath.Base(newname) != newname || flags != unix.RENAME_NOREPLACE {
+						t.Fatal("publication classification preconditions changed")
+					}
+					return tc.err
+				})
+			}
+			parent := t.TempDir()
+			var log bytes.Buffer
+			if code := fetchCLI(f.args(t, filepath.Join(parent, "out")), &log, ops); code != 2 || log.String() != tc.want || calls != 1 {
+				t.Fatalf("publication diagnostic: exit=%d calls=%d output=%q", code, calls, log.String())
+			}
+			requireEmptyFetchParent(t, parent)
+		})
+	}
+}
 
 func TestFetchRejectsSpecialInput(t *testing.T) {
 	if name := os.Getenv("PARITY_TEST_FIFO_INPUT"); name != "" {

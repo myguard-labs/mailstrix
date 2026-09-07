@@ -501,3 +501,20 @@ func TestFetchCLIPrivacyAndPreflight(t *testing.T) {
 		requireEmptyFetchParent(t, parent)
 	}
 }
+
+func TestFetchCLIUnsupportedPlatformBeforeInputs(t *testing.T) {
+	ops := defaultFetchIO()
+	ops.platformSupported = false
+	ops.get = func(context.Context, string, sample) ([]byte, error) {
+		t.Fatal("unsupported platform reached acquisition")
+		return nil, nil
+	}
+	// Missing paths prove that the platform outcome precedes local input reads.
+	dir := t.TempDir()
+	args := []string{"-manifest", filepath.Join(dir, "PRIVATE-manifest"), "-fetch-plan", filepath.Join(dir, "PRIVATE-plan"), "-out", filepath.Join(dir, "out"), "-allow-origin", fetchTestOrigin}
+	var log bytes.Buffer
+	if code := fetchCLI(args, &log, ops); code != 2 || log.String() != "fetch publication requires Linux\n" {
+		t.Fatalf("unsupported platform diagnostic: exit=%d output=%q", code, log.String())
+	}
+	requireEmptyFetchParent(t, dir)
+}

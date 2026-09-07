@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -20,10 +21,22 @@ func openFetchInput(name string) (*os.File, error) {
 // Both names are direct children of a stable opened parent; RENAME_NOREPLACE
 // also protects a destination created after the caller's initial check.
 func publishFetch(parent *os.Root, staged, destination string) error {
+	return publishFetchWith(parent, staged, destination, unix.Renameat2)
+}
+
+// The syscall seam is package-local and used only by diagnostic fault tests.
+func publishFetchWith(parent *os.Root, staged, destination string, rename func(int, string, int, string, uint) error) error {
 	f, err := parent.Open(".")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	return unix.Renameat2(int(f.Fd()), staged, int(f.Fd()), destination, unix.RENAME_NOREPLACE)
+	err = rename(int(f.Fd()), staged, int(f.Fd()), destination, unix.RENAME_NOREPLACE)
+	// With our fixed valid flag and two direct same-parent basenames, EINVAL's
+	// invalid-flag and self-descendant cases are excluded; it denotes unsupported
+	// flags here. This classification is not valid for arbitrary rename calls.
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP) {
+		return errFetchPublicationUnsupported
+	}
+	return err
 }

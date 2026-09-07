@@ -22,6 +22,8 @@ const (
 	fetchTimeout        = 10 * time.Minute
 )
 
+var errFetchPublicationUnsupported = errors.New("fetch publication unsupported by kernel or filesystem")
+
 // A plan binds exact manifest bytes, not merely a reusable corpus name. URLs
 // are acquisition instructions; the existing source references remain evidence.
 type fetchPlan struct {
@@ -171,6 +173,10 @@ func fetchCLI(args []string, stderr io.Writer, ops fetchIO) int {
 		printError(stderr, "fetch requires -manifest, -fetch-plan, -allow-origin and -out")
 		return 2
 	}
+	if !ops.platformSupported {
+		printError(stderr, "fetch publication requires Linux")
+		return 2
+	}
 	raw, err := readFetchJSON(*manifestPath)
 	if err != nil {
 		printError(stderr, err)
@@ -212,15 +218,17 @@ func fetchCLI(args []string, stderr io.Writer, ops fetchIO) int {
 // Only these side effects are substituted by fault tests. No CLI option can
 // replace network policy, publication semantics, or private file creation.
 type fetchIO struct {
-	get     func(context.Context, string, sample) ([]byte, error)
-	create  func(*os.Root, string) (io.WriteCloser, error)
-	publish func(*os.Root, string, string) error
-	cleanup func(*os.Root, string) error
+	platformSupported bool
+	get               func(context.Context, string, sample) ([]byte, error)
+	create            func(*os.Root, string) (io.WriteCloser, error)
+	publish           func(*os.Root, string, string) error
+	cleanup           func(*os.Root, string) error
 }
 
 func defaultFetchIO() fetchIO {
 	client := newFetchClient(netFetchDialer())
 	return fetchIO{
+		platformSupported: fetchPlatformSupported(),
 		get: func(ctx context.Context, url string, s sample) ([]byte, error) {
 			return fetchBytes(ctx, client, url, s)
 		},
@@ -309,6 +317,9 @@ func fetchCorpus(ctx context.Context, m manifest, raw []byte, urls []string, out
 		return errors.New("fetch cancelled")
 	}
 	if err := ops.publish(parent, stageName, name); err != nil {
+		if errors.Is(err, errFetchPublicationUnsupported) {
+			return errFetchPublicationUnsupported
+		}
 		return errors.New("fetch publication failed")
 	}
 	stageName = ""
