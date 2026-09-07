@@ -35,6 +35,7 @@ func TestLauncherRules(t *testing.T) {
 	cases := []ruleCase{
 		{"remote icon", "[InternetShortcut]\nIconFile=\\\\files.example\\icons\\a.ico", ""},
 		{"encoded DeepLink", "<PCSettingsFile><DeepLink>power&#115;hell -enc QUFBQUFBQUFBQUFBQUFBQUFB</DeepLink></PCSettingsFile>", "SettingContent_DeepLink_EncodedPowerShell"},
+		{"pwsh DeepLink", "<PCSettingsFile><DeepLink>pwsh -nop</DeepLink></PCSettingsFile>", "SettingContent_DeepLink_EncodedPowerShell"},
 		{"benign URL", "[InternetShortcut]\nURL=https://example.com/", ""},
 		{"executable URL alone", "[InternetShortcut]\nURL=https://example.com/app.exe", ""},
 		{"local icon", "[InternetShortcut]\nIconFile=C:\\Windows\\icon.ico", ""},

@@ -8,6 +8,7 @@ package extract
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
 	"strings"
 	"time"
@@ -21,9 +22,7 @@ const (
 	// maxLauncherFields bounds how many launcher markers we emit per file.
 	maxLauncherFields = 32
 	// maxLauncherValue caps one emitted field value length.
-	maxLauncherValue = 4 << 10
-	// launcherSniffLen is how many leading bytes the recognisers inspect.
-	launcherSniffLen  = 4 << 10
+	maxLauncherValue  = 4 << 10
 	maxLauncherBytes  = 1 << 20
 	maxLauncherTokens = 4096
 	maxLauncherDepth  = 64
@@ -71,11 +70,11 @@ func fromLauncherFields(buf []byte, res *Result, deadline time.Time) {
 }
 
 // launcherHeadHasLine reports whether want (lowercase) appears as a trimmed,
-// case-insensitively equal line within the leading launcherSniffLen bytes.
+// case-insensitively equal line within the bounded launcher input.
 func launcherHeadHasLine(buf []byte, want string) bool {
 	head := bytes.TrimPrefix(buf, utf8BOM)
-	if len(head) > launcherSniffLen {
-		head = head[:launcherSniffLen]
+	if len(head) > maxLauncherBytes {
+		head = head[:maxLauncherBytes]
 	}
 	rest := head
 	for len(rest) > 0 {
@@ -98,8 +97,8 @@ func launcherHeadHasLine(buf []byte, want string) bool {
 // part.
 func isSettingContent(buf []byte) bool {
 	head := bytes.TrimPrefix(buf, utf8BOM)
-	if len(head) > launcherSniffLen {
-		head = head[:launcherSniffLen]
+	if len(head) > maxLauncherBytes {
+		head = head[:maxLauncherBytes]
 	}
 	head = bytes.TrimSpace(head)
 	if len(head) == 0 || head[0] != '<' {
@@ -216,7 +215,7 @@ func fromSettingContent(buf []byte, res *Result, deadline time.Time) {
 			return
 		}
 		tok, err := d.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			if rootSeen && depth == 0 {
 				publishFields()
 			}

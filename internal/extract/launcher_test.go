@@ -401,3 +401,19 @@ func TestLauncherNestedCarriers(t *testing.T) {
 		})
 	}
 }
+
+func TestURLShortcutPadding(t *testing.T) {
+	doc := strings.Repeat("; harmless padding\n", 300) + evilURL
+	if len(doc) <= 4<<10 {
+		t.Fatal("test input does not exceed the former recognition window")
+	}
+	for _, input := range [][]byte{
+		[]byte(doc),
+		buildZip(t, map[string][]byte{"padded.url": []byte(doc)}),
+	} {
+		res := Extract(input, time.Now().Add(time.Second))
+		if !hasStreamPrefix(&res, urlShortcutMarker, "url=file://") {
+			t.Fatalf("padded shortcut field absent: %q", res.Streams)
+		}
+	}
+}

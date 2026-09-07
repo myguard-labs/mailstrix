@@ -19,7 +19,8 @@ rule SettingContent_DeepLink_EncodedPowerShell : maldoc heuristic suspicious
         $marker = "SETTINGCONTENT-DEEPLINK " ascii
 
         // The abusive command form, within the same extracted marker buffer.
-        $ps = "powershell" ascii nocase
+        $ps1 = "powershell" ascii nocase
+        $ps2 = "pwsh" ascii nocase
 
         $f1 = /-e(nc(odedcommand)?)?\s+[A-Za-z0-9+\/]{20,}/ ascii nocase
         $f2 = "-w hidden" ascii nocase
@@ -30,5 +31,5 @@ rule SettingContent_DeepLink_EncodedPowerShell : maldoc heuristic suspicious
         $f7 = "FromBase64String" ascii nocase
         $f8 = "DownloadString" ascii nocase
     condition:
-        filesize < 1MB and $marker and $ps and any of ($f*)
+        filesize < 1MB and $marker and any of ($ps*) and any of ($f*)
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,9 @@ func TestExtractOOXMLDeadlineStops(t *testing.T) {
 func TestVersionSet(t *testing.T) {
 	if Version == "" {
 		t.Error("extract.Version is empty")
+	}
+	if !strings.Contains(Version, "+launcherfields") {
+		t.Error("extract.Version does not invalidate pre-launcher-field cache entries")
 	}
 }
 

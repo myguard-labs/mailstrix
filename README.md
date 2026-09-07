@@ -640,13 +640,13 @@ rules), merging and de-duplicating matches:
   attachments. A local rule scores suspicious PowerShell DeepLink arguments at
   50; format presence, remote icons and executable-looking URLs alone add no
   score. Extraction never opens a target.
-  Recognition inspects the first 4 KiB; extraction caps input at 1 MiB, INI
-  records/XML tokens at 4096, XML depth at 64, fields at 32 and values at 4 KiB.
-	For XML, malformed or oversized input contributes no fields; token, depth and
-	time limits retain complete fields parsed before the budget stop. Field counts
-	and values are truncated to their caps.
+  Recognition and extraction inspect at most 1 MiB; INI records/XML tokens are
+  capped at 4096, XML depth at 64, fields at 32 and values at 4 KiB.
+  For XML, malformed or oversized input contributes no fields; token, depth and
+  time limits retain complete fields parsed before the budget stop. Field counts
+  and values are truncated to their caps.
   INI extraction retains fields collected before its limits. Raw scanning still
-  runs, including when the 4 KiB recognition window misses a later field.
+  runs when launcher recognition or extraction reaches a limit.
 - **Static decode pass** — over the raw body and every extracted stream, the
   long base64/hex runs are decoded and any whole-buffer reverse (VBA
   `StrReverse`) is undone, then the decoded blobs are re-scanned. This is
