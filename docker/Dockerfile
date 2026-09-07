@@ -94,6 +94,32 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && go test -race -tags yara_static ./...
 
 # ---- binary export (release artifacts; not part of the runtime image) -------
+# Optional parity image uses only trusted repository rule sources. It has no
+# dependency on the public-rule stage and does not enlarge the production image.
+FROM build AS parity-build
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -tags yara_static \
+        -ldflags "-X main.isolatedLibyaraVersion=${YARA_VERSION}" \
+        -o /out/parity ./tools/parity \
+    && go test -c -trimpath -tags yara_static -o /out/parity.test ./tools/parity \
+    && mkdir /out/probe-writable
+
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS parity-runtime
+COPY --from=parity-build /out/parity /usr/local/bin/parity
+COPY docker/local-rules/ /usr/share/mailstrix/parity-rules/
+USER 65534:65534
+ENTRYPOINT ["/usr/local/bin/parity"]
+CMD ["isolated-worker-v1"]
+
+# Inert qualification helper is a separate test image, never the worker image.
+FROM parity-runtime AS parity-probe-runtime
+COPY --from=parity-build /out/parity.test /usr/local/bin/parity
+COPY --from=parity-build --chown=65534:65534 /out/probe-writable /probe-writable
+
+FROM scratch AS parity-qualification-bin
+COPY --from=parity-build /out/parity.test /parity.test
+
 # `docker buildx build --target bin --platform linux/amd64,linux/arm64
 #  --output type=local,dest=dist .` drops just the strixd binary per arch.
 FROM scratch AS bin

@@ -885,8 +885,10 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
 
 The [reproducible detection baseline](tools/parity/README.md) runs generated inert
 fixtures through Mailstrix and reports explicitly labelled indicator results.
-External corpus manifests are integrity-checked only; cross-tool parity and
-real-world precision remain unmeasured.
+Its optional `run-isolated` command evaluates caller-owned local corpora in
+Docker with immutable image-owned rules and fixed resource limits. The in-process
+`run` remains synthetic-only; cross-tool parity and real-world precision remain
+unmeasured.
 
 See the [runner contract](.github/runner/README.md) for physical-slot restoration
 checks, retry requirements and live negative-control acceptance.

@@ -1,6 +1,6 @@
 // parity evaluates the reproducible inert corpus against Mailstrix itself.
-// Mailstrix execution is restricted to generator bytes. The separate opt-in
-// comparison command isolates native third-party Office observations in Docker.
+// In-process execution is restricted to generator bytes. Separate opt-in Docker
+// commands isolate Mailstrix and native third-party Office observations.
 package main
 
 import (
@@ -52,11 +52,17 @@ func printError(w io.Writer, message any) {
 
 func cli(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printError(stderr, "usage: parity generate|check|run|compare|fetch [options]")
+		printError(stderr, "usage: parity generate|check|run|run-isolated|compare|fetch [options]")
 		return 2
 	}
 	if args[0] == "fetch" {
 		return fetchCLI(args[1:], stderr, defaultFetchIO())
+	}
+	if args[0] == "run-isolated" {
+		return isolatedCLI(args[1:], stdout, stderr)
+	}
+	if args[0] == "isolated-worker-v1" && len(args) == 1 {
+		return isolatedWorker(os.Stdin, stdout)
 	}
 	f := flag.NewFlagSet("parity", flag.ContinueOnError)
 	f.SetOutput(stderr)
@@ -160,7 +166,7 @@ func loadManifest(path string) (manifest, string, error) {
 }
 
 // requireSynthetic checks bytes against the compiled generator, not provenance
-// assertions supplied by a manifest. External execution is not available in v1.
+// assertions supplied by a manifest. In-process run remains synthetic-only.
 func requireSynthetic(m manifest) error {
 	fixtures, err := syntheticFixtures()
 	if err != nil {
@@ -172,20 +178,15 @@ func requireSynthetic(m manifest) error {
 	}
 	for _, s := range m.Samples {
 		if !known[s.SHA256] || s.Partition != "synthetic-clean" && s.Partition != "synthetic-indicator" {
-			return errors.New("run accepts only verified generator bytes; external execution is not implemented")
+			return errors.New("run accepts only verified generator bytes; external execution requires run-isolated")
 		}
 	}
 	return nil
 }
 
-func run(root *os.Root, m manifest, hash, rules string) (report, error) {
-	var r report
-	if err := requireSynthetic(m); err != nil {
-		return r, err
-	}
-	// Explicit configuration prevents credentials, live feeds, cache state and
-	// caller environment variables from changing the baseline's observations.
-	cfg := &mailstrix.Config{RulesDir: rules, ScanTimeout: 8 * time.Second, EffortMax: scanEffort}
+// Share the exact diagnostic policy between synthetic runs and isolated workers.
+// Only the returned scanner owns resources; callers close it on successful init.
+func newParityScanner(cfg *mailstrix.Config) (*mailstrix.Scanner, *atomic.Bool, error) {
 	var diagnostic atomic.Bool
 	scanner, err := mailstrix.NewScanner(cfg, func(format string, _ ...any) {
 		// Only these exact success notifications are routine at startup.
@@ -198,6 +199,18 @@ func run(root *os.Root, m manifest, hash, rules string) (report, error) {
 			diagnostic.Store(true)
 		}
 	})
+	return scanner, &diagnostic, err
+}
+
+func run(root *os.Root, m manifest, hash, rules string) (report, error) {
+	var r report
+	if err := requireSynthetic(m); err != nil {
+		return r, err
+	}
+	// Explicit configuration prevents credentials, live feeds, cache state and
+	// caller environment variables from changing the baseline's observations.
+	cfg := &mailstrix.Config{RulesDir: rules, ScanTimeout: 8 * time.Second, EffortMax: scanEffort}
+	scanner, diagnostic, err := newParityScanner(cfg)
 	if err != nil {
 		return r, errors.New("cannot load trusted local rules")
 	}
