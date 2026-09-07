@@ -136,6 +136,7 @@ func cli(args []string, stdout, stderr io.Writer) int {
 }
 
 func loadManifest(path string) (manifest, string, error) {
+	// #nosec G304 -- path is the caller's explicit local -manifest input, not a name resolved under a trusted root.
 	f, err := os.Open(path)
 	if err != nil {
 		return manifest{}, "", errors.New("cannot open manifest")
