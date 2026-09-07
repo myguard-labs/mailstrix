@@ -120,7 +120,7 @@ func launcherText(buf []byte, deadline time.Time) []byte {
 var launcherEncoding = regexp.MustCompile(`(?:^|[\t\r\n ])encoding[\t\r\n ]*=[\t\r\n ]*(?:"([^"]*)"|'([^']*)')`)
 
 // Keep the XML declaration intact except for its encoding value: the ordinary
-// XML decoder still checks syntax/version. An encoding label must agree with
+// XML decoder receives the normalized input. An encoding label must agree with
 // the observed BOM. No declaration, or one without an encoding, needs rewriting.
 func launcherXMLDeclaration(buf []byte, charset string) []byte {
 	if !bytes.HasPrefix(buf, []byte("<?xml")) || len(buf) > 5 && !bytes.ContainsAny(buf[5:6], " \t\r\n") {
