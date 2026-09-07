@@ -38,6 +38,9 @@ func TestIsolatedFraming(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoded, payload, err := decodeIsolatedRequest(bytes.NewReader(good))
+	if headerSize := binary.BigEndian.Uint32(good[:4]); headerSize == 0 || headerSize > isolatedHeaderLimit {
+		t.Fatalf("outgoing header violates decoder bound: %d", headerSize)
+	}
 	if err != nil || decoded != r || !bytes.Equal(payload, data) {
 		t.Fatalf("roundtrip: %v", err)
 	}

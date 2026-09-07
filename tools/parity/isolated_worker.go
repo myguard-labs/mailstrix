@@ -105,8 +105,12 @@ func encodeIsolatedRequest(r isolatedRequest, data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	headerSize := len(header)
+	if headerSize > isolatedHeaderLimit {
+		return nil, errors.New("isolated request header exceeds limit")
+	}
 	var b bytes.Buffer
-	if err := binary.Write(&b, binary.BigEndian, uint32(len(header))); err != nil {
+	if err := binary.Write(&b, binary.BigEndian, uint32(headerSize)); err != nil {
 		return nil, err
 	}
 	b.Write(header)
