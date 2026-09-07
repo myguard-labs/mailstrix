@@ -52,8 +52,11 @@ func printError(w io.Writer, message any) {
 
 func cli(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printError(stderr, "usage: parity generate|check|run|compare [options]")
+		printError(stderr, "usage: parity generate|check|run|compare|fetch [options]")
 		return 2
+	}
+	if args[0] == "fetch" {
+		return fetchCLI(args[1:], stderr, defaultFetchIO())
 	}
 	f := flag.NewFlagSet("parity", flag.ContinueOnError)
 	f.SetOutput(stderr)

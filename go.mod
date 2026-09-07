@@ -14,6 +14,7 @@ require (
 	github.com/redis/go-redis/v9 v9.20.1
 	github.com/saferwall/pe v1.6.5
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
+	golang.org/x/sys v0.47.0
 	www.velocidex.com/golang/oleparse v0.0.0-20251204214047-2e3e765e26a1
 )
 
@@ -36,7 +37,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/crypto v0.56.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
 

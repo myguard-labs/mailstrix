@@ -30,8 +30,9 @@ go build -o /tmp/mailstrix-parity ./tools/parity
 
 Generation requires a new destination and leaves a partial directory on failure.
 Fixtures and the manifest are reproducible under the pinned Go toolchain; archive
-timestamps, entry ordering and personal data are fixed. No acquisition command,
-network feed, credential, external payload or malware corpus is used.
+timestamps, entry ordering and personal data are fixed. Generation uses no network
+feed, credential, external payload or malware corpus. The separate opt-in `fetch`
+command described below retrieves operator-approved HTTPS inputs without scanning.
 
 `run` emits report-v1 JSON to stdout and a short human summary to stderr. Exit 0
 means every explicit label passed and every unique sample completed; exit 1 means
@@ -85,6 +86,99 @@ Identical SHA-256 bytes are counted once, with additional references counted as
 duplicates. Aliases may vary only in ID, locator and source; conflicting labels,
 partition, format or split reject the manifest. All alias references are checked.
 No fuzzy deduplication or automatic family inference is performed.
+
+## Opt-in HTTPS corpus fetch
+
+`fetch` on Linux retrieves the exact bytes named by a caller-owned manifest and
+an explicit request plan. It neither runs Mailstrix/comparators nor extracts,
+decrypts, labels or executes downloaded content. `run` retains its generated-byte
+allowlist. Do not use acquisition or integrity checking as permission to scan or
+redistribute a corpus: provenance and truth fields remain operator assertions.
+
+```sh
+/tmp/mailstrix-parity fetch \
+  -manifest /private/corpus-manifest.json \
+  -fetch-plan /private/fetch-plan.json \
+  -allow-origin https://example.invalid \
+  -out /private/new-corpus
+```
+
+`example.invalid` is a reserved placeholder, not a corpus service. All input
+paths, origins and output choices are explicit; the tool never dereferences
+`source.reference`. Manifest and plan inputs must be stable regular files, not
+symlinks or special files. The new output's `manifest.json` preserves the exact
+supplied manifest bytes and can be consumed by `check` with
+`-corpus-root /private/new-corpus`.
+
+Fetch plan v1 has exactly these fields:
+
+```json
+{
+  "schema_version": 1,
+  "manifest_sha256": "<lowercase SHA-256 of the exact manifest file bytes>",
+  "requests": [
+    {"sample_id": "sample-1", "url": "https://example.invalid/sample-1"}
+  ]
+}
+```
+
+The digest placeholder must be replaced locally. Every manifest sample ID must
+appear exactly once, including aliases. Missing, duplicate or extra IDs reject
+the whole plan. Unknown/missing fields, case variants, duplicate JSON keys,
+trailing JSON, unsupported versions and types are rejected. Plans share the
+manifest's 4 MiB and depth-16 limits. Sample SHA-256, size and destination locator
+come only from the bound manifest. Requests run sequentially in manifest order.
+
+Repeat `-allow-origin` to permit additional exact HTTPS origins. Origins contain
+only scheme, lowercase ASCII host and optional canonical numeric port, without
+a slash or path. Explicit `:443` and an omitted port are distinct. No wildcards,
+userinfo, query strings (including empty `?`), fragments, credentials, cookies,
+proxies from the environment, redirects, retries, automatic compression, shell
+hooks or alternate transports are supported. URLs may have paths; Unicode host
+names must use their reviewed ASCII form. A source needing credentials or a
+signed query URL is unsupported in this version.
+
+TLS verifies both certificate trust and the URL hostname normally. DNS lookup
+and dialing are bounded, and the connection uses a validated IP literal so the
+hostname cannot resolve again between validation and connection. Any forbidden
+address in a DNS answer rejects the entire answer. The policy excludes private,
+loopback, link-local, multicast, unspecified, shared CGNAT, documentation,
+benchmarking and reserved/transition ranges, including mapped IPv4 equivalents.
+IPv6 is conservatively limited to `2000::/3` with special-purpose exclusions in
+[fetch_network.go](fetch_network.go); this is a maintained explicit policy, not
+a claim that `IsGlobalUnicast` alone establishes public reachability. The operator
+still authorizes each endpoint origin and trusts the host's DNS/network/TLS setup.
+
+New fetch limits are 256 MiB of declared payload bytes including aliases,
+15 seconds per complete HTTP request and 10 minutes for the operation's network
+work. Existing 16 MiB-per-sample and 10,000-sample limits also apply. Only status
+200 with unencoded identity bytes is accepted. Reading stops at expected size
+plus one byte, and exact size and SHA-256 must match before a file is written.
+Headers are limited to 64 KiB. No archive unpacking changes the comparison unit.
+
+All plan, origin, destination-collision and aggregate-size checks precede network
+requests or output creation. Duplicate locators, file/directory prefix conflicts,
+and `manifest.json` or descendants are invalid fetch destinations. The output
+parent must already exist and be stable and controlled by the operator; do not
+change it concurrently. Files are created exclusively with mode 0600 inside a
+private 0700 sibling staging directory. No source permissions or hard links are
+imported. After every file and the manifest are written and closed, Linux
+`RENAME_NOREPLACE` publishes the directory atomically. An existing destination,
+even a racing empty directory or symlink, is never replaced. Unsupported
+platforms fail before network/output; unsupported filesystem publication fails
+without replacing the destination. Atomic visibility does not promise crash
+durability or protection against an operator-controlled filesystem changing
+under the process.
+
+On failure only this invocation's unpublished staging directory is removed.
+Cleanup failures leave a private `.parity-fetch-*` sibling and report the
+uncertainty; inspect that output parent locally. Never publish those artifacts,
+private manifests, plans, hashes or paths to Git/CI. Exit 0 means publication
+succeeded; exit 2 means invalid input, I/O, integrity or publication failure. A
+summary-output failure also returns 2 but preserves the already-published corpus.
+Diagnostics contain aggregate outcomes, not URLs, hashes, IDs, paths or remote
+error bodies. CI uses generated inert bytes and injected network I/O, with an
+inert loopback TLS test; it never acquires a remote corpus.
 
 ## Ground truth
 
