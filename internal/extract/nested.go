@@ -109,5 +109,6 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		// payload as a sequence of "echo LINE >>file" commands. Self-gating (cheap
 		// prefilter bails on non-batch text), bounded by the shared budget.
 		fromBatchDropper(data, res, b, depth, deadline)
+		fromLauncherFields(data, res, deadline)
 	}
 }

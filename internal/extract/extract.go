@@ -482,6 +482,9 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// payload. Self-gating (cheap prefilter bails on non-batch text), bounded by
 		// the shared archive budget.
 		fromBatchDropper(buf, &res, b, 0, deadline)
+		// Launcher text adds field context without replacing the other text
+		// extractors: a section name inside a script must not suppress decoding.
+		fromLauncherFields(buf, &res, deadline)
 	}
 
 	// Polyglot / file-type confusion: the dispatch above routes on the FIRST magic
