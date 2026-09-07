@@ -51,6 +51,7 @@ var parityMarkers = map[string]markerKind{
 	"CSV-DDE":                     contractMarker, // ooxml_dde.yara CSV_DDE_Command
 	"XLSB-DDE":                    contractMarker, // ooxml_dde.yara XLSB_DDE_SupBook
 	"SLK-DDE":                     contractMarker, // ooxml_dde.yara SLK_DDE_Command
+	"SETTINGCONTENT-DEEPLINK":     contractMarker, // launcher_fields.yara SettingContent_DeepLink_EncodedPowerShell
 	"OOXML-DDE-FIELD":             contractMarker, // ooxml_dde.yara Maldoc_DDE_Field
 	"OOXML-EXTERNAL-REL":          contractMarker, // ooxml_template_injection.yara
 	"OOXML-MHTML-REL":             contractMarker, // ooxml_template_injection.yara OOXML_MHTML_Scheme
@@ -115,10 +116,12 @@ var parityMarkers = map[string]markerKind{
 	"MALDOC-BEHAVIOR-SCORE": contractMarker, // maldoc_behavior_score.yara Maldoc_Behavior_Score
 
 	// --- carved-payload labels (scanned by existing keyword/IOC rules; no own rule) ---
-	"DOCPROPS-STRINGS": internalMarker,
-	"OLE-META":         internalMarker, // combined OLE-META wrapper tag; sub-markers carry the scoring rules
-	"USERFORM-STRINGS": internalMarker,
-	"OLE2-EXTRA-DATA":  internalMarker, // label on data appended past FAT coverage; carved tail scanned by content rules
+	"DOCPROPS-STRINGS":    internalMarker,
+	"SETTINGCONTENT-ICON": internalMarker,
+	"URL-SHORTCUT":        internalMarker,
+	"OLE-META":            internalMarker, // combined OLE-META wrapper tag; sub-markers carry the scoring rules
+	"USERFORM-STRINGS":    internalMarker,
+	"OLE2-EXTRA-DATA":     internalMarker, // label on data appended past FAT coverage; carved tail scanned by content rules
 	// CAB folder used LZX/Quantum (yarad decompresses only MSZIP/store); diagnostic
 	// label, not inherently malicious — the raw outer bytes are still scanned.
 	"CAB-COMPRESSION-UNSUPPORTED": internalMarker,
