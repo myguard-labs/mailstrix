@@ -131,6 +131,10 @@ func generate(dir string) error {
 	if err != nil {
 		return err
 	}
+	return generateFixtures(dir, fixtures)
+}
+
+func generateFixtures(dir string, fixtures []fixture) error {
 	m := syntheticManifest(fixtures)
 	if err := m.validate(); err != nil {
 		return err

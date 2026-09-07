@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "image": "docker.io/eilandert/rspamd-olefy",
+  "index_digest": "sha256:24d718637a2640af2f363fd16bb4ec42e93b99a0bf83c6aa8b9d25d2fc8d9908",
+  "platform": "linux/amd64",
+  "platform_manifest_digest": "sha256:74148101c4af60f33709d8e58316620fad4084d0dbaad5c7b770e34325643242",
+  "oletools_version": "0.60.2",
+  "oletools_commit": "b565533d6757f3dde2501e946ed6977ebbf2830a",
+  "oletools_wheel_sha256": "72ad8bd748fd0c4e7b5b4733af770d11543ebb2bf2697455f99f975fcd50cc96",
+  "olefy_commit": "9ac23a718ed1e70a770df15faf6cb9660d1cba17",
+  "olefy_sha256": "6c06ec692672116f606410e8b806ddabbb06f6d84d5616b15f25f6a004fa6e48",
+  "olefy_requirements_sha256": "c96b0f37ae0823efe84d6c8b9710e6930e0b2631566fc2e98ea5935bfffed356"
+}
