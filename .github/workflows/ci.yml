@@ -205,10 +205,10 @@ jobs:
       - name: deb maintainer-script behaviour (upgrade must not disable)
         run: sh packaging/deb/maintscript_test.sh
 
-      - name: isolated comparator runner behaviour (stdlib mocks, no Docker)
+      - name: parity helper behaviour (stdlib controls, no Docker)
         run: |
           python3 -B -m unittest discover -s tools/parity \
-            -p 'comparator_runner_test.py'
+            -p '*_test.py'
 
       - name: SHA-pinned actions consistent across workflows
         run: |
