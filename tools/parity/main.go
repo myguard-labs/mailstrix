@@ -52,7 +52,7 @@ func printError(w io.Writer, message any) {
 
 func cli(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printError(stderr, "usage: parity generate|check|run|run-isolated|compare|fetch [options]")
+		printError(stderr, "usage: parity generate|check|run|run-isolated|compare|compare-corpus|fetch [options]")
 		return 2
 	}
 	if args[0] == "fetch" {
@@ -60,6 +60,9 @@ func cli(args []string, stdout, stderr io.Writer) int {
 	}
 	if args[0] == "run-isolated" {
 		return isolatedCLI(args[1:], stdout, stderr)
+	}
+	if args[0] == "compare-corpus" {
+		return corpusCompareCLI(args[1:], stdout, stderr)
 	}
 	if args[0] == "isolated-worker-v1" && len(args) == 1 {
 		return isolatedWorker(os.Stdin, stdout)

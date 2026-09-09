@@ -24,6 +24,8 @@ tools/**
 !tools/parity
 tools/parity/**
 !tools/parity/*.go
+!tools/parity/clamav_adapter.py
+!tools/parity/clamav_bridge.py
 !tools/parity/comparator-pins.json
 !tools/parity/comparator_runner.py
 !tools/parity/testdata
