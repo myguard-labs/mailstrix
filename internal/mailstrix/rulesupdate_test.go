@@ -21,10 +21,15 @@ import (
 
 func seedVerified(t *testing.T, dir string, version int, rule string) {
 	t.Helper()
+	seedVerifiedWithGenerated(t, dir, version, rule, testRulesManifestGenerated)
+}
+
+func seedVerifiedWithGenerated(t *testing.T, dir string, version int, rule, generated string) {
+	t.Helper()
 	b := compiledYacBytes(t, rule)
 	seedLocal(t, dir, version, b)
 	sum := sha256.Sum256(b)
-	m := RulesManifest{Version: version, Generated: "2026-06-18T00:00:00Z", Libyara: "4.5.2", Checksum: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(b))}
+	m := RulesManifest{Version: version, Generated: generated, Libyara: "4.5.2", Checksum: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(b))}
 	if err := writeLocalManifest(filepath.Join(dir, manifestName), m); err != nil {
 		t.Fatal(err)
 	}
@@ -41,8 +46,13 @@ func readRuleFile(t *testing.T, path string) []byte {
 
 func testUpdaterServer(t *testing.T, url string) (*RulesUpdater, *Server) {
 	t.Helper()
+	return testUpdaterServerWithSeedGenerated(t, url, testRulesManifestGenerated)
+}
+
+func testUpdaterServerWithSeedGenerated(t *testing.T, url, generated string) (*RulesUpdater, *Server) {
+	t.Helper()
 	dir := t.TempDir()
-	seedVerified(t, dir, 1, "rule Old { condition: true }")
+	seedVerifiedWithGenerated(t, dir, 1, "rule Old { condition: true }", generated)
 	cfg := &Config{CacheDir: dir, RulesPath: filepath.Join(dir, cachedRulesName), RulesPollInterval: time.Minute, RulesURL: url, ScanTimeout: time.Second}
 	cfg.Finalize()
 	s, err := NewScanner(cfg, func(string, ...any) {})
@@ -66,6 +76,20 @@ func testUpdater(t *testing.T, url string) *RulesUpdater {
 		t.Fatal("test server is nil")
 	}
 	return u
+}
+
+func requireUpdaterRule(t *testing.T, u *RulesUpdater, want string) {
+	t.Helper()
+	matches, err := u.scanner.Scan([]byte("harmless"), ScanMeta{})
+	if err != nil {
+		t.Fatalf("scan rules: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("match count=%d, want 1: %+v", len(matches), matches)
+	}
+	if got := matches[0].Rule; got != want {
+		t.Fatalf("loaded rule=%q, want %q", got, want)
+	}
 }
 
 func TestRulesUpdaterUpgradeAndUnchanged(t *testing.T) {
@@ -101,6 +125,66 @@ func TestRulesUpdaterUpgradeAndUnchanged(t *testing.T) {
 			t.Errorf("missing %q", metric)
 		}
 	}
+}
+
+// The rules-current release rolls independently of the tagged binary release:
+// a fresh rules identity may load into an unchanged binary, but an equal-version
+// or libyara-incompatible publication must not replace the loaded rules.
+func TestRulesUpdaterKeepsStableBinaryIdentityWhenRulesRoll(t *testing.T) {
+	const (
+		stableBinaryRelease      = "v2026.01.15"
+		seedRulesPublished       = "2026-06-16T00:00:00Z"
+		freshRulesPublished      = "2026-06-17T00:00:00Z"
+		staleRulesPublished      = "2026-06-18T00:00:00Z"
+		mismatchedRulesPublished = "2026-06-19T00:00:00Z"
+	)
+	fresh := rulesServerWithGenerated(t, compiledYacBytes(t, "rule Fresh { condition: true }"), 2, "4.5.2", "", freshRulesPublished)
+	defer fresh.Close()
+	u, srv := testUpdaterServerWithSeedGenerated(t, fresh.URL, seedRulesPublished)
+	u.cfg.Version = stableBinaryRelease
+
+	if err := u.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var version struct {
+		Version       string `json:"version"`
+		RulesManifest struct {
+			Version   int    `json:"version"`
+			Generated string `json:"generated"`
+		} `json:"rules_manifest"`
+	}
+	if err := json.Unmarshal(get(srv, "/version").Body.Bytes(), &version); err != nil {
+		t.Fatal(err)
+	}
+	if version.Version != stableBinaryRelease {
+		t.Fatalf("binary version=%q, want stable %q", version.Version, stableBinaryRelease)
+	}
+	if version.RulesManifest.Version != 2 || version.RulesManifest.Generated != freshRulesPublished {
+		t.Fatalf("rolling rules identity=%+v, want v2 with its publication time", version.RulesManifest)
+	}
+	requireUpdaterRule(t, u, "Fresh")
+
+	// Version is the update identity; Generated is audit-only, so changed bytes
+	// with the loaded version remain a no-op rather than a replacement.
+	stale := rulesServerWithGenerated(t, compiledYacBytes(t, "rule Stale { condition: true }"), 2, "4.5.2", "", staleRulesPublished)
+	defer stale.Close()
+	u.cfg.RulesURL = stale.URL
+	before := u.scanner.ReloadMetrics().Successes
+	if err := u.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := u.scanner.ReloadMetrics().Successes; got != before {
+		t.Fatalf("stale rules reloaded: successes=%d, want %d", got, before)
+	}
+	requireUpdaterRule(t, u, "Fresh")
+
+	mismatch := rulesServerWithGenerated(t, compiledYacBytes(t, "rule Mismatch { condition: true }"), 3, "9.9.9", "", mismatchedRulesPublished)
+	defer mismatch.Close()
+	u.cfg.RulesURL = mismatch.URL
+	if err := u.Poll(context.Background()); err == nil || !strings.Contains(err.Error(), "libyara") {
+		t.Fatalf("mismatched rules error=%v, want libyara refusal", err)
+	}
+	requireUpdaterRule(t, u, "Fresh")
 }
 
 func TestRulesUpdaterCurrentVersionIgnoresPublisherLibyaraSkew(t *testing.T) {
