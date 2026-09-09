@@ -178,6 +178,8 @@ func (b *clamBridge) cleanupAfterFailure(name string) bool {
 	}
 	d := isolatedDocker{}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Docker removal output has no contract; its status and the independent
+	// exact-name absence probe below determine whether cleanup succeeded.
 	_, status := d.call(ctx, nil, "rm", "--force", name)
 	cancel()
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
@@ -212,6 +214,7 @@ func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeR
 	} else {
 		// Only these embedded modules are imported. No caller code, Python
 		// environment, user site, credentials or corpus paths enter sys.path.
+		// #nosec G204 -- executable, flags and inline program are fixed; b.dir is the trusted directory containing the two embedded bridge modules and is passed as argv, never through a shell.
 		cmd = exec.CommandContext(ctx, "python3", "-I", "-B", "-c", "import sys;sys.path.insert(0,sys.argv[1]);import clamav_bridge;sys.exit(clamav_bridge.main())", b.dir)
 	}
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TZ=UTC"}

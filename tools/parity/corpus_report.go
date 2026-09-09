@@ -208,7 +208,7 @@ type receiptWriter struct {
 }
 
 func openCorpusReceipts(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- caller explicitly selects the new local receipt path; O_EXCL prevents replacement.
 }
 
 func (w *receiptWriter) write(value any) error {

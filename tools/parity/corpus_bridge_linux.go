@@ -31,7 +31,7 @@ func configureBridgeGroup(cmd *exec.Cmd) error {
 }
 
 func openCorpusConfig(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- path is the caller's explicit local corpus config input; subsequent checks require a bounded regular file.
 }
 
 func waitBridgeExit(ctx context.Context, pid int) error {
