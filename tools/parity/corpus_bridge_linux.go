@@ -19,6 +19,10 @@ var signalBridgeGroup = func(pid int) error {
 	return syscall.Kill(-pid, syscall.SIGKILL)
 }
 
+func executableByCaller(path string) bool {
+	return unix.Access(path, unix.X_OK) == nil
+}
+
 func configureBridgeGroup(cmd *exec.Cmd) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second

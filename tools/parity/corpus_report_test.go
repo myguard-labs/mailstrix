@@ -274,6 +274,15 @@ func TestCorpusOletoolsStopsOnlyForTerminalLaunchState(t *testing.T) {
 	}
 }
 
+func TestClamBridgeSetupDiagnosticExposesOnlyPinnedInterpreterRequirement(t *testing.T) {
+	if got := clamBridgeSetupDiagnostic(errClamBridgePython); got != errClamBridgePython.Error() {
+		t.Fatalf("interpreter diagnosis=%q", got)
+	}
+	if got := clamBridgeSetupDiagnostic(errors.New("PRIVATE setup detail")); got != "ClamAV frozen identity setup failed" || strings.Contains(got, "PRIVATE") {
+		t.Fatalf("private setup diagnosis=%q", got)
+	}
+}
+
 func TestCorpusAliasesAndRulesMismatch(t *testing.T) {
 	m, hash, root := generated(t)
 	all := append([]sample(nil), m.Samples...)

@@ -190,6 +190,13 @@ func terminalOletoolsStatus(status string) bool {
 	}
 }
 
+func clamBridgeSetupDiagnostic(err error) string {
+	if errors.Is(err, errClamBridgePython) {
+		return errClamBridgePython.Error()
+	}
+	return "ClamAV frozen identity setup failed"
+}
+
 func corpusCorrespondence(s sample, left observation, right nativeObservation) string {
 	if s.Format != "office" || s.InputUnit != "file" || left.Status != "ok" || right.Status != "ok" || right.Format != "OpenXML" {
 		return "unknown"
@@ -456,7 +463,7 @@ func corpusCompareCLI(args []string, stdout, stderr io.Writer) (exitCode int) {
 		}
 	}()
 	if err := bridge.setup(*qualification, *variant, hash); err != nil {
-		printError(stderr, "ClamAV frozen identity setup failed")
+		printError(stderr, clamBridgeSetupDiagnostic(err))
 		return 2
 	}
 	pins, err := pinnedComparators()

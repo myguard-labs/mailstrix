@@ -13,6 +13,11 @@ func configureBridgeGroup(_ *exec.Cmd) error {
 	return errors.New("ClamAV bridge requires Linux process groups")
 }
 
+func executableByCaller(string) bool {
+	// compare-corpus is unsupported here; retain compilation for shared tests.
+	return true
+}
+
 func runBridgeGroup(_ context.Context, cmd *exec.Cmd) (bool, error, error) {
 	return true, cmd.Run(), nil
 }

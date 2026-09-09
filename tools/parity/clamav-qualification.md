@@ -30,6 +30,10 @@ python3 -B tools/parity/qualify_clamav.py \
   --assets /path/to/assets.json --output /path/to/new-output
 ```
 
+The later `compare-corpus` bridge requires the trusted host interpreter at
+`/usr/bin/python3` and invokes it in isolated mode. It does not resolve an
+operator, virtualenv, or shim-provided interpreter through `PATH`.
+
 Re-run qualification after any adapter/qualifier behavior change or selected
 installation/DB change. A changed bridge does not rewrite a qualification receipt;
 `compare-corpus` independently verifies the frozen inventory against the imported

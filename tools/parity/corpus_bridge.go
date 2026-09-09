@@ -27,7 +27,12 @@ var clamavBridgeSource []byte
 
 const clamBridgeLimit = 64 << 10
 const clamBridgeBudget = 100 * time.Second
+const clamBridgePython = "/usr/bin/python3"
 const clamEnvelope = "clamav-offline-v1;linux/amd64;cgroup2;network=none;readonly;uid=65534:65534;cap-drop=ALL;no-new-privileges;seccomp=builtin;no-mounts;cpu=1;pids=64;memory+swap=4GiB;tmpfs=512MiB,noexec,nosuid,nodev;input=16MiB;output=64KiB/pipe;scan=45s;operation=5s;reap=5s;bridge=100s;legacy-CVD-verification;no-detached-signature-CA;no-freshness-claim"
+
+var statClamBridgePython = os.Stat
+var accessClamBridgePython = executableByCaller
+var errClamBridgePython = errors.New("ClamAV bridge requires executable /usr/bin/python3")
 
 type clamIdentity struct {
 	ImageID            string `json:"image_id"`
@@ -213,6 +218,21 @@ func clamBridgeFailureCause(outcome clamBridgeOutcome) string {
 	}
 }
 
+func requireClamBridgePython(path string) error {
+	info, err := statClamBridgePython(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || !accessClamBridgePython(path) {
+		return errClamBridgePython
+	}
+	return nil
+}
+
+func clamBridgeCommand(ctx context.Context, directory string) *exec.Cmd {
+	// Only embedded modules are imported. The executable, flags and inline
+	// program are fixed; directory is trusted and passed as argv, not a shell.
+	// #nosec G204 -- no caller-controlled executable, program, or shell input.
+	return exec.CommandContext(ctx, clamBridgePython, "-I", "-B", "-c", "import sys;sys.path.insert(0,sys.argv[1]);import clamav_bridge;sys.exit(clamav_bridge.main())", directory)
+}
+
 func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeReply, error) {
 	var reply clamBridgeReply
 	if b.stopped || len(data) > maxSample || request.Size != int64(len(data)) || request.SampleSHA256 != digest(data) {
@@ -237,10 +257,14 @@ func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeR
 	if b.command != nil {
 		cmd = b.command(ctx, request.Name)
 	} else {
-		// Only these embedded modules are imported. No caller code, Python
-		// environment, user site, credentials or corpus paths enter sys.path.
-		// #nosec G204 -- executable, flags and inline program are fixed; b.dir is the trusted directory containing the two embedded bridge modules and is passed as argv, never through a shell.
-		cmd = exec.CommandContext(ctx, "python3", "-I", "-B", "-c", "import sys;sys.path.insert(0,sys.argv[1]);import clamav_bridge;sys.exit(clamav_bridge.main())", b.dir)
+		if err := requireClamBridgePython(clamBridgePython); err != nil {
+			b.stopped = true
+			if b.diagnostics != nil {
+				printError(b.diagnostics, errClamBridgePython)
+			}
+			return reply, err
+		}
+		cmd = clamBridgeCommand(ctx, b.dir)
 	}
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TZ=UTC"}
 	cmd.Stdin = io.MultiReader(bytes.NewReader(header), strings.NewReader("\n"), bytes.NewReader(data))
@@ -287,6 +311,11 @@ func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeR
 }
 
 func (b *clamBridge) setup(directory, variant, manifestSHA string) error {
+	if b.command == nil {
+		if err := requireClamBridgePython(clamBridgePython); err != nil {
+			return err
+		}
+	}
 	b.manifestSHA = manifestSHA
 	r, err := b.invoke(clamBridgeRequest{Version: 1, Operation: "identity", QualificationDir: directory, Variant: variant,
 		ManifestSHA256: manifestSHA, SampleSHA256: digest(nil)}, nil)

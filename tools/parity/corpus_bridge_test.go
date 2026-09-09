@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -172,6 +174,74 @@ func TestClamBridgeFailureCausePrecedence(t *testing.T) {
 	}
 	if got := clamBridgeFailureCause(clamBridgeOutcome{groupAbsent: true, runErr: context.Canceled, contextErr: context.Canceled, outputOverflow: true}); got != "output_limit" {
 		t.Fatalf("output limit did not take precedence over cancellation: %s", got)
+	}
+}
+
+func TestClamBridgeInterpreterIgnoresCallerPath(t *testing.T) {
+	pathDir := t.TempDir()
+	t.Setenv("PATH", pathDir)
+	interpreter := filepath.Join(pathDir, "python3")
+	if err := os.WriteFile(interpreter, []byte("inert"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(interpreter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStat := statClamBridgePython
+	defer func() { statClamBridgePython = originalStat }()
+	originalAccess := accessClamBridgePython
+	defer func() { accessClamBridgePython = originalAccess }()
+	statClamBridgePython = func(string) (os.FileInfo, error) {
+		return info, nil
+	}
+	accessClamBridgePython = func(string) bool { return true }
+	cmd := clamBridgeCommand(context.Background(), "/inert-bridge")
+	if cmd.Err != nil || cmd.Path != "/usr/bin/python3" || len(cmd.Args) < 4 || cmd.Args[1] != "-I" || cmd.Args[2] != "-B" || cmd.Args[3] != "-c" {
+		t.Fatalf("bridge interpreter not pinned and isolated: path=%q args=%q command_err=%v", cmd.Path, cmd.Args, cmd.Err)
+	}
+	statClamBridgePython = func(string) (os.FileInfo, error) {
+		return nil, os.ErrNotExist
+	}
+	err = (&clamBridge{}).setup("/inert", "engine", digest([]byte("manifest")))
+	statClamBridgePython = originalStat
+	if err == nil || err.Error() != "ClamAV bridge requires executable /usr/bin/python3" {
+		t.Fatalf("command missing-interpreter diagnosis=%v", err)
+	}
+	statClamBridgePython = func(string) (os.FileInfo, error) { return info, nil }
+	accessClamBridgePython = func(string) bool { return false }
+	err = (&clamBridge{}).setup("/inert", "engine", digest([]byte("manifest")))
+	if err == nil || err.Error() != "ClamAV bridge requires executable /usr/bin/python3" {
+		t.Fatalf("inaccessible interpreter diagnosis=%v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing-python")
+	statClamBridgePython = originalStat
+	accessClamBridgePython = originalAccess
+	if err := requireClamBridgePython(missing); err == nil || err.Error() != "ClamAV bridge requires executable /usr/bin/python3" {
+		t.Fatalf("missing interpreter diagnosis=%v", err)
+	}
+	nonExecutable := filepath.Join(t.TempDir(), "python3")
+	if err := os.WriteFile(nonExecutable, []byte("inert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireClamBridgePython(nonExecutable); err == nil || err.Error() != "ClamAV bridge requires executable /usr/bin/python3" {
+		t.Fatalf("non-executable interpreter diagnosis=%v", err)
+	}
+}
+
+func TestClamBridgeInterpreterRemovalStopsLaterInvocation(t *testing.T) {
+	originalStat := statClamBridgePython
+	defer func() { statClamBridgePython = originalStat }()
+	statClamBridgePython = func(string) (os.FileInfo, error) {
+		return nil, os.ErrNotExist
+	}
+	var diagnostic bytes.Buffer
+	b := clamBridge{diagnostics: &diagnostic}
+	if _, err := b.invoke(clamRequestFixture(), nil); !errors.Is(err, errClamBridgePython) || !b.stopped {
+		t.Fatalf("removed interpreter did not stop bridge: stopped=%t err=%v", b.stopped, err)
+	}
+	if got := diagnostic.String(); got != errClamBridgePython.Error()+"\n" {
+		t.Fatalf("removed interpreter diagnostic=%q", got)
 	}
 }
 
