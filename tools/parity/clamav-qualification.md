@@ -67,9 +67,12 @@ inert inputs; the host must expose at least 6 GiB. No representative workload
 capacity claim follows. The deliberately under-budget 32 MiB control must report
 Docker's OOM state as `resource_limit`.
 
-Input is bounded to 32 MiB and each output pipe to 64 KiB. Start/scan has a
-45-second parent deadline; each create/inspect/remove/absence operation has its
-own five-second deadline. Client termination has a five-second reap bound.
+The frozen adapter accepts at most 32 MiB for qualification controls. The
+`compare-corpus` bridge inherits the manifest's stricter 16 MiB-per-sample cap
+and records that limit in its envelope. Each output pipe is bounded to 64 KiB.
+Start/scan has a 45-second parent deadline; each
+create/inspect/remove/absence operation has its own five-second deadline. Client
+termination has a five-second reap bound.
 The container is removed and its absence checked independently on every path.
 An inconclusive create or cleanup poisons the backend instance and retains the
 exact generated container name for operator investigation. Removal must succeed;
