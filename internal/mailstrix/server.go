@@ -73,12 +73,13 @@ type scanResponse struct {
 // gate, and fail-open dispatch to the scanner. It mirrors gozer's server so the
 // two backends behave identically to operators and to the rspamd plugins.
 type Server struct {
-	cfg     *Config
-	engine  ScanEngine
-	cache   Cache
-	flights flightGroup
-	admit   chan struct{} // admission gate: bounds in-flight buffers (held whole request)
-	sem     chan struct{} // scan-CPU gate: held only around the libyara scan
+	rulesUpdater *RulesUpdater // set once before listeners start
+	cfg          *Config
+	engine       ScanEngine
+	cache        Cache
+	flights      flightGroup
+	admit        chan struct{} // admission gate: bounds in-flight buffers (held whole request)
+	sem          chan struct{} // scan-CPU gate: held only around the libyara scan
 
 	// autoEffort is the smoothed effort level for MAILSTRIX_EFFORT=auto (EFFORT-2). It
 	// trails admission-gate pressure by one level per scan (hysteresis). 0 until
@@ -403,7 +404,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // rulesStale reports whether the loaded ruleset is older than the configured
 // MAILSTRIX_RULES_MAX_AGE. False when the check is disabled (max age 0) or the
-// on-disk mtime is unknown — staleness must never be a false alarm.
+// age origin is unknown — staleness must never be a false alarm.
 func (s *Server) rulesStale() bool {
 	if s.cfg.RulesMaxAge <= 0 {
 		return false
@@ -423,16 +424,20 @@ func (s *Server) rulesStale() bool {
 func (s *Server) serveVersion(w http.ResponseWriter) {
 	rl := s.engine.ReloadMetrics()
 	resp := map[string]any{
-		"version":           s.cfg.Version,
-		"extractor_version": extract.Version,
-		"rules":             s.engine.RuleCount(),
-		"fingerprint":       s.engine.Fingerprint(),
-		"last_reload_unix":  rl.LastUnix,
-		"rules_mtime_unix":  rl.ModUnix,
-		"rules_stale":       s.rulesStale(),
-		"repo":              RepoURL,
-		"home":              HomeURL,
-		"license":           License,
+		"version":                 s.cfg.Version,
+		"extractor_version":       extract.Version,
+		"rules":                   s.engine.RuleCount(),
+		"fingerprint":             s.engine.Fingerprint(),
+		"last_reload_unix":        rl.LastUnix,
+		"rules_mtime_unix":        rl.ModUnix,
+		"rules_stale":             s.rulesStale(),
+		"rules_age_check_enabled": s.cfg.RulesMaxAge > 0,
+		"repo":                    RepoURL,
+		"home":                    HomeURL,
+		"license":                 License,
+	}
+	if s.rulesUpdater != nil {
+		resp["rules_update"] = s.rulesUpdater.Snapshot()
 	}
 	if rl.PrevFingerprint != "" {
 		resp["prev_fingerprint"] = rl.PrevFingerprint
@@ -443,7 +448,14 @@ func (s *Server) serveVersion(w http.ResponseWriter) {
 	// Provenance of the loaded compiled bundle, when it came from the cache (set
 	// by fetch-rules / the seeded manifest): which published rule version, when it
 	// was generated, and the libyara it was compiled against.
-	if m, ok := LoadManifest(s.cfg.CacheDir); ok {
+	var m RulesManifest
+	var ok bool
+	if provider, supported := s.engine.(interface {
+		loadedRulesManifest() (RulesManifest, bool)
+	}); supported {
+		m, ok = provider.loadedRulesManifest()
+	}
+	if ok {
 		resp["rules_manifest"] = map[string]any{
 			"version":   m.Version,
 			"generated": m.Generated,
@@ -806,10 +818,10 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 
 	// Rule staleness — catch a silently-broken daily image rebuild (the running
 	// container keeps serving old baked rules with no error). Age is derived from
-	// the loaded ruleset's on-disk mtime; rules_stale is 1 only when a max age is
-	// configured (MAILSTRIX_RULES_MAX_AGE) and exceeded. Both are 0/absent-safe: a
-	// mtime of 0 (couldn't stat) reports age 0 and never flags stale.
-	gauge("rules_mtime_seconds", "mtime (unix seconds) of the loaded ruleset on disk; 0 if unknown", rl.ModUnix)
+	// the loaded ruleset's age origin; rules_stale is 1 only when a max age is
+	// configured (MAILSTRIX_RULES_MAX_AGE) and exceeded. Both are 0/absent-safe:
+	// an origin of 0 (unknown) reports age 0 and never flags stale.
+	gauge("rules_mtime_seconds", "rules age origin (unix seconds): verified publication time or filesystem mtime; 0 if unknown", rl.ModUnix)
 	var ageSecs, stale int64
 	if rl.ModUnix > 0 {
 		if a := time.Now().Unix() - rl.ModUnix; a > 0 {
@@ -819,7 +831,28 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 			stale = 1
 		}
 	}
-	gauge("rules_age_seconds", "age of the loaded ruleset (now - mtime); 0 if mtime unknown", ageSecs)
+	gauge("rules_age_seconds", "age of loaded rules since publication time or filesystem mtime; 0 if origin unknown", ageSecs)
+	var ageEnabled int64
+	if s.cfg.RulesMaxAge > 0 {
+		ageEnabled = 1
+	}
+	gauge("rules_age_check_enabled", "1 when rules age checking is enabled", ageEnabled)
+	if s.rulesUpdater != nil {
+		u := s.rulesUpdater.Snapshot()
+		var enabled int64
+		if u.Enabled {
+			enabled = 1
+		}
+		gauge("rules_update_enabled", "1 when automatic rules polling is enabled", enabled)
+		gauge("rules_published_version", "last observed published bundle version, 0 unknown", int64(u.PublishedVersion))
+		gauge("rules_cached_version", "cached bundle version, 0 unknown", int64(u.CachedVersion))
+		gauge("rules_loaded_version", "loaded bundle version, 0 unknown", int64(u.LoadedVersion))
+		gauge("rules_last_check_timestamp_seconds", "last attempted rules check, 0 never", u.LastCheck)
+		gauge("rules_last_success_timestamp_seconds", "last successful rules check, 0 never", u.LastSuccess)
+		gauge("rules_last_failure_timestamp_seconds", "last failed rules check, 0 never", u.LastFailure)
+		fm("rules_update_failures_total", "failed rules checks", u.Failures)
+		fm("rules_update_reload_failures_total", "failed automatic rules reloads", u.ReloadFailures)
+	}
 	gauge("rules_stale", "1 if rules_age_seconds exceeds MAILSTRIX_RULES_MAX_AGE (0 when unset or fresh)", stale)
 
 	// URLhaus malware-URL lookup (only meaningful when enabled).

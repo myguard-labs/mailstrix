@@ -33,7 +33,10 @@ func cmdInfo(args []string) int {
 		"home":              mailstrix.HomeURL,
 		"license":           mailstrix.License,
 	}
-	if m, ok := mailstrix.LoadManifest(*cacheDir); ok {
+	m, manifestOK, err := mailstrix.LoadManifest(*cacheDir)
+	if err != nil {
+		info["rules"] = "cached manifest temporarily unavailable: " + err.Error()
+	} else if manifestOK {
 		info["rules"] = map[string]any{
 			"version":   m.Version,
 			"generated": m.Generated,
@@ -71,7 +74,10 @@ func cmdInfo(args []string) int {
 	fmt.Printf("  repo:       %s\n", mailstrix.RepoURL)
 	fmt.Printf("  home:       %s\n", mailstrix.HomeURL)
 	fmt.Printf("  license:    %s\n", mailstrix.License)
-	if m, ok := mailstrix.LoadManifest(*cacheDir); ok {
+	if err != nil {
+		fmt.Printf("  rules:      cached manifest temporarily unavailable: %v\n", err)
+		printSources(mailstrix.LoadSources("/usr/share/mailstrix"))
+	} else if manifestOK {
 		fmt.Printf("  rules:      v%d, generated %s, libyara %s, %d rules\n",
 			m.Version, m.Generated, m.Libyara, m.Rules)
 		srcs := m.Sources

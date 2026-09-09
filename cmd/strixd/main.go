@@ -53,6 +53,50 @@ var version = "dev"
 // Empty (dev builds) disables the skew check.
 var libyaraVersion = ""
 
+func disablePollingForCacheFallback(cfg *mailstrix.Config, cacheErr error, logf func(string, ...any)) {
+	// Preserve invalid intervals so NewRulesUpdater still reports the operator's
+	// configuration error instead of silently converting it into disabled polling.
+	if cacheErr == nil || cfg.RulesPollInterval < time.Minute {
+		return
+	}
+	logf("automatic rules polling disabled while the writable cache is unavailable")
+	cfg.RulesPollInterval = 0
+}
+
+func selectRulesFallback(cfg *mailstrix.Config, cacheErr error, logf func(string, ...any)) {
+	if cacheErr == nil {
+		return
+	}
+	if fi, err := os.Stat(cfg.RulesPath); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+		return
+	}
+	if fi, err := os.Stat(cfg.RulesDir); err == nil && fi.IsDir() {
+		cfg.RulesPath = ""
+		return
+	}
+	if fi, err := os.Stat(cfg.SeedRules); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+		cfg.RulesPath = cfg.SeedRules
+		cfg.RulesDir = ""
+		logf("using baked rules seed directly while the writable cache is unavailable")
+	}
+}
+
+func runReloadSignals(ctx context.Context, hup <-chan os.Signal, reload func()) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			// Both cases may be ready during shutdown. Do not start another
+			// potentially blocking cache reload after cancellation won the race.
+			if ctx.Err() != nil {
+				return
+			}
+			reload()
+		}
+	}
+}
+
 func main() {
 	log.SetFlags(0) // journald adds its own timestamps
 	os.Exit(run(os.Args[1:]))
@@ -164,6 +208,10 @@ func cmdServe(args []string) int {
 	fs.StringVar(&cfg.RulesPath, "rules", cfg.RulesPath, "precompiled .yac bundle, wins over -rules-dir (MAILSTRIX_RULES)")
 	fs.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "writable dir for the live rule bundle; seeded from -seed-rules when empty/unreadable (MAILSTRIX_CACHE_DIR)")
 	fs.StringVar(&cfg.SeedRules, "seed-rules", cfg.SeedRules, "baked read-only .yac used to (re)seed the cache (MAILSTRIX_SEED_RULES)")
+	fs.DurationVar(&cfg.RulesMaxAge, "rules-max-age", cfg.RulesMaxAge, "loaded rules maximum age; 0 disables checking (default 48h)")
+	fs.DurationVar(&cfg.RulesPollInterval, "rules-poll-interval", cfg.RulesPollInterval, "automatic rules check interval; 0 disables networking")
+	fs.DurationVar(&cfg.RulesFetchTimeout, "rules-fetch-timeout", cfg.RulesFetchTimeout, "automatic rules network and cache-lock deadline")
+	fs.StringVar(&cfg.RulesURL, "rules-url", cfg.RulesURL, "public rules release directory or mirror")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "per-request logging (MAILSTRIX_VERBOSE)")
 	fs.BoolVar(&cfg.LogStdout, "log-stdout", cfg.LogStdout, "info/access logs to stdout; errors stay stderr (MAILSTRIX_LOG_STDOUT)")
 	if err := fs.Parse(args); err != nil {
@@ -184,9 +232,11 @@ func cmdServe(args []string) int {
 	// dir is set. A seeding failure is not fatal here — fall back to whatever
 	// RulesPath/RulesDir NewScanner can load, so a misconfigured cache never takes
 	// the scanner fully offline.
-	if err := mailstrix.EnsureCachedRules(cfg, logf); err != nil {
-		logf("rules cache unavailable, falling back to baked rules: %v", err)
+	cacheErr := mailstrix.EnsureCachedRules(cfg, logf)
+	if cacheErr != nil {
+		logf("rules cache unavailable, falling back to baked rules: %v", cacheErr)
 	}
+	selectRulesFallback(cfg, cacheErr, logf)
 
 	scanner, err := mailstrix.NewScanner(cfg, logf)
 	if err != nil {
@@ -200,7 +250,20 @@ func cmdServe(args []string) int {
 		logf("CANARY MODE: all matches tagged mailstrix_canary=1 (shadow/observe-only)")
 	}
 
+	// A valid polling request must not turn the documented baked-rules fallback
+	// into a startup failure.
+	disablePollingForCacheFallback(cfg, cacheErr, logf)
 	srv := mailstrix.NewServer(cfg, scanner)
+	updater, err := mailstrix.NewRulesUpdater(cfg, scanner, libyaraVersion, srv.FlushCache)
+	if err != nil {
+		log.Printf("[mailstrix] invalid rules updater: %v", err)
+		return 2
+	}
+	srv.SetRulesUpdater(updater)
+	updateCtx, updateCancel := context.WithCancel(context.Background())
+	updateDone := make(chan struct{})
+	go func() { defer close(updateDone); updater.Run(updateCtx) }()
+	defer func() { updateCancel(); <-updateDone }()
 
 	// Optional ICAP listener — disabled when ICAPAddr is empty.
 	icapShutdown := func(_ context.Context) {}
@@ -224,16 +287,19 @@ func cmdServe(args []string) int {
 	// returns; the listener never drops).
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
+	hupDone := make(chan struct{})
+	defer func() { signal.Stop(hup); updateCancel(); <-hupDone }()
 	go func() {
-		for range hup {
+		defer close(hupDone)
+		runReloadSignals(updateCtx, hup, func() {
 			logf("SIGHUP: reloading rules")
 			if err := scanner.Reload(); err != nil {
 				logf("reload failed: %v", err)
-				continue
+				return
 			}
 			scanner.ReloadDenylist()
 			srv.FlushCache()
-		}
+		})
 	}()
 
 	// Graceful shutdown on SIGTERM/SIGINT: stop accepting new scans (/ready 503s)

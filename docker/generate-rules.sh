@@ -117,6 +117,13 @@ SOURCES="${WORK}/sources.json"
 LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
 [ -n "$LIBYARA" ] || die "could not determine libyara version"
 
+# Build the matching native consumer before publishing; verification runs only
+# after the manifest is live. The image has no production cache or rule sources.
+docker buildx build --target rules-verifier --load \
+    --iidfile "${WORK}/verifier.iid" \
+    -f "${HERE}/docker/Dockerfile" "${HERE}"
+VERIFIER_IMAGE="$(<"${WORK}/verifier.iid")"
+
 # 2) Determine the new monotonic version: previous (from the published manifest)
 #    + 1. Never reuse or decrement.
 #
@@ -134,9 +141,10 @@ LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
 #    anything else (401/403/5xx) => credential/network fault, so abort rather than
 #    guess. This is what actually enforces the monotonicity rule described above.
 RELEASE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer ${GH_TOKEN}" \
+    -H @- \
     -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" || echo 000)"
+    "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" \
+    <<<"Authorization: Bearer ${GH_TOKEN}" || echo 000)"
 case "$RELEASE_HTTP" in
     200|404) : ;;
     *) die "cannot determine whether release ${TAG} exists (HTTP ${RELEASE_HTTP}); refusing to guess the version — check the GITHUB_ORG_LAB_TOKEN and network" ;;
@@ -199,7 +207,30 @@ if [ "$RELEASE_HTTP" != 200 ]; then
         --notes "Rolling compiled YARA bundle for \`strixd --fetch-rules\`. Assets are clobbered on each rule regeneration; see compiled.yac.manifest.json for the current version." \
         --latest=false
 fi
-gh release upload "$TAG" --repo "$REPO" --clobber "$YAC" "$MANIFEST"
+# Publish the manifest last. During the rolling asset replacement window an
+# older manifest can describe the new bytes; consumers reject and retry later.
+gh release upload "$TAG" --repo "$REPO" --clobber "$YAC"
+gh release upload "$TAG" --repo "$REPO" --clobber "$MANIFEST"
+
+# An independent download through the actual consumer validates release/CDN
+# bytes, manifest identity and native loadability without touching any host cache.
+# Asset replacement can be briefly incoherent at the CDN, so retry with bounded
+# backoff and alert only when the new release stays unverifiable.
+verified=0
+for attempt in 1 2 3 4 5; do
+	if docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,size=2g \
+		"$VERIFIER_IMAGE" -url "https://github.com/${REPO}/releases/download/${TAG}" \
+		-timeout 5m -expected-version "$VERSION"; then
+        verified=1
+        break
+    fi
+    if [ "$attempt" -lt 5 ]; then
+        note "post-publish verification attempt ${attempt} failed; retrying"
+        sleep $((attempt * 5))
+    fi
+done
+[ "$verified" -eq 1 ] \
+    || die "published v${VERSION}, but post-publish verification FAILED; inspect the release before declaring it current"
 
 note "published ${TAG}: compiled.yac (v${VERSION}) + manifest"
 

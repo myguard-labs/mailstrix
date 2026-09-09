@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+// DefaultRulesURL is the published rolling rules release used by both daemon
+// polling and the standalone fetch command.
+const DefaultRulesURL = "https://github.com/myguard-labs/mailstrix/releases/download/rules-current"
+
 // Config is yarad's runtime configuration, populated from the environment by
 // LoadConfig. Field comments name the env var each value comes from. The
 // env-helper style mirrors gozer so the two backends configure identically.
@@ -55,14 +59,17 @@ type Config struct {
 	CacheDir  string // MAILSTRIX_CACHE_DIR  (e.g. /var/cache/mailstrix; empty = disabled)
 	SeedRules string // MAILSTRIX_SEED_RULES (baked read-only .yac to seed the cache from)
 
-	// RulesMaxAge flags the loaded ruleset as STALE once its on-disk mtime is
+	// RulesMaxAge flags the loaded ruleset as STALE once its age origin is
 	// older than this. The image bakes rules and a daily rebuild refreshes them;
 	// if that rebuild silently breaks (fetch failed, image not redeployed) the
 	// running container keeps serving old rules with no error. When set (>0) and
-	// exceeded, /ready reports "stale" (503) so an orchestrator/alert notices —
+	// exceeded, /ready reports "stale" in its 200 response so an alert notices —
 	// but /health stays OK and scanning continues (fail-open: old rules still
 	// catch most malware; a hard-down scanner is worse). 0 disables the check.
-	RulesMaxAge time.Duration // MAILSTRIX_RULES_MAX_AGE (seconds; default 0 = off)
+	RulesMaxAge       time.Duration // MAILSTRIX_RULES_MAX_AGE (seconds; default 48h, 0 = off)
+	RulesPollInterval time.Duration // MAILSTRIX_RULES_POLL_INTERVAL (seconds; 0 = off)
+	RulesFetchTimeout time.Duration // MAILSTRIX_RULES_FETCH_TIMEOUT (seconds; default 5m)
+	RulesURL          string        // MAILSTRIX_RULES_URL; public rolling release or operator mirror
 
 	// ScanTimeout bounds a single libyara scan so a pathological rule/input
 	// cannot stall a worker (YARA's own internal timeout, seconds).
@@ -191,33 +198,36 @@ type Config struct {
 // then sanitizes invalid numeric values.
 func LoadConfig() *Config {
 	c := &Config{
-		Host:             envStr("MAILSTRIX_HOST", "0.0.0.0"),
-		Port:             envInt("MAILSTRIX_PORT", 8079),
-		BackendTimeout:   envDur("MAILSTRIX_BACKEND_TIMEOUT", 1),
-		MaxConcurrent:    envIntAuto("MAILSTRIX_MAX_CONCURRENT", runtime.NumCPU()),
-		MaxInflight:      envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0),   // 0 -> sanitize sets 2×MaxConcurrent
-		ICAPMaxConns:     envIntAuto("MAILSTRIX_ICAP_MAX_CONNS", 0), // 0 -> sanitize sets 8×MaxInflight
-		MaxBody:          envInt64("MAILSTRIX_MAX_BODY", 8*1024*1024),
-		Token:            envOrFile("MAILSTRIX_TOKEN"),
-		TokenNext:        envOrFile("MAILSTRIX_TOKEN_NEXT"),
-		RulesDir:         envStr("MAILSTRIX_RULES_DIR", "/rules"),
-		RulesPath:        strings.TrimSpace(os.Getenv("MAILSTRIX_RULES")),
-		CacheDir:         strings.TrimSpace(os.Getenv("MAILSTRIX_CACHE_DIR")),
-		SeedRules:        strings.TrimSpace(os.Getenv("MAILSTRIX_SEED_RULES")),
-		RulesMaxAge:      envDur("MAILSTRIX_RULES_MAX_AGE", 0),
-		ScanTimeout:      envDur("MAILSTRIX_SCAN_TIMEOUT", 8),
-		BigFileThreshold: envInt64("MAILSTRIX_BIGFILE_THRESHOLD", 6*1024*1024),
-		BigFileRules:     strings.TrimSpace(os.Getenv("MAILSTRIX_BIGFILE_RULES")),
-		CacheTTL:         envDur("MAILSTRIX_CACHE_TTL", 3600),
-		CacheSize:        envInt("MAILSTRIX_CACHE_SIZE", 65536),
-		RedisURL:         strings.TrimSpace(os.Getenv("MAILSTRIX_REDIS_URL")),
-		RedisPrefix:      envStr("MAILSTRIX_REDIS_PREFIX", "yara:scan:"),
-		Verbose:          envBool("MAILSTRIX_VERBOSE"),
-		LogStdout:        envBool("MAILSTRIX_LOG_STDOUT"),
-		MetricsAuth:      envBool("MAILSTRIX_METRICS_AUTH"),
-		Pprof:            envBool("MAILSTRIX_PPROF"),
-		Canary:           envBool("MAILSTRIX_CANARY"),
-		ArchivePW:        envBool("MAILSTRIX_ARCHIVE_PW"),
+		Host:              envStr("MAILSTRIX_HOST", "0.0.0.0"),
+		Port:              envInt("MAILSTRIX_PORT", 8079),
+		BackendTimeout:    envDur("MAILSTRIX_BACKEND_TIMEOUT", 1),
+		MaxConcurrent:     envIntAuto("MAILSTRIX_MAX_CONCURRENT", runtime.NumCPU()),
+		MaxInflight:       envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0),   // 0 -> sanitize sets 2×MaxConcurrent
+		ICAPMaxConns:      envIntAuto("MAILSTRIX_ICAP_MAX_CONNS", 0), // 0 -> sanitize sets 8×MaxInflight
+		MaxBody:           envInt64("MAILSTRIX_MAX_BODY", 8*1024*1024),
+		Token:             envOrFile("MAILSTRIX_TOKEN"),
+		TokenNext:         envOrFile("MAILSTRIX_TOKEN_NEXT"),
+		RulesDir:          envStr("MAILSTRIX_RULES_DIR", "/rules"),
+		RulesPath:         strings.TrimSpace(os.Getenv("MAILSTRIX_RULES")),
+		CacheDir:          strings.TrimSpace(os.Getenv("MAILSTRIX_CACHE_DIR")),
+		SeedRules:         strings.TrimSpace(os.Getenv("MAILSTRIX_SEED_RULES")),
+		RulesMaxAge:       envDur("MAILSTRIX_RULES_MAX_AGE", 48*60*60),
+		RulesPollInterval: envDurInvalid("MAILSTRIX_RULES_POLL_INTERVAL", 0),
+		RulesFetchTimeout: envDur("MAILSTRIX_RULES_FETCH_TIMEOUT", 5*60),
+		RulesURL:          envStr("MAILSTRIX_RULES_URL", DefaultRulesURL),
+		ScanTimeout:       envDur("MAILSTRIX_SCAN_TIMEOUT", 8),
+		BigFileThreshold:  envInt64("MAILSTRIX_BIGFILE_THRESHOLD", 6*1024*1024),
+		BigFileRules:      strings.TrimSpace(os.Getenv("MAILSTRIX_BIGFILE_RULES")),
+		CacheTTL:          envDur("MAILSTRIX_CACHE_TTL", 3600),
+		CacheSize:         envInt("MAILSTRIX_CACHE_SIZE", 65536),
+		RedisURL:          strings.TrimSpace(os.Getenv("MAILSTRIX_REDIS_URL")),
+		RedisPrefix:       envStr("MAILSTRIX_REDIS_PREFIX", "yara:scan:"),
+		Verbose:           envBool("MAILSTRIX_VERBOSE"),
+		LogStdout:         envBool("MAILSTRIX_LOG_STDOUT"),
+		MetricsAuth:       envBool("MAILSTRIX_METRICS_AUTH"),
+		Pprof:             envBool("MAILSTRIX_PPROF"),
+		Canary:            envBool("MAILSTRIX_CANARY"),
+		ArchivePW:         envBool("MAILSTRIX_ARCHIVE_PW"),
 		// Wordlist is loaded ONLY when the feature is enabled — a default-OFF
 		// service must not touch (or read into memory) an operator-pointed file at
 		// boot. Gating here keeps the disabled path side-effect-free.
@@ -346,6 +356,10 @@ func (c *Config) sanitize() {
 	if c.RulesMaxAge < 0 {
 		c.RulesMaxAge = 0 // negative is nonsensical; 0 disables the staleness check
 	}
+	if c.RulesFetchTimeout <= 0 {
+		log.Printf("[mailstrix] WARNING: invalid MAILSTRIX_RULES_FETCH_TIMEOUT=%s; using 5m0s", c.RulesFetchTimeout)
+		c.RulesFetchTimeout = 5 * time.Minute
+	}
 	// Effort tiers: EffortMax is the ceiling (clamp to [1, maxEffortCeiling]); the
 	// env-default Effort then clamps to [1, EffortMax] (0 => "= EffortMax", the
 	// full-depth default so an operator who sets nothing keeps today's behaviour).
@@ -458,6 +472,22 @@ func envDur(name string, defSecs float64) time.Duration {
 	secs := defSecs
 	if f, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(name)), 64); err == nil {
 		secs = f
+	}
+	return time.Duration(secs * float64(time.Second))
+}
+
+// envDurInvalid preserves malformed non-empty input as a negative sentinel so
+// callers with a fail-fast contract can distinguish a typo from an unset value.
+const invalidEnvDuration = time.Duration(-1)
+
+func envDurInvalid(name string, defSecs float64) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return time.Duration(defSecs * float64(time.Second))
+	}
+	secs, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return invalidEnvDuration
 	}
 	return time.Duration(secs * float64(time.Second))
 }

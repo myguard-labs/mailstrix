@@ -1,0 +1,137 @@
+---
+rule_files:
+  - mailstrix-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: never checked
+    input_series:
+      - series: 'mailstrix_rules_update_enabled{instance="i"}'
+        values: '1x40'
+      - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: MailstrixRulesNeverChecked
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              severity: warning
+            exp_annotations:
+              summary: No successful automatic rules check
+              description: >-
+                Polling is enabled but no release check has succeeded since
+                startup. Check connectivity and manifest validation.
+
+  - name: healthy recent check
+    input_series:
+      - series: 'mailstrix_rules_update_enabled{instance="i"}'
+        values: '1x40'
+      - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
+        values: '1800x40'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts: []
+
+  - name: overdue after earlier success
+    input_series:
+      - series: 'mailstrix_rules_update_enabled{instance="i"}'
+        values: '1x40'
+      - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
+        values: '60x40'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              severity: warning
+            exp_annotations:
+              summary: Automatic rules checks are overdue
+              description: >-
+                No successful release check has completed within the configured
+                30-minute alert deadline. Check connectivity and update
+                failures.
+
+  - name: disabled polling
+    input_series:
+      - series: 'mailstrix_rules_update_enabled{instance="i"}'
+        values: '0x40'
+      - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
+        values: '60x40'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts: []
+
+  - name: recovered with recent success
+    input_series:
+      - series: 'mailstrix_rules_update_enabled{instance="i"}'
+        values: '1x40'
+      - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
+        values: '60x39 2400'
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              severity: warning
+            exp_annotations:
+              summary: Automatic rules checks are overdue
+              description: >-
+                No successful release check has completed within the configured
+                30-minute alert deadline. Check connectivity and update
+                failures.
+      - eval_time: 40m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts: []
+
+  - name: published version remains unloaded
+    input_series:
+      - series: 'mailstrix_rules_update_enabled{instance="i"}'
+        values: '1x40'
+      - series: 'mailstrix_rules_published_version{instance="i"}'
+        values: '42x40'
+      - series: 'mailstrix_rules_loaded_version{instance="i"}'
+        values: '41x40'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: MailstrixRulesPublishedNotLoaded
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              severity: warning
+            exp_annotations:
+              summary: Published rules are not loaded
+              description: >-
+                Published and loaded versions differ beyond the 30-minute SLA.
+                Inspect update errors and libyara compatibility.
+
+  - name: reload failures below threshold
+    input_series:
+      - series: 'mailstrix_rules_update_reload_failures_total{instance="i"}'
+        values: '0 1 2x60'
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: MailstrixAutomaticReloadFailing
+        exp_alerts: []
+
+  - name: repeated reload failures
+    input_series:
+      - series: 'mailstrix_rules_update_reload_failures_total{instance="i"}'
+        values: '0 1 2 3x60'
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: MailstrixAutomaticReloadFailing
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              severity: warning
+            exp_annotations:
+              summary: Automatic rule reload repeatedly failed
+              description: >-
+                At least three update reloads failed in one hour; the prior
+                active rules remain in use.

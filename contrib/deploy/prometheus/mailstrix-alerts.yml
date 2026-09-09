@@ -25,6 +25,56 @@ groups:
           description: "mailstrix_rules=0 — the daemon is up but scanning nothing. Rule load/compile failed."
 
       # --- rule freshness (catches a silently-broken daily rebuild) ---
+      - alert: MailstrixRulesNeverChecked
+        expr: |
+          mailstrix_rules_update_enabled == 1
+            and mailstrix_rules_last_success_timestamp_seconds == 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "No successful automatic rules check"
+          description: >-
+            Polling is enabled but no release check has succeeded since startup.
+            Check connectivity and manifest validation.
+
+      # Keep this threshold above the normal polling interval and adjust it when
+      # deployments intentionally poll less often than every 30 minutes.
+      - alert: MailstrixRulesCheckOverdue
+        expr: |
+          mailstrix_rules_update_enabled == 1
+            and mailstrix_rules_last_success_timestamp_seconds > 0
+            and time() - mailstrix_rules_last_success_timestamp_seconds > 1800
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "Automatic rules checks are overdue"
+          description: >-
+            No successful release check has completed within the configured
+            30-minute alert deadline. Check connectivity and update failures.
+
+      - alert: MailstrixRulesPublishedNotLoaded
+        expr: |
+          mailstrix_rules_published_version != mailstrix_rules_loaded_version
+            and mailstrix_rules_update_enabled == 1
+            and mailstrix_rules_published_version > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "Published rules are not loaded"
+          description: >-
+            Published and loaded versions differ beyond the 30-minute SLA.
+            Inspect update errors and libyara compatibility.
+
+      - alert: MailstrixAutomaticReloadFailing
+        expr: increase(mailstrix_rules_update_reload_failures_total[1h]) >= 3
+        for: 0m
+        labels: {severity: warning}
+        annotations:
+          summary: "Automatic rule reload repeatedly failed"
+          description: >-
+            At least three update reloads failed in one hour;
+            the prior active rules remain in use.
+
       - alert: MailstrixRulesStale
         expr: mailstrix_rules_stale == 1
         for: 15m

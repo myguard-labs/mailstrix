@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,10 +47,11 @@ type RulesManifest struct {
 
 // FetchResult reports what FetchRules did, for logging and the CLI exit code.
 type FetchResult struct {
-	Updated      bool // a new bundle was downloaded and swapped in
-	LocalVersion int  // version before the run
-	NewVersion   int  // version after (== LocalVersion when not updated)
-	Reason       string
+	Updated          bool // a new bundle was downloaded and swapped in
+	LocalVersion     int  // version before the run
+	NewVersion       int  // version after (== LocalVersion when not updated)
+	Reason           string
+	PublishedVersion int // latest validated remote manifest, even on later failure
 }
 
 // FetchRules implements the manifest-driven update: fetch the remote manifest,
@@ -66,9 +68,21 @@ type FetchResult struct {
 //  3. remote.Libyara != ourLibyara     => refuse (skew), keep current.
 //  4. GET compiled.yac, verify size + sha256 against the manifest. Mismatch =>
 //     discard, keep current.
-//  5. Back up the live bundle (one copy), atomically rename the new one in, write
-//     the manifest. On a post-swap load failure the caller can restore .bak.
+//  5. Back up the live bundle, replace both cache files under the cache lock,
+//     and restore the cache pair and pre-existing backup on a reported install
+//     or daemon reload failure.
 func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client) (FetchResult, error) {
+	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, 0, nil)
+}
+
+// fetchRules stages without the cache lock, then rechecks the monotonic version
+// under the lock. Install and optional reload are one serialized transaction.
+// On a reported failure the cache pair and pre-existing backup are restored;
+// rollback errors are explicit.
+// Individual renames are atomic, but this is not a two-file power-loss journal.
+// reload must leave the active scanner unchanged on error and must not reacquire
+// the cache lock. It runs only after both cache files have been installed.
+func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, minimumVersion int, reload func() error) (FetchResult, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -81,7 +95,12 @@ func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	cachePath := filepath.Join(cacheDir, cachedRulesName)
 	localManifestPath := filepath.Join(cacheDir, manifestName)
 
-	local := readLocalManifest(localManifestPath)
+	unlock, err := lockRules(ctx, cacheDir)
+	if err != nil {
+		return res, err
+	}
+	local := trustedLocalManifest(cachePath, localManifestPath)
+	unlock()
 	res.LocalVersion = local.Version
 	res.NewVersion = local.Version
 
@@ -89,21 +108,26 @@ func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	if err != nil {
 		return res, fmt.Errorf("fetch manifest: %w", err)
 	}
-
+	res.PublishedVersion = remote.Version
+	if remote.Version < minimumVersion {
+		return res, fmt.Errorf("published version %d is older than loaded version %d", remote.Version, minimumVersion)
+	}
 	if remote.Version <= local.Version {
 		res.Reason = fmt.Sprintf("up to date (local v%d, remote v%d)", local.Version, remote.Version)
 		return res, nil
 	}
-	if ourLibyara != "" && remote.Libyara != "" && remote.Libyara != ourLibyara {
-		return res, fmt.Errorf("refusing update: remote bundle libyara %s != ours %s (a .yac only loads on a matching libyara)", remote.Libyara, ourLibyara)
+	if ourLibyara != "" && remote.Libyara != ourLibyara {
+		return res, fmt.Errorf("refusing update: remote bundle libyara %s != ours %s", remote.Libyara, ourLibyara)
 	}
 
 	// Download into a temp file in the cache dir and verify before swapping.
-	tmp, err := downloadToTemp(ctx, hc, base+"/"+cachedRulesName, cacheDir)
+	tmp, err := downloadToTemp(ctx, hc, base+"/"+cachedRulesName, cacheDir, remote.Size)
 	if err != nil {
 		return res, fmt.Errorf("download bundle: %w", err)
 	}
-	defer os.Remove(tmp) // removed unless the rename below consumes it
+	// Every return before the install rename removes the staged download; after a
+	// successful rename this harmlessly observes os.ErrNotExist.
+	defer func() { _ = os.Remove(tmp) }()
 
 	if err := verifyBundle(tmp, remote); err != nil {
 		return res, fmt.Errorf("verify bundle: %w", err)
@@ -117,20 +141,81 @@ func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 		return res, fmt.Errorf("downloaded bundle does not load (keeping current cache): %w", err)
 	}
 
-	// Back up the current live bundle (one copy) so a bad load can roll back.
+	unlock, err = lockRules(ctx, cacheDir)
+	if err != nil {
+		return res, err
+	}
+	defer unlock()
+	local = trustedLocalManifest(cachePath, localManifestPath)
+	res.LocalVersion, res.NewVersion = local.Version, local.Version
+	if remote.Version <= local.Version {
+		res.Reason = "up to date after concurrent update"
+		return res, nil
+	}
+	// Prepare both rollback copies before changing either public filename.
+	rollbackDir, err := os.MkdirTemp(cacheDir, ".rules-rollback-")
+	if err != nil {
+		return res, err
+	}
+	keepRecovery := false
+	defer func() {
+		if !keepRecovery {
+			_ = os.RemoveAll(rollbackDir)
+		}
+	}()
+	paths := []string{cachePath, localManifestPath, cachePath + backupSuffix}
+	existed := make([]bool, len(paths))
+	for i, path := range paths {
+		_, statErr := os.Stat(path)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return res, statErr
+		}
+		existed[i] = statErr == nil
+		if existed[i] {
+			if err := copyFileAtomic(path, filepath.Join(rollbackDir, filepath.Base(path))); err != nil {
+				return res, err
+			}
+		}
+	}
+	rollback := func(cause error) error {
+		var recovery error
+		for i, path := range paths {
+			var err error
+			if existed[i] {
+				err = os.Rename(filepath.Join(rollbackDir, filepath.Base(path)), path)
+			} else {
+				err = os.Remove(path)
+				if errors.Is(err, os.ErrNotExist) {
+					err = nil
+				}
+			}
+			recovery = errors.Join(recovery, err)
+		}
+		if recovery != nil {
+			keepRecovery = true
+			return errors.Join(cause, fmt.Errorf("cache rollback failed; active rules retained but disk cache needs recovery: %w", recovery))
+		}
+		return cause
+	}
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	// Retain the public single-generation backup for operator recovery.
 	if fileExists(cachePath) {
 		if err := copyFileAtomic(cachePath, cachePath+backupSuffix); err != nil {
 			return res, fmt.Errorf("backup current bundle: %w", err)
 		}
 	}
 	if err := os.Rename(tmp, cachePath); err != nil {
-		return res, fmt.Errorf("install bundle: %w", err)
+		return res, rollback(fmt.Errorf("install bundle: %w", err))
 	}
 	if err := writeLocalManifest(localManifestPath, remote); err != nil {
-		// The bundle is in place; a manifest-write failure only loses the version
-		// record (next run re-evaluates). Surface it but don't undo the swap.
-		return FetchResult{Updated: true, LocalVersion: local.Version, NewVersion: remote.Version,
-			Reason: "updated but manifest record not written"}, fmt.Errorf("write local manifest: %w", err)
+		return res, rollback(fmt.Errorf("write local manifest: %w", err))
+	}
+	if reload != nil {
+		if err := reload(); err != nil {
+			return res, rollback(fmt.Errorf("reload downloaded rules: %w", err))
+		}
 	}
 
 	res.Updated = true
@@ -140,14 +225,22 @@ func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 }
 
 // LoadManifest returns the rules manifest stored alongside the cached bundle in
-// cacheDir, and whether one was found. Used by `strixd info` / `/version` to report
-// which rule version is loaded. A zero-value manifest + false means none present.
-func LoadManifest(cacheDir string) (RulesManifest, bool) {
+// cacheDir, whether one was found, and any cache-lock error. Used by `strixd info`
+// and the release verifier to report which rule version is loaded. A zero-value
+// manifest, false, nil means none is present.
+func LoadManifest(cacheDir string) (RulesManifest, bool, error) {
 	if cacheDir == "" {
-		return RulesManifest{}, false
+		return RulesManifest{}, false, nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	unlock, err := lockRules(ctx, cacheDir)
+	if err != nil {
+		return RulesManifest{}, false, err
+	}
+	defer unlock()
 	m := readLocalManifest(filepath.Join(cacheDir, manifestName))
-	return m, m.Version > 0
+	return m, m.Version > 0, nil
 }
 
 // LoadSources reads the baked sources.json from dir (typically /usr/share/mailstrix).
@@ -182,6 +275,17 @@ func readLocalManifest(path string) RulesManifest {
 	return m
 }
 
+// A version only suppresses downloads when its record describes the actual
+// cache bytes. Startup reseeding, manual replacement or interrupted publication
+// can leave a syntactically valid but stale version record beside another bundle.
+func trustedLocalManifest(bundle, path string) RulesManifest {
+	m := readLocalManifest(path)
+	if m.Version <= 0 || verifyBundle(bundle, m) != nil {
+		return RulesManifest{}
+	}
+	return m
+}
+
 func writeLocalManifest(path string, m RulesManifest) error {
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -194,6 +298,7 @@ func writeLocalManifest(path string, m RulesManifest) error {
 		return err
 	}
 	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
@@ -223,11 +328,34 @@ func fetchManifest(ctx context.Context, hc *http.Client, url string) (RulesManif
 	if m.Version <= 0 {
 		return m, fmt.Errorf("manifest has no valid version")
 	}
+	if m.Size <= 0 || m.Size > 512<<20 {
+		return m, fmt.Errorf("manifest size must be 1..536870912")
+	}
+	if m.Libyara == "" {
+		return m, fmt.Errorf("manifest has no libyara version")
+	}
+	generated, err := time.Parse(time.RFC3339, m.Generated)
+	if err != nil {
+		return m, fmt.Errorf("manifest generated: %w", err)
+	}
+	if generated.Unix() <= 0 {
+		return m, fmt.Errorf("manifest generated timestamp must be after the Unix epoch")
+	}
+	if generated.After(time.Now()) {
+		return m, fmt.Errorf("manifest generated timestamp is in the future")
+	}
+	if !strings.HasPrefix(m.Checksum, "sha256:") {
+		return m, fmt.Errorf("manifest checksum must use sha256")
+	}
+	sum, err := hex.DecodeString(strings.TrimPrefix(m.Checksum, "sha256:"))
+	if err != nil || len(sum) != sha256.Size {
+		return m, fmt.Errorf("manifest checksum must contain 32 bytes")
+	}
 	return m, nil
 }
 
 // downloadToTemp streams url into a new temp file in dir, returning its path.
-func downloadToTemp(ctx context.Context, hc *http.Client, url, dir string) (string, error) {
+func downloadToTemp(ctx context.Context, hc *http.Client, url, dir string, size int64) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -244,8 +372,13 @@ func downloadToTemp(ctx context.Context, hc *http.Client, url, dir string) (stri
 	if err != nil {
 		return "", err
 	}
-	// Cap the download to a sane ceiling (compiled bundles are tens of MB).
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, 512<<20)); err != nil {
+	// The validated manifest bounds disk usage; read one extra byte so a
+	// matching prefix cannot hide an oversized response.
+	n, err := io.Copy(f, io.LimitReader(resp.Body, size+1))
+	if err == nil && n != size {
+		err = fmt.Errorf("downloaded size %d != manifest %d", n, size)
+	}
+	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
 		return "", err

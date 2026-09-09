@@ -13,6 +13,18 @@ import (
 	"testing"
 )
 
+func TestLoadManifestReportsLockContention(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := lockRules(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, ok, err := LoadManifest(dir); err == nil || ok {
+		t.Fatalf("LoadManifest under contention: ok=%v err=%v", ok, err)
+	}
+}
+
 // rulesServer serves a compiled.yac + manifest like the rolling release. yac is
 // the bundle bytes; ver/libyara go into the manifest; the checksum is computed
 // from yac (override with badSum to simulate corruption).
@@ -89,8 +101,11 @@ func TestFetchRulesUpdates(t *testing.T) {
 
 func TestFetchRulesSkipsWhenUpToDate(t *testing.T) {
 	cacheDir := t.TempDir()
-	cur := []byte("CURRENT")
-	seedLocal(t, cacheDir, 7, cur)
+	seedVerified(t, cacheDir, 7, "rule Current { condition: true }")
+	cur, err := os.ReadFile(filepath.Join(cacheDir, cachedRulesName))
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := rulesServer(t, []byte("WOULD-BE-NEW"), 7, "4.5.2", "") // same version
 	defer srv.Close()
 
@@ -102,7 +117,7 @@ func TestFetchRulesSkipsWhenUpToDate(t *testing.T) {
 		t.Fatalf("updated despite equal version: %+v", res)
 	}
 	got, _ := os.ReadFile(filepath.Join(cacheDir, cachedRulesName))
-	if string(got) != "CURRENT" {
+	if string(got) != string(cur) {
 		t.Errorf("bundle changed on a no-op: %q", got)
 	}
 }

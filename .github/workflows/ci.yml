@@ -50,6 +50,21 @@ jobs:
             --cache-to type=gha,mode=max,scope=strixd-build \
             .
 
+      - name: build and smoke isolated rules verifier
+        run: |
+          docker buildx build --target rules-verifier -f docker/Dockerfile \
+            -t strixd-rules-verifier:ci --load \
+            --cache-from type=gha,scope=strixd-build .
+          status=0
+          docker run --rm --read-only --network none \
+            --tmpfs /tmp:rw,nosuid,nodev,size=2g strixd-rules-verifier:ci \
+            -url http://127.0.0.1:1 -timeout 1s > verifier-smoke.log 2>&1 \
+            || status=$?
+          test "$status" -eq 2
+          # Contract check: fetchRules wraps manifest transport errors with
+          # this prefix.
+          grep -F 'fetch manifest:' verifier-smoke.log
+
       - name: build final image
         run: |
           docker buildx build --target final -f docker/Dockerfile -t strixd:ci \
@@ -184,6 +199,7 @@ jobs:
             docker/fetch-rules_test.sh \
             docker/compile-rules.sh \
             docker/generate-rules.sh \
+            docker/generate-rules_test.sh \
             docker/pprof-capture.sh \
             docker/profile/run-profile.sh \
             .github/runner/isolation-canary.sh \
@@ -211,6 +227,20 @@ jobs:
         run: |
           python3 -B -m unittest discover -s tools/parity \
             -p '*_test.py'
+
+      - name: rules publication ordering and isolated verifier failure
+        run: bash docker/generate-rules_test.sh
+
+      - name: Prometheus rule behaviour
+        run: |
+          image='prom/prometheus:v3.14.0@sha256:'
+          image+='5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44'
+          image+='b4a115d97a2c7af3b1c21cbb0'
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD:/workspace" -w /workspace \
+            "$image" \
+            test rules \
+            contrib/deploy/prometheus/mailstrix-alerts_test.yml
 
       - name: SHA-pinned actions consistent across workflows
         run: |
