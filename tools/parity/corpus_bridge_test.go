@@ -177,6 +177,30 @@ func TestClamBridgeFailureCausePrecedence(t *testing.T) {
 	}
 }
 
+func TestClamBridgeStartFailureDoesNotInventContainerCleanup(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("Linux process groups")
+	}
+	var diagnostic bytes.Buffer
+	cleanupCalls := 0
+	b := clamBridge{
+		diagnostics: &diagnostic,
+		command: func(ctx context.Context, _ string) *exec.Cmd {
+			return exec.CommandContext(ctx, "/inert/missing-clamav-bridge")
+		},
+		cleanup: func(string) bool {
+			cleanupCalls++
+			return false
+		},
+	}
+	if _, err := b.invoke(clamRequestFixture(), nil); err == nil {
+		t.Fatal("missing bridge executable accepted")
+	}
+	if cleanupCalls != 0 || !strings.Contains(diagnostic.String(), "cause=process cleanup_confirmed=true") {
+		t.Fatalf("start failure invented container cleanup: calls=%d diagnostic=%q", cleanupCalls, diagnostic.String())
+	}
+}
+
 func TestClamBridgeInterpreterIgnoresCallerPath(t *testing.T) {
 	pathDir := t.TempDir()
 	t.Setenv("PATH", pathDir)

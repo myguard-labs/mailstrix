@@ -278,6 +278,7 @@ func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeR
 	// PID/PGID while we kill the whole group; only then may Wait release that
 	// identity and allow exact-name container cleanup to take ownership.
 	groupAbsent, runErr, groupErr := runBridgeGroup(ctx, cmd)
+	processStarted := cmd.Process != nil
 	cause := ""
 	if runErr == nil && groupErr == nil && !out.overflow && !diagnostic.overflow && diagnostic.Len() == 0 {
 		reply, err = decodeClamReply(out.Bytes(), request)
@@ -295,7 +296,7 @@ func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeR
 		b.stopped = true
 		// A surviving client may still operate on the container. Transfer
 		// cleanup ownership only after the entire group is confirmed absent.
-		clean := groupAbsent && b.cleanupAfterFailure(request.Name)
+		clean := groupAbsent && (!processStarted || b.cleanupAfterFailure(request.Name))
 		if b.diagnostics != nil {
 			printError(b.diagnostics, fmt.Sprintf("ClamAV bridge uncertainty: container=%s cause=%s cleanup_confirmed=%t; backend stopped", request.Name, cause, clean))
 		}
