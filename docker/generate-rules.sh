@@ -56,6 +56,7 @@ PUBLISH_STATE=not-started
 _RECEIPTED=0
 _RECEIPT_EMITTING=0
 _PENDING_SIGNAL=0
+_FAILURE_EXIT=0
 nightly_receipt() {  # nightly_receipt <success|failed>
     local status="$1" receipt
     [ "$_RECEIPTED" -eq 0 ] || return 0
@@ -142,7 +143,7 @@ failure_notice() {  # failure_notice <exit-code>
 cleanup() { [ -z "$WORK" ] || rm -rf "${WORK:?}"; }
 trap cleanup EXIT
 # shellcheck disable=SC2154  # rc IS assigned (rc=$?) inside the trap-quoted string
-trap 'rc=$?; if [ "$rc" -ne 0 ]; then [ "$_RECEIPT_EMITTING" -eq 0 ] || NIGHTLY_STAGE=receipt; shout_fail "$(failure_notice "$rc")"; fi; exit $rc' ERR
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then _FAILURE_EXIT=$rc; [ "$_RECEIPT_EMITTING" -eq 0 ] || NIGHTLY_STAGE=receipt; shout_fail "$(failure_notice "$rc")"; fi; exit $rc' ERR
 signal_abort() {  # signal_abort <conventional-signal-exit>
     local rc="$1"
     if [ "$_RECEIPT_EMITTING" -ne 0 ]; then
@@ -151,7 +152,9 @@ signal_abort() {  # signal_abort <conventional-signal-exit>
     fi
     # A terminal receipt is authoritative. In particular, do not contradict a
     # completed success receipt if shutdown lands in the best-effort notifier.
+    [ "$_FAILURE_EXIT" -eq 0 ] || rc="$_FAILURE_EXIT"
     [ "$_RECEIPTED" -eq 0 ] || exit "$rc"
+    _FAILURE_EXIT="$rc"
     shout_fail "$(failure_notice "$rc")"
     exit "$rc"
 }
@@ -166,7 +169,7 @@ trap 'signal_abort 143' TERM
 trap 'signal_abort 130' INT
 trap 'signal_abort 129' HUP
 
-die()  { note "ERROR: $*"; shout_fail "$*"; exit 1; }
+die()  { note "ERROR: $*"; _FAILURE_EXIT=1; shout_fail "$*"; exit 1; }
 
 # Bring up receipt/error handling before fallible startup work so a missing
 # credential, temporary directory, or repository path still produces one build

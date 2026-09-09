@@ -153,6 +153,9 @@ with open(os.environ["EVENTS"], "a", encoding="utf-8") as events:
 if os.environ.get("SIGNAL_SUCCESS_NOTIFY") == "1" and sys.argv[2].endswith("published"):
     with open(os.environ["EVENTS"] + ".signal-target", encoding="utf-8") as target:
         os.kill(int(target.read()), signal.SIGTERM)
+if os.environ.get("SIGNAL_FAILURE_NOTIFY") == "1" and sys.argv[2].endswith("FAILED"):
+    with open(os.environ["EVENTS"] + ".signal-target", encoding="utf-8") as target:
+        os.kill(int(target.read()), signal.SIGTERM)
 raise SystemExit(int(os.environ.get("FAIL_NOTIFY", "0")))
 STUB
 
@@ -380,7 +383,7 @@ assert_success_receipt_signal_is_receipt_failure() {
 assert_failure_receipt_signal_finishes_reporting() {
     local actual
     run_script FAIL_BUILD=1 SIGNAL_FAILURE_RECEIPT=1
-    [ "$actual" -eq 143 ] || assert_event "failure receipt signal exit: $actual"
+    [ "$actual" -eq 41 ] || assert_event "failure receipt signal exit: $actual"
     assert_receipt build failed
     assert_notification failure-receipt-signal build failed
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'failure receipt signal lost or duplicated terminal receipt'
@@ -389,7 +392,7 @@ assert_failure_receipt_signal_finishes_reporting() {
 assert_signaled_success_serializer_failure_falls_back() {
     local actual
     run_script FAIL_AND_SIGNAL_SUCCESS_RECEIPT=1
-    [ "$actual" -eq 143 ] || assert_event "signaled serializer failure exit: $actual"
+    [ "$actual" -eq 1 ] || assert_event "signaled serializer failure exit: $actual"
     assert_receipt receipt failed
     assert_notification signaled-serializer-failure receipt failed
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'signaled serializer failure lost or duplicated fallback receipt'
@@ -414,6 +417,24 @@ assert_success_notification_signal_stays_successful() {
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'success notification signal changed terminal receipt'
     [ "$(grep -c 'FAILED' "$EVENTS" || true)" -eq 0 ] || assert_event 'success notification signal emitted contradictory failure alert'
     grep -Fx 'notify strixd rules: rules-current v1 published' "$EVENTS" >/dev/null || assert_event 'success notification was not attempted'
+}
+
+assert_failure_notification_signal_preserves_stage_exit() {
+    local actual
+    run_script FAIL_BUILD=1 SIGNAL_FAILURE_NOTIFY=1
+    [ "$actual" -eq 41 ] || assert_event "failure notification signal exit: $actual"
+    assert_receipt build failed
+    assert_notification failure-notification-signal build failed
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'failure notification signal changed terminal receipt'
+}
+
+assert_broken_receipt_notification_signal_preserves_stage_exit() {
+    local actual
+    run_script FAIL_BUILD=1 FAIL_RECEIPT=1 SIGNAL_FAILURE_NOTIFY=1
+    [ "$actual" -eq 41 ] || assert_event "broken receipt notification signal exit: $actual"
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 0 ] || assert_event 'broken receipt notification signal emitted a receipt'
+    assert_notification broken-receipt-notification-signal build failed
+    grep -F 'ERROR: failed to emit nightly receipt' "$test_root/log" >/dev/null || assert_event 'broken receipt notification signal lost serializer diagnostic'
 }
 
 run_case() {  # run_case <name> <exit> <stage> <status> <verify-count> <uploads> <build-fail> <publish-fail> <verify-until> <notify-fail>
@@ -461,4 +482,6 @@ assert_failure_receipt_signal_finishes_reporting
 assert_signaled_success_serializer_failure_falls_back
 assert_verify_signal_reports_interruption
 assert_success_notification_signal_stays_successful
+assert_failure_notification_signal_preserves_stage_exit
+assert_broken_receipt_notification_signal_preserves_stage_exit
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'
