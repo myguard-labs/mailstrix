@@ -207,7 +207,7 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 		}
 	}
 	if err := os.Rename(tmp, cachePath); err != nil {
-		return res, fmt.Errorf("install bundle: %w", err)
+		return res, rollback(fmt.Errorf("install bundle: %w", err))
 	}
 	if err := writeLocalManifest(localManifestPath, remote); err != nil {
 		return res, rollback(fmt.Errorf("write local manifest: %w", err))
