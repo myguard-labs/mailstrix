@@ -101,8 +101,8 @@ shout_fail() {  # shout_fail <body> — fires at most once per run
     shout "strixd rules: ${NIGHTLY_STAGE} FAILED" "$1"
     finish_pending_signal
 }
-published_verify_notice() {
-    printf '%s' 'rules-current was published, but native verification failed; clients may encounter an unverified bundle. Inspect and repair the release.'
+published_verify_notice() {  # published_verify_notice <failed|"was interrupted">
+    printf 'rules-current v%s was published, but native verification %s; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$VERSION" "$1"
 }
 failure_notice() {  # failure_notice <exit-code>
     case "$NIGHTLY_STAGE" in
@@ -119,7 +119,12 @@ failure_notice() {  # failure_notice <exit-code>
                     ;;
                 published)
                     case "$NIGHTLY_STAGE" in
-                        verify) published_verify_notice ;;
+                        verify)
+                            case "$1" in
+                                129|130|143) published_verify_notice 'was interrupted' ;;
+                                *) published_verify_notice failed ;;
+                            esac
+                            ;;
                         *) printf 'generate-rules.sh exited %s — rules-current was published, but the nightly did not finish. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$1" ;;
                     esac
                     ;;
@@ -357,7 +362,7 @@ for attempt in 1 2 3 4 5; do
     fi
 done
 [ "$verified" -eq 1 ] \
-    || die "$(published_verify_notice)"
+    || die "$(published_verify_notice failed)"
 
 note "published ${TAG}: compiled.yac (v${VERSION}) + manifest"
 

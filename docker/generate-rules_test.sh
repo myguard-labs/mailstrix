@@ -28,6 +28,9 @@ cat >"$test_root/bin/docker" <<'STUB'
 set -euo pipefail
 if [ "$1" = run ]; then
     printf 'verify %s\n' "$*" >> "$EVENTS"
+    if [ "${SIGNAL_VERIFY:-0}" -eq 1 ]; then
+        kill -TERM "$(cat "${EVENTS}.signal-target")"
+    fi
     attempts_file="${EVENTS}.attempts"
     attempts=0
     [ ! -f "$attempts_file" ] || attempts="$(cat "$attempts_file")"
@@ -388,6 +391,17 @@ assert_signaled_success_serializer_failure_falls_back() {
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'signaled serializer failure lost or duplicated fallback receipt'
 }
 
+assert_verify_signal_reports_interruption() {
+    local actual
+    run_script SIGNAL_VERIFY=1
+    [ "$actual" -eq 143 ] || assert_event "verify signal exit: $actual"
+    assert_receipt verify failed
+    assert_notification verify-signal verify failed
+    grep -Fx 'notify-body rules-current v1 was published, but native verification was interrupted; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$EVENTS" >/dev/null || assert_event 'verify signal interruption wording'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'verify signal upload count'
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'verify signal verifier count'
+}
+
 run_case() {  # run_case <name> <exit> <stage> <status> <verify-count> <uploads> <build-fail> <publish-fail> <verify-until> <notify-fail>
     local name="$1" expected_exit="$2" stage="$3" status="$4" verify_count="$5" uploads="$6"
     local fail_build="$7" fail_publish="$8" fail_verify="$9" fail_notify="${10}" actual
@@ -413,7 +427,7 @@ run_case build-failure 41 build failed 0 0 1 0 0 0
 run_case publish-failure 42 publish failed 0 1 0 1 0 0
 grep -F 'notify-body generate-rules.sh exited 42 — rules-current may be partially updated.' "$EVENTS" >/dev/null || assert_event 'publish failure state wording'
 run_case verify-failure 1 verify failed 5 2 0 0 5 0
-grep -Fx 'notify-body rules-current was published, but native verification failed; clients may encounter an unverified bundle. Inspect and repair the release.' "$EVENTS" >/dev/null || assert_event 'verify failure risk wording'
+grep -Fx 'notify-body rules-current v1 was published, but native verification failed; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$EVENTS" >/dev/null || assert_event 'verify failure risk wording'
 run_case notify-failure-is-best-effort 0 verify success 1 2 0 0 0 1
 assert_receipt_failure_preserves_stage_failure
 assert_release_probe_failure_is_publish
@@ -431,4 +445,5 @@ assert_publish_signal_reports_failure
 assert_success_receipt_signal_is_receipt_failure
 assert_failure_receipt_signal_finishes_reporting
 assert_signaled_success_serializer_failure_falls_back
+assert_verify_signal_reports_interruption
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'
