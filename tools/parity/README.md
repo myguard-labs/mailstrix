@@ -129,7 +129,43 @@ bash scripts/qualify-parity-isolation.sh /tmp/new-parity-qualification
 
 The script builds the worker, a separate test-only probe image, and the host
 qualification executable. It retains image IDs and logs in a new output
-directory. Tests compare generated and external-metadata inert observations,
+directory. Manual runs retain their images. CI passes `--cleanup-images` to
+enable cleanup; the flag can precede or follow the single output directory.
+Use `--` before a directory beginning with `-`; exactly one literal operand
+must follow it. After `--`, even `--help` and `--cleanup-images` are directory
+names, so cleanup must be enabled before the terminator. Help is recognized
+anywhere before `--`, without creating an output directory.
+Only invocation-created tags are removed, including after failures. A unique
+ownership label makes CI image IDs invocation-specific while preserving layer
+reuse; cleanup verifies it. Pre-existing images, other tags, container users
+and shared parent
+layers are protected by non-forced tag removal with `--no-prune`. Cleanup
+failures retain the image and are recorded in `image-cleanup.log`; logs and
+immutable-ID artifacts are never removed.
+Cleanup errors turn an otherwise successful qualification into a failure,
+triggering CI log upload; an existing failure status is preserved. A Docker
+missing-image diagnostic for the exact tag is treated as already absent;
+other inspection failures, ownership/identity mismatches and removal failures
+remain visible failures. If the cleanup log cannot be opened, cleanup uses
+stderr and the job fails.
+Inspection has a five-second timeout plus one second before forced termination;
+image removal allows 15 seconds plus two seconds before forced termination.
+Both tags have at most 46 seconds of combined timeout budget, plus scheduling
+overhead. Inspect stderr is retained separately from the structured identity
+output; warnings do not invalidate a healthy identity. This is a
+conservative bound; no precise runner cancellation grace is specified here.
+
+Cancellation supervisors must signal and reap the full process tree. Tests
+verify image cleanup for process-group SIGINT/SIGTERM and leader-only SIGTERM,
+but terminating the Bash leader alone does not stop its descendants. GNU
+`timeout` may place children in separate process groups; their existing bounds
+are 900 seconds per build and 120 seconds for qualification. Hard termination
+or a Docker outage can leave images behind. The checked-in
+[runner contract](../../.github/runner/README.md) requires slot restoration
+after cancellation; it does not specify the runner's signal-delivery sequence.
+
+Tests compare generated and
+external-metadata inert observations,
 inspect effective cgroups/privileges, deny a local host sentinel and loopback
 listener, reject a root write, kill a ready noncooperative worker, observe a
 finite memory probe's OOM and PID-controller denial, and verify exact container

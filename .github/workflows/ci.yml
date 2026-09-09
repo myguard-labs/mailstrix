@@ -100,7 +100,9 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: qualify optional Mailstrix isolation with inert fixtures
-        run: bash scripts/qualify-parity-isolation.sh "$RUNNER_TEMP/parity-isolation"
+        run: |
+          bash scripts/qualify-parity-isolation.sh --cleanup-images \
+            "$RUNNER_TEMP/parity-isolation"
       - name: retain failed isolation qualification logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -113,6 +115,7 @@ jobs:
             ${{ runner.temp }}/parity-isolation/qualification.log
             ${{ runner.temp }}/parity-isolation/parity-runtime.id
             ${{ runner.temp }}/parity-isolation/parity-probe-runtime.id
+            ${{ runner.temp }}/parity-isolation/image-cleanup.log
           retention-days: 7
           if-no-files-found: warn
 
@@ -248,7 +251,9 @@ jobs:
           python3 -B packaging/deb/workflow_pins_controls_test.py
 
       - name: parity qualification failure artifacts stay bounded
-        run: python3 -B packaging/deb/parity_qualification_artifact_test.py
+        run: |
+          python3 -B packaging/deb/parity_qualification_artifact_test.py
+          python3 -B packaging/deb/parity_image_cleanup_test.py
 
       - name: self-hosted runners use disposable builder slots
         run: sh packaging/deb/runner_isolation_test.sh
