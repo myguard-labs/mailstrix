@@ -190,6 +190,15 @@ func terminalOletoolsStatus(status string) bool {
 	}
 }
 
+func terminalMailstrixStatus(status string) bool {
+	switch status {
+	case "ok", "error", "timeout", "indeterminate", "execution_error", "output_limit", "memory_limit", "malformed_output", "integrity_error":
+		return false
+	default:
+		return true
+	}
+}
+
 func clamBridgeSetupDiagnostic(err error) string {
 	if errors.Is(err, errClamBridgePython) {
 		return errClamBridgePython.Error()
@@ -308,7 +317,7 @@ func compareCorpusAll(root *os.Root, m manifest, p corpusPolicy, context corpusC
 				break
 			}
 			left = observers.mailstrix(s, data)
-			if slices.Contains([]string{"cleanup_error", "create_uncertain", "setup_error", "identity_error"}, left.Status) {
+			if terminalMailstrixStatus(left.Status) {
 				stopped = true
 				break
 			}

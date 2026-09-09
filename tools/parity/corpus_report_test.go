@@ -274,6 +274,66 @@ func TestCorpusOletoolsStopsOnlyForTerminalLaunchState(t *testing.T) {
 	}
 }
 
+func TestCorpusMailstrixStopsOnlyForTerminalLaunchState(t *testing.T) {
+	type statusCase struct {
+		status   string
+		terminal bool
+	}
+	var tests []statusCase
+	for _, status := range []string{"cleanup_error", "create_uncertain", "setup_error", "identity_error", "unknown_future_status"} {
+		tests = append(tests, statusCase{status, true})
+	}
+	for _, status := range []string{"error", "timeout", "indeterminate", "execution_error", "output_limit", "memory_limit", "malformed_output", "integrity_error"} {
+		tests = append(tests, statusCase{status, false})
+	}
+	for _, tc := range tests {
+		t.Run(tc.status, func(t *testing.T) {
+			m, hash, root := generated(t)
+			for i := range m.Samples {
+				m.Samples[i].Format, m.Samples[i].InputUnit = "office", "file"
+			}
+			unique := map[string]bool{}
+			for _, sample := range m.Samples {
+				unique[sample.SHA256] = true
+			}
+			mailstrixCalls, oletoolsCalls, clamavCalls := 0, 0, 0
+			observers := corpusObservers{
+				mailstrix: func(sample, []byte) observation {
+					mailstrixCalls++
+					if mailstrixCalls == 1 {
+						return observation{Status: tc.status}
+					}
+					return observation{Status: "ok"}
+				},
+				oletools: func(string, []byte) nativeObservation {
+					oletoolsCalls++
+					return nativeObservation{Status: "unsupported"}
+				},
+				clamav: func(sample, []byte) clamObservation {
+					clamavCalls++
+					return clamObservation{Status: "no_detection", Detections: []string{}, Diagnostics: []clamDiagnostic{}}
+				},
+			}
+			policy := comparisonPolicyFixture()
+			ctx := corpusContext{Schema: corpusSchema, ManifestSHA256: hash, MailstrixWorker: isolatedIdentity{RulesFingerprintSHA256: policy.RulesFingerprintSHA256}}
+			r, err := compareCorpusAll(root, m, policy, ctx, observers, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.terminal {
+				if mailstrixCalls != 1 || oletoolsCalls != 0 || clamavCalls != 0 || r.Statuses["mailstrix"]["not_run"] != len(unique)-1 {
+					t.Fatalf("terminal state continued: mailstrix=%d oletools=%d clamav=%d statuses=%v", mailstrixCalls, oletoolsCalls, clamavCalls, r.Statuses["mailstrix"])
+				}
+			} else if mailstrixCalls != len(unique) || oletoolsCalls != len(unique) || clamavCalls != len(unique) || r.Statuses["mailstrix"]["not_run"] != 0 {
+				t.Fatalf("ordinary failure stopped corpus: mailstrix=%d oletools=%d clamav=%d statuses=%v", mailstrixCalls, oletoolsCalls, clamavCalls, r.Statuses["mailstrix"])
+			}
+			if r.Complete {
+				t.Fatal("failed Mailstrix observation produced complete report")
+			}
+		})
+	}
+}
+
 func TestClamBridgeSetupDiagnosticExposesOnlyPinnedInterpreterRequirement(t *testing.T) {
 	if got := clamBridgeSetupDiagnostic(errClamBridgePython); got != errClamBridgePython.Error() {
 		t.Fatalf("interpreter diagnosis=%q", got)
