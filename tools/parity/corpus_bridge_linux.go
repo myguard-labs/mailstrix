@@ -15,19 +15,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var signalBridgeGroup = func(pid int) error {
+	return syscall.Kill(-pid, syscall.SIGKILL)
+}
+
 func configureBridgeGroup(cmd *exec.Cmd) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
+	// finishBridgeGroup observes cancellation and exclusively owns group
+	// signalling while the leader pins its PID/PGID. CommandContext's default
+	// asynchronous Cancel callback must not outlive cmd.Wait and signal a
+	// recycled numeric group.
+	cmd.Cancel = nil
 	return nil
 }
 
@@ -110,7 +109,7 @@ func finishBridgeGroup(ctx context.Context, cmd *exec.Cmd) (bool, error, error) 
 	observeErr := waitBridgeExit(ctx, pid)
 	// The unreaped leader still owns pid and pgid here, so this signal cannot
 	// target a recycled process group even after an early bridge exit.
-	signalErr := syscall.Kill(-pid, syscall.SIGKILL)
+	signalErr := signalBridgeGroup(pid)
 	if errors.Is(signalErr, syscall.ESRCH) {
 		signalErr = nil
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,60 @@ func TestClamGroupAbsenceBeforeOwnershipTransfer(t *testing.T) {
 				<-waited
 			}
 		})
+	}
+}
+
+func TestBridgeCancellationHasSinglePinnedSignalOwner(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, "sleep", "60")
+	if err := configureBridgeGroup(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Cancel != nil {
+		t.Fatal("asynchronous cancellation retained a second group-signal owner")
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	originalSignal := signalBridgeGroup
+	signalBridgeGroup = func(pid int) error {
+		close(entered)
+		<-release
+		if cmd.ProcessState != nil {
+			t.Error("group signal ran after leader reap")
+		}
+		return originalSignal(pid)
+	}
+	defer func() { signalBridgeGroup = originalSignal }()
+
+	cancel()
+	done := make(chan struct{})
+	var absent bool
+	var runErr, groupErr error
+	go func() {
+		absent, runErr, groupErr = finishBridgeGroup(ctx, cmd)
+		close(done)
+	}()
+	select {
+	case <-entered:
+		if cmd.ProcessState != nil {
+			t.Fatal("leader reaped before exclusive group signal")
+		}
+		close(release)
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not promptly reach group controller")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellation did not finish bounded group cleanup")
+	}
+	if !absent || !errors.Is(runErr, context.Canceled) || groupErr != nil || cmd.ProcessState == nil {
+		t.Fatalf("absence=%t run=%v group=%v state=%v", absent, runErr, groupErr, cmd.ProcessState)
 	}
 }
 

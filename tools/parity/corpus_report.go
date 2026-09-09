@@ -231,6 +231,8 @@ func (w *receiptWriter) write(value any) error {
 	return err
 }
 
+var readCorpusSample = readSample
+
 // Caller-owned bytes are joined only within this pass. All aliases are checked
 // before any sample reaches any engine, then each unique input is re-read and
 // hash checked immediately before use. Retained truth-scoring matches are limited
@@ -262,7 +264,7 @@ func compareCorpusAll(root *os.Root, m manifest, p corpusPolicy, context corpusC
 	}
 	invalid := map[string]bool{}
 	for _, s := range m.Samples {
-		if _, err := readSample(root, s); err != nil {
+		if _, err := readCorpusSample(root, s); err != nil {
 			invalid[s.SHA256] = true
 		}
 	}
@@ -276,15 +278,19 @@ func compareCorpusAll(root *os.Root, m manifest, p corpusPolicy, context corpusC
 		left := observation{Status: "not_run"}
 		right := nativeObservation{Status: "not_run"}
 		clam := clamObservation{Status: "not_run", Detections: []string{}, Diagnostics: []clamDiagnostic{}}
-		data, readErr := readSample(root, s)
 		switch {
 		case stopped:
-		case invalid[s.SHA256] || readErr != nil:
+		case invalid[s.SHA256]:
 			left.Status, right.Status, clam.Status = "integrity_error", "integrity_error", "integrity_error"
 		case len(invalid) != 0:
 			// One invalid alias invalidates the corpus preflight. Unaffected
 			// groups remain unobserved; no parser receives a partial corpus.
 		default:
+			data, readErr := readCorpusSample(root, s)
+			if readErr != nil {
+				left.Status, right.Status, clam.Status = "integrity_error", "integrity_error", "integrity_error"
+				break
+			}
 			left = observers.mailstrix(s, data)
 			if slices.Contains([]string{"cleanup_error", "create_uncertain", "setup_error", "identity_error"}, left.Status) {
 				stopped = true

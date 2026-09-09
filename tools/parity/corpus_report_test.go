@@ -226,6 +226,58 @@ func TestCorpusAliasesAndRulesMismatch(t *testing.T) {
 	}
 }
 
+func TestTerminalStopSkipsObservationReads(t *testing.T) {
+	m, hash, root := generated(t)
+	p := comparisonPolicyFixture()
+	ctx := corpusContext{ManifestSHA256: hash, MailstrixWorker: isolatedIdentity{RulesFingerprintSHA256: p.RulesFingerprintSHA256}}
+	reads := map[string]int{}
+	originalRead := readCorpusSample
+	readCorpusSample = func(root *os.Root, s sample) ([]byte, error) {
+		reads[s.SHA256]++
+		return readSample(root, s)
+	}
+	defer func() { readCorpusSample = originalRead }()
+	mailstrixCalls := 0
+	var receipts bytes.Buffer
+	r, err := compareCorpusAll(root, m, p, ctx, corpusObservers{
+		mailstrix: func(sample, []byte) observation {
+			mailstrixCalls++
+			return observation{Status: "cleanup_error"}
+		},
+		oletools: func(string, []byte) nativeObservation {
+			t.Fatal("terminal Mailstrix result reached oletools")
+			return nativeObservation{}
+		},
+		clamav: func(sample, []byte) clamObservation {
+			t.Fatal("terminal Mailstrix result reached ClamAV")
+			return clamObservation{}
+		},
+	}, &receipts)
+	if err != nil || r.Complete || mailstrixCalls != 1 {
+		t.Fatalf("report=%+v calls=%d error=%v", r, mailstrixCalls, err)
+	}
+	for i, s := range m.Samples {
+		want := 1
+		if i == 0 {
+			want = 2
+		}
+		if reads[s.SHA256] != want {
+			t.Fatalf("sample %d read %d times, want %d", i, reads[s.SHA256], want)
+		}
+	}
+	if r.Statuses["mailstrix"]["not_run"] != len(m.Samples)-1 {
+		t.Fatalf("Mailstrix not_run=%d", r.Statuses["mailstrix"]["not_run"])
+	}
+	for _, engine := range []string{"oletools", "clamav"} {
+		if r.Statuses[engine]["not_run"] != len(m.Samples) {
+			t.Fatalf("%s not_run=%d", engine, r.Statuses[engine]["not_run"])
+		}
+	}
+	if lines := bytes.Count(receipts.Bytes(), []byte{'\n'}); lines != len(m.Samples)+2 {
+		t.Fatalf("receipt records=%d, want %d", lines, len(m.Samples)+2)
+	}
+}
+
 type receiptShortWriter struct{}
 
 func (receiptShortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }

@@ -445,9 +445,10 @@ behavior or defaults of `run`, `run-isolated`, or `compare`.
 `-clamav-variant` is `engine` by default; `private-engine` exists only for the
 explicit inert-signature qualification control. `-local-receipts` is optional.
 When present it must name a nonexistent file, created exclusively with mode 0600.
-The command validates every alias before any engine runs and re-reads each unique
-sample immediately before observation. It passes only bytes, size, digest and input
-unit between components; it never joins by a filename or engine-supplied label.
+The command validates every alias before any corpus sample reaches an engine and
+re-reads each unique sample immediately before observation. It passes only bytes,
+size, digest and input unit between components; it never joins by a filename or
+engine-supplied label.
 
 The policy has exact fields and no implicit default. This illustrative shape uses
 an all-zero digest only as a placeholder; replace it with the exact isolated-worker
@@ -511,9 +512,11 @@ partial files as incomplete after any write or size-limit failure.
 
 Exit 0 requires every observation/comparison known and the independent labelled
 Mailstrix gate passing. Exit 1 means an incomplete/unknown observation or labelled
-failure; mixed-format corpora normally return 1 because direct oletools is only
-applicable to Office files. Exit 2 means invalid/setup/protocol/report or private
-receipt failure. None of these exits establishes benign or malicious ground truth.
+failure; per-sample protocol failures after setup are recorded here, and mixed-format
+corpora normally return 1 because direct oletools is only applicable to Office files.
+Exit 2 means an invalid CLI input, setup protocol failure, or report/private-receipt
+failure prevented a trustworthy report. None of these exits establishes benign or
+malicious ground truth.
 The Mailstrix, oletools and ClamAV envelopes retain their separately documented
 CPU, memory, PID, output and deadline bounds; they are per-input capacity controls,
 not representative workload thresholds. Go parent or kernel death remains outside

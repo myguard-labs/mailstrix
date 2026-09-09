@@ -95,6 +95,33 @@ class Call:
     status: str = "ok"
 
 
+def wait_unreaped(proc, deadline):
+    """Observe direct-child exit without releasing its PID/PGID identity."""
+    while True:
+        try:
+            exited = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except InterruptedError:
+            continue
+        if exited is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+
+
+def signal_before_reap(proc):
+    """Terminate the owned target while its unreaped leader pins identity."""
+    try:
+        if CALL_NEW_SESSION:
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        # No signalable target remains; proc.wait below still reaps the leader.
+        return
+
+
 def call(args, data=b"", seconds=SECONDS, input_file=None):
     """Bound both pipes while streaming stdin; cancellation kills/reaps the CLI.
 
@@ -162,18 +189,14 @@ def call(args, data=b"", seconds=SECONDS, input_file=None):
                             break
                     if status != "ok":
                         break
-                if status == "ok":
-                    try:
-                        proc.wait(timeout=max(0.001, deadline - time.monotonic()))
-                    except subprocess.TimeoutExpired:
-                        status = "timeout"
+                if status == "ok" and not wait_unreaped(proc, deadline):
+                    status = "timeout"
             finally:
-                if proc.poll() is None:
-                    if CALL_NEW_SESSION:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    else:
-                        proc.kill()
-                    proc.wait(timeout=5)
+                # Keep the leader unreaped until its process family has been
+                # signalled. Its PID therefore still pins the private PGID and
+                # cannot name a recycled group after an early leader exit.
+                signal_before_reap(proc)
+                proc.wait(timeout=5)
         return Call(
             proc.returncode,
             bytes(streams[0][:MAX_OUTPUT]),

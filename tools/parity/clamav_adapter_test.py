@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -124,6 +125,30 @@ class CallTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "timeout")
         self.assertLess(result.code, 0)
+
+    def test_early_leader_exit_kills_private_group_before_reap(self):
+        child = (
+            "import subprocess,sys;"
+            "p=subprocess.Popen([sys.executable,'-I','-c',"
+            "'import time;time.sleep(60)']);"
+            "print(p.pid,flush=True)"
+        )
+        result = adapter.call([sys.executable, "-I", "-c", child], seconds=1)
+        self.assertEqual(result.status, "timeout")
+        self.assertEqual(result.code, 0)
+        self.assertTrue(result.out.strip(), "leader did not report its descendant PID")
+        descendant = int(result.out.strip())
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                raw = Path(f"/proc/{descendant}/stat").read_text()
+            except FileNotFoundError:
+                break
+            if raw[raw.rfind(")") + 2 :].startswith("Z "):
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("early-exit leader left a live private-group descendant")
 
     def test_truncated_stdin_is_not_success(self):
         result = adapter.call(
