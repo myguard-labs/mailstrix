@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import clamav_adapter as adapter
 
@@ -18,6 +18,7 @@ IMAGE = "sha256:" + "a" * 64
 STATE = {"OOMKilled": False, "Running": False, "Error": "", "ExitCode": 0}
 PR_SET_CHILD_SUBREAPER = 36
 PR_GET_CHILD_SUBREAPER = 37
+DOCKER_CLIENTS = ["create", "inspect", "start", "inspect", "rm", "ps"]
 
 
 class ClassifyTests(unittest.TestCase):
@@ -132,6 +133,253 @@ class RuntimeContainmentTests(unittest.TestCase):
 
 
 class CallTests(unittest.TestCase):
+    def test_signal_and_reap_is_bounded(self):
+        for failure, expected in (
+            (None, "ok"),
+            (subprocess.TimeoutExpired(["inert"], 5), "reap_timeout"),
+        ):
+            with self.subTest(timeout=failure is not None):
+                proc = Mock(pid=123)
+                proc.wait.side_effect = failure
+                with (
+                    patch.object(adapter, "signal_before_reap") as signal_process,
+                    patch.object(adapter, "reap_in_background") as background,
+                ):
+                    self.assertEqual(adapter.signal_and_reap(proc), expected)
+                signal_process.assert_called_once_with(proc)
+                proc.wait.assert_called_once_with(timeout=5)
+                if failure is None:
+                    background.assert_not_called()
+                else:
+                    background.assert_called_once_with(proc)
+
+    def test_background_reaper_is_daemonized(self):
+        proc, thread_factory = Mock(), Mock()
+        with patch.object(adapter, "DEFERRED_REAPS", []):
+            adapter.reap_in_background(proc, thread_factory)
+            self.assertEqual(adapter.DEFERRED_REAPS, [proc])
+            thread_factory.assert_called_once()
+            self.assertEqual(
+                thread_factory.call_args.kwargs["name"], "mailstrix-clamav-reaper"
+            )
+            self.assertTrue(thread_factory.call_args.kwargs["daemon"])
+            thread_factory.return_value.start.assert_called_once_with()
+            thread_factory.call_args.kwargs["target"]()
+            proc.wait.assert_called_once_with()
+            self.assertEqual(adapter.DEFERRED_REAPS, [])
+
+    def test_background_wait_failure_retains_child_for_polling(self):
+        proc, thread_factory = Mock(), Mock()
+        proc.wait.side_effect = KeyboardInterrupt
+        with patch.object(adapter, "DEFERRED_REAPS", []):
+            adapter.reap_in_background(proc, thread_factory)
+            thread_factory.call_args.kwargs["target"]()
+            self.assertEqual(adapter.DEFERRED_REAPS, [proc])
+
+    def test_poll_deferred_reaps_retains_live_children(self):
+        exited, live = Mock(), Mock()
+        exited.poll.return_value = 0
+        live.poll.return_value = None
+        with patch.object(adapter, "DEFERRED_REAPS", [exited, live]):
+            adapter.poll_deferred_reaps()
+            self.assertEqual(adapter.DEFERRED_REAPS, [live])
+        exited.poll.assert_called_once_with()
+        live.poll.assert_called_once_with()
+
+    def test_reap_timeout_overrides_setup_exception_and_closes_every_pipe(self):
+        proc = Mock(returncode=None)
+        proc.stdout, proc.stderr, proc.stdin = Mock(), Mock(), Mock()
+        with (
+            patch.object(adapter.subprocess, "Popen", return_value=proc),
+            patch.object(
+                adapter.selectors,
+                "DefaultSelector",
+                side_effect=OSError("private selector failure"),
+            ),
+            patch.object(adapter, "signal_and_reap", return_value="reap_timeout"),
+        ):
+            result = adapter.call(["/inert"])
+        self.assertEqual(result.status, "reap_timeout")
+        self.assertEqual(result.code, -1)
+        self.assertEqual(result.failure_type, "OSError")
+        proc.stdout.close.assert_called_once_with()
+        proc.stderr.close.assert_called_once_with()
+        proc.stdin.close.assert_called_once_with()
+
+    def test_pipe_close_failure_does_not_skip_remaining_pipes(self):
+        proc = Mock()
+        proc.stdout, proc.stderr, proc.stdin = Mock(), Mock(), Mock()
+        proc.stdout.close.side_effect = OSError("private close failure")
+        adapter.close_process_pipes(proc)
+        proc.stdout.close.assert_called_once_with()
+        proc.stderr.close.assert_called_once_with()
+        proc.stdin.close.assert_called_once_with()
+
+    def test_interrupt_propagates_after_cleanup_and_closes_every_pipe(self):
+        proc = Mock(returncode=None)
+        proc.stdout, proc.stderr, proc.stdin = Mock(), Mock(), Mock()
+        with (
+            patch.object(adapter.subprocess, "Popen", return_value=proc),
+            patch.object(
+                adapter.selectors,
+                "DefaultSelector",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch.object(adapter, "signal_and_reap", return_value="reap_timeout"),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            adapter.call(["/inert"])
+        self.assertEqual(
+            getattr(raised.exception, adapter.PROCESS_STATUS_ATTRIBUTE),
+            "reap_timeout",
+        )
+        proc.stdout.close.assert_called_once_with()
+        proc.stderr.close.assert_called_once_with()
+        proc.stdin.close.assert_called_once_with()
+
+    def test_post_spawn_setup_failure_still_reaps_and_closes_every_pipe(self):
+        proc = Mock(returncode=None)
+        proc.stdout, proc.stderr, proc.stdin = Mock(), Mock(), Mock()
+        failure = TypeError("private setup detail")
+        with (
+            patch.object(adapter.subprocess, "Popen", return_value=proc),
+            patch.object(
+                adapter.time,
+                "monotonic",
+                side_effect=failure,
+            ),
+            patch.object(
+                adapter, "signal_and_reap", return_value="reap_timeout"
+            ) as reap,
+            self.assertRaises(TypeError) as raised,
+        ):
+            adapter.call(["/inert"])
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(
+            getattr(raised.exception, adapter.PROCESS_STATUS_ATTRIBUTE),
+            "reap_timeout",
+        )
+        reap.assert_called_once_with(proc)
+        proc.stdout.close.assert_called_once_with()
+        proc.stderr.close.assert_called_once_with()
+        proc.stdin.close.assert_called_once_with()
+
+    def test_cleanup_exception_cannot_replace_original_interrupt(self):
+        proc = Mock(returncode=None)
+        proc.stdout, proc.stderr, proc.stdin = Mock(), Mock(), Mock()
+        original = KeyboardInterrupt()
+        with (
+            patch.object(adapter.subprocess, "Popen", return_value=proc),
+            patch.object(
+                adapter.selectors,
+                "DefaultSelector",
+                side_effect=original,
+            ),
+            patch.object(
+                adapter, "signal_and_reap", side_effect=RuntimeError("cleanup")
+            ),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            adapter.call(["/inert"])
+        self.assertIs(raised.exception, original)
+        self.assertEqual(
+            getattr(raised.exception, adapter.PROCESS_STATUS_ATTRIBUTE),
+            "reap_timeout",
+        )
+        self.assertEqual(
+            raised.exception.__notes__,
+            ["secondary process cleanup error: RuntimeError"],
+        )
+        proc.stdout.close.assert_called_once_with()
+        proc.stderr.close.assert_called_once_with()
+        proc.stdin.close.assert_called_once_with()
+
+    def test_cleanup_exception_retains_body_error_type(self):
+        proc = Mock(returncode=None)
+        proc.stdout, proc.stderr, proc.stdin = Mock(), Mock(), Mock()
+        cleanup = RuntimeError("private cleanup detail")
+        with (
+            patch.object(adapter.subprocess, "Popen", return_value=proc),
+            patch.object(
+                adapter.selectors,
+                "DefaultSelector",
+                side_effect=OSError("private body detail"),
+            ),
+            patch.object(adapter, "signal_and_reap", side_effect=cleanup),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            adapter.call(["/inert"])
+        self.assertIs(raised.exception, cleanup)
+        self.assertEqual(raised.exception.__notes__, ["preceding body error: OSError"])
+        self.assertNotIn("private body detail", str(raised.exception.__notes__))
+
+    def test_reaper_start_failure_is_terminal(self):
+        proc = Mock()
+        proc.wait.side_effect = subprocess.TimeoutExpired(["inert"], 5)
+        with (
+            patch.object(adapter, "signal_before_reap"),
+            patch.object(adapter, "reap_in_background", side_effect=RuntimeError),
+        ):
+            self.assertEqual(adapter.signal_and_reap(proc), "reap_timeout")
+
+    def test_signal_error_is_distinct_and_terminal(self):
+        proc = Mock()
+        with patch.object(adapter, "signal_before_reap", side_effect=PermissionError):
+            self.assertEqual(adapter.signal_and_reap(proc), "signal_error")
+        proc.wait.assert_called_once_with(timeout=5)
+
+    def test_unsignalled_child_is_retained_without_an_unbounded_thread(self):
+        proc = Mock()
+        proc.wait.side_effect = subprocess.TimeoutExpired(["inert"], 5)
+        with (
+            patch.object(adapter, "DEFERRED_REAPS", []),
+            patch.object(adapter, "signal_before_reap", side_effect=PermissionError),
+            patch.object(adapter, "reap_in_background") as background,
+        ):
+            self.assertEqual(adapter.signal_and_reap(proc), "signal_error")
+            self.assertEqual(adapter.DEFERRED_REAPS, [proc])
+        background.assert_not_called()
+
+    def test_non_os_signal_failure_still_reaps_before_propagating(self):
+        proc = Mock()
+        failure = KeyboardInterrupt()
+        with (
+            patch.object(adapter, "signal_before_reap", side_effect=failure),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            adapter.signal_and_reap(proc)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(
+            getattr(raised.exception, adapter.PROCESS_STATUS_ATTRIBUTE),
+            "signal_error",
+        )
+        proc.wait.assert_called_once_with(timeout=5)
+
+    def test_wait_interrupt_registers_deferred_reap_before_propagating(self):
+        proc = Mock()
+        failure = KeyboardInterrupt()
+        proc.wait.side_effect = failure
+        with (
+            patch.object(adapter, "signal_before_reap"),
+            patch.object(adapter, "reap_in_background") as background,
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            adapter.signal_and_reap(proc)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(
+            getattr(raised.exception, adapter.PROCESS_STATUS_ATTRIBUTE),
+            "reap_timeout",
+        )
+        background.assert_called_once_with(proc)
+
+    def test_require_reports_bounded_failure_metadata(self):
+        private = b"private daemon detail"
+        with self.assertRaisesRegex(
+            adapter.QualificationFailure, r"status=ok code=17 stderr=True"
+        ) as raised:
+            adapter.require(adapter.Call(code=17, err=private))
+        self.assertNotIn(private.decode(), str(raised.exception))
+
     def test_stdin_and_both_pipes(self):
         result = adapter.call(
             [
@@ -434,7 +682,7 @@ class LifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             [args[0] for args, _ in self.events],
-            ["create", "inspect", "start", "inspect", "rm", "ps"],
+            DOCKER_CLIENTS,
         )
         self.assertEqual(self.events[2][1]["data"], b"inert")
         self.assertIn("--pull=never", self.events[0][0])
@@ -512,6 +760,100 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(backend.launch(b"inert")["status"], "setup_error")
         self.assertEqual(backend.launch(b"inert")["status"], "backend_unavailable")
         self.assertEqual([args[0] for args, _ in self.events], ["create", "rm", "ps"])
+
+    def test_uncertain_status_stops_all_later_docker_clients(self):
+        for status in ("reap_timeout", "signal_error"):
+            for target_index in range(len(DOCKER_CLIENTS)):
+                with self.subTest(status=status, target_index=target_index):
+                    self._assert_uncertain_status_stops_clients(status, target_index)
+
+    def _assert_uncertain_status_stops_clients(self, status, target_index):
+        self.events.clear()
+        calls = 0
+
+        def execute(args, **kwargs):
+            nonlocal calls
+            result = self.execute(args, **kwargs)
+            if calls == target_index:
+                result = adapter.Call(status=status)
+            calls += 1
+            return result
+
+        backend = adapter.Adapter(IMAGE, execute)
+        observed = backend.launch(b"inert")
+        self.assertEqual(observed["status"], "cleanup_error")
+        self.assertTrue(backend.poisoned)
+        self.assertTrue(backend.process_uncertain)
+        self.assertEqual(
+            [args[0] for args, _ in self.events],
+            DOCKER_CLIENTS[: target_index + 1],
+        )
+        self.assertEqual(backend.launch(b"second")["status"], "backend_unavailable")
+        self.assertEqual(
+            [args[0] for args, _ in self.events],
+            DOCKER_CLIENTS[: target_index + 1],
+        )
+
+    def test_unavailable_launch_polls_retained_children_without_docker(self):
+        backend = adapter.Adapter(IMAGE, self.execute)
+        backend.poisoned = True
+        with patch.object(adapter, "poll_deferred_reaps") as poll:
+            self.assertEqual(backend.launch(b"inert")["status"], "backend_unavailable")
+        poll.assert_called_once_with()
+        self.assertEqual(self.events, [])
+
+    def test_interrupt_with_uncertain_process_poisoning_skips_cleanup_clients(self):
+        def execute(args, **kwargs):
+            self.events.append((args[len(adapter.DOCKER) :], kwargs))
+            error = KeyboardInterrupt()
+            setattr(error, adapter.PROCESS_STATUS_ATTRIBUTE, "reap_timeout")
+            raise error
+
+        backend = adapter.Adapter(IMAGE, execute)
+        with self.assertRaises(KeyboardInterrupt):
+            backend.launch(b"inert")
+        self.assertTrue(backend.poisoned)
+        self.assertTrue(backend.process_uncertain)
+        self.assertEqual([args[0] for args, _ in self.events], ["create"])
+
+    def test_uncertain_interrupt_stops_all_later_docker_clients(self):
+        for status in ("reap_timeout", "signal_error"):
+            for target_index in range(len(DOCKER_CLIENTS)):
+                with self.subTest(status=status, target_index=target_index):
+                    self._assert_uncertain_interrupt_stops_clients(status, target_index)
+
+    def _assert_uncertain_interrupt_stops_clients(self, status, target_index):
+        self.events.clear()
+        calls = 0
+
+        def execute(args, **kwargs):
+            nonlocal calls
+            result = self.execute(args, **kwargs)
+            if calls == target_index:
+                error = KeyboardInterrupt()
+                setattr(
+                    error,
+                    adapter.PROCESS_STATUS_ATTRIBUTE,
+                    status,
+                )
+                raise error
+            calls += 1
+            return result
+
+        backend = adapter.Adapter(IMAGE, execute)
+        with self.assertRaises(KeyboardInterrupt):
+            backend.launch(b"inert")
+        self.assertTrue(backend.poisoned)
+        self.assertTrue(backend.process_uncertain)
+        self.assertEqual(
+            [args[0] for args, _ in self.events],
+            DOCKER_CLIENTS[: target_index + 1],
+        )
+        self.assertEqual(backend.launch(b"second")["status"], "backend_unavailable")
+        self.assertEqual(
+            [args[0] for args, _ in self.events],
+            DOCKER_CLIENTS[: target_index + 1],
+        )
 
     def test_invalid_create_acknowledgement_is_terminal(self):
         for raw in [b"", b"id\n", b"b" * 64, b"b" * 64 + b"\nextra"]:

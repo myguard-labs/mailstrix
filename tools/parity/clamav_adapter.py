@@ -20,6 +20,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -34,6 +35,14 @@ IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
 CONTAINER_NAME = re.compile(r"mailstrix-clamav-[0-9a-f]{32}")
 RUNTIME_LIMITS = ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit")
 BUILTIN_SECCOMP = "name=seccomp,profile=builtin"
+DEFERRED_REAPS: list[subprocess.Popen] = []
+PROCESS_STATUS_ATTRIBUTE = "_mailstrix_clamav_process_status"
+
+
+class QualificationFailure(ValueError):
+    """Operator-facing verdict containing only bounded, non-sensitive fields."""
+
+
 # The Go bridge puts Python and its Docker clients in one parent-owned process
 # group. Standalone qualification owns/reaps each client's group itself.
 CALL_NEW_SESSION = True
@@ -98,7 +107,7 @@ def require_runtime_containment(info):
         or BUILTIN_SECCOMP not in info["SecurityOptions"]
         or any(info.get(key) is not True for key in RUNTIME_LIMITS)
     ):
-        raise ValueError("runtime containment unavailable")
+        raise QualificationFailure("runtime containment unavailable")
 
 
 @dataclass
@@ -107,6 +116,7 @@ class Call:
     out: bytes = b""
     err: bytes = b""
     status: str = "ok"
+    failure_type: str = ""
 
 
 def wait_unreaped(proc, deadline):
@@ -136,92 +146,245 @@ def signal_before_reap(proc):
         return
 
 
+def reap_in_background(proc, thread_factory=threading.Thread):
+    """Keep one killed direct child reachable until it eventually exits."""
+    DEFERRED_REAPS.append(proc)
+
+    def reap():
+        try:
+            proc.wait()
+        except BaseException:  # noqa: BLE001
+            return
+        else:
+            try:
+                DEFERRED_REAPS.remove(proc)
+            except ValueError:
+                pass
+
+    thread_factory(
+        target=reap,
+        name="mailstrix-clamav-reaper",
+        daemon=True,
+    ).start()
+
+
+def retain_for_polling(proc):
+    """Retain an unsignalled child without dedicating an unbounded thread."""
+    DEFERRED_REAPS.append(proc)
+
+
+def signal_and_reap(proc):
+    """Kill the owned process family and bound direct-child reaping."""
+
+    def defer(status):
+        """Retain the unreaped child and return its terminal status."""
+        if status != "ok":
+            retain_for_polling(proc)
+            return status
+        try:
+            reap_in_background(proc)
+        except RuntimeError:
+            # reap_in_background retains proc before starting its thread, so a
+            # thread-start failure remains available to nonblocking polling.
+            pass
+        return "reap_timeout"
+
+    signal_status = "ok"
+    signal_failure = None
+    wait_failure = None
+    try:
+        signal_before_reap(proc)
+    except OSError:
+        signal_status = "signal_error"
+    except BaseException as error:  # noqa: BLE001
+        signal_status = "signal_error"
+        signal_failure = error
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        signal_status = defer(signal_status)
+    except BaseException as error:  # noqa: BLE001
+        wait_failure = error
+        signal_status = defer(signal_status)
+    if signal_failure is not None:
+        setattr(signal_failure, PROCESS_STATUS_ATTRIBUTE, signal_status)
+        if wait_failure is not None:
+            signal_failure.add_note(
+                "secondary wait error: " + type(wait_failure).__name__
+            )
+        raise signal_failure
+    if wait_failure is not None:
+        setattr(wait_failure, PROCESS_STATUS_ATTRIBUTE, signal_status)
+        raise wait_failure
+    return signal_status
+
+
+def poll_deferred_reaps():
+    """Non-blockingly reap retained children that lack a reaper thread."""
+    for proc in tuple(DEFERRED_REAPS):
+        if proc.poll() is not None:
+            try:
+                DEFERRED_REAPS.remove(proc)
+            except ValueError:
+                pass
+
+
+def close_process_pipes(proc):
+    """Close every parent pipe without one close masking the remaining closes."""
+    for stream in (proc.stdout, proc.stderr, proc.stdin):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
 def call(args, data=b"", seconds=SECONDS, input_file=None):
     """Bound both pipes while streaming stdin; cancellation kills/reaps the CLI.
 
     The Docker-owned process is separately removed by Adapter.launch. Snapshot
     import can use a file descriptor instead of retaining the tar in memory.
     """
+    poll_deferred_reaps()
     env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
     # Docker consults the user's config even with a stripped environment. An
     # empty private config prevents implicit proxy/credential/context injection.
-    with (
-        tempfile.TemporaryDirectory(prefix="mailstrix-clamav-docker-") as config,
-        subprocess.Popen(
-            (
-                [args[0], "--config", config, *args[1:]]
-                if args[: len(DOCKER)] == DOCKER
-                else args
-            ),
-            stdin=input_file or subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            start_new_session=CALL_NEW_SESSION,
-        ) as proc,
-    ):
+    with tempfile.TemporaryDirectory(
+        prefix="mailstrix-clamav-docker-", ignore_cleanup_errors=True
+    ) as config:
+        # The explicit lifecycle below bounds reaping; Popen's context manager
+        # performs an unbounded wait when its __exit__ path sees TimeoutExpired.
+        # pylint: disable=consider-using-with
+        proc = None
         streams = [bytearray(), bytearray()]
         status = "ok"
         offset = 0
-        deadline = time.monotonic() + seconds
-        with selectors.DefaultSelector() as selector:
-            for index, stream in enumerate((proc.stdout, proc.stderr)):
-                os.set_blocking(stream.fileno(), False)
-                selector.register(stream, selectors.EVENT_READ, index)
-            if input_file is None:
-                os.set_blocking(proc.stdin.fileno(), False)
-                if data:
-                    selector.register(proc.stdin, selectors.EVENT_WRITE, 2)
-                else:
-                    proc.stdin.close()
+        failure = None
+        control_failure = None
+        setup_failure = None
+        cleanup_failure = None
+        process_status = "ok"
+        try:
+            proc = subprocess.Popen(
+                (
+                    [args[0], "--config", config, *args[1:]]
+                    if args[: len(DOCKER)] == DOCKER
+                    else args
+                ),
+                stdin=input_file or subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                start_new_session=CALL_NEW_SESSION,
+            )
+            deadline = time.monotonic() + seconds
             try:
-                while selector.get_map():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        status = "timeout"
-                        break
-                    for event, _ in selector.select(remaining):
-                        if event.data == 2:
-                            try:
-                                offset += os.write(
-                                    event.fd, data[offset : offset + 4096]
-                                )
-                            except BrokenPipeError:
-                                status = "input_error"
-                                break
-                            if offset == len(data):
-                                selector.unregister(event.fileobj)
-                                event.fileobj.close()
-                            continue
-                        chunk = os.read(event.fd, 4096)
-                        if not chunk:
-                            selector.unregister(event.fileobj)
-                            continue
-                        streams[event.data].extend(chunk)
-                        if len(streams[event.data]) > MAX_OUTPUT:
-                            status = "output_limit"
+                with selectors.DefaultSelector() as selector:
+                    for index, stream in enumerate((proc.stdout, proc.stderr)):
+                        os.set_blocking(stream.fileno(), False)
+                        selector.register(stream, selectors.EVENT_READ, index)
+                    if input_file is None:
+                        os.set_blocking(proc.stdin.fileno(), False)
+                        if data:
+                            selector.register(proc.stdin, selectors.EVENT_WRITE, 2)
+                        else:
+                            proc.stdin.close()
+                    while selector.get_map():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            status = "timeout"
                             break
-                    if status != "ok":
-                        break
-                if status == "ok" and not wait_unreaped(proc, deadline):
-                    status = "timeout"
-            finally:
+                        for event, _ in selector.select(remaining):
+                            if event.data == 2:
+                                try:
+                                    offset += os.write(
+                                        event.fd, data[offset : offset + 4096]
+                                    )
+                                except BrokenPipeError:
+                                    status = "input_error"
+                                    break
+                                if offset == len(data):
+                                    selector.unregister(event.fileobj)
+                                    event.fileobj.close()
+                                continue
+                            chunk = os.read(event.fd, 4096)
+                            if not chunk:
+                                selector.unregister(event.fileobj)
+                                continue
+                            streams[event.data].extend(chunk)
+                            if len(streams[event.data]) > MAX_OUTPUT:
+                                status = "output_limit"
+                                break
+                        if status != "ok":
+                            break
+                    if status == "ok" and not wait_unreaped(proc, deadline):
+                        status = "timeout"
+            # Preserve arbitrary operational failures only when process ownership
+            # is certain; terminal process cleanup must precede every body error.
+            # Control-flow exceptions still propagate after the finally cleanup.
+            except Exception as error:  # noqa: BLE001
+                failure = error
+            except BaseException as error:  # noqa: BLE001
+                control_failure = error
+        except BaseException as error:  # noqa: BLE001
+            setup_failure = error
+        finally:
+            if proc is not None:
                 # Keep the leader unreaped until its process family has been
                 # signalled. Its PID therefore still pins the private PGID and
                 # cannot name a recycled group after an early leader exit.
-                signal_before_reap(proc)
-                proc.wait(timeout=5)
+                try:
+                    process_status = signal_and_reap(proc)
+                except BaseException as error:  # noqa: BLE001
+                    cleanup_failure = error
+                    process_status = getattr(
+                        error, PROCESS_STATUS_ATTRIBUTE, "reap_timeout"
+                    )
+                finally:
+                    close_process_pipes(proc)
+        if setup_failure is not None:
+            if proc is not None and process_status != "ok":
+                setattr(setup_failure, PROCESS_STATUS_ATTRIBUTE, process_status)
+            if cleanup_failure is not None:
+                setup_failure.add_note(
+                    "secondary process cleanup error: " + type(cleanup_failure).__name__
+                )
+            raise setup_failure
+        if control_failure is not None:
+            if process_status != "ok":
+                setattr(control_failure, PROCESS_STATUS_ATTRIBUTE, process_status)
+            if cleanup_failure is not None:
+                control_failure.add_note(
+                    "secondary process cleanup error: " + type(cleanup_failure).__name__
+                )
+            raise control_failure
+        if cleanup_failure is not None:
+            setattr(cleanup_failure, PROCESS_STATUS_ATTRIBUTE, process_status)
+            if failure is not None:
+                cleanup_failure.add_note(
+                    "preceding body error: " + type(failure).__name__
+                )
+            raise cleanup_failure
+        if process_status != "ok":
+            status = process_status
+        elif failure is not None:
+            raise failure
         return Call(
-            proc.returncode,
+            proc.returncode if isinstance(proc.returncode, int) else -1,
             bytes(streams[0][:MAX_OUTPUT]),
             bytes(streams[1][:MAX_OUTPUT]),
             status,
+            type(failure).__name__ if failure is not None else "",
         )
 
 
 def require(result):
     if result.status != "ok" or result.code != 0 or result.err:
-        raise ValueError("Docker operation failed: " + result.status)
+        raise QualificationFailure(
+            "Docker operation failed: "
+            f"status={result.status} code={result.code} stderr={bool(result.err)} "
+            f"cause={result.failure_type or 'none'}"
+        )
     return result.out
 
 
@@ -393,9 +556,25 @@ class Adapter:
         self.memory = memory  # Lower budgets are used only by the inert OOM control.
         self.allow_stale_database = allow_stale_database
         self.poisoned = False
+        self.process_uncertain = False
 
     def command(self, args, **kwargs):
-        return self.execute(DOCKER + args, **kwargs)
+        if self.process_uncertain:
+            return Call(status="backend_unavailable")
+        try:
+            result = self.execute(DOCKER + args, **kwargs)
+        except BaseException as error:
+            if getattr(error, PROCESS_STATUS_ATTRIBUTE, "") in (
+                "reap_timeout",
+                "signal_error",
+            ):
+                self.process_uncertain = True
+                self.poisoned = True
+            raise
+        if result.status in ("reap_timeout", "signal_error"):
+            self.process_uncertain = True
+            self.poisoned = True
+        return result
 
     def create_args(self, name, scan_args):
         return [
@@ -466,9 +645,12 @@ class Adapter:
     def cleanup(self, name):
         """Require both acknowledged removal and independent current absence.
 
-        Always attempt the absence query, including after a removal exception.
-        Absence alone cannot resolve a lost removal or creation acknowledgment.
+        After process cleanup becomes uncertain, make no further Docker call and
+        leave the exact name uncertain. Otherwise always query absence, including
+        after a removal exception; absence cannot resolve a lost acknowledgement.
         """
+        if self.process_uncertain:
+            return False
         try:
             require(self.command(["rm", "--force", name], seconds=5))
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -496,6 +678,7 @@ class Adapter:
         self, data, scan_args=None, seconds=SECONDS, version_probe=False, name=None
     ):
         """One bounded observation; scan_args overrides are qualification-only."""
+        poll_deferred_reaps()
         if self.poisoned:
             return {"status": "backend_unavailable", "detections": []}
         if len(data) > MAX_INPUT:

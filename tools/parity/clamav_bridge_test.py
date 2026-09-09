@@ -331,6 +331,31 @@ class QualificationCLITests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Docker MemTotal must report"):
             qualify_clamav.require_host_memory({"MemTotal": None})
 
+    def test_authored_host_policy_failure_is_visible(self):
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "qualify_clamav.py",
+                    "--assets",
+                    "/private/assets.json",
+                    "--output",
+                    "/private/output",
+                ],
+            ),
+            patch.object(sys, "stderr", stderr),
+            patch.object(Path, "read_bytes", return_value=b"[]"),
+            patch.object(
+                qualify_clamav,
+                "qualify",
+                side_effect=adapter.QualificationFailure("fixed host policy"),
+            ),
+        ):
+            self.assertEqual(qualify_clamav.main(), 1)
+        self.assertEqual(stderr.getvalue(), "qualification failed: fixed host policy\n")
+
     def test_qualifier_rejects_consumer_incompatible_runtime_before_snapshot(self):
         valid = dict(RUNTIME, MemTotal=8 << 30)
         for key, value in (
@@ -410,6 +435,70 @@ class QualificationCLITests(unittest.TestCase):
             ):
                 self.assertEqual(qualify_clamav.main(), 0)
             qualify.assert_called_once()
+
+    def test_qualification_main_omits_local_paths_and_validation_details(self):
+        private_path = "/private/operator/assets.json"
+        for failure, message in (
+            (OSError(private_path), "qualification failed: local operation\n"),
+            (
+                ValueError("private validation detail"),
+                "qualification failed: invalid qualification data\n",
+            ),
+            (
+                IndexError("private index detail"),
+                "qualification failed: invalid qualification data\n",
+            ),
+            (
+                UnicodeError("private encoding detail"),
+                "qualification failed: invalid qualification data\n",
+            ),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                stderr = io.StringIO()
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "qualify_clamav.py",
+                            "--assets",
+                            "/inert/assets.json",
+                            "--output",
+                            "/inert/output",
+                        ],
+                    ),
+                    patch.object(sys, "stderr", stderr),
+                    patch.object(Path, "read_bytes", return_value=b"[]"),
+                    patch.object(qualify_clamav, "qualify", side_effect=failure),
+                ):
+                    self.assertEqual(qualify_clamav.main(), 1)
+                self.assertEqual(stderr.getvalue(), message)
+                self.assertNotIn(private_path, stderr.getvalue())
+                self.assertNotIn("private validation detail", stderr.getvalue())
+
+    def test_qualification_main_omits_unexpected_exception_details(self):
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "qualify_clamav.py",
+                    "--assets",
+                    "/private/assets.json",
+                    "--output",
+                    "/private/output",
+                ],
+            ),
+            patch.object(sys, "stderr", stderr),
+            patch.object(Path, "read_bytes", side_effect=RuntimeError("private")),
+        ):
+            self.assertEqual(qualify_clamav.main(), 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "qualification failed: unexpected error: RuntimeError\n",
+        )
+        self.assertNotIn("private", stderr.getvalue())
 
     def test_main_rejects_truncated_payload_and_header_without_private_output(self):
         script = str(Path(bridge.__file__).resolve())

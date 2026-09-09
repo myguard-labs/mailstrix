@@ -21,7 +21,7 @@ MARKER = b"MAILSTRIX_PRIVATE_INERT_QUALIFICATION_SIGNATURE_V1"
 def require_host_memory(info):
     memory = info.get("MemTotal")
     if type(memory) is not int or memory < 6 << 30:
-        raise ValueError(
+        raise adapter.QualificationFailure(
             "Docker MemTotal must report at least 6GiB for one 4GiB worker"
         )
 
@@ -91,7 +91,7 @@ def qualify(assets, output):
         }
         (output / "qualification.json").write_bytes(adapter.canonical(receipt))
         if observed["status"] != expected:
-            raise ValueError(
+            raise adapter.QualificationFailure(
                 f"{name}: expected {expected}, observed {observed['status']}"
             )
         print(name + ": " + observed["status"], flush=True)
@@ -104,7 +104,7 @@ def qualify(assets, output):
     version = record("engine_version", backend, b"", "version", version_probe=True)
     receipt["engine"]["version"] = version["engine_version"]
     if not version["engine_version"].startswith("ClamAV 1.5.3/"):
-        raise ValueError(
+        raise adapter.QualificationFailure(
             "only ClamAV 1.5.3 historical DB diagnostic policy is qualified"
         )
     backend.allow_stale_database = True
@@ -157,13 +157,15 @@ def qualify(assets, output):
         for item in test_snapshot["assets"]
         if item["path"] != "/db/mailstrix-private.ndb"
     ] != frozen["assets"]:
-        raise ValueError("host installation changed between frozen snapshots")
+        raise adapter.QualificationFailure(
+            "host installation changed between frozen snapshots"
+        )
     test_image = adapter.import_snapshot(output / "private-engine")
     receipt["private_engine"] = dict(test_snapshot, image=test_image)
     test_backend = adapter.Adapter(test_image, allow_stale_database=True)
     found = record("private_signature_detection", test_backend, MARKER, "detection")
     if found["detections"] != ["Mailstrix.Private.Inert.UNOFFICIAL"]:
-        raise ValueError("private signature identity mismatch")
+        raise adapter.QualificationFailure("private signature identity mismatch")
     record("private_signature_negative", test_backend, MARKER.lower(), "no_detection")
     receipt["qualified"] = True
     (output / "qualification.json").write_bytes(adapter.canonical(receipt))
@@ -184,13 +186,28 @@ def main():
     except subprocess.SubprocessError:
         print("qualification failed: subprocess failure", file=sys.stderr)
         return 1
-    except (
-        OSError,
-        ValueError,
-        KeyError,
-        TypeError,
-    ) as error:
-        print("qualification failed: " + str(error), file=sys.stderr)
+    except OSError:
+        print("qualification failed: local operation", file=sys.stderr)
+        return 1
+    except adapter.QualificationFailure as verdict:
+        print("qualification failed: " + str(verdict), file=sys.stderr)
+        return 1
+    except (ValueError, KeyError, TypeError, IndexError, UnicodeError):
+        print("qualification failed: invalid qualification data", file=sys.stderr)
+        return 1
+    except Exception as error:  # noqa: BLE001
+        failure_type = type(error).__name__
+        if (
+            not failure_type
+            or len(failure_type) > 64
+            or not failure_type.isascii()
+            or not failure_type.replace("_", "").isalnum()
+        ):
+            failure_type = "Exception"
+        print(
+            "qualification failed: unexpected error: " + failure_type,
+            file=sys.stderr,
+        )
         return 1
     return 0
 
