@@ -56,6 +56,15 @@ func waitBridgeExit(ctx context.Context, pid int) error {
 	}
 }
 
+func maySkipDeniedProc(readErr error, ownerUID uint32) bool {
+	return (errors.Is(readErr, syscall.EACCES) || errors.Is(readErr, syscall.EPERM)) &&
+		ownerUID != uint32(os.Geteuid())
+}
+
+func processGone(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
+}
+
 func bridgeGroupQuiescent(pid int) (bool, error) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -69,11 +78,23 @@ func bridgeGroupQuiescent(pid int) (bool, error) {
 			if err != nil || member == pid {
 				continue
 			}
-			raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			statPath := filepath.Join("/proc", entry.Name(), "stat")
+			raw, err := os.ReadFile(statPath)
+			if processGone(err) {
 				continue
 			}
 			if err != nil {
+				info, statErr := os.Stat(filepath.Dir(statPath))
+				if processGone(statErr) {
+					continue
+				}
+				if statErr == nil {
+					// The fixed host bridge and Docker CLI retain the caller UID;
+					// container processes do not join this host process group.
+					if owner, ok := info.Sys().(*syscall.Stat_t); ok && maySkipDeniedProc(err, owner.Uid) {
+						continue
+					}
+				}
 				return false, err
 			}
 			closing := bytes.LastIndexByte(raw, ')')

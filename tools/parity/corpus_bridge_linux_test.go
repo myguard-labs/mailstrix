@@ -109,6 +109,44 @@ func TestBridgeCancellationHasSinglePinnedSignalOwner(t *testing.T) {
 	}
 }
 
+func TestProcPermissionErrorsSkipOnlyUnrelatedOwners(t *testing.T) {
+	self := uint32(os.Geteuid())
+	other := self + 1
+	for _, tc := range []struct {
+		err   error
+		uid   uint32
+		want  bool
+		label string
+	}{
+		{syscall.EACCES, other, true, "hidepid unrelated owner"},
+		{syscall.EPERM, other, true, "permission unrelated owner"},
+		{syscall.EACCES, self, false, "owned group member"},
+		{syscall.EPERM, self, false, "owned group permission"},
+		{syscall.EIO, other, false, "unrelated read failure"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			if got := maySkipDeniedProc(tc.err, tc.uid); got != tc.want {
+				t.Fatalf("skip=%t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessGoneErrors(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{os.ErrNotExist, true},
+		{syscall.ESRCH, true},
+		{syscall.EACCES, false},
+	} {
+		if got := processGone(tc.err); got != tc.want {
+			t.Fatalf("processGone(%v)=%t, want %t", tc.err, got, tc.want)
+		}
+	}
+}
+
 func TestCorpusPolicyNonregularRejectedBeforeRead(t *testing.T) {
 	m, _, root := generated(t)
 	raw, err := encodeManifest(m)
