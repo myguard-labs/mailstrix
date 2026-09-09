@@ -9,6 +9,7 @@ Local scratch images and snapshots are retained; no image is tagged or pushed.
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,17 +28,14 @@ def require_host_memory(info):
 
 def qualify(assets, output):
     output = Path(output)
-    output.mkdir(mode=0o700)
     info = json.loads(
         adapter.require(
             adapter.call(adapter.DOCKER + ["info", "--format", "{{json .}}"], seconds=5)
         )
     )
-    if info.get("CgroupVersion") != "2" or not any(
-        "seccomp" in item for item in info.get("SecurityOptions", [])
-    ):
-        raise ValueError("cgroup v2 and seccomp required")
+    adapter.require_runtime_containment(info)
     require_host_memory(info)
+    output.mkdir(mode=0o700)
     receipt = {
         "schema_version": 1,
         "scope": "inert_clamav_adapter_qualification_only",
@@ -48,6 +46,7 @@ def qualify(assets, output):
                 "KernelVersion",
                 "CgroupVersion",
                 "SecurityOptions",
+                *adapter.RUNTIME_LIMITS,
             )
         },
         "policy": {
@@ -179,7 +178,18 @@ def main():
     try:
         assets = json.loads(Path(args.assets).read_bytes())
         qualify(assets, args.output)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except subprocess.TimeoutExpired:
+        print("qualification failed: subprocess timeout", file=sys.stderr)
+        return 1
+    except subprocess.SubprocessError:
+        print("qualification failed: subprocess failure", file=sys.stderr)
+        return 1
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as error:
         print("qualification failed: " + str(error), file=sys.stderr)
         return 1
     return 0

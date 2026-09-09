@@ -206,6 +206,8 @@ jobs:
         run: sh packaging/deb/maintscript_test.sh
 
       - name: parity helper behaviour (stdlib controls, no Docker)
+        # Keep discovered tests hermetic: no Docker, network, external service,
+        # scanner installation, image, or corpus dependency belongs in this step.
         run: |
           python3 -B -m unittest discover -s tools/parity \
             -p '*_test.py'

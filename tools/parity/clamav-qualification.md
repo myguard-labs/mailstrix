@@ -25,7 +25,7 @@ That shortened example is not a complete installation. Supply every needed
 library and the intended DB files. Missing dependencies fail qualification.
 
 ```sh
-python3 -B -m unittest discover -s tools/parity -p 'clamav_adapter_test.py'
+python3 -B -m unittest discover -s tools/parity -p 'clamav_*_test.py'
 python3 -B tools/parity/qualify_clamav.py \
   --assets /path/to/assets.json --output /path/to/new-output
 ```

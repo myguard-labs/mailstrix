@@ -94,6 +94,43 @@ class ClassifyTests(unittest.TestCase):
                 )
 
 
+class RuntimeContainmentTests(unittest.TestCase):
+    def test_requires_exact_complete_docker_capabilities(self):
+        valid = {
+            "CgroupVersion": "2",
+            "SecurityOptions": [adapter.BUILTIN_SECCOMP],
+            **{key: True for key in adapter.RUNTIME_LIMITS},
+        }
+        adapter.require_runtime_containment(valid)
+        changes = [
+            ("CgroupVersion", "1"),
+            ("CgroupVersion", None),
+            ("SecurityOptions", ["name=seccomp,profile=default"]),
+            ("SecurityOptions", []),
+            *[
+                (key, value)
+                for key in adapter.RUNTIME_LIMITS
+                for value in (False, None, 0, 1, "true")
+            ],
+        ]
+        for key, value in changes:
+            with self.subTest(key=key, value=value):
+                invalid = dict(valid, **{key: value})
+                with self.assertRaisesRegex(ValueError, "containment"):
+                    adapter.require_runtime_containment(invalid)
+        for invalid in (
+            None,
+            [],
+            {"SecurityOptions": "not-a-list"},
+            dict(valid, SecurityOptions=adapter.BUILTIN_SECCOMP),
+        ):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "containment"),
+            ):
+                adapter.require_runtime_containment(invalid)
+
+
 class CallTests(unittest.TestCase):
     def test_stdin_and_both_pipes(self):
         result = adapter.call(
@@ -130,6 +167,9 @@ class CallTests(unittest.TestCase):
         self.assertEqual(result.status, "timeout")
         self.assertLess(result.code, 0)
 
+    @unittest.skipUnless(
+        sys.platform == "linux", "prctl subreaper and /proc are Linux-only"
+    )
     def test_early_leader_exit_kills_private_group_before_reap(self):
         child = (
             "import subprocess,sys;"
@@ -204,6 +244,35 @@ class CallTests(unittest.TestCase):
         if cleanup_error is not None:
             raise AssertionError("descendant cleanup failed") from cleanup_error
         self.assertFalse(Path(f"/proc/{descendant}").exists())
+
+    def test_subreaper_control_discovers_as_skip_off_linux(self):
+        # The decorator reads sys.platform while the isolated child imports a
+        # fresh copy of this test module from the explicitly restored path.
+        script = """import importlib.util,sys
+sys.platform='darwin'
+sys.path.insert(0,sys.argv[1])
+spec=importlib.util.spec_from_file_location('adapter_tests_off_linux',sys.argv[2])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+method=module.CallTests.test_early_leader_exit_kills_private_group_before_reap
+assert method.__unittest_skip__ is True
+assert 'Linux-only' in method.__unittest_skip_why__
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                script,
+                str(Path(__file__).resolve().parent),
+                str(Path(__file__).resolve()),
+            ],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_truncated_stdin_is_not_success(self):
         result = adapter.call(

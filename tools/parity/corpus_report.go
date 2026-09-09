@@ -181,6 +181,15 @@ type corpusObservers struct {
 	clamav    func(sample, []byte) clamObservation
 }
 
+func terminalOletoolsStatus(status string) bool {
+	switch status {
+	case "ok", "unsupported", "malformed_output", "tool_error", "execution_error", "timeout", "output_limit", "input_error":
+		return false
+	default:
+		return true
+	}
+}
+
 func corpusCorrespondence(s sample, left observation, right nativeObservation) string {
 	if s.Format != "office" || s.InputUnit != "file" || left.Status != "ok" || right.Status != "ok" || right.Format != "OpenXML" {
 		return "unknown"
@@ -299,7 +308,7 @@ func compareCorpusAll(root *os.Root, m manifest, p corpusPolicy, context corpusC
 			right.Status = "unsupported"
 			if s.Format == "office" && s.InputUnit == "file" {
 				right = observers.oletools("oletools", data)
-				if right.Status != "ok" {
+				if terminalOletoolsStatus(right.Status) {
 					stopped = true
 					break
 				}

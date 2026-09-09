@@ -2,6 +2,7 @@
 
 import copy
 import io
+import json
 import os
 import subprocess
 import sys
@@ -23,6 +24,14 @@ IDENTITY = {
     "engine_assets_sha256": "c" * 64,
     "database_sha256": "d" * 64,
     "version": "ClamAV 1.5.3/28048/Thu Jul  2 06:25:04 2026",
+}
+RUNTIME = {
+    "CgroupVersion": "2",
+    "SecurityOptions": [adapter.BUILTIN_SECCOMP],
+    "MemoryLimit": True,
+    "SwapLimit": True,
+    "CpuCfsQuota": True,
+    "PidsLimit": True,
 }
 
 
@@ -74,14 +83,7 @@ class FrozenTests(unittest.TestCase):
             },
             "Config": {},
         }
-        self.runtime = {
-            "CgroupVersion": "2",
-            "SecurityOptions": ["name=seccomp,profile=builtin"],
-            "MemoryLimit": True,
-            "SwapLimit": True,
-            "CpuCfsQuota": True,
-            "PidsLimit": True,
-        }
+        self.runtime = dict(RUNTIME)
 
     def inspect(self):
         with patch.object(
@@ -124,12 +126,19 @@ class FrozenTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "image does not match"):
                     self.inspect()
                 self.image = original
-        for key in ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit"):
-            with self.subTest(key=key):
-                self.runtime[key] = False
+        for key in adapter.RUNTIME_LIMITS:
+            for value in (False, None, 0, 1, "true"):
+                with self.subTest(key=key, value=value):
+                    self.runtime[key] = value
+                    with self.assertRaisesRegex(ValueError, "containment"):
+                        self.inspect()
+                    self.runtime[key] = True
+        for options in ([], ["name=seccomp,profile=default"], "seccomp"):
+            with self.subTest(options=options):
+                self.runtime["SecurityOptions"] = options
                 with self.assertRaisesRegex(ValueError, "containment"):
                     self.inspect()
-                self.runtime[key] = True
+                self.runtime["SecurityOptions"] = [adapter.BUILTIN_SECCOMP]
 
     def test_tar_and_inventory_corruption_before_any_docker_call(self):
         tarpath = self.root / "engine/rootfs.tar"
@@ -316,9 +325,91 @@ class ProtocolTests(unittest.TestCase):
                 self.assertEqual(stdout.buffer.getvalue(), b"")
                 self.assertEqual(stderr.getvalue(), "ClamAV bridge failed\n")
 
+
+class QualificationCLITests(unittest.TestCase):
     def test_null_host_memory_is_clear_qualification_failure(self):
         with self.assertRaisesRegex(ValueError, "Docker MemTotal must report"):
             qualify_clamav.require_host_memory({"MemTotal": None})
+
+    def test_qualifier_rejects_consumer_incompatible_runtime_before_snapshot(self):
+        valid = dict(RUNTIME, MemTotal=8 << 30)
+        for key, value in (
+            ("SecurityOptions", ["name=seccomp,profile=default"]),
+            ("CpuCfsQuota", False),
+            ("PidsLimit", 1),
+        ):
+            with (
+                self.subTest(key=key, value=value),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                info = dict(valid, **{key: value})
+                with (
+                    patch.object(
+                        adapter,
+                        "call",
+                        return_value=adapter.Call(out=adapter.canonical(info)),
+                    ),
+                    patch.object(adapter, "snapshot") as snapshot,
+                    self.assertRaisesRegex(ValueError, "containment"),
+                ):
+                    output = Path(directory) / "qualification"
+                    qualify_clamav.qualify([], output)
+                snapshot.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_qualification_main_contains_subprocess_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary, database = root / "clamscan", root / "main.cvd"
+            binary.write_bytes(b"inert scanner")
+            database.write_bytes(b"inert database")
+            assets = root / "assets.json"
+            assets.write_text(
+                json.dumps(
+                    [
+                        [str(binary), "/usr/bin/clamscan"],
+                        [str(database), "/db/main.cvd"],
+                    ]
+                ),
+                encoding="ascii",
+            )
+            argv = ["qualify_clamav.py", "--assets", str(assets), "--output"]
+            valid = dict(RUNTIME, MemTotal=8 << 30)
+            for name, calls, message in (
+                (
+                    "info",
+                    [subprocess.TimeoutExpired(["docker", "info"], 5)],
+                    "qualification failed: subprocess timeout\n",
+                ),
+                (
+                    "import",
+                    [
+                        adapter.Call(out=adapter.canonical(valid)),
+                        subprocess.SubprocessError("inert import failure"),
+                    ],
+                    "qualification failed: subprocess failure\n",
+                ),
+            ):
+                with self.subTest(name=name):
+                    stderr = io.StringIO()
+                    with (
+                        patch.object(
+                            sys, "argv", [*argv, str(root / (name + "-output"))]
+                        ),
+                        patch.object(sys, "stderr", stderr),
+                        patch.object(adapter, "call", side_effect=calls),
+                    ):
+                        self.assertEqual(qualify_clamav.main(), 1)
+                    self.assertEqual(stderr.getvalue(), message)
+                    self.assertNotIn("docker", stderr.getvalue())
+                    self.assertNotIn("inert import failure", stderr.getvalue())
+                    self.assertNotIn("Traceback", stderr.getvalue())
+            with (
+                patch.object(sys, "argv", [*argv, str(root / "success-output")]),
+                patch.object(qualify_clamav, "qualify", return_value={}) as qualify,
+            ):
+                self.assertEqual(qualify_clamav.main(), 0)
+            qualify.assert_called_once()
 
     def test_main_rejects_truncated_payload_and_header_without_private_output(self):
         script = str(Path(bridge.__file__).resolve())

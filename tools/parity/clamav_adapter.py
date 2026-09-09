@@ -32,6 +32,8 @@ MEMORY = 4 << 30
 TMPFS = "rw,noexec,nosuid,nodev,size=512m"
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
 CONTAINER_NAME = re.compile(r"mailstrix-clamav-[0-9a-f]{32}")
+RUNTIME_LIMITS = ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit")
+BUILTIN_SECCOMP = "name=seccomp,profile=builtin"
 # The Go bridge puts Python and its Docker clients in one parent-owned process
 # group. Standalone qualification owns/reaps each client's group itself.
 CALL_NEW_SESSION = True
@@ -85,6 +87,18 @@ def stream_digest(stream):
     while chunk := stream.read(1 << 20):
         value.update(chunk)
     return value.hexdigest()
+
+
+def require_runtime_containment(info):
+    """Require every host capability used by the qualified Docker envelope."""
+    if (
+        not isinstance(info, dict)
+        or info.get("CgroupVersion") != "2"
+        or not isinstance(info.get("SecurityOptions"), list)
+        or BUILTIN_SECCOMP not in info["SecurityOptions"]
+        or any(info.get(key) is not True for key in RUNTIME_LIMITS)
+    ):
+        raise ValueError("runtime containment unavailable")
 
 
 @dataclass

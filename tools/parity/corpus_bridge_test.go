@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +28,10 @@ func clamReplyFixture(req clamBridgeRequest) clamBridgeReply {
 
 func TestClamReplyBindingsAndUnknowns(t *testing.T) {
 	req := clamRequestFixture()
-	raw, _ := json.Marshal(clamReplyFixture(req))
+	raw, err := json.Marshal(clamReplyFixture(req))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := decodeClamReply(raw, req); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +65,10 @@ func TestClamReplyBindingsAndUnknowns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := clamReplyFixture(req)
 			tc.edit(&r)
-			raw, _ := json.Marshal(r)
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if _, err := decodeClamReply(raw, req); err == nil {
 				t.Fatal("invalid reply accepted")
 			}
@@ -84,27 +92,28 @@ func TestClamBridgeProcessFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name, script string
-		budget       time.Duration
-		wantError    bool
+		name, script, cause string
+		budget              time.Duration
+		wantError           bool
 	}{
 		{"success", `import json,sys
 r=json.loads(sys.stdin.buffer.readline());sys.stdin.buffer.read()
 out={k:r[k] for k in ('version','name','manifest_sha256','sample_sha256','size','input_unit','identity','scan_args')}
 out.update(status='no_detection',detections=[],diagnostics=[],database_stale=False,terminal=False)
-print(json.dumps(out))`, time.Second, false},
-		{"death before create", `import sys;sys.exit(7)`, time.Second, true},
-		{"death after create", `import json,sys;r=json.loads(sys.stdin.buffer.readline());sys.stdin.buffer.read();sys.exit(7)`, time.Second, true},
-		{"timeout", `import time;time.sleep(60)`, 100 * time.Millisecond, true},
-		{"stdout bound", `import sys;sys.stdout.write('x'*70000)`, time.Second, true},
-		{"stderr bound", `import sys;sys.stderr.write('x'*70000)`, time.Second, true},
-		{"truncated reply", `import sys;sys.stdout.write('{"version":')`, time.Second, true},
+print(json.dumps(out))`, "", 30 * time.Second, false},
+		{"death before create", `import sys;sys.exit(7)`, "process", 30 * time.Second, true},
+		{"death after create", `import json,sys;r=json.loads(sys.stdin.buffer.readline());sys.stdin.buffer.read();sys.exit(7)`, "process", 30 * time.Second, true},
+		{"timeout", `import time;time.sleep(60)`, "timeout", 100 * time.Millisecond, true},
+		{"stdout bound", `import sys;sys.stdout.write('x'*70000)`, "output_limit", 30 * time.Second, true},
+		{"stderr bound", `import sys;sys.stderr.write('x'*70000)`, "output_limit", 30 * time.Second, true},
+		{"stderr diagnostic", `import sys;sys.stderr.write('PRIVATE_SENTINEL')`, "unexpected_diagnostics", 30 * time.Second, true},
+		{"truncated reply", `import sys;sys.stdout.write('{"version":')`, "invalid_reply", 30 * time.Second, true},
 		{"identity mismatch", `import json,sys
 r=json.loads(sys.stdin.buffer.readline());sys.stdin.buffer.read()
 out={k:r[k] for k in ('version','name','manifest_sha256','sample_sha256','size','input_unit','identity','scan_args')}
 out.update(name=r['name']+'x',status='no_detection',detections=[],diagnostics=[],database_stale=False,terminal=False)
-print(json.dumps(out))`, time.Second, true},
-		{"malformed", `print('{}')`, time.Second, true},
+print(json.dumps(out))`, "invalid_reply", 30 * time.Second, true},
+		{"malformed", `print('{}')`, "invalid_reply", 30 * time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, cleanupOK := range []bool{true, false} {
@@ -135,9 +144,12 @@ print(json.dumps(out))`, time.Second, true},
 					t.Fatal("bridge child not reaped")
 				}
 				if tc.wantError {
-					wantDiagnostic := "container=" + name + " cleanup_confirmed=" + map[bool]string{true: "true", false: "false"}[cleanupOK] + "; backend stopped"
+					wantDiagnostic := "container=" + name + " cause=" + tc.cause + " cleanup_confirmed=" + strconv.FormatBool(cleanupOK) + "; backend stopped"
 					if name == "" || cleaned != name || !strings.Contains(diagnostic.String(), wantDiagnostic) {
 						t.Fatal("exact uncertainty identity lost")
+					}
+					if strings.Contains(diagnostic.String(), "PRIVATE_SENTINEL") {
+						t.Fatal("private bridge diagnostic leaked")
 					}
 					if _, err := b.invoke(clamRequestFixture(), nil); err == nil {
 						t.Fatal("terminal backend reused")
@@ -150,6 +162,16 @@ print(json.dumps(out))`, time.Second, true},
 				}
 			}
 		})
+	}
+}
+
+func TestClamBridgeFailureCausePrecedence(t *testing.T) {
+	deadline := context.DeadlineExceeded
+	if got := clamBridgeFailureCause(clamBridgeOutcome{groupAbsent: false, runErr: deadline, groupErr: errors.New("quiescence"), contextErr: deadline, outputOverflow: true, diagnosticOverflow: true, diagnosticBytes: 1}); got != "group_cleanup" {
+		t.Fatalf("group cleanup did not take precedence: %s", got)
+	}
+	if got := clamBridgeFailureCause(clamBridgeOutcome{groupAbsent: true, runErr: context.Canceled, contextErr: context.Canceled, outputOverflow: true}); got != "output_limit" {
+		t.Fatalf("output limit did not take precedence over cancellation: %s", got)
 	}
 }
 

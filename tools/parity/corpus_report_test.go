@@ -48,7 +48,10 @@ func TestCorpusPolicyExplicitUnknowns(t *testing.T) {
 			}
 		})
 	}
-	raw, _ := json.Marshal(p)
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := decodeCorpusPolicy(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +147,10 @@ func TestCorpusReportTruthPrivacyAndReceipts(t *testing.T) {
 	if r.ClamAVRelation.Cells["clamav_unique"] != 2 || r.ClamAVRelation.Cells["both_positive"] != 2 || r.ClamAVRelation.Cells["unknown"] != 2 || r.Complete || r.RealWorldPrecision != nil {
 		t.Fatalf("relation counts: %+v", r)
 	}
-	public, _ := json.Marshal(r)
+	public, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, s := range m.Samples {
 		for _, private := range []string{s.ID, s.SHA256, s.Locator, root.Name()} {
 			if bytes.Contains(public, []byte(private)) {
@@ -183,6 +189,88 @@ func TestCorpusReportTruthPrivacyAndReceipts(t *testing.T) {
 	}
 	if err := json.Unmarshal(lines[len(lines)-1], &footer); err != nil || footer.Schema != "mailstrix-local-corpus-end-v1" || footer.Count != len(m.Samples) || footer.Complete != r.Complete || footer.ReportSHA != digest(public) {
 		t.Fatal("receipt footer does not bind aggregate")
+	}
+}
+
+func TestCorpusOletoolsStopsOnlyForTerminalLaunchState(t *testing.T) {
+	originalRead := readCorpusSample
+	defer func() { readCorpusSample = originalRead }()
+	type statusCase struct {
+		status   string
+		terminal bool
+	}
+	var tests []statusCase
+	for _, status := range []string{"cleanup_error", "setup_error", "identity_error", "pin_mismatch", "unsupported_platform", "unknown_future_status"} {
+		tests = append(tests, statusCase{status, true})
+	}
+	for _, status := range []string{"unsupported", "malformed_output", "tool_error", "execution_error", "timeout", "output_limit", "input_error"} {
+		tests = append(tests, statusCase{status, false})
+	}
+	for _, tc := range tests {
+		t.Run(tc.status, func(t *testing.T) {
+			m, hash, root := generated(t)
+			reads := map[string]int{}
+			readCorpusSample = func(root *os.Root, sample sample) ([]byte, error) {
+				reads[sample.SHA256]++
+				return readSample(root, sample)
+			}
+			for i := range m.Samples {
+				m.Samples[i].Format, m.Samples[i].InputUnit = "office", "file"
+			}
+			unique := map[string]bool{}
+			for _, sample := range m.Samples {
+				unique[sample.SHA256] = true
+			}
+			mailstrixCalls, oletoolsCalls, clamavCalls := 0, 0, 0
+			observers := corpusObservers{
+				mailstrix: func(sample, []byte) observation {
+					mailstrixCalls++
+					return observation{Status: "ok"}
+				},
+				oletools: func(string, []byte) nativeObservation {
+					oletoolsCalls++
+					if oletoolsCalls == 1 {
+						return nativeObservation{Status: tc.status}
+					}
+					return nativeObservation{Status: "ok", Format: "OpenXML"}
+				},
+				clamav: func(sample, []byte) clamObservation {
+					clamavCalls++
+					return clamObservation{Status: "no_detection", Detections: []string{}, Diagnostics: []clamDiagnostic{}}
+				},
+			}
+			policy := comparisonPolicyFixture()
+			ctx := corpusContext{Schema: corpusSchema, ManifestSHA256: hash, MailstrixWorker: isolatedIdentity{RulesFingerprintSHA256: policy.RulesFingerprintSHA256}}
+			r, err := compareCorpusAll(root, m, policy, ctx, observers, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.terminal {
+				if mailstrixCalls != 1 || oletoolsCalls != 1 || clamavCalls != 0 || r.Statuses["oletools"]["not_run"] != len(unique)-1 {
+					t.Fatalf("terminal state continued: mailstrix=%d oletools=%d clamav=%d statuses=%v", mailstrixCalls, oletoolsCalls, clamavCalls, r.Statuses["oletools"])
+				}
+				for i, sample := range m.Samples {
+					want := 1
+					if i == 0 {
+						want = 2
+					}
+					if reads[sample.SHA256] != want {
+						t.Fatalf("terminal state read sample %d %d times, want %d", i, reads[sample.SHA256], want)
+					}
+				}
+			} else if mailstrixCalls != len(unique) || oletoolsCalls != len(unique) || clamavCalls != len(unique) || r.Statuses["oletools"]["not_run"] != 0 {
+				t.Fatalf("ordinary failure stopped corpus: mailstrix=%d oletools=%d clamav=%d statuses=%v", mailstrixCalls, oletoolsCalls, clamavCalls, r.Statuses["oletools"])
+			} else {
+				for i, sample := range m.Samples {
+					if reads[sample.SHA256] != 2 {
+						t.Fatalf("ordinary failure read sample %d %d times, want 2", i, reads[sample.SHA256])
+					}
+				}
+			}
+			if r.Complete {
+				t.Fatal("failed oletools observation produced complete report")
+			}
+		})
 	}
 }
 

@@ -168,15 +168,7 @@ def frozen_identity(directory, variant):
             adapter.call(adapter.DOCKER + ["info", "--format={{json .}}"], seconds=5)
         )
     )
-    if (
-        runtime.get("CgroupVersion") != "2"
-        or "name=seccomp,profile=builtin" not in runtime.get("SecurityOptions", [])
-        or any(
-            runtime.get(key) is not True
-            for key in ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit")
-        )
-    ):
-        raise ValueError("runtime containment unavailable")
+    adapter.require_runtime_containment(runtime)
     return calculated
 
 

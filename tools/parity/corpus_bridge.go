@@ -188,6 +188,31 @@ func (b *clamBridge) cleanupAfterFailure(name string) bool {
 	return status == "ok" && absentStatus == "ok" && len(bytes.TrimSpace(absent)) == 0
 }
 
+type clamBridgeOutcome struct {
+	groupAbsent        bool
+	runErr             error
+	groupErr           error
+	contextErr         error
+	outputOverflow     bool
+	diagnosticOverflow bool
+	diagnosticBytes    int
+}
+
+func clamBridgeFailureCause(outcome clamBridgeOutcome) string {
+	switch {
+	case outcome.groupErr != nil || !outcome.groupAbsent:
+		return "group_cleanup"
+	case outcome.outputOverflow || outcome.diagnosticOverflow:
+		return "output_limit"
+	case outcome.diagnosticBytes != 0:
+		return "unexpected_diagnostics"
+	case errors.Is(outcome.runErr, context.DeadlineExceeded) || errors.Is(outcome.contextErr, context.DeadlineExceeded):
+		return "timeout"
+	default:
+		return "process"
+	}
+}
+
 func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeReply, error) {
 	var reply clamBridgeReply
 	if b.stopped || len(data) > maxSample || request.Size != int64(len(data)) || request.SampleSHA256 != digest(data) {
@@ -229,9 +254,17 @@ func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeR
 	// PID/PGID while we kill the whole group; only then may Wait release that
 	// identity and allow exact-name container cleanup to take ownership.
 	groupAbsent, runErr, groupErr := runBridgeGroup(ctx, cmd)
+	cause := ""
 	if runErr == nil && groupErr == nil && !out.overflow && !diagnostic.overflow && diagnostic.Len() == 0 {
 		reply, err = decodeClamReply(out.Bytes(), request)
+		if err != nil {
+			cause = "invalid_reply"
+		}
 	} else {
+		cause = clamBridgeFailureCause(clamBridgeOutcome{
+			groupAbsent: groupAbsent, runErr: runErr, groupErr: groupErr, contextErr: ctx.Err(),
+			outputOverflow: out.overflow, diagnosticOverflow: diagnostic.overflow, diagnosticBytes: diagnostic.Len(),
+		})
 		err = errors.New("ClamAV bridge terminated without a complete reply")
 	}
 	if err != nil {
@@ -240,7 +273,7 @@ func (b *clamBridge) invoke(request clamBridgeRequest, data []byte) (clamBridgeR
 		// cleanup ownership only after the entire group is confirmed absent.
 		clean := groupAbsent && b.cleanupAfterFailure(request.Name)
 		if b.diagnostics != nil {
-			printError(b.diagnostics, fmt.Sprintf("ClamAV bridge uncertainty: container=%s cleanup_confirmed=%t; backend stopped", request.Name, clean))
+			printError(b.diagnostics, fmt.Sprintf("ClamAV bridge uncertainty: container=%s cause=%s cleanup_confirmed=%t; backend stopped", request.Name, cause, clean))
 		}
 		return reply, err
 	}
