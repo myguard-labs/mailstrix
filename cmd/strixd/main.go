@@ -81,6 +81,22 @@ func selectRulesFallback(cfg *mailstrix.Config, cacheErr error, logf func(string
 	}
 }
 
+func runReloadSignals(ctx context.Context, hup <-chan os.Signal, reload func()) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			// Both cases may be ready during shutdown. Do not start another
+			// potentially blocking cache reload after cancellation won the race.
+			if ctx.Err() != nil {
+				return
+			}
+			reload()
+		}
+	}
+}
+
 func main() {
 	log.SetFlags(0) // journald adds its own timestamps
 	os.Exit(run(os.Args[1:]))
@@ -275,20 +291,15 @@ func cmdServe(args []string) int {
 	defer func() { signal.Stop(hup); updateCancel(); <-hupDone }()
 	go func() {
 		defer close(hupDone)
-		for {
-			select {
-			case <-updateCtx.Done():
-				return
-			case <-hup:
-			}
+		runReloadSignals(updateCtx, hup, func() {
 			logf("SIGHUP: reloading rules")
 			if err := scanner.Reload(); err != nil {
 				logf("reload failed: %v", err)
-				continue
+				return
 			}
 			scanner.ReloadDenylist()
 			srv.FlushCache()
-		}
+		})
 	}()
 
 	// Graceful shutdown on SIGTERM/SIGINT: stop accepting new scans (/ready 503s)

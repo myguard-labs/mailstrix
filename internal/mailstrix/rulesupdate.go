@@ -37,6 +37,7 @@ type RulesUpdater struct {
 	mu              sync.Mutex
 	poll            sync.Mutex
 	state           RulesUpdateState
+	enabled         bool
 	cfg             *Config
 	scanner         *Scanner
 	libyara         string
@@ -64,8 +65,8 @@ func NewRulesUpdater(cfg *Config, scanner *Scanner, libyara string, flush func()
 	// Poll's configured context bounds network and lock acquisition. Native
 	// libyara load/reload calls cannot be safely preempted once entered, so the
 	// client must not impose a second, shorter transport timeout.
-	u := &RulesUpdater{cfg: cfg, scanner: scanner, libyara: libyara, flush: flush, client: &http.Client{}}
-	u.state.Enabled = cfg.RulesPollInterval > 0
+	u := &RulesUpdater{cfg: cfg, scanner: scanner, enabled: cfg.RulesPollInterval > 0, libyara: libyara, flush: flush, client: &http.Client{}}
+	u.state.Enabled = u.enabled
 	if loaded := scanner.loadedManifest.Load(); loaded != nil {
 		u.state.CachedVersion, u.state.LoadedVersion = loaded.Version, loaded.Version
 	}
@@ -108,7 +109,7 @@ func (u *RulesUpdater) Snapshot() RulesUpdateState {
 // calls finish synchronously once entered. Concurrent callers coalesce (no
 // queue or overlapping fetch); a disabled updater performs no network requests.
 func (u *RulesUpdater) Poll(ctx context.Context) error {
-	if !u.state.Enabled || !u.poll.TryLock() {
+	if !u.enabled || !u.poll.TryLock() {
 		return nil
 	}
 	defer u.poll.Unlock()
@@ -193,7 +194,7 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 // attempt. There are no nested retries; failures retry at the next bounded poll.
 // The caller must join Run after cancellation before closing the scanner.
 func (u *RulesUpdater) Run(ctx context.Context) {
-	if !u.state.Enabled {
+	if !u.enabled {
 		return
 	}
 	for ctx.Err() == nil {

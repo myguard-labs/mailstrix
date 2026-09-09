@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,22 @@ import (
 	yara "github.com/hillu/go-yara/v4"
 	"github.com/myguard-labs/mailstrix/internal/mailstrix"
 )
+
+func TestReloadSignalsDoNotStartWorkAfterCancellation(t *testing.T) {
+	// Both select cases are ready. Repetition makes the old unchecked signal
+	// branch's chance of escaping detection negligible (2^-100).
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		hup := make(chan os.Signal, 1)
+		hup <- syscall.SIGHUP
+		cancel()
+		calls := 0
+		runReloadSignals(ctx, hup, func() { calls++ })
+		if calls != 0 {
+			t.Fatalf("iteration %d: reload called %d times after cancellation", i, calls)
+		}
+	}
+}
 
 func TestDisablePollingForCacheFallbackPreservesValidation(t *testing.T) {
 	cacheErr := errors.New("cache unavailable")
