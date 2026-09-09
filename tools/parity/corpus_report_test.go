@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -271,6 +272,17 @@ func TestCorpusOletoolsStopsOnlyForTerminalLaunchState(t *testing.T) {
 				t.Fatal("failed oletools observation produced complete report")
 			}
 		})
+	}
+}
+
+func TestPublicClamDetectionNamesAreBounded(t *testing.T) {
+	report := clamRelationReport{UniqueNames: map[string]int{}}
+	for i := range maxPublicClamNames + 2 {
+		recordPublicClamName(&report, fmt.Sprintf("Inert.Name.%d", i))
+	}
+	recordPublicClamName(&report, "Inert.Name.0")
+	if len(report.UniqueNames) != maxPublicClamNames || report.UniqueNames["Inert.Name.0"] != 2 || report.OmittedNameOccurrences != 2 {
+		t.Fatalf("unbounded or inaccurate public names: names=%d first=%d omitted=%d", len(report.UniqueNames), report.UniqueNames["Inert.Name.0"], report.OmittedNameOccurrences)
 	}
 }
 

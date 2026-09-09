@@ -17,6 +17,7 @@ const corpusMapping = "ooxml-vba-observations-v1"
 const corpusSchema = "mailstrix-corpus-comparison-v1"
 const maxPolicyBytes = 64 << 10
 const maxReceiptBytes = 64 << 20
+const maxPublicClamNames = 4096
 
 var corpusVBASymbol = symbol{"oleid_indicators.yara", "OLEID_OOXML_VBA_Present"}
 
@@ -130,11 +131,22 @@ type correspondenceReport struct {
 }
 
 type clamRelationReport struct {
-	Definition      string         `json:"definition"`
-	Cells           map[string]int `json:"cells"`
-	ExcludedReasons map[string]int `json:"excluded_reasons"`
-	UniqueNames     map[string]int `json:"unique_detection_names"`
-	StaleDatabase   int            `json:"stale_database_observations"`
+	Definition             string         `json:"definition"`
+	Cells                  map[string]int `json:"cells"`
+	ExcludedReasons        map[string]int `json:"excluded_reasons"`
+	UniqueNames            map[string]int `json:"unique_detection_names"`
+	OmittedNameOccurrences int            `json:"omitted_detection_name_occurrences"`
+	StaleDatabase          int            `json:"stale_database_observations"`
+}
+
+func recordPublicClamName(report *clamRelationReport, name string) {
+	if count, exists := report.UniqueNames[name]; exists {
+		report.UniqueNames[name] = count + 1
+	} else if len(report.UniqueNames) < maxPublicClamNames {
+		report.UniqueNames[name] = 1
+	} else {
+		report.OmittedNameOccurrences++
+	}
 }
 
 type corpusReport struct {
@@ -355,7 +367,7 @@ func compareCorpusAll(root *os.Root, m manifest, p corpusPolicy, context corpusC
 			r.ClamAVRelation.Cells[relation]++
 			if relation == "clamav_unique" {
 				for _, name := range clam.Detections {
-					r.ClamAVRelation.UniqueNames[name]++
+					recordPublicClamName(&r.ClamAVRelation, name)
 				}
 			}
 		}

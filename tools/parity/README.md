@@ -502,7 +502,9 @@ and source identities, comparator runner, frozen ClamAV
 image/rootfs/engine/DB/version,
 scanner argv, adapter/bridge source hashes and local runtime identity. The manifest
 digest can still disclose corpus membership and needs privacy review before
-publication. `real_world_precision` remains null.
+publication. Public ClamAV detection-name aggregation is capped at 4,096 distinct
+names; `omitted_detection_name_occurrences` counts later occurrences whose names
+were not retained. `real_world_precision` remains null.
 
 Opt-in private JSONL receipts contain one context header, one exact manifest/sample
 identity row per unique sample, and one footer binding the aggregate report hash,
