@@ -448,6 +448,19 @@ func TestCLI(t *testing.T) {
 	}
 }
 
+func TestCLIUsageListsCompareCorpus(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cli(nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("empty CLI exit=%d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "|compare-corpus|") {
+		t.Fatalf("legacy usage omitted compare-corpus: %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("usage wrote stdout: %q", stdout.String())
+	}
+}
+
 func TestGenerationErrorRedactsPath(t *testing.T) {
 	// An overlong basename gives a real OS error distinct from destination
 	// permissions, without filling a disk or modifying host resource limits.

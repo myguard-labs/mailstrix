@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -155,24 +157,31 @@ func TestCorpusReportTruthPrivacyAndReceipts(t *testing.T) {
 		t.Fatalf("receipt rows=%d", len(lines))
 	}
 	var header struct {
+		Schema     string `json:"schema"`
 		ContextSHA string `json:"context_sha256"`
 	}
 	if err := json.Unmarshal(lines[0], &header); err != nil {
 		t.Fatal(err)
+	}
+	if header.Schema != "mailstrix-local-corpus-context-v1" {
+		t.Fatalf("receipt header schema=%q", header.Schema)
 	}
 	for i, line := range lines[1 : len(lines)-1] {
 		var row corpusReceipt
 		if err := json.Unmarshal(line, &row); err != nil {
 			t.Fatal(err)
 		}
-		if row.ContextSHA256 != header.ContextSHA || row.SampleSHA256 != m.Samples[i].SHA256 || row.ManifestSHA256 != hash || row.Size != m.Samples[i].Size || row.InputUnit != "file" {
+		if row.Schema != "mailstrix-local-corpus-observation-v1" || row.ContextSHA256 != header.ContextSHA || row.SampleSHA256 != m.Samples[i].SHA256 || row.ManifestSHA256 != hash || row.Size != m.Samples[i].Size || row.InputUnit != "file" {
 			t.Fatalf("receipt binding lost: %+v", row)
 		}
 	}
 	var footer struct {
+		Schema    string `json:"schema"`
+		Count     int    `json:"unique_samples"`
+		Complete  bool   `json:"complete"`
 		ReportSHA string `json:"report_sha256"`
 	}
-	if err := json.Unmarshal(lines[len(lines)-1], &footer); err != nil || footer.ReportSHA != digest(public) {
+	if err := json.Unmarshal(lines[len(lines)-1], &footer); err != nil || footer.Schema != "mailstrix-local-corpus-end-v1" || footer.Count != len(m.Samples) || footer.Complete != r.Complete || footer.ReportSHA != digest(public) {
 		t.Fatal("receipt footer does not bind aggregate")
 	}
 }
@@ -221,6 +230,10 @@ type receiptShortWriter struct{}
 
 func (receiptShortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
 
+type receiptErrorWriter struct{}
+
+func (receiptErrorWriter) Write([]byte) (int, error) { return 0, errors.New("inert write failure") }
+
 func TestCorpusReceiptWriteFailures(t *testing.T) {
 	w := receiptWriter{out: io.Discard, remaining: 1}
 	if err := w.write("inert"); err == nil {
@@ -229,5 +242,31 @@ func TestCorpusReceiptWriteFailures(t *testing.T) {
 	w = receiptWriter{out: receiptShortWriter{}, remaining: 1024}
 	if err := w.write("inert"); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("short write: %v", err)
+	}
+	w = receiptWriter{out: receiptErrorWriter{}, remaining: 1024}
+	if err := w.write("inert"); err == nil || err.Error() != "inert write failure" {
+		t.Fatalf("write error: %v", err)
+	}
+	w = receiptWriter{out: io.Discard, remaining: 1024}
+	if err := w.write(make(chan int)); err == nil {
+		t.Fatal("receipt JSON error ignored")
+	}
+}
+
+func TestCorpusReceiptsAreExclusivePrivateFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private-receipts.jsonl")
+	file, err := openCorpusReceipts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, statErr := file.Stat()
+	if closeErr := file.Close(); statErr != nil || closeErr != nil {
+		t.Fatalf("receipt stat/close: %v / %v", statErr, closeErr)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("receipt mode=%#o, want 0600", info.Mode().Perm())
+	}
+	if _, err := openCorpusReceipts(path); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("existing receipt was not rejected: %v", err)
 	}
 }

@@ -52,7 +52,7 @@ func printError(w io.Writer, message any) {
 
 func cli(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printError(stderr, "usage: parity generate|check|run|run-isolated|compare|fetch [options]")
+		printError(stderr, "usage: parity generate|check|run|run-isolated|compare|compare-corpus|fetch [options]")
 		return 2
 	}
 	if args[0] == "fetch" {

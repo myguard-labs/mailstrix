@@ -207,6 +207,10 @@ type receiptWriter struct {
 	remaining int
 }
 
+func openCorpusReceipts(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+}
+
 func (w *receiptWriter) write(value any) error {
 	if w.out == nil {
 		return nil
@@ -454,7 +458,7 @@ func corpusCompareCLI(args []string, stdout, stderr io.Writer) (exitCode int) {
 	var receipt *os.File
 	var writer io.Writer
 	if *receiptPath != "" {
-		receipt, err = os.OpenFile(*receiptPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		receipt, err = openCorpusReceipts(*receiptPath)
 		if err != nil {
 			printError(stderr, "local receipts require a new file; none overwritten")
 			return 2
