@@ -69,14 +69,16 @@ type FetchResult struct {
 //  4. GET compiled.yac, verify size + sha256 against the manifest. Mismatch =>
 //     discard, keep current.
 //  5. Back up the live bundle, replace both cache files under the cache lock,
-//     and restore both on a reported install or daemon reload failure.
+//     and restore the cache pair and pre-existing backup on a reported install
+//     or daemon reload failure.
 func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client) (FetchResult, error) {
 	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, 0, nil)
 }
 
 // fetchRules stages without the cache lock, then rechecks the monotonic version
 // under the lock. Install and optional reload are one serialized transaction.
-// On a reported failure both files are restored; rollback errors are explicit.
+// On a reported failure the cache pair and pre-existing backup are restored;
+// rollback errors are explicit.
 // Individual renames are atomic, but this is not a two-file power-loss journal.
 // reload must leave the active scanner unchanged on error and must not reacquire
 // the cache lock. It runs only after both cache files have been installed.
@@ -161,7 +163,7 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 			_ = os.RemoveAll(rollbackDir)
 		}
 	}()
-	paths := []string{cachePath, localManifestPath}
+	paths := []string{cachePath, localManifestPath, cachePath + backupSuffix}
 	existed := make([]bool, len(paths))
 	for i, path := range paths {
 		_, statErr := os.Stat(path)

@@ -199,6 +199,11 @@ func TestRulesUpdaterFailureKeepsLoadedAndCache(t *testing.T) {
 			defer source.Close()
 			u := testUpdater(t, source.URL)
 			path := filepath.Join(u.cfg.CacheDir, cachedRulesName)
+			backupPath := path + backupSuffix
+			backupBefore := []byte("PREVIOUS-BACKUP")
+			if err := os.WriteFile(backupPath, backupBefore, 0o640); err != nil {
+				t.Fatal(err)
+			}
 			before := readRuleFile(t, path)
 			manifestBefore := readRuleFile(t, filepath.Join(u.cfg.CacheDir, manifestName))
 			if tc.reload {
@@ -218,6 +223,9 @@ func TestRulesUpdaterFailureKeepsLoadedAndCache(t *testing.T) {
 			manifestAfter := readRuleFile(t, filepath.Join(u.cfg.CacheDir, manifestName))
 			if !bytes.Equal(before, after) || !bytes.Equal(manifestBefore, manifestAfter) {
 				t.Fatal("failed update changed last-known-good cache")
+			}
+			if backupAfter := readRuleFile(t, backupPath); !bytes.Equal(backupBefore, backupAfter) {
+				t.Fatal("failed update changed the pre-existing operator backup")
 			}
 			if got := u.scanner.rules.Load().GetRules()[0].Identifier(); got != "Old" {
 				t.Fatalf("active rules changed: %s", got)
