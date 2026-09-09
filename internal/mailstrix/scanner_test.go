@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -650,6 +651,28 @@ func TestReloadMetricsFailure(t *testing.T) {
 	}
 	if s.ReloadMetrics().Failures != failBefore+1 {
 		t.Error("failed reload not counted")
+	}
+}
+
+func TestReloadMetricsCountCacheLockFailure(t *testing.T) {
+	u := testUpdater(t, "")
+	s := u.scanner
+	before := s.ReloadMetrics()
+	s.reloadLastMillis.Store(1 << 30)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.reloadWithContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("reload error=%v, want context cancellation", err)
+	}
+	after := s.ReloadMetrics()
+	if after.Attempts != before.Attempts+1 || after.Failures != before.Failures+1 {
+		t.Fatalf("lock failure metrics=%+v, before=%+v", after, before)
+	}
+	if after.Successes != before.Successes || after.Rules != before.Rules {
+		t.Fatalf("lock failure changed successful scanner state: %+v -> %+v", before, after)
+	}
+	if after.LastMillis == 1<<30 {
+		t.Fatal("lock failure did not record attempt duration")
 	}
 }
 

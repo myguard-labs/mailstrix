@@ -13,6 +13,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 		"MAILSTRIX_HOST", "MAILSTRIX_PORT", "MAILSTRIX_BACKEND_TIMEOUT", "MAILSTRIX_MAX_CONCURRENT",
 		"MAILSTRIX_MAX_BODY", "MAILSTRIX_TOKEN", "MAILSTRIX_TOKEN_FILE", "MAILSTRIX_RULES_DIR",
 		"MAILSTRIX_RULES", "MAILSTRIX_SCAN_TIMEOUT", "MAILSTRIX_VERBOSE", "MAILSTRIX_LOG_STDOUT",
+		"MAILSTRIX_RULES_FETCH_TIMEOUT",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -27,6 +28,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if c.BackendTimeout != time.Second || c.ScanTimeout != 8*time.Second {
 		t.Errorf("timeouts = %s/%s", c.BackendTimeout, c.ScanTimeout)
 	}
+	if c.RulesFetchTimeout != 5*time.Minute {
+		t.Errorf("rules fetch timeout = %s, want 5m", c.RulesFetchTimeout)
+	}
 	if c.RulesDir != "/rules" {
 		t.Errorf("rules dir = %s", c.RulesDir)
 	}
@@ -37,6 +41,7 @@ func TestLoadConfigEnvOverride(t *testing.T) {
 	t.Setenv("MAILSTRIX_PORT", "9999")
 	t.Setenv("MAILSTRIX_MAX_CONCURRENT", "32")
 	t.Setenv("MAILSTRIX_SCAN_TIMEOUT", "2.5")
+	t.Setenv("MAILSTRIX_RULES_FETCH_TIMEOUT", "180")
 	t.Setenv("MAILSTRIX_TOKEN", "sekrit")
 	t.Setenv("MAILSTRIX_VERBOSE", "yes")
 	c := LoadConfig()
@@ -46,8 +51,18 @@ func TestLoadConfigEnvOverride(t *testing.T) {
 	if c.ScanTimeout != 2500*time.Millisecond {
 		t.Errorf("scan timeout = %s, want 2.5s", c.ScanTimeout)
 	}
+	if c.RulesFetchTimeout != 3*time.Minute {
+		t.Errorf("rules fetch timeout = %s, want 3m", c.RulesFetchTimeout)
+	}
 	if c.Token != "sekrit" || !c.Verbose {
 		t.Errorf("token/verbose = %q/%t", c.Token, c.Verbose)
+	}
+}
+
+func TestMalformedRulesPollIntervalRemainsInvalid(t *testing.T) {
+	t.Setenv("MAILSTRIX_RULES_POLL_INTERVAL", "15m")
+	if got := LoadConfig().RulesPollInterval; got >= 0 {
+		t.Fatalf("malformed poll interval became %s, want invalid sentinel", got)
 	}
 }
 

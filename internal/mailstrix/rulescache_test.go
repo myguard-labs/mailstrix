@@ -97,6 +97,58 @@ func TestEnsureCachedRulesKeepsExisting(t *testing.T) {
 	}
 }
 
+func TestEnsureCachedRulesCleansRollbackOnlyAfterRecovery(t *testing.T) {
+	cacheDir := t.TempDir()
+	seedVerified(t, cacheDir, 2, cacheRuleA)
+	stale := filepath.Join(cacheDir, ".rules-rollback-stale")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, cachedRulesName), []byte("recovery"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCachedRules(&Config{CacheDir: cacheDir}, quietLog); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale rollback directory remains after verified recovery: %v", err)
+	}
+
+	compiledYac(t, filepath.Join(cacheDir, cachedRulesName), cacheRuleB)
+	if err := os.WriteFile(filepath.Join(cacheDir, manifestName), []byte(`{"version":3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovery := filepath.Join(cacheDir, ".rules-rollback-recovery")
+	if err := os.Mkdir(recovery, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCachedRules(&Config{CacheDir: cacheDir}, quietLog); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(recovery); err != nil {
+		t.Fatalf("recovery directory removed beside incoherent cache: %v", err)
+	}
+}
+
+func TestCleanupRollbackDirsTreatsCachePathLiterally(t *testing.T) {
+	parent := t.TempDir()
+	cacheDir := filepath.Join(parent, "cache[ab]")
+	stale := filepath.Join(cacheDir, ".rules-rollback-own")
+	sibling := filepath.Join(parent, "cachea", ".rules-rollback-sibling")
+	for _, dir := range []string{stale, sibling} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanupRollbackDirs(cacheDir, quietLog)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("literal cache rollback directory remains: %v", err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("glob-like cache path removed sibling recovery data: %v", err)
+	}
+}
+
 // TestEnsureCachedRulesReseedsWiped: a wiped (missing) cache is restored from the
 // seed on the next call — the self-heal contract.
 func TestEnsureCachedRulesReseedsWiped(t *testing.T) {

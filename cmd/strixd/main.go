@@ -164,6 +164,10 @@ func cmdServe(args []string) int {
 	fs.StringVar(&cfg.RulesPath, "rules", cfg.RulesPath, "precompiled .yac bundle, wins over -rules-dir (MAILSTRIX_RULES)")
 	fs.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "writable dir for the live rule bundle; seeded from -seed-rules when empty/unreadable (MAILSTRIX_CACHE_DIR)")
 	fs.StringVar(&cfg.SeedRules, "seed-rules", cfg.SeedRules, "baked read-only .yac used to (re)seed the cache (MAILSTRIX_SEED_RULES)")
+	fs.DurationVar(&cfg.RulesMaxAge, "rules-max-age", cfg.RulesMaxAge, "loaded rules maximum age; 0 disables checking (default 48h)")
+	fs.DurationVar(&cfg.RulesPollInterval, "rules-poll-interval", cfg.RulesPollInterval, "automatic rules check interval; 0 disables networking")
+	fs.DurationVar(&cfg.RulesFetchTimeout, "rules-fetch-timeout", cfg.RulesFetchTimeout, "automatic rules network and cache-lock deadline")
+	fs.StringVar(&cfg.RulesURL, "rules-url", cfg.RulesURL, "public rules release directory or mirror")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "per-request logging (MAILSTRIX_VERBOSE)")
 	fs.BoolVar(&cfg.LogStdout, "log-stdout", cfg.LogStdout, "info/access logs to stdout; errors stay stderr (MAILSTRIX_LOG_STDOUT)")
 	if err := fs.Parse(args); err != nil {
@@ -201,6 +205,16 @@ func cmdServe(args []string) int {
 	}
 
 	srv := mailstrix.NewServer(cfg, scanner)
+	updater, err := mailstrix.NewRulesUpdater(cfg, scanner, libyaraVersion, srv.FlushCache)
+	if err != nil {
+		log.Printf("[mailstrix] invalid rules updater: %v", err)
+		return 2
+	}
+	srv.SetRulesUpdater(updater)
+	updateCtx, updateCancel := context.WithCancel(context.Background())
+	updateDone := make(chan struct{})
+	go func() { defer close(updateDone); updater.Run(updateCtx) }()
+	defer func() { updateCancel(); <-updateDone }()
 
 	// Optional ICAP listener — disabled when ICAPAddr is empty.
 	icapShutdown := func(_ context.Context) {}
@@ -224,8 +238,16 @@ func cmdServe(args []string) int {
 	// returns; the listener never drops).
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
+	hupDone := make(chan struct{})
+	defer func() { signal.Stop(hup); updateCancel(); <-hupDone }()
 	go func() {
-		for range hup {
+		defer close(hupDone)
+		for {
+			select {
+			case <-updateCtx.Done():
+				return
+			case <-hup:
+			}
 			logf("SIGHUP: reloading rules")
 			if err := scanner.Reload(); err != nil {
 				logf("reload failed: %v", err)

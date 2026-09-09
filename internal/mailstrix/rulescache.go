@@ -1,10 +1,14 @@
 package mailstrix
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	yara "github.com/hillu/go-yara/v4"
 )
@@ -31,6 +35,13 @@ func EnsureCachedRules(cfg *Config, logf func(string, ...any)) error {
 	if cfg.CacheDir == "" {
 		return nil // caching disabled — load RulesPath/RulesDir as before
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	unlock, err := lockRules(ctx, cfg.CacheDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := os.MkdirAll(cfg.CacheDir, 0o750); err != nil {
 		return fmt.Errorf("cache dir %s: %w", cfg.CacheDir, err)
 	}
@@ -44,6 +55,9 @@ func EnsureCachedRules(cfg *Config, logf func(string, ...any)) error {
 	if rulesFileUsable(cachePath) {
 		if err := rulesBundleLoadable(cachePath); err == nil {
 			cfg.RulesPath = cachePath
+			if trustedLocalManifest(cachePath, filepath.Join(cfg.CacheDir, manifestName)).Version > 0 {
+				cleanupRollbackDirs(cfg.CacheDir, logf)
+			}
 			return nil
 		} else {
 			logf("WARNING: cached rules %s present but not loadable (%v); reseeding from baked seed", cachePath, err)
@@ -61,12 +75,48 @@ func EnsureCachedRules(cfg *Config, logf func(string, ...any)) error {
 	if err := rulesBundleLoadable(seed); err != nil {
 		return fmt.Errorf("seed %s is not a loadable rule bundle: %w", seed, err)
 	}
+	seedInfo, err := os.Stat(seed)
+	if err != nil {
+		return fmt.Errorf("stat seed %s: %w", seed, err)
+	}
 	if err := copyFileAtomic(seed, cachePath); err != nil {
 		return fmt.Errorf("seed %s -> %s: %w", seed, cachePath, err)
 	}
+	if err := os.Remove(filepath.Join(cfg.CacheDir, manifestName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("invalidate reseeded manifest: %w", err)
+	}
+	// A fresh copy mtime would make an old baked seed look newly published and
+	// suppress the age alert. Preserve its origin once stale identity is removed.
+	if err := os.Chtimes(cachePath, seedInfo.ModTime(), seedInfo.ModTime()); err != nil {
+		// Do not retain a cache whose fresh mtime lies about age. RulesPath still
+		// names the untouched seed, so the caller's documented fallback stays live.
+		_ = os.Remove(cachePath)
+		return fmt.Errorf("preserve seed age on %s: %w", cachePath, err)
+	}
 	logf("seeded rules cache %s from %s", cachePath, seed)
 	cfg.RulesPath = cachePath
+	cleanupRollbackDirs(cfg.CacheDir, logf)
 	return nil
+}
+
+// cleanupRollbackDirs removes transaction directories left by an interrupted
+// process only after startup has established a coherent verified cache or a
+// known-good seed. An incoherent cache retains them as operator recovery data.
+func cleanupRollbackDirs(cacheDir string, logf func(string, ...any)) {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		logf("WARNING: list stale rules rollback directories: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".rules-rollback-") {
+			continue
+		}
+		dir := filepath.Join(cacheDir, entry.Name())
+		if err := os.RemoveAll(dir); err != nil {
+			logf("WARNING: remove stale rules rollback directory %s: %v", dir, err)
+		}
+	}
 }
 
 // rulesFileUsable reports whether path is a non-empty, readable regular file.

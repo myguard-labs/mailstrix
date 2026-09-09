@@ -2,6 +2,7 @@ package mailstrix
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -72,9 +73,11 @@ type Match struct {
 // old set until they finish, new scans pick up the new one. No scan ever holds
 // a lock for its (potentially slow) duration.
 type Scanner struct {
-	rules       atomic.Pointer[yara.Rules]
-	scanTimeout time.Duration
-	logf        func(string, ...any)
+	cacheDir       string // only set when srcFile is the managed cache bundle
+	loadedManifest atomic.Pointer[RulesManifest]
+	rules          atomic.Pointer[yara.Rules]
+	scanTimeout    time.Duration
+	logf           func(string, ...any)
 
 	// bigRules is the small, high-signal "big-file" ruleset used by the
 	// oversized-buffer cost gate (STAB/BIGFILE). A full-ruleset scan of a multi-MB
@@ -154,11 +157,8 @@ type Scanner struct {
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
 	reloadLastUnix, reloadLastMillis     atomic.Int64
 	reloadPrevFP                         atomic.Pointer[string] // fingerprint before the last successful reload
-	// rulesModUnix is the mtime (unix seconds) of the loaded ruleset on disk:
-	// the .yac bundle, or the newest source file in the rules dir. A daily image
-	// rebuild refreshes it; if the rebuild silently breaks (fetch failed, image
-	// not redeployed), this stops advancing and the rules-age metric/staleness
-	// check catches it. 0 if the mtime could not be stat'd.
+	// rulesModUnix is the age origin: verified non-future publication time for
+	// managed bundles, otherwise bundle/newest source mtime; 0 if unknown.
 	rulesModUnix atomic.Int64
 
 	// Optional abuse.ch URLhaus malware-URL lookup (nil when no Auth-Key set).
@@ -219,6 +219,16 @@ type Scanner struct {
 
 	// topMatches counts rule hits since the last reload for /version observability.
 	topMatches *matchCounter
+}
+
+// loadedRulesManifest returns an immutable snapshot of the manifest verified
+// against the currently loaded bundle. It never performs filesystem I/O.
+func (s *Scanner) loadedRulesManifest() (RulesManifest, bool) {
+	loaded := s.loadedManifest.Load()
+	if loaded == nil {
+		return RulesManifest{}, false
+	}
+	return *loaded, true
 }
 
 // scannerGen is a bounded free-list of yara.Scanner objects bound to one
@@ -409,6 +419,9 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 		allowlist:         cfg.RuleAllowlist,
 		topMatches:        newMatchCounter(matchCounterCap),
 	}
+	if cfg.CacheDir != "" && filepath.Clean(cfg.RulesPath) == filepath.Join(cfg.CacheDir, cachedRulesName) {
+		s.cacheDir = cfg.CacheDir
+	}
 	// Resolve the big-file ruleset path into a precompiled .yac (load) or a source
 	// dir (compile), so Reload can build it the same way it builds the main set.
 	// A path that doesn't exist is treated as "unset" — the gate then falls back to
@@ -483,7 +496,7 @@ type ReloadMetrics struct {
 	LastUnix        int64  // unix seconds of the last successful reload
 	LastMillis      int64  // wall-clock duration of the last reload attempt
 	Rules           int64  // rule count after the last successful reload
-	ModUnix         int64  // mtime (unix seconds) of the loaded ruleset on disk; 0 if unknown
+	ModUnix         int64  // age origin (publication time or filesystem mtime); 0 if unknown
 	PrevFingerprint string // fingerprint before the last reload ("" on first load)
 }
 
@@ -509,6 +522,30 @@ func (s *Scanner) ReloadMetrics() ReloadMetrics {
 // the previous set active — a broken edit to the rules dir must never disarm a
 // running scanner. Safe to call from a SIGHUP handler concurrently with scans.
 func (s *Scanner) Reload() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return s.reloadWithContext(ctx)
+}
+
+// reloadWithContext exposes the cache-lock deadline to deterministic lifecycle
+// tests while keeping Reload's public timeout fixed.
+func (s *Scanner) reloadWithContext(ctx context.Context) error {
+	if s.cacheDir != "" {
+		start := time.Now()
+		unlock, err := lockRules(ctx, s.cacheDir)
+		if err != nil {
+			s.reloadAttempts.Add(1)
+			s.reloadFail.Add(1)
+			s.reloadLastMillis.Store(time.Since(start).Milliseconds())
+			return err
+		}
+		defer unlock()
+	}
+	return s.reloadLockedCache()
+}
+
+// reloadLockedCache requires the managed-cache lock when cacheDir is set.
+func (s *Scanner) reloadLockedCache() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -558,9 +595,21 @@ func (s *Scanner) Reload() error {
 	s.fp.Store(&fp)
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())
-	// Record the on-disk mtime of what we just loaded so staleness (a silently
-	// broken daily rebuild) is observable. Best-effort: 0 if it can't be stat'd.
+	// Start with filesystem mtime, then prefer a verified publication time.
+	// Future publication timestamps retain the fallback instead of muting age.
 	s.rulesModUnix.Store(rulesetModUnix(s.srcFile, s.srcDir))
+	if s.cacheDir != "" {
+		m := readLocalManifest(filepath.Join(s.cacheDir, manifestName))
+		// An identity is reported only if it describes these exact loaded bytes.
+		if verifyBundle(s.srcFile, m) == nil {
+			s.loadedManifest.Store(&m)
+			if generated, err := time.Parse(time.RFC3339, m.Generated); err == nil && generated.Unix() > 0 && !generated.After(time.Now()) {
+				s.rulesModUnix.Store(generated.Unix())
+			}
+		} else {
+			s.loadedManifest.Store(nil)
+		}
+	}
 	// The previous *yara.Rules is intentionally NOT Destroy()ed here: an in-flight
 	// scan may still hold the pointer it loaded before the swap, and freeing the
 	// native rules under it would crash. go-yara registers a runtime finalizer on

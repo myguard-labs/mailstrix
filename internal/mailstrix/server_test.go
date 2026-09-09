@@ -117,7 +117,6 @@ func TestVersionEndpoint(t *testing.T) {
 // /version surfaces per-ruleset provenance (the manifest's sources array) so an
 // operator can audit which rule sources are baked into the running bundle.
 func TestVersionEndpointSources(t *testing.T) {
-	dir := t.TempDir()
 	man := RulesManifest{
 		Version: 7, Generated: "2026-06-20T00:00:00Z", Libyara: "4.5.0", Rules: 42,
 		Sources: []RuleSource{
@@ -125,16 +124,7 @@ func TestVersionEndpointSources(t *testing.T) {
 			{Name: "local", Repo: "in-repo docker/local-rules", License: "MIT", Ref: "main"},
 		},
 	}
-	b, err := json.Marshal(man)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, manifestName), b, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	s := newTestServer(&fakeEngine{count: 5, fp: "abc"}, "tok")
-	s.cfg.CacheDir = dir
+	s := newTestServer(&fakeEngine{count: 5, fp: "abc", manifest: &man}, "tok")
 	w := get(s, "/version")
 	if w.Code != http.StatusOK {
 		t.Fatalf("version: %d", w.Code)
@@ -314,6 +304,7 @@ type fakeEngine struct {
 	lastMeta atomic.Pointer[ScanMeta]
 	mb       mbazaar.Metrics // returned by MBazaarMetrics (zero = disabled)
 	modUnix  int64           // returned as ReloadMetrics.ModUnix (rules mtime)
+	manifest *RulesManifest  // returned without I/O as the loaded bundle identity
 }
 
 func (f *fakeEngine) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
@@ -339,6 +330,12 @@ func (f *fakeEngine) URLhausMetrics() urlhaus.Metrics     { return urlhaus.Metri
 func (f *fakeEngine) MBazaarMetrics() mbazaar.Metrics     { return f.mb }
 func (f *fakeEngine) ThreatFoxMetrics() threatfox.Metrics { return threatfox.Metrics{} }
 func (f *fakeEngine) TopMatches(n int) []MatchCount       { return nil }
+func (f *fakeEngine) loadedRulesManifest() (RulesManifest, bool) {
+	if f.manifest == nil {
+		return RulesManifest{}, false
+	}
+	return *f.manifest, true
+}
 
 func newTestServer(eng ScanEngine, token string) *Server {
 	cfg := &Config{Token: token, MaxConcurrent: 4, MaxBody: 1 << 20, BackendTimeout: 0}

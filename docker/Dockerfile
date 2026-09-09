@@ -127,6 +127,12 @@ COPY --from=build /out/strixd /strixd
 COPY --from=build /out/strix-scan /strix-scan
 COPY --from=build /out/strix-milter /strix-milter
 
+# Post-publication verifier: no baked rules and no production cache mount.
+# Keep this before final so an untargeted build still produces the service image.
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS rules-verifier
+COPY --from=build /out/strixd /usr/local/bin/strixd
+ENTRYPOINT ["/usr/local/bin/strixd", "fetch-rules", "-verify-only"]
+
 # ---- rules ------------------------------------------------------------------
 # FROM the yara stage so we have `yarac` (the libyara compiler) from the exact
 # same libyara build go-yara links against — a .yac is version-locked to its

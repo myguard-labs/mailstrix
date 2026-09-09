@@ -11,11 +11,6 @@ import (
 	"github.com/myguard-labs/mailstrix/internal/mailstrix"
 )
 
-// defaultRulesURL is the rolling release directory that generate-rules.sh
-// publishes compiled.yac + its manifest to. Override with -url / MAILSTRIX_RULES_URL
-// (e.g. to point at a mirror).
-const defaultRulesURL = "https://github.com/myguard-labs/mailstrix/releases/download/rules-current"
-
 // cmdFetchRules downloads an updated compiled rule bundle into the cache, driven
 // by the published manifest: it fetches the manifest first and updates only when
 // the remote version is newer and the libyara version matches. It verifies the
@@ -29,11 +24,26 @@ func cmdFetchRules(args []string) int {
 	cfg := mailstrix.LoadConfig()
 
 	fs := flag.NewFlagSet("fetch-rules", flag.ContinueOnError)
-	url := fs.String("url", envOr("MAILSTRIX_RULES_URL", defaultRulesURL), "base URL holding compiled.yac + its manifest (MAILSTRIX_RULES_URL)")
+	url := fs.String("url", firstNonEmpty(cfg.RulesURL, mailstrix.DefaultRulesURL), "base URL holding compiled.yac + its manifest (MAILSTRIX_RULES_URL)")
 	cacheDir := fs.String("cache-dir", firstNonEmpty(cfg.CacheDir, "/var/cache/mailstrix"), "cache dir for the live bundle (MAILSTRIX_CACHE_DIR)")
 	timeout := fs.Duration("timeout", 60*time.Second, "overall HTTP timeout")
+	verifyOnly := fs.Bool("verify-only", false, "verify into a fresh temporary cache and remove it; never touch the configured cache")
+	expectedVersion := fs.Int("expected-version", 0, "with -verify-only, require this published version")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *expectedVersion < 0 || (*expectedVersion > 0 && !*verifyOnly) {
+		fmt.Fprintln(os.Stderr, "expected-version requires verify-only and a positive version")
+		return 2
+	}
+	if *verifyOnly {
+		dir, err := os.MkdirTemp("", "strixd-verify-")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		*cacheDir = dir
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -58,19 +68,29 @@ func cmdFetchRules(args []string) int {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
 		return 2
 	}
+	if *expectedVersion > 0 && res.NewVersion != *expectedVersion {
+		fmt.Fprintf(os.Stderr, "verify-rules: published version %d, expected %d\n", res.NewVersion, *expectedVersion)
+		return 2
+	}
+	if *verifyOnly {
+		if !res.Updated {
+			fmt.Fprintln(os.Stderr, "verify-rules: no bundle was staged and load-validated:", res.Reason)
+			return 2
+		}
+		m, ok := mailstrix.LoadManifest(*cacheDir)
+		if !ok {
+			fmt.Fprintln(os.Stderr, "verify-rules: verified manifest missing")
+			return 2
+		}
+		fmt.Printf("verify-rules: version=%d libyara=%s size=%d checksum=%s loadable=true\n", m.Version, m.Libyara, m.Size, m.Checksum)
+		return 0
+	}
 	if res.Updated {
 		fmt.Printf("fetch-rules: %s — restart or SIGHUP strixd to load the new bundle\n", res.Reason)
 	} else {
 		fmt.Printf("fetch-rules: %s\n", res.Reason)
 	}
 	return 0
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 func firstNonEmpty(vals ...string) string {

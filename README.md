@@ -276,9 +276,95 @@ strixd fetch-rules -cache-dir /var/cache/mailstrix
 It reads a small manifest first and updates only when the published **version**
 is newer; it **refuses** a bundle built against a different **libyara**,
 **verifies the sha256**, and swaps atomically (keeping one `.bak`). On any error
-the current bundle is untouched. Then SIGHUP (or restart) strixd to load it. The
-bundle is published by `docker/generate-rules.sh` (run from cron); point `-url` /
+the current bundle is retained; rollback errors explicitly require cache recovery.
+Then SIGHUP (or restart) strixd to load it, or enable daemon polling below. The
+bundle is published by `docker/generate-rules.sh` (run from cron).
+Point `-url` /
 `MAILSTRIX_RULES_URL` at a mirror if not fetching from GitHub.
+
+Daemon polling is opt-in: set `MAILSTRIX_RULES_POLL_INTERVAL=900` (seconds), or
+`serve -rules-poll-interval=15m`. It requires the compiled cache actually loaded
+by the scanner. Custom local `.yar` directories and offline installations keep
+polling disabled (`0`, the default); a cache fallback cannot silently change to
+remote rules. Network and cache-lock waits share a configurable five-minute
+default deadline. Native libyara validation and reload finish synchronously once
+entered. There is one check at startup, then one per interval plus 0–20% jitter,
+including after failure (no retry burst).
+Concurrent polls coalesce and shutdown cancels and joins the worker.
+
+The manifest checksum detects corruption but is not an origin signature because
+the manifest and bundle share one channel. Use an HTTPS URL whose publisher you
+trust; reserve plaintext HTTP overrides for loopback or an equivalently trusted
+private transport. Detached manifest signing remains tracked separately.
+
+The lifecycle is `check manifest -> validate/download -> install -> reload`.
+Version, libyara, positive bounded size, generation timestamp and SHA-256 must
+validate; the native library must load the staged bytes before publication.
+Cache readers/writers and SIGHUP share a process-independent cache lock, acquired
+after downloading, with the version rechecked under that lock. The daemon uses
+the existing atomic rules swap and flushes verdicts only after successful reload.
+Standalone `fetch-rules` installs are picked up on the next successful poll.
+The cache directory is a writable runtime directory, not a read-only rules mount;
+the daemon and any cron updater must both be able to create `.rules.lock` and
+replace its files. Size `MAILSTRIX_RULES_FETCH_TIMEOUT` for the complete download,
+native validation, and subsequent lock acquisition on the slowest expected link.
+
+| Outcome | Cache and active rules |
+| --- | --- |
+| Current release, valid cache | No download; reconcile cached rules |
+| Invalid metadata, bytes or interrupted download | Preserve both |
+| Install or reload fails | Restore both cache files; retain active rules |
+| Rollback itself fails | Keep active rules and remaining recovery files |
+| Successful update | Record version; new scans use new rules |
+
+Each file replacement is atomic and participating readers see coherent pairs.
+The two files are **not crash/power-loss atomic**. Startup still load-validates
+and reseeds the cache; a version record whose checksum does not describe the
+cache cannot suppress a repair download. Do not modify the cache concurrently
+with tools that ignore its `.rules.lock` advisory lock. An update can briefly
+use roughly four bundle sizes of disk for the live file, `.bak`, staged download,
+and rollback copy. Startup removes interrupted `.rules-rollback-*` directories
+only after proving the public cache pair coherent or installing the baked seed;
+otherwise they remain as operator recovery data.
+
+Age checking now defaults to **48 hours**, using a verified manifest's generated
+time or the local rules' modification time. Remote manifests with future
+timestamps are rejected without clock-skew tolerance; a cached future timestamp
+falls back to filesystem mtime. Keep publisher and scanner clocks synchronized.
+Set `MAILSTRIX_RULES_MAX_AGE=0`
+(or `-rules-max-age=0`) explicitly for static/offline rules. `/health` and scans
+remain available; `/ready` stays HTTP 200 for stale rules and reports the stale
+state in its body. A strict deployment must explicitly have its readiness probe
+reject that state; it trades outage availability for freshness. Unknown age is
+reported separately through a zero `rules_mtime_unix`/mtime metric. These legacy
+field names report the age origin (publication time or filesystem fallback),
+not necessarily filesystem mtime. `/version`
+and metrics expose whether age checking is enabled, so disabled does not mean
+fresh.
+
+`/version.rules_update` and corresponding `mailstrix_rules_*` metrics distinguish
+the last observed published version, the cached publication record, and the
+successfully loaded version, plus last check/success/failure times and failure
+counters. Zero version means unknown and zero timestamp means never. Cached
+telemetry reads the record; byte integrity is checked during fetch/reload, not
+on every scrape. While a cache transaction is busy, telemetry keeps its last
+observed identity pair without delaying HTTP probes. Custom local rules do not
+inherit an unrelated release manifest from a feed cache directory.
+The bundled Prometheus alerts use a 30-minute update deadline, including after
+an earlier successful check; adjust the `1800`-second threshold when selecting
+a longer polling interval.
+
+The publisher uploads the bundle first and manifest last, then runs an isolated
+native verifier against the released URLs. During replacement, a mismatched
+manifest/asset pair is rejected and retried at the next poll. Verification uses
+a fresh temporary cache and alerts on failure; it never mounts a production
+cache. Reproduce the verification with:
+
+```sh
+strixd fetch-rules -verify-only -expected-version 42
+```
+
+The receipt includes version, libyara, size, checksum and native load success.
 
 ## Thin client for Dovecot / Sieve (`strix-scan`)
 
@@ -445,7 +531,10 @@ Every setting is an env var and a `serve` CLI flag (flag > env > default).
 | `MAILSTRIX_TOKEN_NEXT[_FILE]` | — | incoming rotation token accepted alongside the primary; append here then migrate clients, then promote to `MAILSTRIX_TOKEN` and clear this |
 | `MAILSTRIX_RULES_DIR` | `/rules` | dir of `*.yar`/`*.yara` compiled at boot and on SIGHUP |
 | `MAILSTRIX_RULES` | — | a precompiled `.yac` bundle; loaded instead of `RULES_DIR` (faster start) |
-| `MAILSTRIX_RULES_MAX_AGE` | `0` (off) | seconds; flag rules `stale` (metric + `/ready` body) once older than this. Fail-open: never fails readiness |
+| `MAILSTRIX_RULES_MAX_AGE` | `172800` (48h) | seconds; flag rules `stale` (metric + `/ready` body); explicit `0` disables. Fail-open: never fails readiness |
+| `MAILSTRIX_RULES_POLL_INTERVAL` | `0` (off) | seconds; automatic verified update and reload; enabled intervals must be at least 60 seconds |
+| `MAILSTRIX_RULES_FETCH_TIMEOUT` | `300` | seconds; shared deadline for automatic update network and cache-lock waits |
+| `MAILSTRIX_RULES_URL` | GitHub `rules-current` release | public bundle/manifest directory override for daemon polling and `fetch-rules` |
 | `MAILSTRIX_SCAN_TIMEOUT` | `8` (s) | per-request libyara budget (raw + all extracted streams share it) |
 | `MAILSTRIX_BACKEND_TIMEOUT` | `1` (s) | how long to wait for an admission / scan slot |
 | `MAILSTRIX_MAX_CONCURRENT` | `auto` (CPU count) | max concurrent libyara scans (CPU gate) |

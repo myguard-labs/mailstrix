@@ -89,8 +89,11 @@ func TestFetchRulesUpdates(t *testing.T) {
 
 func TestFetchRulesSkipsWhenUpToDate(t *testing.T) {
 	cacheDir := t.TempDir()
-	cur := []byte("CURRENT")
-	seedLocal(t, cacheDir, 7, cur)
+	seedVerified(t, cacheDir, 7, "rule Current { condition: true }")
+	cur, err := os.ReadFile(filepath.Join(cacheDir, cachedRulesName))
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := rulesServer(t, []byte("WOULD-BE-NEW"), 7, "4.5.2", "") // same version
 	defer srv.Close()
 
@@ -102,7 +105,7 @@ func TestFetchRulesSkipsWhenUpToDate(t *testing.T) {
 		t.Fatalf("updated despite equal version: %+v", res)
 	}
 	got, _ := os.ReadFile(filepath.Join(cacheDir, cachedRulesName))
-	if string(got) != "CURRENT" {
+	if string(got) != string(cur) {
 		t.Errorf("bundle changed on a no-op: %q", got)
 	}
 }
