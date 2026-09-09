@@ -58,7 +58,7 @@ func waitBridgeExit(ctx context.Context, pid int) error {
 
 func maySkipDeniedProc(readErr error, ownerUID uint32) bool {
 	return (errors.Is(readErr, syscall.EACCES) || errors.Is(readErr, syscall.EPERM)) &&
-		ownerUID != uint32(os.Geteuid())
+		ownerUID != uint32(os.Geteuid()) // #nosec G115 -- Linux UIDs are unsigned 32-bit values; this feature is Linux/amd64-only.
 }
 
 func processGone(err error) bool {
@@ -79,7 +79,7 @@ func bridgeGroupQuiescent(pid int) (bool, error) {
 				continue
 			}
 			statPath := filepath.Join("/proc", entry.Name(), "stat")
-			raw, err := os.ReadFile(statPath)
+			raw, err := os.ReadFile(statPath) // #nosec G304 -- fixed /proc root plus a kernel-produced numeric directory entry.
 			if processGone(err) {
 				continue
 			}
