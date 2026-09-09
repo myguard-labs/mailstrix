@@ -367,6 +367,15 @@ strixd fetch-rules -verify-only -expected-version 42
 ```
 
 The receipt includes version, libyara, size, checksum and native load success.
+Each nightly whose serializer can write emits exactly one JSON receipt line with
+schema `mailstrix-rules-nightly-v1`. A successful receipt reports stage
+`verify` and records that same fresh verifier evidence; a failed receipt contains only
+`schema: "mailstrix-rules-nightly-v1"`, `stage` (`build`, `publish`, `verify`,
+or `receipt`), and `status: "failed"`. A broken
+serializer fails closed and may leave no JSON line; cron monitoring must treat a
+missing receipt as a failure. Failure notifications carry the same stage in
+their title. Discord delivery is the sole best-effort publisher exception: its
+failure does not change an otherwise successful publish or receipt.
 
 ## Thin client for Dovecot / Sieve (`strix-scan`)
 

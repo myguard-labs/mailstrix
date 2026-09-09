@@ -30,7 +30,114 @@ set -euo pipefail
 
 REPO="${REPO:-myguard-labs/mailstrix}"
 TAG="${TAG:-rules-current}"
-HERE="$(cd "$(dirname "$0")/.." && pwd)"   # repo root (script lives in docker/)
+HERE=""
+WORK=""
+
+# Seed the best-effort notifier path without a subshell or external command so
+# startup failures while canonicalizing HERE can still notify.
+case "${BASH_SOURCE[0]}" in
+    */*) notifier_dir="${BASH_SOURCE[0]%/*}" ;;
+    *) notifier_dir="." ;;
+esac
+case "$notifier_dir" in
+    /*) ;;
+    *) notifier_dir="${PWD}/${notifier_dir}" ;;
+esac
+NOTIFY="${notifier_dir}/../../../tools/discord-notify.py"
+
+note() { echo "generate-rules: $*" >&2; }
+
+# Emit one JSON object for the terminal nightly result. Successful receipts carry
+# the same identity and native-load evidence as `strixd fetch-rules -verify-only`;
+# failures intentionally contain only a fixed stage/status pair, so cron logs do
+# not turn command output or credentials into an artifact.
+NIGHTLY_STAGE=build
+PUBLISH_STATE=not-started
+_RECEIPTED=0
+_RECEIPT_EMITTING=0
+nightly_receipt() {  # nightly_receipt <success|failed>
+    local status="$1"
+    [ "$_RECEIPTED" -eq 0 ] || return 0
+    if [ "$status" = success ]; then
+        jq -cn \
+            --arg stage "$NIGHTLY_STAGE" \
+            --arg status "$status" \
+            --argjson version "$VERSION" \
+            --arg generated "$GENERATED" \
+            --arg checksum "sha256:${SUM}" \
+            --arg libyara "$LIBYARA" \
+            --argjson rules "$RULES" \
+            --argjson size "$SIZE" \
+            '{schema:"mailstrix-rules-nightly-v1", stage:$stage, status:$status, version:$version, generated:$generated, checksum:$checksum, libyara:$libyara, rules:$rules, size:$size, loadable:true}' || return 1
+    else
+        jq -cn --arg stage "$NIGHTLY_STAGE" --arg status "$status" \
+            '{schema:"mailstrix-rules-nightly-v1", stage:$stage, status:$status}' || return 1
+    fi
+    _RECEIPTED=1
+}
+
+# Discord #builds shout (via discord-notify.py → myguard-discord-bot socket; the
+# build host has no DISCORD_WEBHOOK_*, only the bot). Best-effort: a notify
+# failure must never fail the publish, so swallow errors. Located relative to the
+# repo root (HERE) so cron's minimal PATH still finds it.
+_SHOUTED_FAIL=0
+shout() {  # shout <title> <body>
+    [ -x "$NOTIFY" ] || return 0
+    python3 "$NOTIFY" message "$1" "$2" >/dev/null 2>&1 || true
+}
+shout_fail() {  # shout_fail <body> — fires at most once per run
+    [ "$_SHOUTED_FAIL" -eq 0 ] || return 0
+    _SHOUTED_FAIL=1
+    if ! nightly_receipt failed; then
+        note "ERROR: failed to emit nightly receipt"
+    fi
+    shout "strixd rules: ${NIGHTLY_STAGE} FAILED" "$1"
+}
+published_verify_notice() {
+    printf '%s' 'rules-current was published, but native verification failed; clients may encounter an unverified bundle. Inspect and repair the release.'
+}
+failure_notice() {  # failure_notice <exit-code>
+    case "$NIGHTLY_STAGE" in
+        receipt)
+            printf '%s' 'terminal receipt preparation or emission failed after rules-current was published and native-verified. Check /opt/myguard/packages/log/yarad-generate-rules.log'
+            ;;
+        *)
+            case "$PUBLISH_STATE" in
+                not-started)
+                    printf 'generate-rules.sh exited %s — rules-current NOT updated. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$1"
+                    ;;
+                uncertain)
+                    printf 'generate-rules.sh exited %s — rules-current may be partially updated. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$1"
+                    ;;
+                published)
+                    case "$NIGHTLY_STAGE" in
+                        verify) published_verify_notice ;;
+                        *) printf 'generate-rules.sh exited %s — rules-current was published, but the nightly did not finish. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$1" ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# Any unexpected abort (set -e / a failed command) shouts FAIL to #builds before
+# exiting, so a broken nightly is visible instead of silent. die() shouts its own
+# message; the once-guard stops a double-shout when die triggers ERR. The
+# Discord delivery itself is the publisher-only best-effort exception; build,
+# publish, and verify failures remain fatal. A receipt-emission fault cannot
+# mask the original failure after its stage-specific alert is sent.
+cleanup() { [ -z "$WORK" ] || rm -rf "${WORK:?}"; }
+trap cleanup EXIT
+# shellcheck disable=SC2154  # rc IS assigned (rc=$?) inside the trap-quoted string
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then [ "$_RECEIPT_EMITTING" -eq 0 ] || NIGHTLY_STAGE=receipt; shout_fail "$(failure_notice "$rc")"; fi; exit $rc' ERR
+
+die()  { note "ERROR: $*"; shout_fail "$*"; exit 1; }
+
+# Bring up receipt/error handling before fallible startup work so a missing
+# credential, temporary directory, or repository path still produces one build
+# receipt. A missing notifier remains the approved best-effort exception.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"   # canonical repo root for builds
+NOTIFY="${HERE}/../../tools/discord-notify.py"
 
 # gh needs a token with contents:write on the myguard-labs ORG to publish the
 # rolling release. The build user's default gh login (hosts.yml) carries the
@@ -55,35 +162,8 @@ fi
 # Never let a stale/invalid ~/.config/gh/hosts.yml login serve as the fallback:
 # that token is currently invalid and 401s even on READS, which is what defeated
 # the version guard below. GH_TOKEN takes precedence over hosts.yml in gh.
-[ -n "${GH_TOKEN:-}" ] || { echo "generate-rules: ERROR: GITHUB_ORG_LAB_TOKEN not readable from /etc/myguard-build-env; cannot publish" >&2; exit 1; }
+[ -n "${GH_TOKEN:-}" ] || die "GITHUB_ORG_LAB_TOKEN not readable from /etc/myguard-build-env; cannot publish"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-
-note() { echo "generate-rules: $*" >&2; }
-
-# Discord #builds shout (via discord-notify.py → myguard-discord-bot socket; the
-# build host has no DISCORD_WEBHOOK_*, only the bot). Best-effort: a notify
-# failure must never fail the publish, so swallow errors. Located relative to the
-# repo root (HERE) so cron's minimal PATH still finds it.
-NOTIFY="${HERE}/../../tools/discord-notify.py"
-_SHOUTED_FAIL=0
-shout() {  # shout <title> <body>
-    [ -x "$NOTIFY" ] || return 0
-    python3 "$NOTIFY" message "$1" "$2" >/dev/null 2>&1 || true
-}
-shout_fail() {  # shout_fail <body> — fires at most once per run
-    [ "$_SHOUTED_FAIL" -eq 0 ] || return 0
-    _SHOUTED_FAIL=1
-    shout "strixd rules: regeneration FAILED" "$1"
-}
-
-# Any unexpected abort (set -e / a failed command) shouts FAIL to #builds before
-# exiting, so a broken nightly is visible instead of silent. die() shouts its own
-# message; the once-guard stops a double-shout when die triggers ERR.
-# shellcheck disable=SC2154  # rc IS assigned (rc=$?) inside the trap-quoted string
-trap 'rc=$?; [ "$rc" -ne 0 ] && shout_fail "generate-rules.sh exited $rc — rules-current NOT updated. Check /opt/myguard/packages/log/yarad-generate-rules.log"; exit $rc' ERR
-
-die()  { note "ERROR: $*"; shout_fail "$*"; exit 1; }
 
 for bin in docker gh jq sha256sum python3; do
     command -v "$bin" >/dev/null 2>&1 || die "missing required tool: $bin"
@@ -117,6 +197,19 @@ SOURCES="${WORK}/sources.json"
 LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
 [ -n "$LIBYARA" ] || die "could not determine libyara version"
 
+# Rule count is optional, but when supplied it becomes JSON in both the manifest
+# and terminal receipt. Accept canonical decimal only (zero is `0`, no leading
+# zeroes) and cap it at MaxInt32 so every Go consumer's `int` can decode it.
+# Validate it while this is still a build-stage failure, before any release
+# query, asset upload, or verifier invocation.
+RULES="${RULES_COUNT:-0}"
+MAX_RULES=2147483647
+if ! [[ "$RULES" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    [ "${#RULES}" -gt "${#MAX_RULES}" ] ||
+    [ "$RULES" -gt "$MAX_RULES" ]; then
+    die "RULES_COUNT must be a canonical non-negative decimal no greater than ${MAX_RULES}"
+fi
+
 # Build the matching native consumer before publishing; verification runs only
 # after the manifest is live. The image has no production cache or rule sources.
 docker buildx build --target rules-verifier --load \
@@ -140,6 +233,7 @@ VERIFIER_IMAGE="$(<"${WORK}/verifier.iid")"
 #    branch on the HTTP STATUS instead: 200 => exists, 404 => genuinely absent,
 #    anything else (401/403/5xx) => credential/network fault, so abort rather than
 #    guess. This is what actually enforces the monotonicity rule described above.
+NIGHTLY_STAGE=publish
 RELEASE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' \
     -H @- \
     -H 'Accept: application/vnd.github+json' \
@@ -163,12 +257,12 @@ else
 fi
 VERSION=$((PREV + 1))
 
+# The release probe is publish-stage, but local manifest preparation cannot
+# change the release and must retain build-stage attribution.
+NIGHTLY_STAGE=build
 # 3) Compute the checksum + sanity fields, write the manifest.
 SUM="$(sha256sum "$YAC" | awk '{print $1}')"
 SIZE="$(stat -c '%s' "$YAC")"
-# Rule count: yarac doesn't print it; the build's compile step logs it, but for a
-# robust standalone number, leave 0 if we can't get it cheaply (display-only).
-RULES="${RULES_COUNT:-0}"
 GENERATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 MANIFEST="${WORK}/compiled.yac.manifest.json"
@@ -200,6 +294,10 @@ note "version ${PREV} -> ${VERSION}, libyara ${LIBYARA}, size ${SIZE}, sha256 ${
 # 4) Publish to the rolling release (create once if absent), clobbering assets.
 # Reuse the HTTP-status probe from step 1 (same reason: gh's exit status is not
 # trustworthy here). RELEASE_HTTP is 200 or 404 by now — anything else already died.
+NIGHTLY_STAGE=publish
+# A failed create can follow a server-side mutation or ambiguous transport loss,
+# so uncertainty starts before the first remote release mutation.
+PUBLISH_STATE=uncertain
 if [ "$RELEASE_HTTP" != 200 ]; then
     note "creating rolling release ${TAG}"
     gh release create "$TAG" --repo "$REPO" \
@@ -211,11 +309,13 @@ fi
 # older manifest can describe the new bytes; consumers reject and retry later.
 gh release upload "$TAG" --repo "$REPO" --clobber "$YAC"
 gh release upload "$TAG" --repo "$REPO" --clobber "$MANIFEST"
+PUBLISH_STATE=published
 
 # An independent download through the actual consumer validates release/CDN
 # bytes, manifest identity and native loadability without touching any host cache.
 # Asset replacement can be briefly incoherent at the CDN, so retry with bounded
 # backoff and alert only when the new release stays unverifiable.
+NIGHTLY_STAGE=verify
 verified=0
 for attempt in 1 2 3 4 5; do
 	if docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,size=2g \
@@ -230,12 +330,28 @@ for attempt in 1 2 3 4 5; do
     fi
 done
 [ "$verified" -eq 1 ] \
-    || die "published v${VERSION}, but post-publish verification FAILED; inspect the release before declaring it current"
+    || die "$(published_verify_notice)"
 
 note "published ${TAG}: compiled.yac (v${VERSION}) + manifest"
 
-# Shout success to Discord #builds. Size in MiB; rules count only if known (>0).
+# Prepare the success notification before the terminal receipt. The notification
+# delivery itself remains best-effort, so no fallible work follows that receipt.
+NIGHTLY_STAGE=receipt
 SIZE_MIB="$(awk -v b="$SIZE" 'BEGIN{printf "%.1f", b/1048576}')"
-rules_line=""; [ "${RULES:-0}" -gt 0 ] 2>/dev/null && rules_line=", ${RULES} rules"
+rules_line=""
+[ "$RULES" = 0 ] || rules_line=", ${RULES} rules"
+
+# This is the terminal verify artifact, not best-effort telemetry: its numeric
+# fields have already passed jq while writing MANIFEST before publication. An
+# encoding fault fails closed as its own receipt stage rather than mislabeling a
+# successfully native-verified release as a verify failure.
+# Success reports `verify`; only an in-flight serializer failure is relabeled
+# `receipt` by the ERR trap while _RECEIPT_EMITTING is set.
+NIGHTLY_STAGE=verify
+_RECEIPT_EMITTING=1
+nightly_receipt success
+_RECEIPT_EMITTING=0
+
+# Shout success to Discord #builds. Size in MiB; rules count only if known (>0).
 shout "strixd rules: rules-current v${VERSION} published" \
       "Fresh compiled YARA bundle published to \`${TAG}\` (v${PREV}→v${VERSION}${rules_line}, ${SIZE_MIB} MiB, libyara ${LIBYARA}). strixd \`--fetch-rules\` clients update on next check."
