@@ -154,9 +154,10 @@ type clamBridge struct {
 	manifestSHA string
 	stopped     bool
 	diagnostics io.Writer
-	command     func(context.Context, string) *exec.Cmd // inert process tests only
-	cleanup     func(string) bool                       // tests only
-	budget      time.Duration                           // tests only
+	command     func(context.Context, string) *exec.Cmd           // inert process tests only
+	cleanup     func(string) bool                                 // tests only
+	dockerCall  func(context.Context, ...string) ([]byte, string) // tests only
+	budget      time.Duration                                     // tests only
 }
 
 func prepareClamBridge(diagnostics io.Writer) (*clamBridge, error) {
@@ -181,16 +182,22 @@ func (b *clamBridge) cleanupAfterFailure(name string) bool {
 	if b.cleanup != nil {
 		return b.cleanup(name)
 	}
-	d := isolatedDocker{}
+	call := b.dockerCall
+	if call == nil {
+		d := isolatedDocker{}
+		call = func(ctx context.Context, args ...string) ([]byte, string) {
+			return d.call(ctx, nil, args...)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	// Docker removal output has no contract; its status and the independent
-	// exact-name absence probe below determine whether cleanup succeeded.
-	_, status := d.call(ctx, nil, "rm", "--force", name)
+	// Removal is best effort: a clean Python exit may already have removed the
+	// container. The independent exact-name absence probe is authoritative.
+	_, _ = call(ctx, "rm", "--force", name)
 	cancel()
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	absent, absentStatus := d.call(ctx, nil, "ps", "--all", "--quiet", "--filter", "name=^/"+name+"$")
-	return status == "ok" && absentStatus == "ok" && len(bytes.TrimSpace(absent)) == 0
+	absent, absentStatus := call(ctx, "ps", "--all", "--quiet", "--filter", "name=^/"+name+"$")
+	return absentStatus == "ok" && len(bytes.TrimSpace(absent)) == 0
 }
 
 type clamBridgeOutcome struct {

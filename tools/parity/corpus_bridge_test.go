@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -198,6 +199,36 @@ func TestClamBridgeStartFailureDoesNotInventContainerCleanup(t *testing.T) {
 	}
 	if cleanupCalls != 0 || !strings.Contains(diagnostic.String(), "cause=process cleanup_confirmed=true") {
 		t.Fatalf("start failure invented container cleanup: calls=%d diagnostic=%q", cleanupCalls, diagnostic.String())
+	}
+}
+
+func TestClamBridgeCleanupUsesExactAbsenceAfterRedundantRemoval(t *testing.T) {
+	name := "mailstrix-clamav-" + strings.Repeat("a", 32)
+	for _, tc := range []struct {
+		name, absence, absenceStatus string
+		want                         bool
+	}{
+		{"already absent", "", "ok", true},
+		{"still present", "container-id\n", "ok", false},
+		{"absence unknown", "", "timeout", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			b := clamBridge{dockerCall: func(_ context.Context, args ...string) ([]byte, string) {
+				calls = append(calls, append([]string{}, args...))
+				if args[0] == "rm" {
+					return nil, "exit"
+				}
+				return []byte(tc.absence), tc.absenceStatus
+			}}
+			if got := b.cleanupAfterFailure(name); got != tc.want {
+				t.Fatalf("cleanup=%t, want %t", got, tc.want)
+			}
+			if len(calls) != 2 || !slices.Equal(calls[0], []string{"rm", "--force", name}) ||
+				!slices.Equal(calls[1], []string{"ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"}) {
+				t.Fatalf("unexpected cleanup sequence: %v", calls)
+			}
+		})
 	}
 }
 

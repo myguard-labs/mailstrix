@@ -73,10 +73,11 @@ and records that limit in its envelope. Each output pipe is bounded to 64 KiB.
 Start/scan has a 45-second parent deadline; each
 create/inspect/remove/absence operation has its own five-second deadline. Client
 termination has a five-second reap bound.
-The container is removed and its absence checked independently on every path.
+Container removal is attempted and exact-name absence is checked independently
+on every path.
 An inconclusive create or cleanup poisons the backend instance and retains the
-exact generated container name for operator investigation. Removal must succeed;
-the independent absence query still runs after failed removal. Cleanup failure
+exact generated container name for operator investigation. The independent
+absence query is authoritative and still runs after failed removal. Cleanup failure
 overrides any successful scanner response. Qualification exercises actual timeout,
 missing-DB, max-file-size, and OOM cases, in addition to deterministic boundary
 and cleanup controls. Neither sample-controlled output nor a timed-out process
