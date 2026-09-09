@@ -144,11 +144,15 @@ STUB
 cat >"$test_root/tools/discord-notify.py" <<'STUB'
 #!/usr/bin/env python3
 import os
+import signal
 import sys
 
 with open(os.environ["EVENTS"], "a", encoding="utf-8") as events:
     events.write(f"notify {sys.argv[2]}\n")
     events.write(f"notify-body {sys.argv[3]}\n")
+if os.environ.get("SIGNAL_SUCCESS_NOTIFY") == "1" and sys.argv[2].endswith("published"):
+    with open(os.environ["EVENTS"] + ".signal-target", encoding="utf-8") as target:
+        os.kill(int(target.read()), signal.SIGTERM)
 raise SystemExit(int(os.environ.get("FAIL_NOTIFY", "0")))
 STUB
 
@@ -402,6 +406,16 @@ assert_verify_signal_reports_interruption() {
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'verify signal verifier count'
 }
 
+assert_success_notification_signal_stays_successful() {
+    local actual
+    run_script SIGNAL_SUCCESS_NOTIFY=1
+    [ "$actual" -eq 143 ] || assert_event "success notification signal exit: $actual"
+    assert_receipt verify success
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'success notification signal changed terminal receipt'
+    [ "$(grep -c 'FAILED' "$EVENTS" || true)" -eq 0 ] || assert_event 'success notification signal emitted contradictory failure alert'
+    grep -Fx 'notify strixd rules: rules-current v1 published' "$EVENTS" >/dev/null || assert_event 'success notification was not attempted'
+}
+
 run_case() {  # run_case <name> <exit> <stage> <status> <verify-count> <uploads> <build-fail> <publish-fail> <verify-until> <notify-fail>
     local name="$1" expected_exit="$2" stage="$3" status="$4" verify_count="$5" uploads="$6"
     local fail_build="$7" fail_publish="$8" fail_verify="$9" fail_notify="${10}" actual
@@ -446,4 +460,5 @@ assert_success_receipt_signal_is_receipt_failure
 assert_failure_receipt_signal_finishes_reporting
 assert_signaled_success_serializer_failure_falls_back
 assert_verify_signal_reports_interruption
+assert_success_notification_signal_stays_successful
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'

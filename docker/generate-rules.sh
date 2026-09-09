@@ -149,6 +149,9 @@ signal_abort() {  # signal_abort <conventional-signal-exit>
         _PENDING_SIGNAL="$rc"
         return 0
     fi
+    # A terminal receipt is authoritative. In particular, do not contradict a
+    # completed success receipt if shutdown lands in the best-effort notifier.
+    [ "$_RECEIPTED" -eq 0 ] || exit "$rc"
     shout_fail "$(failure_notice "$rc")"
     exit "$rc"
 }
