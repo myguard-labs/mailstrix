@@ -79,7 +79,7 @@ class FrozenTests(unittest.TestCase):
             "SecurityOptions": ["name=seccomp,profile=builtin"],
             "MemoryLimit": True,
             "SwapLimit": True,
-            "CPUCfsQuota": True,
+            "CpuCfsQuota": True,
             "PidsLimit": True,
         }
 
@@ -124,7 +124,7 @@ class FrozenTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "image does not match"):
                     self.inspect()
                 self.image = original
-        for key in ("MemoryLimit", "SwapLimit", "CPUCfsQuota", "PidsLimit"):
+        for key in ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit"):
             with self.subTest(key=key):
                 self.runtime[key] = False
                 with self.assertRaisesRegex(ValueError, "containment"):

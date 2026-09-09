@@ -173,7 +173,7 @@ def frozen_identity(directory, variant):
         or "name=seccomp,profile=builtin" not in runtime.get("SecurityOptions", [])
         or any(
             runtime.get(key) is not True
-            for key in ("MemoryLimit", "SwapLimit", "CPUCfsQuota", "PidsLimit")
+            for key in ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit")
         )
     ):
         raise ValueError("runtime containment unavailable")

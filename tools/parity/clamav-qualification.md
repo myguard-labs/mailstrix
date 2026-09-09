@@ -1,9 +1,10 @@
 # Offline ClamAV adapter qualification
 
 This optional prerequisite uses inert local text and one private test signature.
-It does not yet connect ClamAV to the parity CLI, compare corpus observations,
-measure accuracy, or qualify a representative corpus. Existing CLI reports keep
-their meaning and privacy defaults.
+The resulting frozen `engine` snapshot is an explicit input to the opt-in
+`parity compare-corpus` command. Qualification does not compare corpus observations,
+measure accuracy, establish database freshness, or qualify a representative
+corpus. Existing CLI reports keep their meaning and privacy defaults.
 
 Supply a JSON array of `[source_path, absolute_image_path]` pairs containing a
 trusted local `/usr/bin/clamscan`, its ELF loader/shared libraries, and explicit
@@ -28,6 +29,12 @@ python3 -B -m unittest discover -s tools/parity -p 'clamav_adapter_test.py'
 python3 -B tools/parity/qualify_clamav.py \
   --assets /path/to/assets.json --output /path/to/new-output
 ```
+
+Re-run qualification after any adapter/qualifier behavior change or selected
+installation/DB change. A changed bridge does not rewrite a qualification receipt;
+`compare-corpus` independently verifies the frozen inventory against the imported
+image and binds both adapter and bridge source hashes in its comparison context.
+Never reuse a receipt whose `qualified` field is absent or false.
 
 The new output directory retains normalized `rootfs.tar` snapshots, per-asset
 SHA-256 inventories, engine-assets and DB-set identities, and
@@ -92,3 +99,12 @@ verification stays enabled. No detached-signature CA is installed, so this path
 does not qualify detached-signature databases; verification failures remain
 errors. The private unsigned test signature is declared only in its separate
 qualification DB inventory.
+
+For `compare-corpus`, pass the qualification directory itself with
+`-clamav-qualification` and normally retain the default `-clamav-variant engine`.
+The command verifies the normalized tar hash and inventory, requires the imported
+image to have exactly that one rootfs diffID, checks the local cgroup/resource/
+seccomp capabilities, and obtains the running ClamAV version before any sample.
+Its optional local receipts bind the resulting image, rootfs, engine-assets, DB,
+version and exact scan arguments. Those identities describe selected bytes and
+runtime observations; they are not an accuracy, provenance, or attestation claim.

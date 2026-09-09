@@ -7,10 +7,11 @@ is computed from the generator, not trusted manifest claims. Optional
 per unique sample, with the fixed envelope described below.
 
 The separate opt-in `compare` command runs pinned oletools and olefy against local
-Office inputs in isolated containers. Neither runs during `generate`, `check` or
-`run`. ClamAV remains unimplemented. This baseline establishes selected indicator
-expectations; it does not
-measure real-world precision, prove oletools parity or replace ClamAV.
+Office inputs in isolated containers. The opt-in `compare-corpus` command joins
+isolated Mailstrix, direct oletools and a separately frozen ClamAV observation in
+one local pass. None runs during `generate`, `check` or `run`. These tools establish
+selected indicator and interface observations; they do not measure real-world
+precision, prove semantic equivalence or provide representative thresholds.
 
 ## Run
 
@@ -420,12 +421,110 @@ inner identities, runner hash, adapter schema, platform and fixed budgets, while
 omitting sample IDs, paths, hashes, content and raw diagnostics. The manifest
 digest still needs privacy review before publication.
 
+## Opt-in three-engine corpus comparison
+
+`compare-corpus` is a local, sequential join over exact manifest bytes. It requires
+Linux/amd64 and four explicit reviewed inputs: an immutable local Mailstrix image,
+a frozen ClamAV qualification directory, a v1 manifest/corpus root, and a versioned
+comparison policy. The pinned direct-oletools image must already be local. It never
+pulls, updates a database, acquires a corpus, uses a host scanner, or changes the
+behavior or defaults of `run`, `run-isolated`, or `compare`.
+
+```sh
+/tmp/mailstrix-parity compare-corpus \
+  -manifest /private/corpus/manifest.json \
+  -corpus-root /private/corpus \
+  -engine-image sha256:<immutable-mailstrix-image-id> \
+  -clamav-qualification /private/clamav-qualification \
+  -clamav-variant engine \
+  -policy /private/comparison-policy.json \
+  -local-receipts /private/new-comparison-receipts.jsonl \
+  > /private/comparison-report.json
+```
+
+`-clamav-variant` is `engine` by default; `private-engine` exists only for the
+explicit inert-signature qualification control. `-local-receipts` is optional.
+When present it must name a nonexistent file, created exclusively with mode 0600.
+The command validates every alias before any engine runs and re-reads each unique
+sample immediately before observation. It passes only bytes, size, digest and input
+unit between components; it never joins by a filename or engine-supplied label.
+
+The policy has exact fields and no implicit default. This illustrative shape uses
+an all-zero digest only as a placeholder; replace it with the exact isolated-worker
+rules fingerprint and independently review every symbol classification:
+
+```json
+{
+  "schema_version": 1,
+  "id": "reviewed-observation-policy-v1",
+  "review_ref": "local review record, not an attestation",
+  "rules_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "mapping": "ooxml-vba-observations-v1",
+  "scope": [{"format": "pdf", "input_unit": "file"}],
+  "closed": true,
+  "positive": [{"namespace": "pdf_indicators.yara", "rule": "PDF_OpenAction_JS"}],
+  "neutral": [{"namespace": "pdf_indicators.yara", "rule": "PDF_ObjStm"}]
+}
+```
+
+Only an exact rules fingerprint, applicable scope, completed Mailstrix observation,
+and explicitly closed policy can yield a policy-negative decision. A positive hit
+does not override an unmapped hit. Open policies, mismatched rules, failures,
+out-of-scope inputs and any unmapped observed symbol are `unknown`, with an explicit
+exclusion reason. `review_ref` records caller provenance; it is not cryptographic
+or source-to-binary attestation.
+
+The named `ooxml-vba-observations-v1` correspondence is applicable only to an
+Office/file input with a completed native OpenXML classification. Its left
+predicate is the observed Mailstrix `oleid_indicators.yara` /
+`OLEID_OOXML_VBA_Present` marker, which intends successful decoded-VBA output. Its
+right predicate is a nonempty direct-oletools macro-record list, including a record
+whose code is null. The report counts `both`, `mailstrix_only`, `oletools_only`,
+`neither`, and `unknown`. These predicates are deliberately different;
+correspondence is not semantic equivalence. Olefy and direct oletools are two
+interfaces to one engine, not independent votes.
+
+The ClamAV relation counts `both_positive`, `mailstrix_only`, `clamav_unique`,
+`both_negative`, and `unknown`. Here `clamav_unique` means only a named,
+non-heuristic ClamAV detection beside an applicable known-negative Mailstrix policy
+observation. It does not mean true positive, malware, or accuracy. Limits,
+heuristics, stale or added diagnostics, timeouts, identity errors and all other
+incomplete results are excluded rather than converted to negative observations.
+The one byte-exact historical database-age warning described in
+[clamav-qualification.md](clamav-qualification.md) is retained as stale metadata;
+it makes no freshness or current-accuracy claim.
+
+The public JSON report is aggregate. It omits sample IDs, sample digests, locators,
+content, full symbol lists and raw engine output. Its context binds the manifest
+and policy hashes, Mailstrix image/worker/rules/envelope, pinned oletools image
+and source identities, comparator runner, frozen ClamAV
+image/rootfs/engine/DB/version,
+scanner argv, adapter/bridge source hashes and local runtime identity. The manifest
+digest can still disclose corpus membership and needs privacy review before
+publication. `real_world_precision` remains null.
+
+Opt-in private JSONL receipts contain one context header, one exact manifest/sample
+identity row per unique sample, and one footer binding the aggregate report hash,
+count and completeness. They can expose private sample membership and full observed
+symbols/detections. Keep them local, never put them in Git or public CI, and handle
+partial files as incomplete after any write or size-limit failure.
+
+Exit 0 requires every observation/comparison known and the independent labelled
+Mailstrix gate passing. Exit 1 means an incomplete/unknown observation or labelled
+failure; mixed-format corpora normally return 1 because direct oletools is only
+applicable to Office files. Exit 2 means invalid/setup/protocol/report or private
+receipt failure. None of these exits establishes benign or malicious ground truth.
+The Mailstrix, oletools and ClamAV envelopes retain their separately documented
+CPU, memory, PID, output and deadline bounds; they are per-input capacity controls,
+not representative workload thresholds. Go parent or kernel death remains outside
+the bridge cleanup guarantee.
+
 ## Validation
 
 ```sh
 go test -race ./tools/parity
 go test ./tools/parity -run TestSyntheticScannerBaseline -count=1
-python3 -B -m unittest discover -s tools/parity -p 'comparator_runner_test.py'
+python3 -B -m unittest discover -s tools/parity -p '*_test.py'
 ```
 
 These tests run in the existing Docker CI `go test -race -tags yara_static ./...`
@@ -438,5 +537,6 @@ a daemon. The CI scanner job also runs standard-library Python tests with mocked
 identity, subprocess and socket providers for protocol framing, diagnostics,
 timeouts, input/output bounds and process cleanup. These tests do not require
 oletools, olefy, an image or an external corpus.
-The complete external-corpus harness, cross-tool parity/ClamAV-only
-metrics and representative non-regression thresholds remain unfinished.
+`compare-corpus` is complete for caller-supplied local inputs under these explicit
+contracts. Representative external-corpus precision and non-regression thresholds
+remain unmeasured and are not inferred from inert qualification.
