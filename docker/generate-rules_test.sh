@@ -60,6 +60,9 @@ case "${2:-}" in
         ;;
     upload)
         printf 'upload %s\n' "$(basename "${!#}")" >> "$EVENTS"
+        if [ "${SIGNAL_PUBLISH:-0}" -eq 1 ]; then
+            kill -TERM "$(cat "${EVENTS}.signal-target")"
+        fi
         [ "${FAIL_PUBLISH:-0}" -eq 0 ] || exit 42
         ;;
 esac
@@ -117,6 +120,20 @@ if [ "${FAIL_RECEIPT_ONCE:-0}" -eq 1 ] && [[ "$*" == *mailstrix-rules-nightly-v1
     attempts=$((attempts + 1))
     printf '%s\n' "$attempts" > "$receipt_attempts"
     [ "$attempts" -gt 1 ] || exit 43
+fi
+if [ "${SIGNAL_SUCCESS_RECEIPT:-0}" -eq 1 ] && [[ "$*" == *'--arg status success'* ]]; then
+    "$REAL_JQ" "$@"
+    kill -TERM "$(cat "${EVENTS}.signal-target")"
+    exit 0
+fi
+if [ "${SIGNAL_FAILURE_RECEIPT:-0}" -eq 1 ] && [[ "$*" == *'--arg status failed'* ]]; then
+    "$REAL_JQ" "$@"
+    kill -TERM "$(cat "${EVENTS}.signal-target")"
+    exit 0
+fi
+if [ "${FAIL_AND_SIGNAL_SUCCESS_RECEIPT:-0}" -eq 1 ] && [[ "$*" == *'--arg status success'* ]]; then
+    kill -TERM "$(cat "${EVENTS}.signal-target")"
+    exit 43
 fi
 exec "$REAL_JQ" "$@"
 STUB
@@ -210,14 +227,26 @@ assert_success_event_order() {  # assert_success_event_order <case> <verify-coun
     [ "${#lifecycle[@]}" -eq "$((verify_count + 3))" ] || assert_event "$name: unexpected lifecycle event count"
 }
 
-assert_receipt_failure_preserves_stage_failure() {
+run_script() {  # run_script <env-assignment>...; assigns caller-local actual
+    local runner_pid
     : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_BUILD=1 FAIL_RECEIPT=1 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
+    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target"
+    (
+        printf '%s\n' "$BASHPID" >"${EVENTS}.signal-target"
+        exec env "$@" bash "$test_root/sandbox/project/docker/generate-rules.sh"
+    ) >"$test_root/log" 2>&1 &
+    runner_pid=$!
+    if wait "$runner_pid"; then
         actual=0
     else
         actual=$?
     fi
+    rm -f "${EVENTS}.signal-target"
+}
+
+assert_receipt_failure_preserves_stage_failure() {
+    local actual
+    run_script FAIL_BUILD=1 FAIL_RECEIPT=1
     [ "$actual" -eq 41 ] || assert_event "receipt failure masked build exit: $actual"
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 0 ] || assert_event 'failed serializer emitted a receipt'
     grep -Fx 'notify strixd rules: build FAILED' "$EVENTS" >/dev/null || assert_event 'receipt failure lost build notification'
@@ -225,13 +254,8 @@ assert_receipt_failure_preserves_stage_failure() {
 }
 
 assert_release_probe_failure_is_publish() {
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if RELEASE_HTTP=401 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local actual
+    run_script RELEASE_HTTP=401
     [ "$actual" -eq 1 ] || assert_event "release probe exit: $actual"
     assert_receipt publish failed
     grep -Fx 'notify strixd rules: publish FAILED' "$EVENTS" >/dev/null || assert_event 'release probe stage notification'
@@ -240,13 +264,8 @@ assert_release_probe_failure_is_publish() {
 }
 
 assert_release_create_failure_is_publish_uncertain() {
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_CREATE=1 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local actual
+    run_script FAIL_CREATE=1
     [ "$actual" -eq 49 ] || assert_event "release create exit: $actual"
     assert_receipt publish failed
     assert_notification release-create publish failed
@@ -257,13 +276,8 @@ assert_release_create_failure_is_publish_uncertain() {
 }
 
 assert_success_receipt_failure_is_receipt_stage() {
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_RECEIPT_ONCE=1 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local actual
+    run_script FAIL_RECEIPT_ONCE=1
     [ "$actual" -eq 1 ] || assert_event "receipt-stage exit: $actual"
     assert_receipt receipt failed
     grep -Fx 'notify strixd rules: receipt FAILED' "$EVENTS" >/dev/null || assert_event 'receipt-stage notification'
@@ -274,24 +288,17 @@ assert_success_receipt_failure_is_receipt_stage() {
 }
 
 assert_valid_rules_count() {  # assert_valid_rules_count <count>
-    local rules="$1"
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    RULES_COUNT="$rules" bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1 || assert_event "valid rules count ${rules} failed"
+    local rules="$1" actual
+    run_script RULES_COUNT="$rules"
+    [ "$actual" -eq 0 ] || assert_event "valid rules count ${rules} failed"
     assert_receipt verify success "$rules"
     grep -F "${rules} rules" "$EVENTS" >/dev/null || assert_event "valid rules count ${rules} notification"
     assert_success_event_order "valid rules count ${rules}" 1
 }
 
 assert_invalid_rules_count_is_build_failure() {  # assert_invalid_rules_count_is_build_failure <count>
-    local rules="$1"
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if RULES_COUNT="$rules" bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local rules="$1" actual
+    run_script RULES_COUNT="$rules"
     [ "$actual" -eq 1 ] || assert_event "invalid rules count ${rules} exit: $actual"
     assert_receipt build failed
     grep -F 'ERROR: RULES_COUNT must be a canonical non-negative decimal no greater than 2147483647' "$test_root/log" >/dev/null || assert_event "invalid rules count ${rules} diagnostic"
@@ -301,13 +308,8 @@ assert_invalid_rules_count_is_build_failure() {  # assert_invalid_rules_count_is
 }
 
 assert_startup_failure_is_build_failure() {
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_MKTEMP=1 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local actual
+    run_script FAIL_MKTEMP=1
     [ "$actual" -eq 44 ] || assert_event "mktemp startup exit: $actual"
     assert_receipt build failed
     assert_notification startup-mktemp build failed
@@ -316,13 +318,8 @@ assert_startup_failure_is_build_failure() {
 }
 
 assert_repository_path_failure_notifies() {
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_HERE=1 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local actual
+    run_script FAIL_HERE=1
     [ "$actual" -eq 1 ] || assert_event "repository path startup exit: $actual"
     assert_receipt build failed
     assert_notification repository-path build failed
@@ -331,13 +328,8 @@ assert_repository_path_failure_notifies() {
 }
 
 assert_manifest_preparation_failure_is_build_failure() {
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_MANIFEST_DATE=1 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local actual
+    run_script FAIL_MANIFEST_DATE=1
     [ "$actual" -eq 48 ] || assert_event "manifest preparation exit: $actual"
     assert_receipt build failed
     assert_notification manifest-preparation build failed
@@ -346,13 +338,8 @@ assert_manifest_preparation_failure_is_build_failure() {
 }
 
 assert_post_verify_preparation_is_receipt_stage() {
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_POST_VERIFY_AWK=1 bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local actual
+    run_script FAIL_POST_VERIFY_AWK=1
     [ "$actual" -eq 47 ] || assert_event "post-verify preparation exit: $actual"
     assert_receipt receipt failed
     assert_notification post-verify-preparation receipt failed
@@ -361,17 +348,50 @@ assert_post_verify_preparation_is_receipt_stage() {
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'post-verify preparation verifier count'
 }
 
+assert_publish_signal_reports_failure() {
+    local actual
+    run_script SIGNAL_PUBLISH=1
+    [ "$actual" -eq 143 ] || assert_event "publish signal exit: $actual"
+    assert_receipt publish failed
+    assert_notification publish-signal publish failed
+    grep -F 'notify-body generate-rules.sh exited 143 — rules-current may be partially updated.' "$EVENTS" >/dev/null || assert_event 'publish signal state wording'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 1 ] || assert_event 'publish signal upload count'
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 0 ] || assert_event 'publish signal started verifier'
+}
+
+assert_success_receipt_signal_is_receipt_failure() {
+    local actual
+    run_script SIGNAL_SUCCESS_RECEIPT=1
+    [ "$actual" -eq 143 ] || assert_event "success receipt signal exit: $actual"
+    assert_receipt receipt failed
+    assert_notification success-receipt-signal receipt failed
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'success receipt signal emitted conflicting receipts'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'success receipt signal upload count'
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'success receipt signal verifier count'
+}
+
+assert_failure_receipt_signal_finishes_reporting() {
+    local actual
+    run_script FAIL_BUILD=1 SIGNAL_FAILURE_RECEIPT=1
+    [ "$actual" -eq 143 ] || assert_event "failure receipt signal exit: $actual"
+    assert_receipt build failed
+    assert_notification failure-receipt-signal build failed
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'failure receipt signal lost or duplicated terminal receipt'
+}
+
+assert_signaled_success_serializer_failure_falls_back() {
+    local actual
+    run_script FAIL_AND_SIGNAL_SUCCESS_RECEIPT=1
+    [ "$actual" -eq 143 ] || assert_event "signaled serializer failure exit: $actual"
+    assert_receipt receipt failed
+    assert_notification signaled-serializer-failure receipt failed
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'signaled serializer failure lost or duplicated fallback receipt'
+}
+
 run_case() {  # run_case <name> <exit> <stage> <status> <verify-count> <uploads> <build-fail> <publish-fail> <verify-until> <notify-fail>
     local name="$1" expected_exit="$2" stage="$3" status="$4" verify_count="$5" uploads="$6"
-    local fail_build="$7" fail_publish="$8" fail_verify="$9" fail_notify="${10}"
-    : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts"
-    if FAIL_BUILD="$fail_build" FAIL_PUBLISH="$fail_publish" FAIL_VERIFY_UNTIL="$fail_verify" FAIL_NOTIFY="$fail_notify" \
-        bash "$test_root/sandbox/project/docker/generate-rules.sh" >"$test_root/log" 2>&1; then
-        actual=0
-    else
-        actual=$?
-    fi
+    local fail_build="$7" fail_publish="$8" fail_verify="$9" fail_notify="${10}" actual
+    run_script FAIL_BUILD="$fail_build" FAIL_PUBLISH="$fail_publish" FAIL_VERIFY_UNTIL="$fail_verify" FAIL_NOTIFY="$fail_notify"
     [ "$actual" -eq "$expected_exit" ] || {
         cat "$test_root/log" >&2
         assert_event "$name: exit $actual, want $expected_exit"
@@ -407,4 +427,8 @@ assert_startup_failure_is_build_failure
 assert_repository_path_failure_notifies
 assert_manifest_preparation_failure_is_build_failure
 assert_post_verify_preparation_is_receipt_stage
+assert_publish_signal_reports_failure
+assert_success_receipt_signal_is_receipt_failure
+assert_failure_receipt_signal_finishes_reporting
+assert_signaled_success_serializer_failure_falls_back
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'

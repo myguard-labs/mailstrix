@@ -55,11 +55,12 @@ NIGHTLY_STAGE=build
 PUBLISH_STATE=not-started
 _RECEIPTED=0
 _RECEIPT_EMITTING=0
+_PENDING_SIGNAL=0
 nightly_receipt() {  # nightly_receipt <success|failed>
-    local status="$1"
+    local status="$1" receipt
     [ "$_RECEIPTED" -eq 0 ] || return 0
     if [ "$status" = success ]; then
-        jq -cn \
+        receipt="$(jq -cn \
             --arg stage "$NIGHTLY_STAGE" \
             --arg status "$status" \
             --argjson version "$VERSION" \
@@ -68,12 +69,16 @@ nightly_receipt() {  # nightly_receipt <success|failed>
             --arg libyara "$LIBYARA" \
             --argjson rules "$RULES" \
             --argjson size "$SIZE" \
-            '{schema:"mailstrix-rules-nightly-v1", stage:$stage, status:$status, version:$version, generated:$generated, checksum:$checksum, libyara:$libyara, rules:$rules, size:$size, loadable:true}' || return 1
+            '{schema:"mailstrix-rules-nightly-v1", stage:$stage, status:$status, version:$version, generated:$generated, checksum:$checksum, libyara:$libyara, rules:$rules, size:$size, loadable:true}')" || return 1
     else
-        jq -cn --arg stage "$NIGHTLY_STAGE" --arg status "$status" \
-            '{schema:"mailstrix-rules-nightly-v1", stage:$stage, status:$status}' || return 1
+        receipt="$(jq -cn --arg stage "$NIGHTLY_STAGE" --arg status "$status" \
+            '{schema:"mailstrix-rules-nightly-v1", stage:$stage, status:$status}')" || return 1
     fi
+    # A signal received while the serializer child was running is handled once
+    # this function unwinds. Do not expose the now-stale success object first.
+    [ "$status" = failed ] || [ "$_PENDING_SIGNAL" -eq 0 ] || return 0
     _RECEIPTED=1
+    printf '%s\n' "$receipt"
 }
 
 # Discord #builds shout (via discord-notify.py → myguard-discord-bot socket; the
@@ -88,10 +93,13 @@ shout() {  # shout <title> <body>
 shout_fail() {  # shout_fail <body> — fires at most once per run
     [ "$_SHOUTED_FAIL" -eq 0 ] || return 0
     _SHOUTED_FAIL=1
+    _RECEIPT_EMITTING=1
     if ! nightly_receipt failed; then
         note "ERROR: failed to emit nightly receipt"
     fi
+    _RECEIPT_EMITTING=0
     shout "strixd rules: ${NIGHTLY_STAGE} FAILED" "$1"
+    finish_pending_signal
 }
 published_verify_notice() {
     printf '%s' 'rules-current was published, but native verification failed; clients may encounter an unverified bundle. Inspect and repair the release.'
@@ -130,6 +138,25 @@ cleanup() { [ -z "$WORK" ] || rm -rf "${WORK:?}"; }
 trap cleanup EXIT
 # shellcheck disable=SC2154  # rc IS assigned (rc=$?) inside the trap-quoted string
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then [ "$_RECEIPT_EMITTING" -eq 0 ] || NIGHTLY_STAGE=receipt; shout_fail "$(failure_notice "$rc")"; fi; exit $rc' ERR
+signal_abort() {  # signal_abort <conventional-signal-exit>
+    local rc="$1"
+    if [ "$_RECEIPT_EMITTING" -ne 0 ]; then
+        _PENDING_SIGNAL="$rc"
+        return 0
+    fi
+    shout_fail "$(failure_notice "$rc")"
+    exit "$rc"
+}
+finish_pending_signal() {
+    local rc
+    [ "$_PENDING_SIGNAL" -ne 0 ] || return 0
+    rc="$_PENDING_SIGNAL"
+    _PENDING_SIGNAL=0
+    signal_abort "$rc"
+}
+trap 'signal_abort 143' TERM
+trap 'signal_abort 130' INT
+trap 'signal_abort 129' HUP
 
 die()  { note "ERROR: $*"; shout_fail "$*"; exit 1; }
 
@@ -351,6 +378,8 @@ NIGHTLY_STAGE=verify
 _RECEIPT_EMITTING=1
 nightly_receipt success
 _RECEIPT_EMITTING=0
+if [ "$_PENDING_SIGNAL" -ne 0 ]; then NIGHTLY_STAGE=receipt; fi
+finish_pending_signal
 
 # Shout success to Discord #builds. Size in MiB; rules count only if known (>0).
 shout "strixd rules: rules-current v${VERSION} published" \
