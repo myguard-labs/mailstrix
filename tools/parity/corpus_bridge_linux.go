@@ -23,9 +23,9 @@ func configureBridgeGroup(cmd *exec.Cmd) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
 	// finishBridgeGroup observes cancellation and exclusively owns group
-	// signalling while the leader pins its PID/PGID. CommandContext's default
-	// asynchronous Cancel callback must not outlive cmd.Wait and signal a
-	// recycled numeric group.
+	// signalling while the leader pins its PID/PGID. The removed custom
+	// asynchronous raw-PGID callback could outlive reaping and signal a recycled
+	// group.
 	cmd.Cancel = nil
 	return nil
 }

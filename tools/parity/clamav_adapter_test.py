@@ -1,7 +1,9 @@
 """Inert, stdlib-only controls for the optional offline ClamAV adapter."""
 
+import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,8 @@ import clamav_adapter as adapter
 
 IMAGE = "sha256:" + "a" * 64
 STATE = {"OOMKilled": False, "Running": False, "Error": "", "ExitCode": 0}
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
 
 
 class ClassifyTests(unittest.TestCase):
@@ -133,22 +137,73 @@ class CallTests(unittest.TestCase):
             "'import time;time.sleep(60)']);"
             "print(p.pid,flush=True)"
         )
-        result = adapter.call([sys.executable, "-I", "-c", child], seconds=1)
-        self.assertEqual(result.status, "timeout")
-        self.assertEqual(result.code, 0)
-        self.assertTrue(result.out.strip(), "leader did not report its descendant PID")
-        descendant = int(result.out.strip())
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline:
+        libc = ctypes.CDLL(None, use_errno=True)
+        old_subreaper = ctypes.c_int()
+        self.assertEqual(
+            libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(old_subreaper), 0, 0, 0),
+            0,
+            f"PR_GET_CHILD_SUBREAPER errno={ctypes.get_errno()}",
+        )
+        self.assertEqual(
+            libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0),
+            0,
+            f"PR_SET_CHILD_SUBREAPER errno={ctypes.get_errno()}",
+        )
+        descendant = None
+        failure = None
+        cleanup_error = None
+        descendant_absent = False
+        try:
+            result = adapter.call([sys.executable, "-I", "-c", child], seconds=1)
+            self.assertTrue(
+                result.out.strip(), "leader did not report its descendant PID"
+            )
+            descendant = int(result.out.strip())
             try:
-                raw = Path(f"/proc/{descendant}/stat").read_text()
-            except FileNotFoundError:
-                break
-            if raw[raw.rfind(")") + 2 :].startswith("Z "):
-                break
-            time.sleep(0.01)
-        else:
-            self.fail("early-exit leader left a live private-group descendant")
+                self.assertEqual(result.status, "timeout")
+                self.assertEqual(result.code, 0)
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    try:
+                        raw = Path(f"/proc/{descendant}/stat").read_text(
+                            encoding="ascii"
+                        )
+                    except FileNotFoundError:
+                        descendant_absent = True
+                        break
+                    if raw[raw.rfind(")") + 2 :].startswith("Z "):
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail(f"early-exit leader left descendant {descendant} live")
+            except AssertionError as error:
+                failure = error
+            finally:
+                if not descendant_absent:
+                    try:
+                        os.kill(descendant, signal.SIGKILL)
+                        waited, _ = os.waitpid(descendant, 0)
+                        if waited != descendant:
+                            cleanup_error = AssertionError(
+                                f"reaped {waited}, want descendant {descendant}"
+                            )
+                    except (ProcessLookupError, ChildProcessError) as error:
+                        cleanup_error = error
+        finally:
+            if (
+                libc.prctl(PR_SET_CHILD_SUBREAPER, old_subreaper.value, 0, 0, 0) != 0
+                and cleanup_error is None
+            ):
+                cleanup_error = OSError(
+                    ctypes.get_errno(), "restore PR_SET_CHILD_SUBREAPER"
+                )
+        if failure is not None:
+            if cleanup_error is not None:
+                failure.add_note(f"secondary descendant cleanup error: {cleanup_error}")
+            raise failure
+        if cleanup_error is not None:
+            raise AssertionError("descendant cleanup failed") from cleanup_error
+        self.assertFalse(Path(f"/proc/{descendant}").exists())
 
     def test_truncated_stdin_is_not_success(self):
         result = adapter.call(
