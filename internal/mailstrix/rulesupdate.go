@@ -149,9 +149,12 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 		var unlock func()
 		unlock, err = lockRules(ctx, u.scanner.cacheDir)
 		if err == nil {
-			m := readLocalManifest(filepath.Join(u.scanner.cacheDir, manifestName))
+			cachePath := filepath.Join(u.scanner.cacheDir, cachedRulesName)
+			m := trustedLocalManifest(cachePath, filepath.Join(u.scanner.cacheDir, manifestName))
 			loaded := u.scanner.loadedManifest.Load()
-			if loaded == nil || loaded.Version != m.Version {
+			if m.Version == 0 {
+				err = fmt.Errorf("cached rules manifest is missing or does not match the compiled bundle")
+			} else if loaded == nil || loaded.Version != m.Version {
 				err = reload()
 			}
 			if err == nil {

@@ -1,14 +1,93 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	yara "github.com/hillu/go-yara/v4"
+	"github.com/myguard-labs/mailstrix/internal/mailstrix"
 )
+
+func TestDisablePollingForCacheFallbackPreservesValidation(t *testing.T) {
+	cacheErr := errors.New("cache unavailable")
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{name: "valid", in: time.Minute, want: 0},
+		{name: "too short", in: time.Second, want: time.Second},
+		{name: "malformed sentinel", in: -1, want: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &mailstrix.Config{RulesPollInterval: tc.in}
+			disablePollingForCacheFallback(cfg, cacheErr, func(string, ...any) {})
+			if cfg.RulesPollInterval != tc.want {
+				t.Fatalf("poll interval=%v, want %v", cfg.RulesPollInterval, tc.want)
+			}
+		})
+	}
+}
+
+func TestInfoReportsTemporaryManifestContention(t *testing.T) {
+	dir := t.TempDir()
+	lock, err := os.OpenFile(filepath.Join(dir, ".rules.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck -- test teardown
+	status := -1
+	out := captureStdout(t, func() { status = cmdInfo([]string{"-json", "-cache-dir", dir}) })
+	if status != 0 || !strings.Contains(out, "cached manifest temporarily unavailable") {
+		t.Fatalf("cmdInfo status=%d output=%s", status, out)
+	}
+}
+
+func TestSeedOnlyCacheFailureStartsFallbackScanner(t *testing.T) {
+	dir := t.TempDir()
+	seed := filepath.Join(dir, "seed.yac")
+	makeCompiledYac(t, seed, "rule SeedFallback { condition: true }")
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block cache creation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &mailstrix.Config{
+		RulesDir:          filepath.Join(dir, "missing-rules"),
+		SeedRules:         seed,
+		CacheDir:          filepath.Join(blocker, "cache"),
+		RulesPollInterval: time.Minute,
+		ScanTimeout:       time.Second,
+	}
+	cfg.Finalize()
+	cacheErr := mailstrix.EnsureCachedRules(cfg, func(string, ...any) {})
+	if cacheErr == nil {
+		t.Fatal("unavailable cache unexpectedly initialized")
+	}
+	selectRulesFallback(cfg, cacheErr, func(string, ...any) {})
+	scanner, err := mailstrix.NewScanner(cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("seed-only cache fallback did not start scanner: %v", err)
+	}
+	defer scanner.Close()
+	disablePollingForCacheFallback(cfg, cacheErr, func(string, ...any) {})
+	updater, err := mailstrix.NewRulesUpdater(cfg, scanner, "4.5.2", nil)
+	if err != nil {
+		t.Fatalf("cache fallback rejected updater: %v", err)
+	}
+	if state := updater.Snapshot(); state.Enabled {
+		t.Fatalf("polling remained enabled without a writable cache: %+v", state)
+	}
+}
 
 // makeCompiledYac compiles rule into a real .yac bundle at path so it can be
 // used as a SeedRules / cache fixture (yara.LoadRules validates the format).

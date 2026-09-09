@@ -53,6 +53,34 @@ var version = "dev"
 // Empty (dev builds) disables the skew check.
 var libyaraVersion = ""
 
+func disablePollingForCacheFallback(cfg *mailstrix.Config, cacheErr error, logf func(string, ...any)) {
+	// Preserve invalid intervals so NewRulesUpdater still reports the operator's
+	// configuration error instead of silently converting it into disabled polling.
+	if cacheErr == nil || cfg.RulesPollInterval < time.Minute {
+		return
+	}
+	logf("automatic rules polling disabled while the writable cache is unavailable")
+	cfg.RulesPollInterval = 0
+}
+
+func selectRulesFallback(cfg *mailstrix.Config, cacheErr error, logf func(string, ...any)) {
+	if cacheErr == nil {
+		return
+	}
+	if fi, err := os.Stat(cfg.RulesPath); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+		return
+	}
+	if fi, err := os.Stat(cfg.RulesDir); err == nil && fi.IsDir() {
+		cfg.RulesPath = ""
+		return
+	}
+	if fi, err := os.Stat(cfg.SeedRules); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+		cfg.RulesPath = cfg.SeedRules
+		cfg.RulesDir = ""
+		logf("using baked rules seed directly while the writable cache is unavailable")
+	}
+}
+
 func main() {
 	log.SetFlags(0) // journald adds its own timestamps
 	os.Exit(run(os.Args[1:]))
@@ -188,9 +216,11 @@ func cmdServe(args []string) int {
 	// dir is set. A seeding failure is not fatal here — fall back to whatever
 	// RulesPath/RulesDir NewScanner can load, so a misconfigured cache never takes
 	// the scanner fully offline.
-	if err := mailstrix.EnsureCachedRules(cfg, logf); err != nil {
-		logf("rules cache unavailable, falling back to baked rules: %v", err)
+	cacheErr := mailstrix.EnsureCachedRules(cfg, logf)
+	if cacheErr != nil {
+		logf("rules cache unavailable, falling back to baked rules: %v", cacheErr)
 	}
+	selectRulesFallback(cfg, cacheErr, logf)
 
 	scanner, err := mailstrix.NewScanner(cfg, logf)
 	if err != nil {
@@ -204,6 +234,9 @@ func cmdServe(args []string) int {
 		logf("CANARY MODE: all matches tagged mailstrix_canary=1 (shadow/observe-only)")
 	}
 
+	// A valid polling request must not turn the documented baked-rules fallback
+	// into a startup failure.
+	disablePollingForCacheFallback(cfg, cacheErr, logf)
 	srv := mailstrix.NewServer(cfg, scanner)
 	updater, err := mailstrix.NewRulesUpdater(cfg, scanner, libyaraVersion, srv.FlushCache)
 	if err != nil {

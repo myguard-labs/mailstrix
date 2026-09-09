@@ -223,21 +223,22 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 }
 
 // LoadManifest returns the rules manifest stored alongside the cached bundle in
-// cacheDir, and whether one was found. Used by `strixd info` / `/version` to report
-// which rule version is loaded. A zero-value manifest + false means none present.
-func LoadManifest(cacheDir string) (RulesManifest, bool) {
+// cacheDir, whether one was found, and any cache-lock error. Used by `strixd info`
+// and the release verifier to report which rule version is loaded. A zero-value
+// manifest, false, nil means none is present.
+func LoadManifest(cacheDir string) (RulesManifest, bool, error) {
 	if cacheDir == "" {
-		return RulesManifest{}, false
+		return RulesManifest{}, false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	unlock, err := lockRules(ctx, cacheDir)
 	if err != nil {
-		return RulesManifest{}, false
+		return RulesManifest{}, false, err
 	}
 	defer unlock()
 	m := readLocalManifest(filepath.Join(cacheDir, manifestName))
-	return m, m.Version > 0
+	return m, m.Version > 0, nil
 }
 
 // LoadSources reads the baked sources.json from dir (typically /usr/share/mailstrix).

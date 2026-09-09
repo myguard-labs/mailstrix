@@ -115,6 +115,43 @@ func TestRulesUpdaterCurrentVersionIgnoresPublisherLibyaraSkew(t *testing.T) {
 	}
 }
 
+func TestRulesUpdaterDoesNotReloadUntrustedReconcileManifest(t *testing.T) {
+	source := rulesServer(t, compiledYacBytes(t, "rule Current { condition: true }"), 1, "4.5.2", "")
+	defer source.Close()
+	u := testUpdater(t, source.URL)
+	u.scanner.loadedManifest.Store(nil)
+	before := u.scanner.ReloadMetrics().Successes
+	u.afterFetch = func() {
+		path := filepath.Join(u.cfg.CacheDir, manifestName)
+		m := readLocalManifest(path)
+		m.Checksum = "sha256:" + strings.Repeat("0", 64)
+		if err := writeLocalManifest(path, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := u.Poll(context.Background()); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("untrusted reconcile manifest error=%v", err)
+	}
+	if got := u.scanner.ReloadMetrics().Successes; got != before {
+		t.Fatalf("untrusted reconcile manifest triggered reload: successes=%d, want %d", got, before)
+	}
+	if loaded := u.scanner.loadedManifest.Load(); loaded != nil {
+		t.Fatalf("untrusted identity became loaded during reconciliation: %+v", loaded)
+	}
+	if state := u.Snapshot(); state.Failures != 1 || state.LastFailure == 0 {
+		t.Fatalf("untrusted reconcile manifest was not recorded: %+v", state)
+	}
+	// The next poll starts by treating the untrusted local identity as version
+	// zero, so the current remote release is downloaded and repairs the cache.
+	u.afterFetch = nil
+	if err := u.Poll(context.Background()); err != nil {
+		t.Fatalf("next poll did not repair untrusted cache: %v", err)
+	}
+	if loaded := u.scanner.loadedManifest.Load(); loaded == nil || loaded.Version != 1 {
+		t.Fatalf("repaired identity was not loaded: %+v", loaded)
+	}
+}
+
 func TestRulesAgeRejectsInvalidCachedPublicationOrigin(t *testing.T) {
 	for _, generated := range []string{"9999-01-01T00:00:00Z", "1970-01-01T00:00:00Z", "1969-12-31T23:59:59Z"} {
 		t.Run(generated, func(t *testing.T) {

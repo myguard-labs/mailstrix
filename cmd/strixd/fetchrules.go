@@ -77,7 +77,11 @@ func cmdFetchRules(args []string) int {
 			fmt.Fprintln(os.Stderr, "verify-rules: no bundle was staged and load-validated:", res.Reason)
 			return 2
 		}
-		m, ok := mailstrix.LoadManifest(*cacheDir)
+		m, ok, err := mailstrix.LoadManifest(*cacheDir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "verify-rules: read verified manifest:", err)
+			return 2
+		}
 		if !ok {
 			fmt.Fprintln(os.Stderr, "verify-rules: verified manifest missing")
 			return 2

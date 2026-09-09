@@ -73,11 +73,16 @@ for case_spec in '0 0 1' '2 0 3' '5 1 5'; do
 		exit 1
 	fi
 	mapfile -t events <"$EVENTS"
-	[ "${#events[@]}" -eq $((2 + verify_count)) ]
-	[ "${events[0]}" = 'upload compiled.yac' ]
-	[ "${events[1]}" = 'upload compiled.yac.manifest.json' ]
-	[[ "${events[2]}" == verify*'-expected-version 1' ]]
-	[[ "${events[2]}" == *'-timeout 5m'* ]]
-	[[ "${events[2]}" == *'--read-only --tmpfs /tmp:rw,nosuid,nodev,size=2g'* ]]
+	assert_event() {
+		printf 'FAIL: %s\nevents:\n' "$1" >&2
+		printf '  %s\n' "${events[@]}" >&2
+		exit 1
+	}
+	[ "${#events[@]}" -eq $((2 + verify_count)) ] || assert_event "expected $((2 + verify_count)) events"
+	[ "${events[0]}" = 'upload compiled.yac' ] || assert_event 'bundle must upload first'
+	[ "${events[1]}" = 'upload compiled.yac.manifest.json' ] || assert_event 'manifest must upload second'
+	[[ "${events[2]}" == verify*'-expected-version 1' ]] || assert_event 'verifier must pin the published version'
+	[[ "${events[2]}" == *'-timeout 5m'* ]] || assert_event 'verifier must carry the fetch timeout'
+	[[ "${events[2]}" == *'--read-only --tmpfs /tmp:rw,nosuid,nodev,size=2g'* ]] || assert_event 'verifier must run isolated'
 done
 echo 'PASS: ordered publication; verifier retries recover or abort at the bound'

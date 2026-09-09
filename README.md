@@ -286,9 +286,11 @@ Daemon polling is opt-in: set `MAILSTRIX_RULES_POLL_INTERVAL=900` (seconds), or
 `serve -rules-poll-interval=15m`. It requires the compiled cache actually loaded
 by the scanner. Custom local `.yar` directories and offline installations keep
 polling disabled (`0`, the default); a cache fallback cannot silently change to
-remote rules. Network and cache-lock waits share a configurable five-minute
-default deadline. Native libyara validation and reload finish synchronously once
-entered. There is one check at startup, then one per interval plus 0–20% jitter,
+remote rules. If writable cache setup fails, strixd serves the baked/local
+fallback and logs that automatic polling was disabled. Network and cache-lock
+waits share a configurable five-minute default deadline. Native libyara
+validation and reload finish synchronously once entered. There is one check at
+startup, then one per interval plus 0–20% jitter,
 including after failure (no retry burst).
 Concurrent polls coalesce and shutdown cancels and joins the worker.
 

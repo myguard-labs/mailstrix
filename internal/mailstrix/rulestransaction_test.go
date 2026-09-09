@@ -77,7 +77,7 @@ func TestFetchRulesDelayedDownloadCannotReplaceNewerInstall(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("stale downloader did not complete")
 	}
-	if m, ok := LoadManifest(dir); !ok || m.Version != 3 {
+	if m, ok, err := LoadManifest(dir); err != nil || !ok || m.Version != 3 {
 		t.Fatalf("cached version regressed: %+v", m)
 	}
 	if got := readRuleFile(t, filepath.Join(dir, cachedRulesName)); string(got) != string(newBytes) {

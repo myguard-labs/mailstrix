@@ -13,6 +13,18 @@ import (
 	"testing"
 )
 
+func TestLoadManifestReportsLockContention(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := lockRules(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, ok, err := LoadManifest(dir); err == nil || ok {
+		t.Fatalf("LoadManifest under contention: ok=%v err=%v", ok, err)
+	}
+}
+
 // rulesServer serves a compiled.yac + manifest like the rolling release. yac is
 // the bundle bytes; ver/libyara go into the manifest; the checksum is computed
 // from yac (override with badSum to simulate corruption).
