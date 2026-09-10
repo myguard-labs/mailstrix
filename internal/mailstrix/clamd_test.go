@@ -996,6 +996,9 @@ func TestClamdUnixPathCapacity(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	const capacity = len(syscall.RawSockaddrUnix{}.Path) - 1
+	if len(root)+10 > capacity {
+		t.Skip("temporary root is too long for Unix path capacity fixtures")
+	}
 	t.Run("overlong-basename", func(t *testing.T) {
 		parent := filepath.Join(root, "short")
 		if err := os.Mkdir(parent, 0700); err != nil {
