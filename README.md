@@ -28,7 +28,7 @@ moment the author edits one byte; a YARA rule matches the *shape* of a file (PE
 imports, section entropy, embedded magic) and survives the next variant. strixd
 compiles those rules — libyara modules and all — and runs them over your mail.
 
-**Five ways to plug it into a mail server, all shipped in this repo:**
+**Six ways to plug it into a mail server, all shipped in this repo:**
 
 - **rspamd** — an async `mailstrix.lua` plugin ([`contrib/rspamd/`](contrib/rspamd/)) POSTs each
   message/part to strixd at SMTP time and turns the hits into a spam-score symbol.
@@ -46,6 +46,8 @@ compiles those rules — libyara modules and all — and runs them over your mai
 - **ICAP** — set `MAILSTRIX_ICAP_ADDR` and strixd also speaks ICAP (RFC 3507) so an
   ICAP-aware proxy or content-filter (Squid, c-icap) scans REQMOD/RESPMOD bodies
   through the same engine ([ICAP mode](#icap-mode-optional)).
+- **clamd streams** — opt-in Unix/TCP listeners in `strixd` accept `INSTREAM`
+  from supported clamd clients ([subset, limits and examples](contrib/clamd/)).
 
 ```
  ┌───────────────────────┐  POST /scan  ┌──────────────┐    ┌──────────────┐
@@ -538,7 +540,8 @@ messages scanned.
 
 ## Configuration
 
-Every setting is an env var and a `serve` CLI flag (flag > env > default).
+Settings use environment variables; `serve -help` lists available CLI overrides
+(flag > env > default). The optional clamd listener settings below are env-only.
 
 | Env | Default | Meaning |
 |-----|---------|---------|
@@ -581,6 +584,9 @@ Every setting is an env var and a `serve` CLI flag (flag > env > default).
 | `MAILSTRIX_RULE_ALLOWLIST` | — | comma-sep rule names to force log-only (kept + tagged `mailstrix_allow`); deny wins if in both |
 | `MAILSTRIX_CANARY` | `0` | tag every match as log-only canary/shadow output; shipped rspamd/SpamAssassin/Sieve/ICAP integrations observe but do not score/block these hits |
 | `MAILSTRIX_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `:1344`. When set, strixd also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. |
+| `MAILSTRIX_CLAMD_TCP_ADDR` | — (disabled) | Explicit `host:port` |
+| `MAILSTRIX_CLAMD_UNIX_PATH` | — (disabled) | Absolute socket path |
+| `MAILSTRIX_CLAMD_MAX_CONNS` | `64` | Shared Unix/TCP cap, range 1–1024 |
 | `MAILSTRIX_VERBOSE` | off | log one line per request |
 | `MAILSTRIX_LOG_STDOUT` | off | info/access logs to stdout (errors always stderr) |
 | `MAILSTRIX_PPROF` | off | enable `/debug/pprof` profiling endpoints (off by default; auth-gated when `MAILSTRIX_METRICS_AUTH` is set) |
