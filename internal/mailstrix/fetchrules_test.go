@@ -13,6 +13,8 @@ import (
 	"testing"
 )
 
+const testRulesManifestGenerated = "2026-06-18T00:00:00Z"
+
 func TestLoadManifestReportsLockContention(t *testing.T) {
 	dir := t.TempDir()
 	unlock, err := lockRules(context.Background(), dir)
@@ -30,13 +32,18 @@ func TestLoadManifestReportsLockContention(t *testing.T) {
 // from yac (override with badSum to simulate corruption).
 func rulesServer(t *testing.T, yac []byte, ver int, libyara, badSum string) *httptest.Server {
 	t.Helper()
+	return rulesServerWithGenerated(t, yac, ver, libyara, badSum, testRulesManifestGenerated)
+}
+
+func rulesServerWithGenerated(t *testing.T, yac []byte, ver int, libyara, badSum, generated string) *httptest.Server {
+	t.Helper()
 	sum := sha256.Sum256(yac)
 	checksum := "sha256:" + hex.EncodeToString(sum[:])
 	if badSum != "" {
 		checksum = badSum
 	}
 	m := RulesManifest{
-		Version: ver, Generated: "2026-06-18T00:00:00Z",
+		Version: ver, Generated: generated,
 		Checksum: checksum, Libyara: libyara, Rules: 1, Size: int64(len(yac)),
 	}
 	mb, _ := json.Marshal(m)
