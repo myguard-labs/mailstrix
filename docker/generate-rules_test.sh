@@ -63,6 +63,9 @@ case "${2:-}" in
         ;;
     upload)
         printf 'upload %s\n' "$(basename "${!#}")" >> "$EVENTS"
+        if [[ "${!#}" == */compiled.yac.manifest.json ]]; then
+            cp "${!#}" "${EVENTS}.manifest"
+        fi
         if [ "${SIGNAL_PUBLISH:-0}" -eq 1 ]; then
             kill -TERM "$(cat "${EVENTS}.signal-target")"
         fi
@@ -279,7 +282,7 @@ run_script_with_output() {  # run_script_with_output <stdout> <stderr> <env-assi
     local stdout="$1" stderr="$2" runner_pid
     shift 2
     : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target"
+    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target" "${EVENTS}.manifest"
     (
         if [ "$stdout" = "$stderr" ]; then
             exec >"$stdout" 2>&1
@@ -380,12 +383,17 @@ assert_partial_receipt_write_is_not_retried() {  # <build-failure> <signal> <ser
     fi
 }
 
-assert_valid_rules_count() {  # assert_valid_rules_count <count>
-    local rules="$1" actual
+assert_valid_rules_count() {  # assert_valid_rules_count <input> [normalized-count]
+    local rules="$1" expected="${2:-$1}" actual
     run_script RULES_COUNT="$rules"
     [ "$actual" -eq 0 ] || assert_event "valid rules count ${rules} failed"
-    assert_receipt verify success "$rules"
-    grep -F "${rules} rules" "$EVENTS" >/dev/null || assert_event "valid rules count ${rules} notification"
+    assert_receipt verify success "$expected"
+    jq -e --argjson expected "$expected" '.rules == $expected' "${EVENTS}.manifest" >/dev/null || assert_event "valid rules count ${rules} manifest"
+    if [ "$expected" = 0 ]; then
+        ! grep -F '0 rules' "$EVENTS" >/dev/null || assert_event 'zero rules count must remain omitted from notification'
+    else
+        grep -F ", ${expected} rules," "$EVENTS" >/dev/null || assert_event "valid rules count ${rules} notification"
+    fi
     assert_success_event_order "valid rules count ${rules}" 1
 }
 
@@ -571,7 +579,10 @@ assert_partial_receipt_write_is_not_retried 0 1 0
 assert_partial_receipt_write_is_not_retried 1 1 0
 assert_partial_receipt_write_is_not_retried 0 0 1
 assert_valid_rules_count 2147483647
-for invalid_rules in -1 not-a-number 12oops 12e1 012 2147483648 9223372036854775808; do
+assert_valid_rules_count ' 42 ' 42
+assert_valid_rules_count $'\t\r\n\v\f0\f\v\n\r\t' 0
+assert_valid_rules_count $' \t2147483647\r\n' 2147483647
+for invalid_rules in -1 +1 not-a-number 12oops 12e1 012 2147483648 9223372036854775808 ' ' $'\t\r\n\v\f' '4 2' $'4\t2' $'4\n2' ' 2147483648 ' ' 012 ' ' -1 '; do
     assert_invalid_rules_count_is_build_failure "$invalid_rules"
 done
 assert_startup_failure_is_build_failure

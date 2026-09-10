@@ -246,11 +246,14 @@ LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
 [ -n "$LIBYARA" ] || die "could not determine libyara version"
 
 # Rule count is optional, but when supplied it becomes JSON in both the manifest
-# and terminal receipt. Accept canonical decimal only (zero is `0`, no leading
+# and terminal receipt. Trim boundary POSIX whitespace, then accept canonical
+# decimal only (zero is `0`, no leading
 # zeroes) and cap it at MaxInt32 so every Go consumer's `int` can decode it.
 # Validate it while this is still a build-stage failure, before any release
 # query, asset upload, or verifier invocation.
 RULES="${RULES_COUNT:-0}"
+RULES="${RULES#"${RULES%%[![:space:]]*}"}"
+RULES="${RULES%"${RULES##*[![:space:]]}"}"
 MAX_RULES=2147483647
 if ! [[ "$RULES" =~ ^(0|[1-9][0-9]*)$ ]] ||
     [ "${#RULES}" -gt "${#MAX_RULES}" ] ||
