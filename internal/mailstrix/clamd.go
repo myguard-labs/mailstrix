@@ -129,7 +129,7 @@ func listenClamdUnix(path string) (net.Listener, func(), error) {
 		if runtime.GOOS != "linux" {
 			return nil, nil, errors.New("clamd Unix staging path exceeds socket address capacity")
 		}
-		stage, err = os.Open(dir)
+		stage, err = os.Open(dir) // #nosec G304 -- dir is the private os.MkdirTemp staging directory held by FD for binding, not client input.
 		if err != nil {
 			return nil, nil, err
 		}
