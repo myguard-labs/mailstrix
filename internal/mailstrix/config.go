@@ -152,7 +152,10 @@ type Config struct {
 	ThreatFoxRefresh time.Duration // MAILSTRIX_THREATFOX_REFRESH (default 360m, floor 5m)
 	ThreatFoxMaxURLs int           // MAILSTRIX_THREATFOX_MAX_URLS (per message, default 64)
 
-	ICAPAddr string // MAILSTRIX_ICAP_ADDR (empty = disabled; e.g. ":1344")
+	ICAPAddr      string // MAILSTRIX_ICAP_ADDR (empty = disabled; e.g. ":1344")
+	ClamdTCPAddr  string // MAILSTRIX_CLAMD_TCP_ADDR (empty = disabled; explicit host:port)
+	ClamdUnixPath string // MAILSTRIX_CLAMD_UNIX_PATH (empty = disabled; filesystem socket)
+	ClamdMaxConns int    // MAILSTRIX_CLAMD_MAX_CONNS (default 64, range 1..1024)
 
 	// RuleDenylist suppresses matches for these rule names (case-insensitive).
 	// Public rulesets ship demo/noise rules that are pure false positives for
@@ -205,6 +208,9 @@ func LoadConfig() *Config {
 		MaxInflight:       envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0),   // 0 -> sanitize sets 2×MaxConcurrent
 		ICAPMaxConns:      envIntAuto("MAILSTRIX_ICAP_MAX_CONNS", 0), // 0 -> sanitize sets 8×MaxInflight
 		MaxBody:           envInt64("MAILSTRIX_MAX_BODY", 8*1024*1024),
+		ClamdTCPAddr:      os.Getenv("MAILSTRIX_CLAMD_TCP_ADDR"),
+		ClamdUnixPath:     os.Getenv("MAILSTRIX_CLAMD_UNIX_PATH"),
+		ClamdMaxConns:     envInt("MAILSTRIX_CLAMD_MAX_CONNS", 64),
 		Token:             envOrFile("MAILSTRIX_TOKEN"),
 		TokenNext:         envOrFile("MAILSTRIX_TOKEN_NEXT"),
 		RulesDir:          envStr("MAILSTRIX_RULES_DIR", "/rules"),
@@ -332,6 +338,9 @@ func (c *Config) sanitize() {
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		c.Port = clamp("MAILSTRIX_PORT", c.Port, 8079)
+	}
+	if c.ClamdMaxConns < 1 || c.ClamdMaxConns > 1024 {
+		c.ClamdMaxConns = clamp("MAILSTRIX_CLAMD_MAX_CONNS", c.ClamdMaxConns, 64)
 	}
 	if c.BackendTimeout <= 0 {
 		log.Printf("[mailstrix] WARNING: invalid MAILSTRIX_BACKEND_TIMEOUT=%s; using 1s", c.BackendTimeout)

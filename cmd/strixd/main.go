@@ -2,9 +2,10 @@
 // no native YARA module (as of 4.1.0), so the mailstrix.lua plugin POSTs message or
 // MIME-part bytes here over HTTP and strixd scans them against a compiled YARA
 // rule set, returning the matched rule names. It mirrors the gozer backend's
-// shape: one authenticated HTTP endpoint (/scan), /health and /metrics, every
-// option settable by env var or CLI flag, and a health subcommand for the
-// distroless HEALTHCHECK (no shell or curl in the image).
+// shape: one authenticated HTTP endpoint (/scan), /health and /metrics,
+// configuration through environment variables with selected CLI overrides,
+// and a health subcommand for the distroless HEALTHCHECK (no shell or curl
+// in the image).
 //
 // Usage:
 //
@@ -189,10 +190,47 @@ func cmdHealth() int {
 	return 0
 }
 
+// clamdDrain coordinates the two daemon exit paths with deferred scanner cleanup.
+// Only the main goroutine uses it. A failed drain is sticky: skip cleanup while
+// native callers remain. Scanner.Close currently stops feed refreshers only;
+// this conservative guard also protects any future native-resource cleanup.
+type clamdDrain struct {
+	service *mailstrix.ClamdService
+	stopped bool
+	err     error
+}
+
+func (d *clamdDrain) shutdown(ctx context.Context) error {
+	if !d.stopped {
+		d.stopped = true
+		d.err = d.service.Shutdown(ctx)
+	}
+	return d.err
+}
+
+func (d *clamdDrain) closeScanner(close func()) {
+	if d.err == nil {
+		close()
+	}
+}
+
+// shutdownAdapters shares one absolute deadline and joins every adapter before
+// deferred cleanup. The sticky clamd drain stays on the calling main goroutine.
+func shutdownAdapters(ctx context.Context, drain *clamdDrain, httpShutdown func(context.Context) error, icapShutdown func(context.Context)) error {
+	httpDone := make(chan error, 1)
+	icapDone := make(chan struct{})
+	go func() { httpDone <- httpShutdown(ctx) }()
+	go func() { defer close(icapDone); icapShutdown(ctx) }()
+	_ = drain.shutdown(ctx) // deferred reporter logs the sticky error and sets exitCode
+	err := <-httpDone
+	<-icapDone
+	return err
+}
+
 // cmdServe loads config from the environment, overlays CLI flags
 // (flag > env > default), compiles the rule set, wires a SIGHUP reloader, and
 // serves until the process is signalled.
-func cmdServe(args []string) int {
+func cmdServe(args []string) (exitCode int) {
 	cfg := mailstrix.LoadConfig()
 	cfg.Version = version // build identity, surfaced on /version
 
@@ -243,9 +281,10 @@ func cmdServe(args []string) int {
 		log.Printf("[mailstrix] FATAL: cannot load rules: %v", err)
 		return 1
 	}
-	// Stop the abuse.ch feed refresher goroutines on any exit path (nil-safe
-	// when the feeds are disabled), so they don't outlive a graceful shutdown.
-	defer scanner.Close()
+	// Stop the scanner's abuse.ch feed refreshers after a successful drain.
+	// A failed native drain conservatively leaves cleanup to process exit.
+	drain := &clamdDrain{}
+	defer drain.closeScanner(scanner.Close)
 	if cfg.Canary {
 		logf("CANARY MODE: all matches tagged mailstrix_canary=1 (shadow/observe-only)")
 	}
@@ -260,6 +299,23 @@ func cmdServe(args []string) int {
 		return 2
 	}
 	srv.SetRulesUpdater(updater)
+	clamd, err := srv.StartClamd()
+	if err != nil {
+		log.Printf("[mailstrix] clamd startup error: %v", err)
+		return 2
+	}
+	drain.service = clamd
+	// Every exit path drains clamd before scanner.Close. A native scan cannot
+	// be interrupted by closing its socket. On timeout, skip scanner cleanup;
+	// Close currently stops feed refreshers and does not destroy the engine.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ScanTimeout+5*time.Second)
+		defer cancel()
+		if err := drain.shutdown(ctx); err != nil {
+			exitCode = 1
+			log.Printf("[mailstrix] clamd shutdown error: %v", err)
+		}
+	}()
 	updateCtx, updateCancel := context.WithCancel(context.Background())
 	updateDone := make(chan struct{})
 	go func() { defer close(updateDone); updater.Run(updateCtx) }()
@@ -324,8 +380,7 @@ func cmdServe(args []string) int {
 		logf("%s: draining (graceful shutdown)", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.ScanTimeout+5*time.Second)
 		defer cancel()
-		icapShutdown(ctx)
-		if err := srv.Shutdown(ctx); err != nil {
+		if err := shutdownAdapters(ctx, drain, srv.Shutdown, icapShutdown); err != nil {
 			log.Printf("[mailstrix] shutdown error: %v", err)
 			return 1
 		}

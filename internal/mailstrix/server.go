@@ -88,6 +88,7 @@ type Server struct {
 	// most one scan old and self-corrects next scan).
 	autoEffort atomic.Int64
 	metrics    struct {
+		clamdAcceptErrors                       atomic.Uint64 // unexpected terminal listener failures
 		scans, matches, errors, busy            atomic.Uint64
 		canceled                                atomic.Uint64
 		cacheHit, cacheMiss, cacheCoalesced     atomic.Uint64
@@ -665,9 +666,8 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta 
 
 // dispatch runs the scanner and never lets a panic reach the caller: on panic
 // it logs and returns a non-nil error. Returning an error (not (nil,nil)) is
-// deliberate — the caller treats errors as fail-open "no match" but does NOT
-// cache them, so a panicking input is rescanned next time instead of being
-// pinned as a clean verdict for the whole cache TTL.
+// deliberate: HTTP/ICAP consumers fail open without caching the error, while
+// clamd returns ERROR. A panic therefore never becomes a cached clean verdict.
 func (s *Server) dispatch(buf []byte, meta ScanMeta) (matches []Match, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -747,8 +747,9 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	// reset, so rate()/increase() on it silently invent traffic that never happened.
 	fm := func(name, help string, v uint64) { emit(name, help, "counter", v) }
 	fg := func(name, help string, v uint64) { emit(name, help, "gauge", v) }
-	fm("scans_total", "total /scan requests served", s.metrics.scans.Load())
-	fm("matches_total", "/scan requests with >=1 rule match", s.metrics.matches.Load())
+	fm("scans_total", "total scan requests served across HTTP and clamd", s.metrics.scans.Load())
+	fm("clamd_accept_errors_total", "unexpected terminal clamd listener failures", s.metrics.clamdAcceptErrors.Load())
+	fm("matches_total", "scan requests with >=1 rule match across HTTP and clamd", s.metrics.matches.Load())
 	fm("errors_total", "scan/read/length errors", s.metrics.errors.Load())
 	fm("busy_total", "requests rejected by the concurrency gate", s.metrics.busy.Load())
 	fm("canceled_total", "requests abandoned because the client disconnected/timed out", s.metrics.canceled.Load())
