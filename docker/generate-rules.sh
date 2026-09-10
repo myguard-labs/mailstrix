@@ -54,12 +54,16 @@ note() { echo "generate-rules: $*" >&2; }
 NIGHTLY_STAGE=build
 PUBLISH_STATE=not-started
 _RECEIPTED=0
+_RECEIPT_WRITE_ATTEMPTED=0
 _RECEIPT_EMITTING=0
 _PENDING_SIGNAL=0
 _FAILURE_EXIT=0
 nightly_receipt() {  # nightly_receipt <success|failed>
     local status="$1" receipt
     [ "$_RECEIPTED" -eq 0 ] || return 0
+    # A failed write may already have emitted a prefix. Never append a fallback
+    # object after that attempt; serializer failures before stdout remain retryable.
+    [ "$_RECEIPT_WRITE_ATTEMPTED" -eq 0 ] || return 1
     if [ "$status" = success ]; then
         receipt="$(jq -cn \
             --arg stage "$NIGHTLY_STAGE" \
@@ -78,8 +82,14 @@ nightly_receipt() {  # nightly_receipt <success|failed>
     # A signal received while the serializer child was running is handled once
     # this function unwinds. Do not expose the now-stale success object first.
     [ "$status" = failed ] || [ "$_PENDING_SIGNAL" -eq 0 ] || return 0
+    # Functions do not inherit ERR by default, so explicitly return a failed
+    # output write to the caller. Record the attempt before the write, separately
+    # from completion so signals cannot mistake a partial receipt for success.
+    _RECEIPT_WRITE_ATTEMPTED=1
+    if ! printf '%s\n' "$receipt"; then
+        return 1
+    fi
     _RECEIPTED=1
-    printf '%s\n' "$receipt"
 }
 
 # Discord #builds shout (via discord-notify.py → myguard-discord-bot socket; the
@@ -383,7 +393,7 @@ rules_line=""
 # fields have already passed jq while writing MANIFEST before publication. An
 # encoding fault fails closed as its own receipt stage rather than mislabeling a
 # successfully native-verified release as a verify failure.
-# Success reports `verify`; only an in-flight serializer failure is relabeled
+# Success reports `verify`; only an in-flight serialization or emission failure is relabeled
 # `receipt` by the ERR trap while _RECEIPT_EMITTING is set.
 NIGHTLY_STAGE=verify
 _RECEIPT_EMITTING=1

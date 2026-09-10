@@ -163,6 +163,25 @@ cat >"$test_root/bin/sleep" <<'STUB'
 #!/usr/bin/env bash
 exit 0
 STUB
+
+# Inject the write failure at the stdout boundary, after emitting real bytes.
+# Other printf uses (including stage-specific notices) retain builtin behavior.
+cat >"$test_root/partial-write.bash" <<'STUB'
+printf() {
+    if [ "${1:-}" = '%s\n' ] && [[ "${2:-}" == *'"schema":"mailstrix-rules-nightly-v1"'* ]]; then
+        builtin printf 'receipt-write\n' >> "$EVENTS"
+        if [ "${_PARTIAL_RECEIPT_WRITTEN:-0}" -eq 0 ]; then
+            _PARTIAL_RECEIPT_WRITTEN=1
+            builtin printf '%s' '{"schema":'
+            if [ "${SIGNAL_PARTIAL_WRITE:-0}" -eq 1 ]; then
+                kill -TERM "$BASHPID"
+            fi
+            return 1
+        fi
+    fi
+    builtin printf "$@"
+}
+STUB
 chmod +x "$test_root/bin/"* "$test_root/tools/discord-notify.py"
 
 assert_event() {
@@ -237,14 +256,20 @@ assert_success_event_order() {  # assert_success_event_order <case> <verify-coun
     [ "${#lifecycle[@]}" -eq "$((verify_count + 3))" ] || assert_event "$name: unexpected lifecycle event count"
 }
 
-run_script() {  # run_script <env-assignment>...; assigns caller-local actual
-    local runner_pid
+run_script_with_output() {  # run_script_with_output <stdout> <stderr> <env-assignment>...; assigns caller-local actual
+    local stdout="$1" stderr="$2" runner_pid
+    shift 2
     : >"$EVENTS"
     rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target"
     (
+        if [ "$stdout" = "$stderr" ]; then
+            exec >"$stdout" 2>&1
+        else
+            exec >"$stdout" 2>"$stderr"
+        fi
         printf '%s\n' "$BASHPID" >"${EVENTS}.signal-target"
         exec env "$@" bash "$test_root/sandbox/project/docker/generate-rules.sh"
-    ) >"$test_root/log" 2>&1 &
+    ) &
     runner_pid=$!
     if wait "$runner_pid"; then
         actual=0
@@ -252,6 +277,14 @@ run_script() {  # run_script <env-assignment>...; assigns caller-local actual
         actual=$?
     fi
     rm -f "${EVENTS}.signal-target"
+}
+
+run_script() {  # run_script <env-assignment>...; assigns caller-local actual
+    run_script_with_output "$test_root/log" "$test_root/log" "$@"
+}
+
+run_script_stdout_full() {  # assigns caller-local actual
+    run_script_with_output /dev/full "$test_root/log"
 }
 
 assert_receipt_failure_preserves_stage_failure() {
@@ -295,6 +328,37 @@ assert_success_receipt_failure_is_receipt_stage() {
     ! grep -F 'notify-body generate-rules.sh exited' "$EVENTS" || assert_event 'receipt-stage stale failure body'
     [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'receipt-stage upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'receipt-stage verifier count'
+}
+
+assert_stdout_failure_is_receipt_stage() {
+    local actual
+    run_script_stdout_full
+    [ "$actual" -eq 1 ] || assert_event "stdout-full exit: $actual"
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 0 ] || assert_event 'stdout-full emitted a receipt on stderr'
+    assert_notification stdout-full receipt failed
+    grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'stdout-full receipt-stage body'
+    grep -F 'ERROR: failed to emit nightly receipt' "$test_root/log" >/dev/null || assert_event 'stdout-full fallback failure not diagnosed'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'stdout-full upload count'
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'stdout-full verifier count'
+}
+
+assert_partial_receipt_write_is_not_retried() {  # <build-failure> <signal> <serializer-failure>
+    local fail_build="$1" signal="$2" serializer_failure="$3" actual expected=1 stage=receipt
+    if [ "$fail_build" -eq 1 ]; then expected=41; stage=build; fi
+    run_script_with_output "$test_root/stdout" "$test_root/log" \
+        BASH_ENV="$test_root/partial-write.bash" FAIL_BUILD="$fail_build" \
+        SIGNAL_PARTIAL_WRITE="$signal" FAIL_RECEIPT_ONCE="$serializer_failure"
+    [ "$actual" -eq "$expected" ] || assert_event "partial-write exit: $actual, want $expected"
+    [ "$(grep -c '^receipt-write$' "$EVENTS" || true)" -eq 1 ] || assert_event 'partial-write retried stdout emission'
+    [ "$(cat "$test_root/stdout")" = '{"schema":' ] || assert_event 'partial-write appended bytes after failed emission'
+    [ "$(wc -c < "$test_root/stdout")" -eq 10 ] || assert_event 'partial-write prefix byte count changed'
+    assert_notification partial-write "$stage" failed
+    grep -F 'ERROR: failed to emit nightly receipt' "$test_root/log" >/dev/null || assert_event 'partial-write not diagnosed'
+    if [ "$stage" = receipt ]; then
+        grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'partial-write receipt-stage body'
+    else
+        grep -F 'notify-body generate-rules.sh exited 41 — rules-current NOT updated.' "$EVENTS" >/dev/null || assert_event 'partial-write lost original build error'
+    fi
 }
 
 assert_valid_rules_count() {  # assert_valid_rules_count <count>
@@ -468,6 +532,12 @@ assert_receipt_failure_preserves_stage_failure
 assert_release_probe_failure_is_publish
 assert_release_create_failure_is_publish_uncertain
 assert_success_receipt_failure_is_receipt_stage
+assert_stdout_failure_is_receipt_stage
+assert_partial_receipt_write_is_not_retried 0 0 0
+assert_partial_receipt_write_is_not_retried 1 0 0
+assert_partial_receipt_write_is_not_retried 0 1 0
+assert_partial_receipt_write_is_not_retried 1 1 0
+assert_partial_receipt_write_is_not_retried 0 0 1
 assert_valid_rules_count 2147483647
 for invalid_rules in -1 not-a-number 12oops 12e1 012 2147483648 9223372036854775808; do
     assert_invalid_rules_count_is_build_failure "$invalid_rules"
