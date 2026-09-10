@@ -182,6 +182,25 @@ printf() {
     builtin printf "$@"
 }
 STUB
+
+# DEBUG runs before each top-level command. Arm before the receipt->verify
+# assignment, then send TERM at the very next command, after that assignment
+# completed. This fixes the scheduler boundary without depending on the guard's
+# value or changing the source under test.
+cat >"$test_root/receipt-boundary.bash" <<'STUB'
+receipt_boundary_signal() {
+    if [ "${_BOUNDARY_ARMED:-0}" -eq 1 ] && [ "${_BOUNDARY_SENT:-0}" -eq 0 ]; then
+        _BOUNDARY_SENT=1
+        builtin printf 'receipt-boundary-signal\n' >> "$EVENTS"
+        kill -TERM "$BASHPID"
+    fi
+    if [ "$1" = NIGHTLY_STAGE=verify ] && [ "${NIGHTLY_STAGE:-}" = receipt ]; then
+        _BOUNDARY_ARMED=1
+    fi
+    return 0
+}
+trap 'receipt_boundary_signal "$BASH_COMMAND"' DEBUG
+STUB
 chmod +x "$test_root/bin/"* "$test_root/tools/discord-notify.py"
 
 assert_event() {
@@ -444,6 +463,19 @@ assert_success_receipt_signal_is_receipt_failure() {
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'success receipt signal verifier count'
 }
 
+assert_receipt_stage_transition_defers_signal() {
+    local actual
+    run_script BASH_ENV="$test_root/receipt-boundary.bash"
+    [ "$(grep -c '^receipt-boundary-signal$' "$EVENTS" || true)" -eq 1 ] || assert_event 'receipt boundary signal did not fire exactly once'
+    [ "$actual" -eq 143 ] || assert_event "receipt boundary signal exit: $actual"
+    assert_receipt receipt failed
+    assert_notification receipt-boundary-signal receipt failed
+    grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'receipt boundary reported completed verification as interrupted'
+    [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'receipt boundary signal duplicated terminal receipt'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'receipt boundary signal upload count'
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'receipt boundary signal verifier count'
+}
+
 assert_failure_receipt_signal_finishes_reporting() {
     local actual
     run_script FAIL_BUILD=1 SIGNAL_FAILURE_RECEIPT=1
@@ -548,6 +580,7 @@ assert_manifest_preparation_failure_is_build_failure
 assert_post_verify_preparation_is_receipt_stage
 assert_publish_signal_reports_failure
 assert_success_receipt_signal_is_receipt_failure
+assert_receipt_stage_transition_defers_signal
 assert_failure_receipt_signal_finishes_reporting
 assert_signaled_success_serializer_failure_falls_back
 assert_verify_signal_reports_interruption

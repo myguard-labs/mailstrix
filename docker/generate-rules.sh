@@ -395,8 +395,9 @@ rules_line=""
 # successfully native-verified release as a verify failure.
 # Success reports `verify`; only an in-flight serialization or emission failure is relabeled
 # `receipt` by the ERR trap while _RECEIPT_EMITTING is set.
-NIGHTLY_STAGE=verify
+# Defer signals before exposing the success stage; verification already finished.
 _RECEIPT_EMITTING=1
+NIGHTLY_STAGE=verify
 nightly_receipt success
 _RECEIPT_EMITTING=0
 if [ "$_PENDING_SIGNAL" -ne 0 ]; then NIGHTLY_STAGE=receipt; fi
