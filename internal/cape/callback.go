@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -157,6 +159,11 @@ func singleHeader(r *http.Request, name string) string {
 	return values[0]
 }
 
+func callbackMediaType(r *http.Request) bool {
+	media, params, err := mime.ParseMediaType(singleHeader(r, "Content-Type"))
+	return err == nil && strings.EqualFold(media, "application/json") && len(params) == 0
+}
+
 func (h *callbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	status := h.receive(r)
 	w.Header().Set("Cache-Control", "no-store")
@@ -167,37 +174,13 @@ func (h *callbackHandler) receive(r *http.Request) int {
 	if len(h.keys) == 0 {
 		return http.StatusNotFound
 	}
-	if r.TLS == nil || r.Method != http.MethodPost || r.URL.EscapedPath() != CallbackPath || r.URL.RawQuery != "" || r.URL.ForceQuery || len(r.Header.Values("Content-Encoding")) > 0 || singleHeader(r, "Content-Type") != "application/json" {
-		return http.StatusBadRequest
+	body, status := callbackRequestBody(r)
+	if status != 0 {
+		return status
 	}
-	if r.ContentLength > callbackLimit {
-		return http.StatusRequestEntityTooLarge
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, callbackLimit+1))
-	if err != nil {
-		return http.StatusBadRequest
-	}
-	if len(body) > callbackLimit {
-		return http.StatusRequestEntityTooLarge
-	}
-	keyID := singleHeader(r, "X-Cape-Key-ID")
-	key, ok := h.keys[keyID]
-	stamp, event := singleHeader(r, "X-Cape-Timestamp"), singleHeader(r, "X-Cape-Event-ID")
-	seconds, err := strconv.ParseInt(stamp, 10, 64)
-	mac, macErr := hex.DecodeString(singleHeader(r, "X-Cape-Signature"))
-	if !ok || err != nil || seconds <= 0 || strconv.FormatInt(seconds, 10) != stamp || !eventID(event) || macErr != nil || len(mac) != sha256.Size || !hmac.Equal(mac, callbackMAC(key.Secret, body, stamp, event)) {
+	keyID, event, seconds, key, e, ok := h.authenticateCallback(r, body)
+	if !ok {
 		return http.StatusUnauthorized
-	}
-	// Authenticate raw bytes before interpreting the body or accessing any job.
-	doc, err := jsonDocument(body, nil)
-	var e callbackEvent
-	if err != nil || len(doc) != 7 || json.Unmarshal(body, &e) != nil || e.Version != 1 || e.EventID != event || e.Timestamp != seconds || !eventID(e.JobID) || !key.tenants[e.Tenant] || !key.generations[e.Generation] || e.TaskID <= 0 || e.TaskID > 2147483647 {
-		return http.StatusUnauthorized
-	}
-	for _, name := range []string{"version", "event_id", "tenant_id", "job_id", "endpoint_generation", "task_id", "timestamp"} {
-		if _, ok := doc[name]; !ok {
-			return http.StatusUnauthorized
-		}
 	}
 	s := h.store
 	s.mu.Lock()
@@ -210,76 +193,8 @@ func (h *callbackHandler) receive(r *http.Request) int {
 	defer s.writers.Done()
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
-	err = s.transaction(r.Context(), func(tx *sql.Tx) error {
-		if s.hooks.callbackTx != nil {
-			s.hooks.callbackTx()
-		}
-		actual := s.hooks.clock.Now().UTC()
-		var latest int64
-		ce := tx.QueryRow("SELECT latest FROM cape_event_clock WHERE id=1").Scan(&latest)
-		if ce != nil && !errors.Is(ce, sql.ErrNoRows) {
-			return ErrStoreUnavailable
-		}
-		if ce == nil && actual.Before(time.Unix(0, latest)) {
-			return ErrClock
-		}
-		now, err := s.now(tx)
-		if err != nil {
-			return err
-		}
-		signed := time.Unix(seconds, 0)
-		if actual.Before(key.NotBefore) || !actual.Before(key.NotAfter) || signed.Before(actual.Add(-5*time.Minute)) || signed.After(actual.Add(5*time.Minute)) {
-			return &Error{Code: Invalid}
-		}
-		j, err := readJob(tx.QueryRow("SELECT document FROM jobs WHERE id=? AND tenant=?", e.JobID, e.Tenant))
-		if err != nil {
-			if errors.Is(err, ErrStoreUnavailable) {
-				return ErrStoreUnavailable
-			}
-			return &Error{Code: Invalid}
-		}
-		bound := j.ID == e.JobID && j.Tenant == e.Tenant && j.Generation == e.Generation && len(j.TaskIDs) == 1 && j.TaskIDs[0] == e.TaskID
-		if !bound {
-			return &Error{Code: Invalid}
-		}
-		if _, err = tx.Exec("DELETE FROM cape_events WHERE expires<=?", now.UnixNano()); err != nil {
-			return ErrStoreUnavailable
-		}
-		var n int
-		if err = tx.QueryRow("SELECT count(*) FROM cape_events WHERE event=?", event).Scan(&n); err != nil {
-			return ErrStoreUnavailable
-		}
-		if n != 0 {
-			return ErrConflict
-		}
-		var own, rate int
-		if err = tx.QueryRow("SELECT count(*) FROM cape_events").Scan(&n); err != nil {
-			return ErrStoreUnavailable
-		}
-		if err = tx.QueryRow("SELECT count(*) FROM cape_events WHERE tenant=?", e.Tenant).Scan(&own); err != nil {
-			return ErrStoreUnavailable
-		}
-		if err = tx.QueryRow("SELECT count(*) FROM cape_events WHERE key_id=? AND accepted>?", keyID, now.Add(-time.Minute).UnixNano()).Scan(&rate); err != nil {
-			return ErrStoreUnavailable
-		}
-		if n >= 10000 || own >= 1000 || rate >= 10 {
-			return ErrQuota
-		}
-		if _, err = tx.Exec("INSERT INTO cape_events(event,tenant,key_id,accepted,expires) VALUES(?,?,?,?,?)", event, e.Tenant, keyID, now.UnixNano(), now.Add(11*time.Minute).UnixNano()); err != nil {
-			return ErrStoreUnavailable
-		}
-		if _, err = tx.Exec("INSERT INTO cape_event_clock(id,latest) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET latest=excluded.latest", actual.UnixNano()); err != nil {
-			return ErrStoreUnavailable
-		}
-		// The durable replay insert and hint commit together. No callback changes
-		// state, evidence, retry deadlines, or resurrects a terminal job.
-		if (j.State == RemotePending || j.State == Fetching) && !j.Suppressed && now.Before(j.AnalysisDeadline) {
-			previous := j
-			j.PollWakeAt = now
-			j.Version++
-			return putJob(tx, j, previous)
-		}
-		return nil
+	err := s.transaction(r.Context(), func(tx *sql.Tx) error {
+		return h.persistCallback(tx, keyID, event, seconds, key, e)
 	})
 	switch {
 	case err == nil:
@@ -293,4 +208,143 @@ func (h *callbackHandler) receive(r *http.Request) int {
 	default:
 		return http.StatusUnauthorized
 	}
+}
+
+func callbackRequestBody(r *http.Request) ([]byte, int) {
+	if r.TLS == nil || r.Method != http.MethodPost || r.URL.EscapedPath() != CallbackPath || r.URL.RawQuery != "" || r.URL.ForceQuery || len(r.Header.Values("Content-Encoding")) > 0 || !callbackMediaType(r) {
+		return nil, http.StatusBadRequest
+	}
+	if r.ContentLength > callbackLimit {
+		return nil, http.StatusRequestEntityTooLarge
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, callbackLimit+1))
+	if err != nil {
+		return nil, http.StatusBadRequest
+	}
+	if len(body) > callbackLimit {
+		return nil, http.StatusRequestEntityTooLarge
+	}
+	return body, 0
+}
+
+func (h *callbackHandler) authenticateCallback(r *http.Request, body []byte) (string, string, int64, callbackKey, callbackEvent, bool) {
+	keyID := singleHeader(r, "X-Cape-Key-ID")
+	key, known := h.keys[keyID]
+	stamp, event := singleHeader(r, "X-Cape-Timestamp"), singleHeader(r, "X-Cape-Event-ID")
+	seconds, stampErr := strconv.ParseInt(stamp, 10, 64)
+	mac, macErr := hex.DecodeString(singleHeader(r, "X-Cape-Signature"))
+	if !validCallbackSignature(known, stampErr, seconds, stamp, event, macErr, mac, key.Secret, body) {
+		return "", "", 0, callbackKey{}, callbackEvent{}, false
+	}
+	// Authenticate raw bytes before interpreting the body or accessing any job.
+	doc, err := jsonDocument(body, nil)
+	var e callbackEvent
+	if err != nil || len(doc) != 7 || json.Unmarshal(body, &e) != nil || !validCallbackEvent(e, event, seconds, key) {
+		return "", "", 0, callbackKey{}, callbackEvent{}, false
+	}
+	for _, name := range []string{"version", "event_id", "tenant_id", "job_id", "endpoint_generation", "task_id", "timestamp"} {
+		if _, present := doc[name]; !present {
+			return "", "", 0, callbackKey{}, callbackEvent{}, false
+		}
+	}
+	return keyID, event, seconds, key, e, true
+}
+
+func validCallbackSignature(known bool, stampErr error, seconds int64, stamp, event string, macErr error, mac, secret, body []byte) bool {
+	return known && stampErr == nil && seconds > 0 && strconv.FormatInt(seconds, 10) == stamp && eventID(event) && macErr == nil && len(mac) == sha256.Size && hmac.Equal(mac, callbackMAC(secret, body, stamp, event))
+}
+
+func validCallbackEvent(e callbackEvent, event string, seconds int64, key callbackKey) bool {
+	return e.Version == 1 && e.EventID == event && e.Timestamp == seconds && eventID(e.JobID) && key.tenants[e.Tenant] && key.generations[e.Generation] && e.TaskID > 0 && e.TaskID <= 2147483647
+}
+
+func (h *callbackHandler) persistCallback(tx *sql.Tx, keyID, event string, seconds int64, key callbackKey, e callbackEvent) error {
+	s := h.store
+	if s.hooks.callbackTx != nil {
+		s.hooks.callbackTx()
+	}
+	actual := s.hooks.clock.Now().UTC()
+	if err := validateCallbackClock(tx, actual, seconds, key); err != nil {
+		return err
+	}
+	now, err := s.now(tx)
+	if err != nil {
+		return err
+	}
+	j, err := callbackJob(tx, e)
+	if err != nil {
+		return err
+	}
+	if err = reserveCallbackEvent(tx, keyID, event, e.Tenant, now); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("INSERT INTO cape_event_clock(id,latest) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET latest=excluded.latest", actual.UnixNano()); err != nil {
+		return ErrStoreUnavailable
+	}
+	if (j.State != RemotePending && j.State != Fetching) || j.Suppressed || !now.Before(j.AnalysisDeadline) {
+		return nil
+	}
+	previous := j
+	j.PollWakeAt = now
+	j.Version++
+	return putJob(tx, j, previous)
+}
+
+func validateCallbackClock(tx *sql.Tx, actual time.Time, seconds int64, key callbackKey) error {
+	var latest int64
+	err := tx.QueryRow("SELECT latest FROM cape_event_clock WHERE id=1").Scan(&latest)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return ErrStoreUnavailable
+	}
+	if err == nil && actual.Before(time.Unix(0, latest)) {
+		return ErrClock
+	}
+	signed := time.Unix(seconds, 0)
+	if actual.Before(key.NotBefore) || !actual.Before(key.NotAfter) || signed.Before(actual.Add(-5*time.Minute)) || signed.After(actual.Add(5*time.Minute)) {
+		return &Error{Code: Invalid}
+	}
+	return nil
+}
+
+func callbackJob(tx *sql.Tx, e callbackEvent) (Job, error) {
+	j, err := readJob(tx.QueryRow("SELECT document FROM jobs WHERE id=? AND tenant=?", e.JobID, e.Tenant))
+	if err != nil {
+		if errors.Is(err, ErrStoreUnavailable) {
+			return Job{}, ErrStoreUnavailable
+		}
+		return Job{}, &Error{Code: Invalid}
+	}
+	if j.ID != e.JobID || j.Tenant != e.Tenant || j.Generation != e.Generation || len(j.TaskIDs) != 1 || j.TaskIDs[0] != e.TaskID {
+		return Job{}, &Error{Code: Invalid}
+	}
+	return j, nil
+}
+
+func reserveCallbackEvent(tx *sql.Tx, keyID, event, tenant string, now time.Time) error {
+	if _, err := tx.Exec("DELETE FROM cape_events WHERE expires<=?", now.UnixNano()); err != nil {
+		return ErrStoreUnavailable
+	}
+	var total, own, rate int
+	if err := tx.QueryRow("SELECT count(*) FROM cape_events WHERE event=?", event).Scan(&total); err != nil {
+		return ErrStoreUnavailable
+	}
+	if total != 0 {
+		return ErrConflict
+	}
+	if err := tx.QueryRow("SELECT count(*) FROM cape_events").Scan(&total); err != nil {
+		return ErrStoreUnavailable
+	}
+	if err := tx.QueryRow("SELECT count(*) FROM cape_events WHERE tenant=?", tenant).Scan(&own); err != nil {
+		return ErrStoreUnavailable
+	}
+	if err := tx.QueryRow("SELECT count(*) FROM cape_events WHERE key_id=? AND accepted>?", keyID, now.Add(-time.Minute).UnixNano()).Scan(&rate); err != nil {
+		return ErrStoreUnavailable
+	}
+	if total >= 10000 || own >= 1000 || rate >= 10 {
+		return ErrQuota
+	}
+	if _, err := tx.Exec("INSERT INTO cape_events(event,tenant,key_id,accepted,expires) VALUES(?,?,?,?,?)", event, tenant, keyID, now.UnixNano(), now.Add(11*time.Minute).UnixNano()); err != nil {
+		return ErrStoreUnavailable
+	}
+	return nil
 }

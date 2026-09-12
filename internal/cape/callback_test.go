@@ -689,3 +689,21 @@ func TestCallbackRepeatedEncodingTLS(t *testing.T) {
 		}
 	}
 }
+
+func TestCallbackMediaTypeTokenCaseAndMalformedParameters(t *testing.T) {
+	for _, tc := range []struct {
+		name, media string
+		want        int
+	}{
+		{"mixed-case", "Application/JSON", 202},
+		{"parameter", "application/json; charset=utf-8", 400},
+		{"malformed", "application/json; charset", 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, c, cfg, j, h := callbackFixture(t)
+			r := bridgeRequest(t, cfg, bridgeEvent(c, j, 1), nil)
+			r.Header.Set("Content-Type", tc.media)
+			requireBridge(t, h, r, tc.want)
+		})
+	}
+}

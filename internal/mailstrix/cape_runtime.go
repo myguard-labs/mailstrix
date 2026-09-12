@@ -122,10 +122,13 @@ func buildCAPEAuth(ctx context.Context, c *capeDaemonConfig, resolve capeResolve
 	sort.Slice(entries, func(i, j int) bool { return entries[i].tenant < entries[j].tenant })
 	return func(r *http.Request) (string, error) {
 		values := r.Header.Values("Authorization")
-		if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") || len(values[0]) > 4096+7 {
+		if len(values) != 1 || len(values[0]) > 4096+7 {
 			return "", ErrCAPEUnavailable
 		}
-		token := strings.TrimPrefix(values[0], "Bearer ")
+		scheme, token, ok := strings.Cut(values[0], " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
+			return "", ErrCAPEUnavailable
+		}
 		digest := sha256.Sum256([]byte(token))
 		tenant := ""
 		for _, entry := range entries {

@@ -148,87 +148,9 @@ func (s *Store) RecordSubmission(ctx context.Context, tenant, id string, version
 	}
 	var j Job
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
-		var e error
-		j, e = readJob(tx.QueryRow("SELECT document FROM jobs WHERE id=? AND tenant=?", id, tenant))
-		if e != nil {
-			return e
-		}
-		if version < 1 || j.SubmissionRecorded || (j.State != Submitting && !terminal(j.State) && j.State != SubmitUncertain) ||
-			(j.SubmissionVersion != version && !(j.SubmissionVersion == 0 && j.State == Submitting && j.Version == version)) {
-			return ErrConflict
-		}
-		previous := j
-		j.Version++
-		j.SubmissionRecorded = true
-		j.Reason = outcome
-		invalid := len(submission.Tasks) > MaxTaskIDs
-		seen := make(map[int64]bool)
-		for i, t := range submission.Tasks {
-			if i >= MaxTaskIDs {
-				break
-			}
-			if t.ID < 1 || t.ID > math.MaxInt32 || t.Generation != j.Generation || seen[t.ID] {
-				invalid = true
-				continue
-			}
-			seen[t.ID] = true
-			j.TaskIDs = append(j.TaskIDs, t.ID)
-		}
-		j.UnknownDebt = submission.UnknownDebt || invalid
-		j.DedupBarrier = true
-		switch {
-		case terminal(previous.State):
-			j.Reason = previous.Reason
-			// Cancellation/expiry never discard the response of the owned attempt.
-			// They also never reopen it, even with a positive no-send result.
-			j.UnknownDebt = j.UnknownDebt || !(submission.NoBytesSent && len(submission.Tasks) == 0 && !invalid) && (outcome != "" || len(j.TaskIDs) != 1)
-			if submission.NoBytesSent && len(submission.Tasks) == 0 && !invalid && !submission.UnknownDebt {
-				j.UnknownDebt = false
-				j.DedupBarrier = false
-				j.Cleanup = "not_submitted"
-			} else {
-				j.Cleanup = "remote_delete_pending"
-				if j.UnknownDebt {
-					j.Cleanup = "remote_delete_failed/unknown"
-				}
-			}
-		case len(submission.Tasks) > 1:
-			j.State = Failed
-			j.UnknownDebt = true
-			j.TerminalAt = s.hooks.clock.Now().UTC()
-			if j.TerminalAt.Before(j.AttemptAt) {
-				j.TerminalAt = j.AttemptAt
-			}
-			j.Reason = Protocol
-			j.Cleanup = "remote_delete_failed/unknown"
-		case outcome == "" && !invalid && !submission.UnknownDebt && !submission.NoBytesSent && len(j.TaskIDs) == 1:
-			j.State = RemotePending
-			j.Cleanup = "remote_delete_pending"
-		case outcome != "" && submission.NoBytesSent && !invalid && !submission.UnknownDebt && len(submission.Tasks) == 0:
-			// Keep the original UTC deadlines; rollback cannot authorize a retry.
-			now, e := s.now(tx)
-			if e != nil {
-				return e
-			}
-			if backoff < 5*time.Second {
-				backoff = 5 * time.Second
-			}
-			if backoff > 5*time.Minute {
-				backoff = 5 * time.Minute
-			}
-			j.State = Queued
-			j.Cleanup = "not_submitted"
-			j.DedupBarrier = false
-			j.NextAttempt = now.Add(backoff)
-		default:
-			j.State = SubmitUncertain
-			j.UnknownDebt = true
-			j.Cleanup = "remote_delete_failed/unknown"
-			if j.Reason == "" {
-				j.Reason = Protocol
-			}
-		}
-		return putJob(tx, j, previous)
+		var txErr error
+		j, txErr = s.recordSubmissionTx(tx, tenant, id, version, submission, outcome, backoff)
+		return txErr
 	})
 	if err != nil {
 		return Job{}, err
@@ -244,6 +166,87 @@ func (s *Store) RecordSubmission(ctx context.Context, tenant, id string, version
 		return j, err
 	}
 	return j, nil
+}
+
+func (s *Store) recordSubmissionTx(tx *sql.Tx, tenant, id string, version int64, submission Submission, outcome Code, backoff time.Duration) (Job, error) {
+	j, err := readJob(tx.QueryRow("SELECT document FROM jobs WHERE id=? AND tenant=?", id, tenant))
+	if err != nil {
+		return Job{}, err
+	}
+	if version < 1 || j.SubmissionRecorded || (j.State != Submitting && !terminal(j.State) && j.State != SubmitUncertain) ||
+		(j.SubmissionVersion != version && !(j.SubmissionVersion == 0 && j.State == Submitting && j.Version == version)) {
+		return Job{}, ErrConflict
+	}
+	previous := j
+	j.Version++
+	j.SubmissionRecorded = true
+	j.Reason = outcome
+	invalid := appendSubmissionTasks(&j, submission.Tasks)
+	j.UnknownDebt = submission.UnknownDebt || invalid
+	j.DedupBarrier = true
+	if err = s.applySubmissionOutcome(tx, &j, previous, submission, outcome, invalid, backoff); err != nil {
+		return Job{}, err
+	}
+	return j, putJob(tx, j, previous)
+}
+
+func appendSubmissionTasks(j *Job, tasks []TaskRef) bool {
+	invalid := len(tasks) > MaxTaskIDs
+	seen := make(map[int64]bool)
+	for i, task := range tasks {
+		if i >= MaxTaskIDs {
+			break
+		}
+		if task.ID < 1 || task.ID > math.MaxInt32 || task.Generation != j.Generation || seen[task.ID] {
+			invalid = true
+			continue
+		}
+		seen[task.ID] = true
+		j.TaskIDs = append(j.TaskIDs, task.ID)
+	}
+	return invalid
+}
+
+func (s *Store) applySubmissionOutcome(tx *sql.Tx, j *Job, previous Job, submission Submission, outcome Code, invalid bool, backoff time.Duration) error {
+	switch {
+	case terminal(previous.State):
+		applyTerminalSubmission(j, previous, submission, outcome, invalid)
+	case len(submission.Tasks) > 1:
+		j.State, j.UnknownDebt, j.Reason, j.Cleanup = Failed, true, Protocol, "remote_delete_failed/unknown"
+		j.TerminalAt = s.hooks.clock.Now().UTC()
+		if j.TerminalAt.Before(j.AttemptAt) {
+			j.TerminalAt = j.AttemptAt
+		}
+	case outcome == "" && !invalid && !submission.UnknownDebt && !submission.NoBytesSent && len(j.TaskIDs) == 1:
+		j.State, j.Cleanup = RemotePending, "remote_delete_pending"
+	case outcome != "" && submission.NoBytesSent && !invalid && !submission.UnknownDebt && len(submission.Tasks) == 0:
+		now, err := s.now(tx)
+		if err != nil {
+			return err
+		}
+		backoff = max(5*time.Second, min(backoff, 5*time.Minute))
+		j.State, j.Cleanup, j.DedupBarrier, j.NextAttempt = Queued, "not_submitted", false, now.Add(backoff)
+	default:
+		j.State, j.UnknownDebt, j.Cleanup = SubmitUncertain, true, "remote_delete_failed/unknown"
+		if j.Reason == "" {
+			j.Reason = Protocol
+		}
+	}
+	return nil
+}
+
+func applyTerminalSubmission(j *Job, previous Job, submission Submission, outcome Code, invalid bool) {
+	j.Reason = previous.Reason
+	noSend := submission.NoBytesSent && len(submission.Tasks) == 0 && !invalid
+	j.UnknownDebt = j.UnknownDebt || !noSend && (outcome != "" || len(j.TaskIDs) != 1)
+	if noSend && !submission.UnknownDebt {
+		j.UnknownDebt, j.DedupBarrier, j.Cleanup = false, false, "not_submitted"
+		return
+	}
+	j.Cleanup = "remote_delete_pending"
+	if j.UnknownDebt {
+		j.Cleanup = "remote_delete_failed/unknown"
+	}
 }
 
 func safeOutcome(code Code) bool {
@@ -262,9 +265,29 @@ func validJobID(id string) bool {
 // Startup holds the OS owner lock throughout reconciliation. Staging is never
 // promoted; removed files are directory-synced before reservations are released.
 func (s *Store) recover(ctx context.Context) error {
+	jobs, err := s.loadRecoveryJobs(ctx)
+	if err != nil {
+		return err
+	}
+	if err = s.reconcileRecoveryJobs(ctx, jobs); err != nil {
+		return err
+	}
+	seen, err := s.reconcileRecoverySpool(jobs)
+	if err != nil {
+		return err
+	}
+	for id, j := range jobs {
+		if (j.State == Queued || j.State == SubmitUncertain) && !seen[id] {
+			return ErrStoreUnavailable
+		}
+	}
+	return nil
+}
+
+func (s *Store) loadRecoveryJobs(ctx context.Context) (map[string]Job, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT document FROM jobs")
 	if err != nil {
-		return ErrStoreUnavailable
+		return nil, ErrStoreUnavailable
 	}
 	jobs := make(map[string]Job)
 	for rows.Next() {
@@ -272,7 +295,7 @@ func (s *Store) recover(ctx context.Context) error {
 		var j Job
 		if rows.Scan(&raw) != nil || len(raw) > JobMetadataLimit+JobResultLimit || json.Unmarshal(raw, &j) != nil || !validJobID(j.ID) || len(jobs) >= 10000 {
 			_ = rows.Close() // scan/validation failure is already the reported store error
-			return ErrStoreUnavailable
+			return nil, ErrStoreUnavailable
 		}
 		jobs[j.ID] = j
 	}
@@ -281,18 +304,22 @@ func (s *Store) recover(ctx context.Context) error {
 		err = closeErr
 	}
 	if err != nil {
-		return ErrStoreUnavailable
+		return nil, ErrStoreUnavailable
 	}
+	return jobs, nil
+}
+
+func (s *Store) reconcileRecoveryJobs(ctx context.Context, jobs map[string]Job) error {
 	for id, j := range jobs {
 		if j.State == Staging {
-			if err = s.cleanupStaging(id); err != nil {
+			if err := s.cleanupStaging(id); err != nil {
 				return err
 			}
 			delete(jobs, id)
 			continue
 		}
 		if j.State == Submitting {
-			err = s.transaction(ctx, func(tx *sql.Tx) error {
+			err := s.transaction(ctx, func(tx *sql.Tx) error {
 				previousJob := j
 				j.State = SubmitUncertain
 				j.Version++
@@ -313,54 +340,53 @@ func (s *Store) recover(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
+}
+
+func (s *Store) reconcileRecoverySpool(jobs map[string]Job) (map[string]bool, error) {
 	// Directory reads are bounded independently of database occupancy.
-	if _, err = s.spool.Seek(0, io.SeekStart); err != nil {
-		return ErrStoreUnavailable
+	if _, err := s.spool.Seek(0, io.SeekStart); err != nil {
+		return nil, ErrStoreUnavailable
 	}
 	seen := make(map[string]bool)
 	count := 0
 	for {
-		entries, e := s.spool.ReadDir(128)
+		entries, readErr := s.spool.ReadDir(128)
 		for _, entry := range entries {
 			count++
 			name := entry.Name()
 			id, ext, ok := strings.Cut(name, ".")
 			if count > 20000 || !ok || !validJobID(id) || (ext != "tmp" && ext != "blob") || !entry.Type().IsRegular() {
-				return ErrStoreUnavailable
+				return nil, ErrStoreUnavailable
 			}
-			f, e := openStoreFile(s.spool, name, os.O_RDONLY)
-			if e != nil {
-				return ErrStoreUnavailable
+			f, openErr := openStoreFile(s.spool, name, os.O_RDONLY)
+			if openErr != nil {
+				return nil, ErrStoreUnavailable
 			}
-			info, e := f.Stat()
+			info, statErr := f.Stat()
 			_ = f.Close()
-			if e != nil {
-				return ErrStoreUnavailable
+			if statErr != nil {
+				return nil, ErrStoreUnavailable
 			}
 			j, exists := jobs[id]
 			if exists && ext == "blob" && (j.State == Queued || j.State == SubmitUncertain) {
 				if info.Size() != j.PayloadBytes || j.PayloadBytes < 1 || j.PayloadBytes > MaxAttachment {
-					return ErrStoreUnavailable
+					return nil, ErrStoreUnavailable
 				}
 				seen[id] = true
 			} else if _, err := removeStoreFile(s.spool, name); err != nil {
-				return ErrStoreUnavailable
+				return nil, ErrStoreUnavailable
 			}
 		}
-		if e == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
-		if e != nil {
-			return ErrStoreUnavailable
+		if readErr != nil {
+			return nil, ErrStoreUnavailable
 		}
 	}
 	if s.spool.Sync() != nil {
-		return ErrStoreUnavailable
+		return nil, ErrStoreUnavailable
 	}
-	for id, j := range jobs {
-		if (j.State == Queued || j.State == SubmitUncertain) && !seen[id] {
-			return ErrStoreUnavailable
-		}
-	}
-	return nil
+	return seen, nil
 }

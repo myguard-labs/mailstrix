@@ -8,6 +8,7 @@ import argparse
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,28 @@ def print_failure_logs(case: Path) -> None:
         )
 
 
+def worker_accepts(path: Path, mutation: str) -> bool:
+    if mutation == "pathname-ready":
+        return path.exists()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.1)
+            probe.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
+def reject_unconnected_pathname(base: Path, mutation: str) -> None:
+    path = base / "pathname-only.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as decoy:
+        decoy.bind(str(path))
+        require(
+            not worker_accepts(path, mutation),
+            "AF_UNIX pathname creation alone passed the readiness oracle",
+        )
+
+
 def config_test(prefix: Path, env: dict, case: StartupCase, files: CaseFiles) -> None:
     with (files.directory / "configtest.log").open("w", encoding="utf-8") as log:
         result = subprocess.run(
@@ -109,7 +132,7 @@ def config_test(prefix: Path, env: dict, case: StartupCase, files: CaseFiles) ->
 
 
 def daemon_startup(
-    prefix: Path, env: dict, case: StartupCase, files: CaseFiles
+    prefix: Path, env: dict, case: StartupCase, files: CaseFiles, mutation: str
 ) -> None:
     command = [str(prefix / "usr/bin/rspamd"), "-f", "-c", str(files.config)]
     if os.geteuid() == 0:
@@ -126,17 +149,20 @@ def daemon_startup(
     ):
         try:
             deadline = time.monotonic() + 15
-            while proc.poll() is None and not files.socket.exists():
+            connected = False
+            while proc.poll() is None and not connected:
                 remaining = deadline - time.monotonic()
                 require(
                     remaining > 0,
                     f"{case.mode}/{case.name}: startup timed out; "
                     f"see {files.directory}",
                 )
-                time.sleep(min(0.05, remaining))
+                connected = worker_accepts(files.socket, mutation)
+                if not connected:
+                    time.sleep(min(0.05, remaining))
             if case.valid:
                 require(
-                    proc.poll() is None and files.socket.exists(),
+                    proc.poll() is None and connected,
                     f"{case.mode}/{case.name}: valid policy did not start "
                     f"worker; see {files.directory}",
                 )
@@ -198,7 +224,7 @@ actions {{ reject = 15; add_header = 6; greylist = 4; }}
         encoding="utf-8",
     )
     config_test(prefix, env, case, files)
-    daemon_startup(prefix, env, case, files)
+    daemon_startup(prefix, env, case, files, mutation)
     print(f"PASS {case.mode}/{case.name}", flush=True)
 
 
@@ -207,12 +233,15 @@ def main() -> None:
     parser.add_argument("--prefix", type=Path, default=Path("/"))
     parser.add_argument("--mode", choices=("all", "inline", "autoload"), default="all")
     parser.add_argument(
-        "--mutation", choices=("none", "return", "remove-preflight"), default="none"
+        "--mutation",
+        choices=("none", "return", "remove-preflight", "pathname-ready"),
+        default="none",
     )
     args = parser.parse_args()
     prefix = args.prefix.resolve()
     base = Path(tempfile.mkdtemp(prefix="cape-start-", dir="/tmp"))
     print(f"Artifacts: {base}", flush=True)
+    reject_unconnected_pathname(base, args.mutation)
     source = Path(__file__).resolve().parents[1]
     plugin = (source / "plugins/mailstrix.lua").read_text(encoding="utf-8")
     if args.mutation == "return":

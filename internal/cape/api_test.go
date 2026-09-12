@@ -553,3 +553,31 @@ func TestAPIRepeatedContentEncodingTLS(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIMediaTypeTokenCaseAndMalformedParameters(t *testing.T) {
+	for _, tc := range []struct {
+		name, media string
+		want        int
+	}{
+		{"mixed-case", "Application/Octet-Stream", 202},
+		{"parameter", "application/octet-stream; charset=binary", 400},
+		{"malformed", "application/octet-stream; charset", 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
+			h, err := NewAPIHandler(apiFixture(t, s))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodPost, "https://local.invalid"+JobsPath, strings.NewReader("attachment"))
+			r.Header.Set("Authorization", "Bearer fixture-alpha")
+			r.Header.Set("Content-Type", tc.media)
+			r.Header.Set("X-Mailstrix-CAPE-Profile", "private")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d want=%d", w.Code, tc.want)
+			}
+		})
+	}
+}

@@ -599,7 +599,7 @@ func TestResponseContentEncoding(t *testing.T) {
 		{name: "empty", values: []string{""}},
 		{name: "leading-whitespace", values: []string{" identity"}},
 		{name: "trailing-whitespace", values: []string{"identity "}},
-		{name: "noncanonical-case", values: []string{"Identity"}},
+		{name: "mixed-case", values: []string{"IdEnTiTy"}, valid: true},
 		{name: "other", values: []string{"gzip"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

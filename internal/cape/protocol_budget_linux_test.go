@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 )
 
@@ -24,15 +23,7 @@ func flatJSONDocument(elements int) []byte {
 	return []byte(body.String())
 }
 
-func processMaxRSS() int64 {
-	var usage syscall.Rusage
-	if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) != nil {
-		return -1
-	}
-	return usage.Maxrss * 1024
-}
-
-func TestJSONDocumentTokenBudgetAndConcurrentRSS(t *testing.T) {
+func TestJSONDocumentTokenBudgetAndConcurrentHeapReservation(t *testing.T) {
 	near := flatJSONDocument(maxDecodedJSONTokens - 5)
 	if _, err := jsonDocument(near, nil); err != nil {
 		t.Fatal("near-limit flat array rejected", err)
@@ -47,7 +38,6 @@ func TestJSONDocumentTokenBudgetAndConcurrentRSS(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	rssBefore := processMaxRSS()
 	var workers sync.WaitGroup
 	workers.Add(concurrency)
 	for i := 0; i < concurrency; i++ {
@@ -67,9 +57,8 @@ func TestJSONDocumentTokenBudgetAndConcurrentRSS(t *testing.T) {
 		}
 	}
 	runtime.ReadMemStats(&after)
-	rssAfter := processMaxRSS()
 	heapGrowth := int64(after.HeapSys - before.HeapSys)
-	t.Logf("100 concurrent flat-array parses: heap_sys_delta=%d max_rss_before=%d max_rss_after=%d", heapGrowth, rssBefore, rssAfter)
+	t.Logf("100 concurrent flat-array parses: heap_sys_delta=%d", heapGrowth)
 	if heapGrowth > 512<<20 {
 		t.Fatalf("bounded concurrent parses grew heap reservation by %d bytes", heapGrowth)
 	}

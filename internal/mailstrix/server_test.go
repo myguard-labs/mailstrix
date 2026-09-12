@@ -391,6 +391,14 @@ func TestAuth(t *testing.T) {
 	if w := post(s, "x", map[string]string{"Authorization": "Bearer tok"}); w.Code != 200 {
 		t.Errorf("bearer = %d, want 200", w.Code)
 	}
+	if w := post(s, "x", map[string]string{"Authorization": "bEaReR tok"}); w.Code != 200 {
+		t.Errorf("mixed-case bearer = %d, want 200", w.Code)
+	}
+	for _, malformed := range []string{"Bearertok", "Bearer ", "Bearer  tok", "Bearer\ttok"} {
+		if w := post(s, "x", map[string]string{"Authorization": malformed}); w.Code != 401 {
+			t.Errorf("malformed bearer %q = %d, want 401", malformed, w.Code)
+		}
+	}
 }
 
 // With no token configured the scanner runs OPEN: /scan accepts requests with or

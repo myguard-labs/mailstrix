@@ -386,7 +386,7 @@ func (c *Client) do(req *http.Request, limit int64) ([]byte, error) {
 
 func validContentEncoding(header http.Header) bool {
 	encodings := header.Values("Content-Encoding")
-	return len(encodings) == 0 || len(encodings) == 1 && encodings[0] == "identity"
+	return len(encodings) == 0 || len(encodings) == 1 && strings.EqualFold(encodings[0], "identity")
 }
 
 func classifyHTTP(resp *http.Response) error {

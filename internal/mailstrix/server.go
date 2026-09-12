@@ -722,8 +722,8 @@ func (s *Server) authRequired() bool { return len(s.cfg.tokens) > 0 }
 // Authorization header or X-MAILSTRIX-Token.
 func (s *Server) authOK(r *http.Request) bool {
 	presented := ""
-	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
-		presented = strings.TrimSpace(a[len("Bearer "):])
+	if scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") && token != "" {
+		presented = token
 	} else {
 		presented = strings.TrimSpace(r.Header.Get("X-MAILSTRIX-Token"))
 	}
