@@ -119,7 +119,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			check, done := context.WithTimeout(ctx, time.Second)
 			current, lookupErr := s.store.Lookup(check, active.job.Tenant, id)
 			done()
-			if lookupErr != nil || terminal(current.State) && !terminal(active.job.State) {
+			if cancelLiveLookup(active.job, current, lookupErr) {
 				active.cancel()
 			}
 		}
@@ -135,6 +135,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 	}
+}
+
+func cancelLiveLookup(active, current Job, lookupErr error) bool {
+	var storeErr *Error
+	gone := errors.As(lookupErr, &storeErr) && storeErr.Code == NotFound
+	return gone || lookupErr == nil && terminal(current.State) && !terminal(active.State)
 }
 
 func retryDelay(attempt int) time.Duration {

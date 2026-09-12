@@ -370,3 +370,24 @@ func TestSchedulerShutdownStorageFailureRetainsPacket(t *testing.T) {
 		t.Fatal("repaired shutdown retry lost task ID")
 	}
 }
+
+func TestLiveLookupCancellationRequiresAuthoritativeState(t *testing.T) {
+	active := Job{State: Submitting}
+	for name, tc := range map[string]struct {
+		current Job
+		err     error
+		want    bool
+	}{
+		"transient-store": {err: ErrStoreUnavailable},
+		"deadline":        {err: context.DeadlineExceeded},
+		"not-found":       {err: &Error{Code: NotFound}, want: true},
+		"terminal":        {current: Job{State: Failed}, want: true},
+		"still-live":      {current: Job{State: RemotePending}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := cancelLiveLookup(active, tc.current, tc.err); got != tc.want {
+				t.Fatalf("cancel=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
