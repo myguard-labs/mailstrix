@@ -633,7 +633,7 @@ func TestStoreSubmissionOutcomesAndVersions(t *testing.T) {
 					wantTaskID = maxTaskID
 				}
 				if j.State != RemotePending || len(j.TaskIDs) != 1 || j.TaskIDs[0] != wantTaskID {
-					t.Fatal("acknowledged ownership not persisted")
+					t.Fatalf("acknowledged ownership state=%s task_ids=%v, want state=%s task_id=%d", j.State, j.TaskIDs, RemotePending, wantTaskID)
 				}
 				if _, e = os.Stat(filepath.Join(s.cfg.Directory, "spool", j.ID+".blob")); !errors.Is(e, os.ErrNotExist) {
 					t.Fatal("acknowledged payload not removed")
