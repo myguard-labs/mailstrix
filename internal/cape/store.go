@@ -144,10 +144,11 @@ type storeHooks struct {
 	checkpoint func() error // package-private deterministic storage fault fixture
 }
 
-// Store owns a process-lifetime file lock and one SQLite connection. All database
-// work is serialized, while bounded ingress writers run concurrently.
+// Store owns a process-lifetime file lock and a bounded SQLite pool. State
+// transitions are serialized, while ingress and callback writers are joined by Close.
 type Store struct {
 	mu                        sync.Mutex
+	callbackMu                sync.Mutex
 	db                        *sql.DB
 	dir, spool, lock          *os.File
 	cfg                       StoreConfig
@@ -259,8 +260,8 @@ func openStore(ctx context.Context, cfg StoreConfig, hooks storeHooks) (_ *Store
 	if err != nil {
 		return nil, ErrStoreUnavailable
 	}
-	s.db.SetMaxOpenConns(1)
-	s.db.SetMaxIdleConns(1)
+	s.db.SetMaxOpenConns(2)
+	s.db.SetMaxIdleConns(2)
 	var mode string
 	var synchronous, pageSize, pages int64
 	if s.db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode) != nil || mode != "wal" ||
@@ -342,7 +343,7 @@ func (s *Store) closeFiles() {
 	}
 }
 
-// Close interrupts ingress and joins every writer before releasing ownership.
+// Close interrupts ingress and joins every ingress/callback writer before releasing ownership.
 // While a scheduler Run is active it returns ErrConflict immediately, leaves
 // the store open and does not interrupt ingress. Stop and join Run first.
 func (s *Store) Close() error {

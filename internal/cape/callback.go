@@ -109,6 +109,8 @@ func NewCallbackHandler(s *Store, cfg CallbackConfig) (http.Handler, error) {
 	// Replay rows alone also bound the rate history, including removed key IDs.
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS cape_events(event TEXT PRIMARY KEY,tenant TEXT NOT NULL,key_id TEXT NOT NULL,accepted INTEGER NOT NULL,expires INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS cape_events_expiry ON cape_events(expires);
+ CREATE INDEX IF NOT EXISTS cape_events_tenant ON cape_events(tenant);
+ CREATE INDEX IF NOT EXISTS cape_events_key_accepted ON cape_events(key_id,accepted);
  CREATE TABLE IF NOT EXISTS cape_event_clock(id INTEGER PRIMARY KEY CHECK(id=1), latest INTEGER NOT NULL);`)
 	if err != nil {
 		return nil, ErrStoreUnavailable
@@ -199,10 +201,15 @@ func (h *callbackHandler) receive(r *http.Request) int {
 	}
 	s := h.store
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return http.StatusServiceUnavailable
 	}
+	s.writers.Add(1)
+	s.mu.Unlock()
+	defer s.writers.Done()
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
 	err = s.transaction(r.Context(), func(tx *sql.Tx) error {
 		actual := s.hooks.clock.Now().UTC()
 		var latest int64
@@ -243,7 +250,13 @@ func (h *callbackHandler) receive(r *http.Request) int {
 			return ErrConflict
 		}
 		var own, rate int
-		if err = tx.QueryRow("SELECT count(*),coalesce(sum(tenant=?),0),coalesce(sum(key_id=? AND accepted>?),0) FROM cape_events", e.Tenant, keyID, now.Add(-time.Minute).UnixNano()).Scan(&n, &own, &rate); err != nil {
+		if err = tx.QueryRow("SELECT count(*) FROM cape_events").Scan(&n); err != nil {
+			return ErrStoreUnavailable
+		}
+		if err = tx.QueryRow("SELECT count(*) FROM cape_events WHERE tenant=?", e.Tenant).Scan(&own); err != nil {
+			return ErrStoreUnavailable
+		}
+		if err = tx.QueryRow("SELECT count(*) FROM cape_events WHERE key_id=? AND accepted>?", keyID, now.Add(-time.Minute).UnixNano()).Scan(&rate); err != nil {
 			return ErrStoreUnavailable
 		}
 		if n >= 10000 || own >= 1000 || rate >= 10 {

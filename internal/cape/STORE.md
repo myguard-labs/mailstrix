@@ -32,10 +32,11 @@ The full configured attachment ceiling plus 4 KiB metadata and 16 KiB result
 allowances is reserved transactionally before any input is read. Attachment
 limits cannot exceed 10 MiB. Dedup requires temporary admission capacity too.
 
-One permanent lock inode enforces a single process owner. SQLite uses one
-connection, WAL, FULL synchronous writes, a one-second busy timeout and bounded
-pages; required PRAGMAs are read back. Readers never retain database cursors
-outside the store mutex. Automatic checkpoints run every 32 pages, with explicit
+One permanent lock inode enforces a single process owner. SQLite uses a bounded
+two-connection pool, WAL, FULL synchronous writes, a one-second busy timeout and
+bounded pages; required PRAGMAs are read back. Callback writes use the second
+connection so scheduler lookups are not starved, and Close joins them before
+releasing storage. Automatic checkpoints run every 32 pages, with explicit
 truncate checkpoints on publication/outcome and shutdown. Files use exclusive
 creation and descriptor-relative operations without symlink traversal. The
 database path remains attached to the held directory descriptor.
