@@ -433,7 +433,7 @@ func (s *Store) cleanupStaging(id string) error {
 			return ErrStoreUnavailable
 		}
 		for _, suffix := range []string{".tmp", ".blob"} {
-			if removeStoreFile(s.spool, id+suffix) != nil {
+			if _, err := removeStoreFile(s.spool, id+suffix); err != nil {
 				return ErrStoreUnavailable
 			}
 		}

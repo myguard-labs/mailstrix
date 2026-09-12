@@ -137,15 +137,15 @@ func validateDatabaseFiles(dir *os.File) error {
 	return nil
 }
 
-func removeStoreFile(dir *os.File, name string) error {
+func removeStoreFile(dir *os.File, name string) (bool, error) {
 	if strings.ContainsAny(name, "/\\") {
-		return ErrStoreUnavailable
+		return false, ErrStoreUnavailable
 	}
 	err := unix.Unlinkat(int(dir.Fd()), name, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return false, nil
 	}
-	return err
+	return err == nil, err
 }
 
 func renameStoreFile(dir *os.File, oldName, newName string) error {

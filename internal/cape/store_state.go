@@ -308,7 +308,7 @@ func (s *Store) recover(ctx context.Context) error {
 			jobs[id] = j
 		}
 		if j.State == RemotePending || j.State == Fetching || j.State == Completed || j.State == Cancelled || j.State == Failed || j.State == Expired {
-			if removeStoreFile(s.spool, id+".blob") != nil {
+			if _, err := removeStoreFile(s.spool, id+".blob"); err != nil {
 				return ErrStoreUnavailable
 			}
 		}
@@ -343,7 +343,7 @@ func (s *Store) recover(ctx context.Context) error {
 					return ErrStoreUnavailable
 				}
 				seen[id] = true
-			} else if removeStoreFile(s.spool, name) != nil {
+			} else if _, err := removeStoreFile(s.spool, name); err != nil {
 				return ErrStoreUnavailable
 			}
 		}

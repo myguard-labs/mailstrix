@@ -150,7 +150,8 @@ func (s *Store) Cancel(ctx context.Context, tenant, id string) (Job, error) {
 }
 
 func (s *Store) removePayload(id string) error {
-	if removeStoreFile(s.spool, id+".blob") != nil || s.spool.Sync() != nil {
+	removed, err := removeStoreFile(s.spool, id+".blob")
+	if err != nil || removed && s.spool.Sync() != nil {
 		return ErrStoreUnavailable
 	}
 	return nil

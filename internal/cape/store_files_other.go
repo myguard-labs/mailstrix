@@ -12,6 +12,6 @@ func openSpool(*os.File) (*os.File, error)                  { return nil, ErrSto
 func lockStore(*os.File) (*os.File, error)                  { return nil, ErrStoreUnavailable }
 func databasePath(*os.File) string                          { return "" }
 func validateDatabaseFiles(*os.File) error                  { return ErrStoreUnavailable }
-func removeStoreFile(*os.File, string) error                { return ErrStoreUnavailable }
+func removeStoreFile(*os.File, string) (bool, error)        { return false, ErrStoreUnavailable }
 func renameStoreFile(*os.File, string, string) error        { return ErrStoreUnavailable }
 func filesystemCapacity(*os.File, string) (capacity, error) { return capacity{}, ErrStoreUnavailable }
