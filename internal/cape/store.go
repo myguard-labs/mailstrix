@@ -138,10 +138,14 @@ func (t realStoreTimer) C() <-chan time.Time               { return t.Timer.C }
 
 type capacity struct{ total, available, block int64 }
 type storeHooks struct {
-	clock      storeClock
-	capacity   func(*os.File, string) (capacity, error)
-	crash      func(string)
-	checkpoint func() error // package-private deterministic storage fault fixture
+	clock            storeClock
+	capacity         func(*os.File, string) (capacity, error)
+	crash            func(string)
+	checkpoint       func() error // package-private deterministic storage fault fixture
+	callbackTx       func()       // package-private callback overlap fixture barrier
+	syncSpool        func() error // package-private directory durability fixture
+	beforeWriterWait func()       // package-private Close phase fixture barrier
+	afterWriterWait  func()       // package-private Close phase fixture observation
 }
 
 // Store owns a process-lifetime file lock and a bounded SQLite pool. State
@@ -375,7 +379,13 @@ func (s *Store) Close() error {
 		cancel()
 	}
 	s.mu.Unlock()
+	if s.hooks.beforeWriterWait != nil {
+		s.hooks.beforeWriterWait()
+	}
 	s.writers.Wait()
+	if s.hooks.afterWriterWait != nil {
+		s.hooks.afterWriterWait()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err := s.checkpoint(context.Background())
@@ -394,6 +404,13 @@ func (s *Store) checkpoint(ctx context.Context) error {
 		return ErrStoreUnavailable
 	}
 	return nil
+}
+
+func (s *Store) syncSpool() error {
+	if s.hooks.syncSpool != nil {
+		return s.hooks.syncSpool()
+	}
+	return s.spool.Sync()
 }
 
 func (s *Store) transaction(ctx context.Context, f func(*sql.Tx) error) error {

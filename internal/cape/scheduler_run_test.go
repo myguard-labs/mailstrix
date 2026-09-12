@@ -26,6 +26,32 @@ func schedulerPhase(t *testing.T, phase <-chan struct{}, message string) {
 	}
 }
 
+func TestSchedulerDrainRetriesDuringGrace(t *testing.T) {
+	s, _, j, report, task := fetchingFixture(t)
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_grace_retry BEFORE UPDATE ON jobs BEGIN SELECT RAISE(ABORT,'fixture'); END`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	var attempts atomic.Int32
+	q := &Scheduler{
+		store: s, mapper: mapperFunc(func(context.Context, *Report, string) (NormalizedResult, error) {
+			return NormalizedResult{Version: 1, Policy: "r1", Evidence: EvidenceNoSignal}, nil
+		}),
+		pending:       []schedulerResult{{job: j, kind: "report", task: task, report: report}},
+		beforePersist: func(context.Context) { attempts.Add(1) },
+	}
+	if err := q.drainPending(ctx); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatal("failed grace drain did not retain pending outcome")
+	}
+	if attempts.Load() < 2 {
+		t.Fatalf("shutdown grace made %d persistence attempts, want multiple", attempts.Load())
+	}
+	if len(q.pending) != 1 {
+		t.Fatal("shutdown retries discarded failed pending outcome")
+	}
+}
+
 func TestSchedulerRunLiveShutdownHarvest(t *testing.T) {
 	started := make(chan struct{})
 	var requests atomic.Int32

@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -558,6 +559,61 @@ func TestCallbackConcurrentAdmission(t *testing.T) {
 				t.Fatal("concurrent callback durable count/version mismatch")
 			}
 		})
+	}
+}
+
+func TestCallbackTransactionOverlapAndCloseJoin(t *testing.T) {
+	s, c, cfg, j, h := callbackFixture(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	s.hooks.callbackTx = func() {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	request := bridgeRequest(t, cfg, bridgeEvent(c, j, 1), nil)
+	callbackDone := make(chan int, 1)
+	go func() { callbackDone <- bridgeStatus(h, request) }()
+	schedulerPhase(t, entered, "callback did not enter database transaction")
+	lookupDone := make(chan error, 1)
+	go func() {
+		_, err := s.Lookup(context.Background(), j.Tenant, j.ID)
+		lookupDone <- err
+	}()
+	select {
+	case err := <-lookupDone:
+		if err != nil {
+			t.Fatal("concurrent lookup failed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked callback monopolized the database pool")
+	}
+	closeWaiting := make(chan struct{})
+	writersJoined := make(chan struct{})
+	s.hooks.beforeWriterWait = func() { close(closeWaiting) }
+	s.hooks.afterWriterWait = func() { close(writersJoined) }
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- s.Close() }()
+	schedulerPhase(t, closeWaiting, "Close did not reach callback writer join")
+	select {
+	case <-writersJoined:
+		t.Fatal("Close joined writers before callback completed")
+	default:
+	}
+	unblock()
+	if status := <-callbackDone; status != http.StatusAccepted {
+		t.Fatalf("callback status=%d want accepted", status)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-writersJoined:
+	default:
+		t.Fatal("Close returned without completing writer join")
 	}
 }
 

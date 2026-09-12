@@ -36,6 +36,27 @@ func TestLifecycleLoweredQuota(t *testing.T) {
 	}
 }
 
+func TestLifecycleCleanupCursorRollsBackOnTransactionFailure(t *testing.T) {
+	ctx := context.Background()
+	clock := newStoreClock()
+	s := testStore(t, storeConfig(t.TempDir()), clock)
+	j := enqueueBytes(t, s, "alpha", "cursor-rollback").Job
+	if _, err := s.Cancel(ctx, j.Tenant, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(25 * time.Hour)
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_cursor_delete BEFORE DELETE ON jobs BEGIN SELECT RAISE(ABORT,'fixture'); END`); err != nil {
+		t.Fatal(err)
+	}
+	before := s.maintenanceCleanupCursor
+	if err := s.Maintain(ctx); !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("maintenance error=%v want store unavailable", err)
+	}
+	if s.maintenanceCleanupCursor != before {
+		t.Fatalf("failed cleanup advanced cursor from %q to %q", before, s.maintenanceCleanupCursor)
+	}
+}
+
 func TestLifecycleRollbackCancel(t *testing.T) {
 	for _, completed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "queued", true: "completed"}[completed], func(t *testing.T) {

@@ -12,6 +12,10 @@ import (
 	"unicode/utf8"
 )
 
+// maxDecodedJSONTokens bounds aggregate decoded structure independently of the
+// transport byte and nesting limits. It includes keys, scalars and delimiters.
+const maxDecodedJSONTokens = 65536
+
 // jsonDocument rejects duplicate keys, nonfinite numbers, trailing documents and
 // excessive nesting. The optional visitor observes only fully decoded elements
 // of the root object's data.task_ids array, including before a later parse error.
@@ -36,10 +40,23 @@ type jsonParser struct {
 	decoder *json.Decoder
 	visit   func(any)
 	invalid bool
+	tokens  int
+}
+
+func (p *jsonParser) token() (json.Token, error) {
+	token, err := p.decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	p.tokens++
+	if p.tokens > maxDecodedJSONTokens {
+		return nil, &Error{Code: Protocol}
+	}
+	return token, nil
 }
 
 func (p *jsonParser) value(depth int, path []string) (any, error) {
-	token, err := p.decoder.Token()
+	token, err := p.token()
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +69,7 @@ func (p *jsonParser) value(depth int, path []string) (any, error) {
 		case '{':
 			m := make(map[string]any)
 			for p.decoder.More() {
-				key, err := p.decoder.Token()
+				key, err := p.token()
 				if err != nil {
 					return nil, err
 				}
@@ -73,7 +90,7 @@ func (p *jsonParser) value(depth int, path []string) (any, error) {
 				}
 				m[name] = child
 			}
-			end, err := p.decoder.Token()
+			end, err := p.token()
 			if err != nil || end != json.Delim('}') {
 				return nil, &Error{Code: Protocol}
 			}
@@ -94,7 +111,7 @@ func (p *jsonParser) value(depth int, path []string) (any, error) {
 				}
 				a = append(a, child)
 			}
-			end, err := p.decoder.Token()
+			end, err := p.token()
 			if err != nil || end != json.Delim(']') {
 				return nil, &Error{Code: Protocol}
 			}

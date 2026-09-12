@@ -144,3 +144,25 @@ func TestMaintainPreservesUnsubmittedPayload(t *testing.T) {
 		})
 	}
 }
+
+func TestRemovePayloadSyncsDirectoryOnlyAfterUnlink(t *testing.T) {
+	s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
+	j := enqueueBytes(t, s, "alpha", "conditional-sync").Job
+	syncs := 0
+	s.hooks.syncSpool = func() error {
+		syncs++
+		return nil
+	}
+	if err := s.removePayload(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if syncs != 1 {
+		t.Fatalf("successful unlink directory syncs=%d want 1", syncs)
+	}
+	if err := s.removePayload(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if syncs != 1 {
+		t.Fatalf("absent payload triggered directory sync: calls=%d", syncs)
+	}
+}

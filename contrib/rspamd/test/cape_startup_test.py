@@ -12,9 +12,27 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 ERROR = "unsupported cape_policy: adapter requires static-only"
+
+
+@dataclass(frozen=True)
+class StartupCase:
+    mode: str
+    name: str
+    option: str
+    valid: bool
+
+
+@dataclass(frozen=True)
+class CaseFiles:
+    directory: Path
+    config: Path
+    socket: Path
+
+
 CASES = (
     ("omitted", "", True),
     ("empty", 'cape_policy = "";', True),
@@ -62,103 +80,126 @@ def print_failure_logs(case: Path) -> None:
         )
 
 
-def run_case(
-    base: Path,
-    prefix: Path,
-    env: dict,
-    mode: str,
-    name: str,
-    option: str,
-    valid: bool,
-    mutation: str,
-) -> None:
-    case = base / f"{mode}-{name}"
-    case.mkdir()
-    sock = case / "worker.sock"
-    if mode == "inline":
-        loader = f'lua = "{base}/mailstrix.lua";'
-    else:
-        loader = f'modules {{ path = "{base}/plugins"; }}'
-        if mutation != "remove-preflight":
-            loader += f'\nlua = "{base}/mailstrix-preflight.lua";'
-    config = case / "rspamd.conf"
-    config.write_text(
-        f'''logging {{ type = console; level = info; }}
-options {{ pidfile = "{case}/rspamd.pid"; tempdir = "{case}";
-  hs_cache_dir = "{case}"; maps_cache_dir = "{case}";
-  url_tld = "{base}/tlds"; filters = "";
-  dns {{ nameserver = "127.0.0.1:9"; }} }}
-lang_detection {{ languages = "{prefix}/usr/share/rspamd/languages"; }}
-{loader}
-mailstrix {{ {option} url = "http://127.0.0.1:9/scan"; }}
-worker "normal" {{ bind_socket = "{sock}"; count = 1; }}
-actions {{ reject = 15; add_header = 6; greylist = 4; }}
-''',
-        encoding="utf-8",
-    )
-    with (case / "configtest.log").open("w", encoding="utf-8") as log:
+def config_test(prefix: Path, env: dict, case: StartupCase, files: CaseFiles) -> None:
+    with (files.directory / "configtest.log").open("w", encoding="utf-8") as log:
         result = subprocess.run(
-            [str(prefix / "usr/bin/rspamadm"), "configtest", "-s", "-c", str(config)],
+            [
+                str(prefix / "usr/bin/rspamadm"),
+                "configtest",
+                "-s",
+                "-c",
+                str(files.config),
+            ],
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
             timeout=20,
             check=False,
         )
-    diagnostic = (case / "configtest.log").read_text(encoding="utf-8")
+    diagnostic = (files.directory / "configtest.log").read_text(encoding="utf-8")
     require(
-        (result.returncode == 0) == valid,
-        f"{mode}/{name}: configtest validity mismatch; see {case}",
+        (result.returncode == 0) == case.valid,
+        f"{case.mode}/{case.name}: configtest validity mismatch; see {files.directory}",
     )
-    if not valid:
-        require(ERROR in diagnostic, f"{mode}/{name}: missing configtest policy error")
-    command = [str(prefix / "usr/bin/rspamd"), "-f", "-c", str(config)]
+    if not case.valid:
+        require(
+            ERROR in diagnostic,
+            f"{case.mode}/{case.name}: missing configtest policy error",
+        )
+
+
+def daemon_startup(
+    prefix: Path, env: dict, case: StartupCase, files: CaseFiles
+) -> None:
+    command = [str(prefix / "usr/bin/rspamd"), "-f", "-c", str(files.config)]
     if os.geteuid() == 0:
         command.append("-i")  # Only this synthetic test configuration, inside CI.
-    with (case / "daemon.log").open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
+    with (
+        (files.directory / "daemon.log").open("w", encoding="utf-8") as log,
+        subprocess.Popen(
             command,
             env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-        )
+        ) as proc,
+    ):
         try:
             deadline = time.monotonic() + 15
-            while proc.poll() is None and not sock.exists():
+            while proc.poll() is None and not files.socket.exists():
                 remaining = deadline - time.monotonic()
-                require(remaining > 0, f"{mode}/{name}: startup timed out; see {case}")
-                time.sleep(min(0.05, remaining))
-            if valid:
                 require(
-                    proc.poll() is None and sock.exists(),
-                    f"{mode}/{name}: valid policy did not start worker; see {case}",
+                    remaining > 0,
+                    f"{case.mode}/{case.name}: startup timed out; "
+                    f"see {files.directory}",
+                )
+                time.sleep(min(0.05, remaining))
+            if case.valid:
+                require(
+                    proc.poll() is None and files.socket.exists(),
+                    f"{case.mode}/{case.name}: valid policy did not start "
+                    f"worker; see {files.directory}",
                 )
             else:
                 require(
-                    not sock.exists(),
-                    f"{mode}/{name}: invalid policy started worker; see {case}",
+                    not files.socket.exists(),
+                    f"{case.mode}/{case.name}: invalid policy started worker; "
+                    f"see {files.directory}",
                 )
                 require(
                     proc.returncode is not None and proc.returncode > 0,
-                    f"{mode}/{name}: invalid policy did not exit nonzero",
+                    f"{case.mode}/{case.name}: invalid policy did not exit nonzero",
                 )
         finally:
             stop(proc)
-    diagnostic = (case / "daemon.log").read_text(encoding="utf-8")
-    if valid:
-        require(proc.returncode == 0, f"{mode}/{name}: shutdown failed")
+    diagnostic = (files.directory / "daemon.log").read_text(encoding="utf-8")
+    if case.valid:
+        require(proc.returncode == 0, f"{case.mode}/{case.name}: shutdown failed")
         require(
             diagnostic.count("mailstrix: registered, backend=") == 1,
-            f"{mode}/{name}: plugin must register exactly once",
+            f"{case.mode}/{case.name}: plugin must register exactly once",
         )
     else:
-        require(ERROR in diagnostic, f"{mode}/{name}: missing daemon policy error")
+        require(
+            ERROR in diagnostic, f"{case.mode}/{case.name}: missing daemon policy error"
+        )
         require(
             "mailstrix: registered, backend=" not in diagnostic,
-            f"{mode}/{name}: invalid policy registered plugin",
+            f"{case.mode}/{case.name}: invalid policy registered plugin",
         )
-    print(f"PASS {mode}/{name}", flush=True)
+
+
+def run_case(
+    base: Path, prefix: Path, env: dict, case: StartupCase, mutation: str
+) -> None:
+    directory = base / f"{case.mode}-{case.name}"
+    directory.mkdir()
+    sock = directory / "worker.sock"
+    if case.mode == "inline":
+        loader = f'lua = "{base}/mailstrix.lua";'
+    else:
+        loader = f'modules {{ path = "{base}/plugins"; }}'
+        if mutation != "remove-preflight":
+            loader += f'\nlua = "{base}/mailstrix-preflight.lua";'
+    config = directory / "rspamd.conf"
+    files = CaseFiles(directory, config, sock)
+    config.write_text(
+        f'''logging {{ type = console; level = info; }}
+options {{ pidfile = "{directory}/rspamd.pid"; tempdir = "{directory}";
+  hs_cache_dir = "{directory}"; maps_cache_dir = "{directory}";
+  url_tld = "{base}/tlds"; filters = "";
+  dns {{ nameserver = "127.0.0.1:9"; }} }}
+lang_detection {{ languages = "{prefix}/usr/share/rspamd/languages"; }}
+{loader}
+mailstrix {{ {case.option} url = "http://127.0.0.1:9/scan"; }}
+worker "normal" {{ bind_socket = "{sock}"; count = 1; }}
+actions {{ reject = 15; add_header = 6; greylist = 4; }}
+''',
+        encoding="utf-8",
+    )
+    config_test(prefix, env, case, files)
+    daemon_startup(prefix, env, case, files)
+    print(f"PASS {case.mode}/{case.name}", flush=True)
 
 
 def main() -> None:
@@ -212,10 +253,11 @@ def main() -> None:
     modes = ("inline", "autoload") if args.mode == "all" else (args.mode,)
     for mode in modes:
         for name, option, valid in CASES:
+            case = StartupCase(mode, name, option, valid)
             try:
-                run_case(base, prefix, env, mode, name, option, valid, args.mutation)
+                run_case(base, prefix, env, case, args.mutation)
             except (RuntimeError, OSError, subprocess.SubprocessError):
-                print_failure_logs(base / f"{mode}-{name}")
+                print_failure_logs(base / f"{case.mode}-{case.name}")
                 raise
     print("PASS: real Rspamd policy startup checks", flush=True)
 

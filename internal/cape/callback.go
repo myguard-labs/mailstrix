@@ -211,6 +211,9 @@ func (h *callbackHandler) receive(r *http.Request) int {
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
 	err = s.transaction(r.Context(), func(tx *sql.Tx) error {
+		if s.hooks.callbackTx != nil {
+			s.hooks.callbackTx()
+		}
 		actual := s.hooks.clock.Now().UTC()
 		var latest int64
 		ce := tx.QueryRow("SELECT latest FROM cape_event_clock WHERE id=1").Scan(&latest)

@@ -298,6 +298,43 @@ func TestNewValidationAndTLS(t *testing.T) {
 	}
 }
 
+func TestTLSHandshakeTimeoutBounds(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+	addr := netip.MustParseAddrPort(listener.Addr().String())
+	c, err := New(Config{Origin: "https://localhost:" + fmt.Sprint(addr.Port()), AllowedDestination: addr,
+		Generation: "fixture-v1", Machine: "one-vm", CredentialReference: "fixture-account"},
+		credentialFunc(func(context.Context, string) (string, error) { return "synthetic-test-token", nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	c.transport.TLSHandshakeTimeout = 50 * time.Millisecond
+	started := time.Now()
+	_, err = c.Status(context.Background(), owned())
+	elapsed := time.Since(started)
+	assertCode(t, err, Transport)
+	if elapsed < 35*time.Millisecond || elapsed > 750*time.Millisecond {
+		t.Fatalf("TLS handshake timeout elapsed=%v outside [35ms,750ms]", elapsed)
+	}
+	select {
+	case conn := <-accepted:
+		_ = conn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("TLS timeout test never reached accepted connection")
+	}
+}
+
 func TestCredentialsAndLifecycle(t *testing.T) {
 	var calls atomic.Int32
 	c, cfg := fixture(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -532,9 +569,6 @@ func TestReadErrors(t *testing.T) {
 				calls.Add(1)
 				if tc.encoding != "" {
 					w.Header().Set("Content-Encoding", tc.encoding)
-				}
-				if tc.encoding == "" && len(w.Header().Values("Content-Encoding")) != 0 {
-					t.Error("fixture injected an empty Content-Encoding header")
 				}
 				w.Header().Set("Retry-After", "999999")
 				w.WriteHeader(tc.status)
