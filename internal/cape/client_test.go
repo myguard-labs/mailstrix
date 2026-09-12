@@ -530,7 +530,12 @@ func TestReadErrors(t *testing.T) {
 			var calls atomic.Int32
 			c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) {
 				calls.Add(1)
-				w.Header().Set("Content-Encoding", tc.encoding)
+				if tc.encoding != "" {
+					w.Header().Set("Content-Encoding", tc.encoding)
+				}
+				if tc.encoding == "" && len(w.Header().Values("Content-Encoding")) != 0 {
+					t.Error("fixture injected an empty Content-Encoding header")
+				}
 				w.Header().Set("Retry-After", "999999")
 				w.WriteHeader(tc.status)
 				_, _ = io.WriteString(w, tc.body)
