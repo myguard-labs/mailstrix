@@ -232,6 +232,7 @@ func (s *Store) Maintain(ctx context.Context) error {
 		return &Error{Code: Closed}
 	}
 	var now time.Time
+	var deadlineCursor string
 	err := s.transaction(ctx, func(tx *sql.Tx) error {
 		var err error
 		now, err = s.now(tx)
@@ -239,7 +240,7 @@ func (s *Store) Maintain(ctx context.Context) error {
 			return err
 		}
 		var jobs []Job
-		jobs, s.maintenanceDeadlineCursor, err = nextMaintenanceBatch(tx, deadlineStates, s.maintenanceDeadlineCursor)
+		jobs, deadlineCursor, err = nextMaintenanceBatch(tx, deadlineStates, s.maintenanceDeadlineCursor)
 		if err != nil {
 			return err
 		}
@@ -266,14 +267,16 @@ func (s *Store) Maintain(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.maintenanceDeadlineCursor = deadlineCursor
 	// Terminal publication precedes unlink: rollback must never leave a queued
 	// or uncertain row referring to a payload that cleanup already removed.
+	var cleanupCursor string
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
 		jobs, cursor, err := nextMaintenanceBatch(tx, cleanupStates, s.maintenanceCleanupCursor)
 		if err != nil {
 			return err
 		}
-		s.maintenanceCleanupCursor = cursor
+		cleanupCursor = cursor
 		for _, j := range jobs {
 			if !terminal(j.State) {
 				// Submission publication precedes unlink too. A failed unlink after
@@ -314,6 +317,7 @@ func (s *Store) Maintain(ctx context.Context) error {
 		return nil
 	})
 	if err == nil {
+		s.maintenanceCleanupCursor = cleanupCursor
 		err = s.checkpoint(ctx)
 	}
 	return err

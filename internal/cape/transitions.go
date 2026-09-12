@@ -147,8 +147,8 @@ func reportIdentity(r *Report, task TaskRef, digest string) bool {
 
 func (s *Store) transitionReport(ctx context.Context, tenant, id string, version int64, task TaskRef, expected JobState, change func(*Job, time.Time) error) (Job, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return Job{}, &Error{Code: Closed}
 	}
 	var j Job
@@ -176,6 +176,7 @@ func (s *Store) transitionReport(ctx context.Context, tenant, id string, version
 		j.Version++
 		return putJob(tx, j, previousJob)
 	})
+	s.mu.Unlock()
 	if err == nil {
 		err = s.checkpoint(ctx)
 	}

@@ -24,6 +24,7 @@ type Scheduler struct {
 	pending       []schedulerResult
 	lastTenant    [2]string
 	interval      time.Duration
+	drainTimeout  time.Duration
 	beforeJoin    func()                // package-private phase barrier for deterministic shutdown fixtures
 	beforePersist func(context.Context) // package-private persistence-pass fixture observation
 }
@@ -40,7 +41,7 @@ func NewScheduler(store *Store, clients map[string]*Client, mapper ResultMapper,
 		}
 		copyClients[generation] = client
 	}
-	return &Scheduler{store: store, clients: copyClients, mapper: mapper, workers: workers, interval: time.Second}, nil
+	return &Scheduler{store: store, clients: copyClients, mapper: mapper, workers: workers, interval: time.Second, drainTimeout: RequestTimeout}, nil
 }
 
 type schedulerResult struct {
@@ -101,7 +102,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 				delete(live, r.job.ID)
 				s.pending = append(s.pending, r)
 			}
-			drain, done := context.WithTimeout(context.Background(), RequestTimeout)
+			drain, done := context.WithTimeout(context.Background(), s.drainTimeout)
 			defer done()
 			return s.drainPending(drain)
 		}

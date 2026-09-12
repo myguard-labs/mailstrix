@@ -82,6 +82,13 @@ func TestCAPEDaemonConfigStrict(t *testing.T) {
 			c.Profiles["manual"] = p
 		},
 		"arbitrary-tenants": func(c *capeDaemonConfig) { c.Store.Tenants = []string{"caller"} },
+		"max-jobs-high":     func(c *capeDaemonConfig) { c.Store.MaxJobs = 10001 },
+		"tenant-jobs-high":  func(c *capeDaemonConfig) { c.Store.MaxJobs, c.Store.TenantJobs = 1, 2 },
+		"max-bytes-negative": func(c *capeDaemonConfig) {
+			c.Store.MaxBytes = -1
+		},
+		"submit-rate-high": func(c *capeDaemonConfig) { c.Store.SubmitPerMinute = 10001 },
+		"concurrency-high": func(c *capeDaemonConfig) { c.Store.SubmissionConcurrency = 101 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := capeFixtureConfig()

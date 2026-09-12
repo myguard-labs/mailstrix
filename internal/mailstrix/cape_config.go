@@ -369,6 +369,10 @@ func (c *capeDaemonConfig) validateStore() error {
 	if !filepath.IsAbs(c.Store.Directory) || len(c.Store.Tenants) != 0 {
 		return ErrCAPEConfig
 	}
+	store := c.Store
+	if cape.ValidateStoreLimits(&store) != nil {
+		return ErrCAPEConfig
+	}
 	return nil
 }
 func (c *capeDaemonConfig) hasReference(name string) bool {

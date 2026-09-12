@@ -238,6 +238,16 @@ func TestReportCheckedIdentityAndMapper(t *testing.T) {
 				}
 			} else if mapped {
 				t.Fatal("invalid identity reached trusted mapper")
+			} else if mode == "stale" {
+				if !errors.Is(e, ErrConflict) {
+					t.Fatal("stale store identity did not conflict")
+				}
+			} else if mode == "tenant" {
+				if e == nil {
+					t.Fatal("unknown tenant identity did not fail")
+				}
+			} else if e != nil || got.State != Failed || got.Reason != Protocol {
+				t.Fatal("invalid report identity did not publish a protocol failure")
 			}
 		})
 	}
@@ -343,6 +353,7 @@ func TestSchedulerShutdownStorageFailureRetainsPacket(t *testing.T) {
 	s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
 	j := schedulerAdmission(t, s, c, "alpha", "shutdown-storage")
 	q := testScheduler(t, s, c, nil, 1)
+	q.drainTimeout = 500 * time.Millisecond
 	live, results := schedulerDispatch(q)
 	schedulerHarvest(t, q, live, results)
 	if _, e := s.db.Exec(`CREATE TRIGGER reject_shutdown BEFORE UPDATE ON jobs BEGIN SELECT RAISE(ABORT,'fixture'); END`); e != nil {
@@ -354,7 +365,7 @@ func TestSchedulerShutdownStorageFailureRetainsPacket(t *testing.T) {
 	if e := q.Run(ctx); !errors.Is(e, ErrStoreUnavailable) {
 		t.Fatal("shutdown did not report unresolved durable ownership")
 	}
-	if time.Since(started) > 36*time.Second {
+	if time.Since(started) > 2*time.Second {
 		t.Fatal("shutdown persistence exceeded bounded drain")
 	}
 	if len(q.pending) != 1 || len(q.pending[0].submission.Tasks) != 1 || schedulerLookup(t, s, j).State != Submitting {

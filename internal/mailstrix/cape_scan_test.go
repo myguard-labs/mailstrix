@@ -36,6 +36,8 @@ func TestCAPEDaemonStaticClassification(t *testing.T) {
 		{"log-only-first", []Match{{Rule: "canary", Meta: map[string]string{"mailstrix_canary": "1"}}, {Rule: "hit"}}, nil, false, "malicious"},
 		{"actionable-first", []Match{{Rule: "hit"}, {Rule: "allow", Meta: map[string]string{"mailstrix_allow": "1"}}}, nil, false, "malicious"},
 		{"error", nil, errors.New("fixture"), false, ""},
+		// CAPE.md: recovered matches must not rescue an incomplete scan.
+		{"error-with-matches", []Match{{Rule: "hit"}}, errors.New("fixture"), false, ""},
 		{"panic", nil, nil, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

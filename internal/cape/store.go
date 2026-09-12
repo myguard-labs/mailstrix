@@ -171,6 +171,26 @@ func OpenStore(ctx context.Context, cfg StoreConfig) (*Store, error) {
 }
 
 func validateStoreConfig(c *StoreConfig) error {
+	if err := ValidateStoreLimits(c); err != nil {
+		return err
+	}
+	if c.Directory == "" || len(c.Tenants) == 0 || len(c.Tenants) > 10000 {
+		return &Error{Code: Invalid}
+	}
+	for _, tenant := range c.Tenants {
+		if !identifier(tenant, 128) {
+			return &Error{Code: Invalid}
+		}
+	}
+	return nil
+}
+
+// ValidateStoreLimits applies the frozen defaults and validates StoreConfig's
+// numeric bounds without accessing durable state.
+func ValidateStoreLimits(c *StoreConfig) error {
+	if c == nil {
+		return &Error{Code: Invalid}
+	}
 	if c.MaxAttachment == 0 {
 		c.MaxAttachment = MaxAttachment
 	}
@@ -201,18 +221,12 @@ func validateStoreConfig(c *StoreConfig) error {
 	if c.TenantSubmissionConcurrency == 0 {
 		c.TenantSubmissionConcurrency = 1
 	}
-	if c.Directory == "" || len(c.Tenants) == 0 || len(c.Tenants) > 10000 ||
-		c.MaxAttachment < 1 || c.MaxAttachment > MaxAttachment || c.MaxJobs < 1 || c.MaxJobs > 10000 ||
+	if c.MaxAttachment < 1 || c.MaxAttachment > MaxAttachment || c.MaxJobs < 1 || c.MaxJobs > 10000 ||
 		c.TenantJobs < 1 || c.TenantJobs > c.MaxJobs || c.MaxBytes < 1 || c.MaxBytes > PhysicalLimit-StateReserve-3*databaseLimit ||
 		c.TenantBytes < 1 || c.TenantBytes > c.MaxBytes || c.SubmitPerMinute < 1 || c.SubmitPerMinute > 10000 ||
 		c.TenantSubmitPerMinute < 1 || c.TenantSubmitPerMinute > c.SubmitPerMinute ||
 		c.RequestsPerMinute < c.SubmitPerMinute || c.RequestsPerMinute > 10000 || c.SubmissionConcurrency < 1 || c.SubmissionConcurrency > 100 || c.TenantSubmissionConcurrency < 1 || c.TenantSubmissionConcurrency > c.SubmissionConcurrency {
 		return &Error{Code: Invalid}
-	}
-	for _, tenant := range c.Tenants {
-		if !identifier(tenant, 128) {
-			return &Error{Code: Invalid}
-		}
 	}
 	return nil
 }

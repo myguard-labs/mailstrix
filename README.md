@@ -533,7 +533,7 @@ which matches the fail-open posture above.
 | `-timeout` | `20s` | hard per-message deadline; on expiry the message is **accepted** as `unknown` |
 | `-max-body` | `8 MiB` | a larger message is accepted **unscanned** rather than scanned as a truncated prefix (which would be a silent miss) |
 | `-max-conns` | `64` | max concurrent MTA connections; bounds memory at roughly `max-conns × max-body`, so a flood of large messages cannot OOM the filter (an OOM restart would, with `milter_default_action = accept`, let mail through unscanned) |
-| `-cape-policy` / `MAILSTRIX_CAPE_POLICY` | `static-only` | `static-only` keeps delivery based solely on the current static verdict. An empty environment variable is treated as unset and selects this default; an explicit empty `-cape-policy=` flag disables sandbox policy integration. No quarantine or temporary-failure policy is accepted. |
+| `-cape-policy` / `MAILSTRIX_CAPE_POLICY` | `static-only` | Delivery always follows the current static verdict; this adapter is report-only. Accepted values are `static-only` and the empty string, which behave identically. An empty environment variable is treated as unset and selects the default. Any other value, including quarantine or temporary-failure policies, is rejected at startup with exit status 2. |
 | `-log-clean` | off | log clean verdicts too (noisy) |
 
 Keep the listener on loopback or a unix socket: anyone who can reach it can have

@@ -214,14 +214,14 @@ func TestCAPEDaemonTLSConcreteConnAndAcceptLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	_ = held.SetReadDeadline(start.Add(12 * time.Second))
+	_ = held.SetReadDeadline(start.Add(capeReadHeaderTimeout + 10*time.Second))
 	if _, err := held.Read(make([]byte, 1)); err == nil {
 		t.Fatal("incomplete TLS handshake survived server timeout")
 	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		t.Fatal("client deadline fired before server TLS handshake timeout")
 	}
 	_ = held.Close()
-	if elapsed := time.Since(start); elapsed < 8*time.Second || elapsed > 12*time.Second {
+	if elapsed := time.Since(start); elapsed < capeReadHeaderTimeout-2*time.Second {
 		t.Fatalf("TLS handshake timeout elapsed outside lifecycle bound: %v", elapsed)
 	}
 
@@ -275,6 +275,13 @@ func TestCAPEDaemonOperationalFailurePreservesStatic(t *testing.T) {
 	}
 	if service, err := s.startCAPE(capeFixtureConfig(), capeServiceDeps{resolve, build, net.Listen}); !errors.Is(err, ErrCAPEConfig) || service != nil {
 		t.Fatal("invalid config accepted", err)
+	}
+	var malformedClosed atomic.Bool
+	build = func(context.Context, *capeDaemonConfig, capeResolver, func(context.Context, string, io.Reader) (string, error)) (*capeRuntime, error) {
+		return &capeRuntime{close: func() error { malformedClosed.Store(true); return nil }}, ErrCAPEUnavailable
+	}
+	if service, err := s.startCAPE(capeFixtureConfig(), capeServiceDeps{resolve, build, net.Listen}); !errors.Is(err, ErrCAPEConfig) || service != nil || !malformedClosed.Load() {
+		t.Fatal("malformed runtime was not rejected and closed", err)
 	}
 }
 

@@ -158,7 +158,8 @@ func (s *Store) markCleanupDeadlines(ctx context.Context) error {
 	if s.closed {
 		return &Error{Code: Closed}
 	}
-	return s.transaction(ctx, func(tx *sql.Tx) error {
+	var nextCursor string
+	err := s.transaction(ctx, func(tx *sql.Tx) error {
 		now, err := s.now(tx)
 		if err != nil {
 			return err
@@ -167,7 +168,7 @@ func (s *Store) markCleanupDeadlines(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		s.cleanupDeadlineCursor = cursor
+		nextCursor = cursor
 		var due []Job
 		for _, j := range jobs {
 			if !j.CleanupDeadlineExceeded && !j.AttemptAt.IsZero() && !now.Before(j.AttemptAt.Add(48*time.Hour)) && j.DedupBarrier {
@@ -184,4 +185,8 @@ func (s *Store) markCleanupDeadlines(ctx context.Context) error {
 		}
 		return nil
 	})
+	if err == nil {
+		s.cleanupDeadlineCursor = nextCursor
+	}
+	return err
 }

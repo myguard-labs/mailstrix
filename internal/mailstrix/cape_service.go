@@ -19,6 +19,8 @@ type capeServiceDeps struct {
 	listen  func(string, string) (net.Listener, error)
 }
 
+const capeReadHeaderTimeout = 10 * time.Second
+
 type capeAcceptListener struct {
 	net.Listener
 	slots   chan struct{}
@@ -153,7 +155,14 @@ func (s *Server) startCAPE(c *capeDaemonConfig, deps capeServiceDeps) (*CAPEServ
 	if errors.Is(buildErr, ErrCAPEConfig) {
 		return nil, ErrCAPEConfig
 	}
-	if buildErr == nil && (runtime == nil || runtime.handler == nil || runtime.run == nil || runtime.close == nil) {
+	if runtime != nil && (runtime.handler == nil || runtime.run == nil || runtime.close == nil) {
+		if runtime.close != nil {
+			// The malformed runtime cannot be served; closing is best-effort cleanup.
+			_ = runtime.close()
+		}
+		return nil, ErrCAPEConfig
+	}
+	if buildErr == nil && runtime == nil {
 		return nil, ErrCAPEConfig
 	}
 	listener, err := deps.listen("tcp", c.Listen)
@@ -168,7 +177,7 @@ func (s *Server) startCAPE(c *capeDaemonConfig, deps capeServiceDeps) (*CAPEServ
 	service := &CAPEService{runtime: runtime, cancelHTTP: cancelHTTP, cancelScheduler: cancelScheduler, httpDone: make(chan struct{}), schedulerDone: make(chan struct{}), stopped: make(chan struct{})}
 	service.accepts = newCAPEAcceptListener(listener, c.AcceptLimit)
 	service.listener = tls.NewListener(service.accepts, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{pair}})
-	service.http = &http.Server{Handler: service, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 35 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, BaseContext: func(net.Listener) context.Context { return httpCtx }, ConnState: func(conn net.Conn, state http.ConnState) {
+	service.http = &http.Server{Handler: service, ReadHeaderTimeout: capeReadHeaderTimeout, ReadTimeout: 35 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, BaseContext: func(net.Listener) context.Context { return httpCtx }, ConnState: func(conn net.Conn, state http.ConnState) {
 		if state == http.StateActive || state == http.StateHijacked || state == http.StateClosed {
 			service.accepts.promoted(conn)
 		}
