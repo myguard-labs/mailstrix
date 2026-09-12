@@ -29,9 +29,13 @@ type Scheduler struct {
 	beforePersist func(context.Context) // package-private persistence-pass fixture observation
 }
 
+// MaxSchedulerWorkers bounds aggregate report fetch and parse memory. Each
+// worker can retain a MaxReport-sized response until its result is persisted.
+const MaxSchedulerWorkers = 8
+
 // NewScheduler validates and constructs a scheduler for the configured clients.
 func NewScheduler(store *Store, clients map[string]*Client, mapper ResultMapper, workers int) (*Scheduler, error) {
-	if store == nil || workers < 1 || workers > 100 || len(clients) == 0 || len(clients) > 10000 {
+	if store == nil || workers < 1 || workers > MaxSchedulerWorkers || len(clients) == 0 || len(clients) > 10000 {
 		return nil, &Error{Code: Invalid}
 	}
 	copyClients := make(map[string]*Client, len(clients))

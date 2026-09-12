@@ -265,7 +265,7 @@ func (c *capeDaemonConfig) validate() error {
 }
 
 func (c *capeDaemonConfig) validateService() error {
-	if c.Version != 1 || verdict.ValidateReportOnlyPolicy(c.Policy) != nil || c.Workers < 1 || c.Workers > 100 || c.AcceptLimit < 1 || c.AcceptLimit > 4096 {
+	if c.Version != 1 || verdict.ValidateReportOnlyPolicy(c.Policy) != nil || c.Workers < 1 || c.Workers > cape.MaxSchedulerWorkers || c.AcceptLimit < 1 || c.AcceptLimit > 4096 {
 		return ErrCAPEConfig
 	}
 	if _, err := netip.ParseAddrPort(c.Listen); err != nil {

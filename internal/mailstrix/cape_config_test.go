@@ -59,6 +59,7 @@ func TestCAPEDaemonConfigStrict(t *testing.T) {
 	for name, mutate := range map[string]func(*capeDaemonConfig){
 		"accept-limit-zero": func(c *capeDaemonConfig) { c.AcceptLimit = 0 },
 		"accept-limit-high": func(c *capeDaemonConfig) { c.AcceptLimit = 4097 },
+		"workers-high":      func(c *capeDaemonConfig) { c.Workers = cape.MaxSchedulerWorkers + 1 },
 		"reference":         func(c *capeDaemonConfig) { c.TLSKeyRef = "missing" },
 		"inline-and-file":   func(c *capeDaemonConfig) { c.References["key"] = capeReference{Env: "KEY", File: "/fixture/key"} },
 		"relative":          func(c *capeDaemonConfig) { c.References["key"] = capeReference{File: "relative"} },

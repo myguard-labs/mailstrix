@@ -89,7 +89,7 @@ redirects or request-supplied upstream endpoints, machines or options are used.
 the authenticated tenant.
 
 Limits: 16 endpoint descriptors, 128 tenant/profile/result-policy entries,
-256 references and 1–100 workers. Tenants have one or two token references for
+256 references and 1–8 workers. Tenants have one or two token references for
 explicit rotation overlap. Duplicate token values are rejected, including across
 tenants. Bearer authentication accepts exactly one Authorization header and
 does not derive tenants from message or tenant headers.

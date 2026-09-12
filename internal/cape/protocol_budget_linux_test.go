@@ -54,6 +54,13 @@ func TestJSONDocumentTokenBudgetConcurrent(t *testing.T) {
 	}
 }
 
+func TestSchedulerAggregateReportBudget(t *testing.T) {
+	const aggregateReportBudget = 64 << 20
+	if got := MaxSchedulerWorkers * MaxReport; got != aggregateReportBudget {
+		t.Fatalf("aggregate report body budget=%d, want %d", got, aggregateReportBudget)
+	}
+}
+
 func BenchmarkJSONDocumentTokenBudget(b *testing.B) {
 	over := flatJSONDocument(maxDecodedJSONTokens - 4)
 	b.ReportAllocs()

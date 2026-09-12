@@ -1,7 +1,7 @@
 # CAPE scheduler checkpoint
 
 `NewScheduler` takes an already opened private store, a fixed generation-to-client
-map, an explicit trusted result mapper and 1–100 workers. `Run` is the sole
+map, an explicit trusted result mapper and 1–8 workers. `Run` is the sole
 network scheduler owner for the store. Importing the package starts nothing;
 no API listener, adapter, production settings, credential lookup or CAPE endpoint
 is enabled by this building block. Keep clients for old endpoint/account/profile
@@ -11,8 +11,9 @@ no request can substitute the current generation for an old job.
 Run local maintenance every iteration, including outages. It retries local payload
 removal after committed submission success while a job is remote_pending or
 fetching, without changing ownership or permitting another submission.
-One request occupies
-one bounded worker; live uploads also occupy the store's deployment/tenant
+One request occupies one bounded worker. The eight-worker ceiling bounds
+simultaneously retained report bodies to 64 MiB before decoded structures;
+live uploads also occupy the store's deployment/tenant
 submission slots until their outcomes commit, including after cancellation.
 Eligible owned-task deletion is selected first, with a separate tenant rotation
 for deletion and submission/poll traffic. All requests consume the same persisted
