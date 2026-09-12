@@ -251,8 +251,10 @@ func apiError(w http.ResponseWriter, status int, code string) {
 		Error string `json:"error"`
 	}{code})
 }
+
 func apiJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	// Status is committed and API response values contain only JSON-safe types.
 	_ = json.NewEncoder(w).Encode(value)
 }

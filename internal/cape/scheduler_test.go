@@ -333,7 +333,7 @@ func TestSchedulerBudgetBackoffHintsAndRestart(t *testing.T) {
 
 func TestSchedulerCallbackWakesUnthrottledPoll(t *testing.T) {
 	var statusCalls atomic.Int32
-	client, fixtureConfig := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+	client, _ := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			if _, copyErr := io.Copy(io.Discard, r.Body); copyErr != nil {
 				t.Error(copyErr)
@@ -344,7 +344,6 @@ func TestSchedulerCallbackWakesUnthrottledPoll(t *testing.T) {
 		statusCalls.Add(1)
 		fmt.Fprint(w, `{"error":false,"data":"pending"}`)
 	})
-	_ = fixtureConfig
 	clock := newStoreClock()
 	s := testStore(t, storeConfig(t.TempDir()), clock)
 	j := schedulerAdmission(t, s, client, "alpha", "callback-wake")
@@ -366,7 +365,7 @@ func TestSchedulerCallbackWakesUnthrottledPoll(t *testing.T) {
 
 func TestSchedulerCallbackRetainsShorterRetryAfter(t *testing.T) {
 	var statusCalls atomic.Int32
-	client, fixtureConfig := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+	client, _ := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			if _, copyErr := io.Copy(io.Discard, r.Body); copyErr != nil {
 				t.Error(copyErr)
@@ -377,7 +376,6 @@ func TestSchedulerCallbackRetainsShorterRetryAfter(t *testing.T) {
 		statusCalls.Add(1)
 		fmt.Fprint(w, `{"error":false,"data":"pending"}`)
 	})
-	_ = fixtureConfig
 	clock := newStoreClock()
 	s := testStore(t, storeConfig(t.TempDir()), clock)
 	j := schedulerAdmission(t, s, client, "alpha", "callback-throttle")

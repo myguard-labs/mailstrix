@@ -78,6 +78,12 @@ func (s *Store) schedulerJobs(ctx context.Context) ([]Job, error) {
 	return jobs, nil
 }
 
+func readThrottled(j Job, now time.Time) bool {
+	callbackWake := !j.PollWakeAt.IsZero() && !now.Before(j.PollWakeAt)
+	retryAfter := !j.RetryAfterUntil.IsZero() && now.Before(j.RetryAfterUntil)
+	return now.Before(j.NextAttempt) && (!callbackWake || retryAfter)
+}
+
 // Reserve one safe read/delete BEFORE dispatch. Persisted next-attempt survives
 // restart and callbacks; a crash can waste a token but cannot refund one.
 func (s *Store) reserveRead(ctx context.Context, snapshot Job, delay time.Duration) (Job, error) {
@@ -100,9 +106,7 @@ func (s *Store) reserveRead(ctx context.Context, snapshot Job, delay time.Durati
 		if err != nil {
 			return err
 		}
-		callbackWake := !j.PollWakeAt.IsZero() && !now.Before(j.PollWakeAt)
-		retryAfter := !j.RetryAfterUntil.IsZero() && now.Before(j.RetryAfterUntil)
-		if now.Before(j.NextAttempt) && (!callbackWake || retryAfter) {
+		if readThrottled(j, now) {
 			return &Error{Code: Throttled}
 		}
 		if terminal(j.State) {
