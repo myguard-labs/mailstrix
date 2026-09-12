@@ -196,6 +196,23 @@ func TestAPIRejections(t *testing.T) {
 			t.Fatal("malformed request accepted", tc.header, w.Code)
 		}
 	}
+	for _, header := range []string{"Content-Type", "X-Mailstrix-CAPE-Profile"} {
+		t.Run("duplicate "+header, func(t *testing.T) {
+			r := httptest.NewRequest("POST", JobsPath, strings.NewReader("x"))
+			r.Header.Set("Authorization", "Bearer fixture-alpha")
+			r.Header.Set("Content-Type", "application/octet-stream")
+			r.Header.Set("X-Mailstrix-CAPE-Profile", "private")
+			r.Header.Add(header, r.Header.Get(header))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("duplicate %s accepted: %d", header, w.Code)
+			}
+			if n, reserved := storeCount(t, s); n != 0 || reserved != 0 {
+				t.Fatalf("duplicate %s admitted work: jobs=%d reserved=%d", header, n, reserved)
+			}
+		})
+	}
 }
 
 func TestAPIAdmissionClassPolicy(t *testing.T) {

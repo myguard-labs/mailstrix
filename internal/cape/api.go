@@ -113,8 +113,14 @@ func opaqueJobID(id string) bool {
 }
 
 func (h *APIHandler) submit(w http.ResponseWriter, r *http.Request, tenant string) {
-	media, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	name := r.Header.Get("X-Mailstrix-CAPE-Profile")
+	contentTypes := r.Header.Values("Content-Type")
+	names := r.Header.Values("X-Mailstrix-CAPE-Profile")
+	if len(contentTypes) != 1 || len(names) != 1 {
+		apiError(w, http.StatusBadRequest, "invalid")
+		return
+	}
+	media, params, err := mime.ParseMediaType(contentTypes[0])
+	name := names[0]
 	if err != nil || !strings.EqualFold(media, "application/octet-stream") || len(params) != 0 || len(r.Header.Values("Content-Encoding")) != 0 || !identifier(name, 128) {
 		apiError(w, http.StatusBadRequest, "invalid")
 		return

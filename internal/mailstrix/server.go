@@ -745,14 +745,22 @@ func bearerToken(value string) (string, bool) {
 // Authorization header or X-MAILSTRIX-Token.
 func (s *Server) authOK(r *http.Request) bool {
 	presented := ""
-	if authorization := r.Header.Get("Authorization"); authorization != "" {
-		token, ok := bearerToken(authorization)
+	authorizations := r.Header.Values("Authorization")
+	if len(authorizations) != 0 {
+		if len(authorizations) != 1 {
+			return false
+		}
+		token, ok := bearerToken(authorizations[0])
 		if !ok {
 			return false
 		}
 		presented = token
 	} else {
-		presented = strings.TrimSpace(r.Header.Get("X-MAILSTRIX-Token"))
+		legacy := r.Header.Values("X-MAILSTRIX-Token")
+		if len(legacy) != 1 {
+			return false
+		}
+		presented = strings.TrimSpace(legacy[0])
 	}
 	for _, tok := range s.cfg.tokens {
 		if hmac.Equal([]byte(presented), []byte(tok)) {

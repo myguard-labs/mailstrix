@@ -76,7 +76,7 @@ type capeDaemonConfig struct {
 	// the authenticated tenant map and cannot be configured a second time.
 	Store   cape.StoreConfig `json:"store"`
 	Workers int              `json:"workers"`
-	// AcceptLimit bounds sockets before TLS and HTTP header validation complete.
+	// AcceptLimit bounds accepted sockets until each connection closes.
 	AcceptLimit int `json:"accept_limit"`
 }
 

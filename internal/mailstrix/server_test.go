@@ -405,6 +405,20 @@ func TestAuth(t *testing.T) {
 	if w := post(s, "x", map[string]string{"Authorization": "Bearer\twrong", "X-MAILSTRIX-Token": "tok"}); w.Code != 401 {
 		t.Errorf("malformed bearer with valid legacy token = %d, want 401", w.Code)
 	}
+	for _, header := range []string{"Authorization", "X-MAILSTRIX-Token"} {
+		r := httptest.NewRequest(http.MethodPost, "/scan", strings.NewReader("x"))
+		value := "tok"
+		if header == "Authorization" {
+			value = "Bearer tok"
+		}
+		r.Header.Add(header, value)
+		r.Header.Add(header, value)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("duplicate %s = %d, want 401", header, w.Code)
+		}
+	}
 }
 
 // With no token configured the scanner runs OPEN: /scan accepts requests with or
