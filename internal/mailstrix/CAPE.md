@@ -80,7 +80,7 @@ private endpoint, trust, volume, approved content/egress or remote reaper checks
 
 The CAPE listener must use a different nonzero port from configured HTTP, ICAP
 and clamd TCP listeners. `accept_limit` (1–4096) bounds accepted connections
-that have not completed TLS and HTTP header parsing. TLS 1.2 or later is
+until they close, including HTTP keep-alive connections. TLS 1.2 or later is
 required. An endpoint's optional
 `ca_ref` names a reference containing its PEM trust bundle; otherwise standard
 system trust applies. Destinations are explicit numeric IP:port pairs. No proxies,

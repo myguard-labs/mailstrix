@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/netip"
 	"sort"
-	"strings"
 
 	"github.com/myguard-labs/mailstrix/internal/cape"
 )
@@ -125,8 +124,8 @@ func buildCAPEAuth(ctx context.Context, c *capeDaemonConfig, resolve capeResolve
 		if len(values) != 1 || len(values[0]) > 4096+7 {
 			return "", ErrCAPEUnavailable
 		}
-		scheme, token, ok := strings.Cut(values[0], " ")
-		if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
+		token, ok := bearerToken(values[0])
+		if !ok {
 			return "", ErrCAPEUnavailable
 		}
 		digest := sha256.Sum256([]byte(token))

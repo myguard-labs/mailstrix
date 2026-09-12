@@ -20,7 +20,7 @@ const maxDecodedJSONTokens = 65536
 // excessive nesting. The optional visitor observes only fully decoded elements
 // of the root object's data.task_ids array, including before a later parse error.
 func jsonDocument(body []byte, visit func(any)) (map[string]any, error) {
-	p := jsonParser{decoder: json.NewDecoder(bytes.NewReader(body)), visit: visit}
+	p := jsonParser{decoder: json.NewDecoder(bytes.NewReader(body)), body: body, visit: visit}
 	p.decoder.UseNumber()
 	v, err := p.value(0, nil)
 	if err != nil {
@@ -38,9 +38,24 @@ func jsonDocument(body []byte, visit func(any)) (map[string]any, error) {
 
 type jsonParser struct {
 	decoder *json.Decoder
+	body    []byte
 	visit   func(any)
 	invalid bool
 	tokens  int
+}
+
+func (p *jsonParser) elementTerminated() bool {
+	for offset := int(p.decoder.InputOffset()); offset < len(p.body); offset++ {
+		switch p.body[offset] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case ',', ']':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (p *jsonParser) token() (json.Token, error) {
@@ -106,7 +121,7 @@ func (p *jsonParser) value(depth int, path []string) (any, error) {
 				if err != nil {
 					return nil, err
 				}
-				if p.visit != nil && len(path) == 2 && path[0] == "data" && path[1] == "task_ids" {
+				if p.visit != nil && len(path) == 2 && path[0] == "data" && path[1] == "task_ids" && p.elementTerminated() {
 					p.visit(child)
 				}
 				a = append(a, child)

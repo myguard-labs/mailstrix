@@ -717,12 +717,39 @@ func (s *Server) metricsAuthed(r *http.Request) bool {
 // (a trusted-network deployment), flagged with a loud startup warning.
 func (s *Server) authRequired() bool { return len(s.cfg.tokens) > 0 }
 
+func bearerToken(value string) (string, bool) {
+	space := 0
+	for space < len(value) && value[space] != ' ' {
+		space++
+	}
+	if space == len(value) || !strings.EqualFold(value[:space], "Bearer") {
+		return "", false
+	}
+	end := space
+	for end < len(value) && value[end] == ' ' {
+		end++
+	}
+	if end == len(value) {
+		return "", false
+	}
+	for i := end; i < len(value); i++ {
+		if value[i] <= ' ' || value[i] >= 0x7f {
+			return "", false
+		}
+	}
+	return value[end:], true
+}
+
 // authOK validates the presented secret against the configured token in constant
 // time. Only meaningful when authRequired(). Accepts the token as a Bearer
 // Authorization header or X-MAILSTRIX-Token.
 func (s *Server) authOK(r *http.Request) bool {
 	presented := ""
-	if scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") && token != "" {
+	if authorization := r.Header.Get("Authorization"); authorization != "" {
+		token, ok := bearerToken(authorization)
+		if !ok {
+			return false
+		}
 		presented = token
 	} else {
 		presented = strings.TrimSpace(r.Header.Get("X-MAILSTRIX-Token"))

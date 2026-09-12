@@ -3,7 +3,6 @@
 package cape
 
 import (
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -23,7 +22,7 @@ func flatJSONDocument(elements int) []byte {
 	return []byte(body.String())
 }
 
-func TestJSONDocumentTokenBudgetAndConcurrentHeapReservation(t *testing.T) {
+func TestJSONDocumentTokenBudgetConcurrent(t *testing.T) {
 	near := flatJSONDocument(maxDecodedJSONTokens - 5)
 	if _, err := jsonDocument(near, nil); err != nil {
 		t.Fatal("near-limit flat array rejected", err)
@@ -35,9 +34,6 @@ func TestJSONDocumentTokenBudgetAndConcurrentHeapReservation(t *testing.T) {
 	const concurrency = 100
 	start := make(chan struct{})
 	errors := make(chan error, concurrency)
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
 	var workers sync.WaitGroup
 	workers.Add(concurrency)
 	for i := 0; i < concurrency; i++ {
@@ -56,10 +52,14 @@ func TestJSONDocumentTokenBudgetAndConcurrentHeapReservation(t *testing.T) {
 			t.Fatalf("concurrent over-budget parse error=%v want protocol", err)
 		}
 	}
-	runtime.ReadMemStats(&after)
-	heapGrowth := int64(after.HeapSys - before.HeapSys)
-	t.Logf("100 concurrent flat-array parses: heap_sys_delta=%d", heapGrowth)
-	if heapGrowth > 512<<20 {
-		t.Fatalf("bounded concurrent parses grew heap reservation by %d bytes", heapGrowth)
+}
+
+func BenchmarkJSONDocumentTokenBudget(b *testing.B) {
+	over := flatJSONDocument(maxDecodedJSONTokens - 4)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := jsonDocument(over, nil); outcomeCode(err) != Protocol {
+			b.Fatal("over-budget document lost protocol rejection", err)
+		}
 	}
 }

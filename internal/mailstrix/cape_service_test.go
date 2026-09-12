@@ -231,8 +231,27 @@ func TestCAPEDaemonTLSConcreteConnAndAcceptLifecycle(t *testing.T) {
 	}
 	_ = response.Body.Close()
 	got := <-observed
-	if !got.tls || len(service.accepts.slots) != 0 {
-		t.Fatalf("net/http lost concrete TLS metadata or pre-HTTP slot promotion: tls=%v slots=%d", got.tls, len(service.accepts.slots))
+	if !got.tls || len(service.accepts.slots) != 1 {
+		t.Fatalf("net/http lost TLS metadata or released a live keep-alive slot: tls=%v slots=%d", got.tls, len(service.accepts.slots))
+	}
+	over, err := net.DialTimeout("tcp", service.listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer over.Close()
+	_ = over.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := over.Read(make([]byte, 1)); err == nil {
+		t.Fatal("post-response keep-alive connection permitted over-cap acceptance")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("over-cap connection was held instead of refused")
+	}
+	client.CloseIdleConnections()
+	deadline := time.Now().Add(time.Second)
+	for len(service.accepts.slots) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(service.accepts.slots); got != 0 {
+		t.Fatalf("closed keep-alive connection retained slot: slots=%d", got)
 	}
 }
 

@@ -166,6 +166,8 @@ func TestSubmitUncertainIDs(t *testing.T) {
 		{"partial-error", `{"error":[],"errors":[{"fixture":"failed"}],"data":{"task_ids":[41]}}`, 1},
 		{"error-true", `{"error":true,"data":{"task_ids":[41]}}`, 1},
 		{"truncated", `{"data":{"task_ids":[41,42,`, 2},
+		{"truncated-inside-id", `{"data":{"task_ids":[41`, 0},
+		{"complete-id-before-truncated-id", `{"data":{"task_ids":[41,42`, 1},
 		{"invalid-middle", `{"error":[],"errors":[],"data":{"task_ids":[41,"bad",42,0,-1,2147483648,43]}}`, 3},
 		{"duplicate-id", `{"error":[],"errors":[],"data":{"task_ids":[41,41]}}`, 1},
 		{"duplicate-key", `{"error":[],"errors":[],"data":{"task_ids":[41],"task_ids":[42]}}`, 2},

@@ -394,10 +394,16 @@ func TestAuth(t *testing.T) {
 	if w := post(s, "x", map[string]string{"Authorization": "bEaReR tok"}); w.Code != 200 {
 		t.Errorf("mixed-case bearer = %d, want 200", w.Code)
 	}
-	for _, malformed := range []string{"Bearertok", "Bearer ", "Bearer  tok", "Bearer\ttok"} {
+	if w := post(s, "x", map[string]string{"Authorization": "Bearer   tok"}); w.Code != 200 {
+		t.Errorf("multiple-space bearer = %d, want 200", w.Code)
+	}
+	for _, malformed := range []string{"Bearertok", "Bearer ", "Bearer\ttok", "Bearer tok extra", "Bearer tok\t"} {
 		if w := post(s, "x", map[string]string{"Authorization": malformed}); w.Code != 401 {
 			t.Errorf("malformed bearer %q = %d, want 401", malformed, w.Code)
 		}
+	}
+	if w := post(s, "x", map[string]string{"Authorization": "Bearer\twrong", "X-MAILSTRIX-Token": "tok"}); w.Code != 401 {
+		t.Errorf("malformed bearer with valid legacy token = %d, want 401", w.Code)
 	}
 }
 

@@ -26,6 +26,7 @@ type capeAcceptListener struct {
 	slots   chan struct{}
 	mu      sync.Mutex
 	conns   map[net.Conn]struct{}
+	preHTTP map[net.Conn]struct{}
 	closing bool
 }
 
@@ -42,7 +43,7 @@ func (c *capeAcceptConn) Close() error {
 }
 
 func newCAPEAcceptListener(listener net.Listener, limit int) *capeAcceptListener {
-	return &capeAcceptListener{Listener: listener, slots: make(chan struct{}, limit), conns: make(map[net.Conn]struct{}, limit)}
+	return &capeAcceptListener{Listener: listener, slots: make(chan struct{}, limit), conns: make(map[net.Conn]struct{}, limit), preHTTP: make(map[net.Conn]struct{}, limit)}
 }
 
 func (l *capeAcceptListener) Accept() (net.Conn, error) {
@@ -62,6 +63,7 @@ func (l *capeAcceptListener) Accept() (net.Conn, error) {
 			wrapped := &capeAcceptConn{Conn: conn}
 			wrapped.release = func() { l.release(wrapped) }
 			l.conns[wrapped] = struct{}{}
+			l.preHTTP[wrapped] = struct{}{}
 			l.mu.Unlock()
 			return wrapped, nil
 		default:
@@ -75,6 +77,7 @@ func (l *capeAcceptListener) release(conn net.Conn) {
 	l.mu.Lock()
 	if _, ok := l.conns[conn]; ok {
 		delete(l.conns, conn)
+		delete(l.preHTTP, conn)
 		<-l.slots
 	}
 	l.mu.Unlock()
@@ -84,14 +87,16 @@ func (l *capeAcceptListener) promoted(conn net.Conn) {
 	if tlsConn, ok := conn.(*tls.Conn); ok {
 		conn = tlsConn.NetConn()
 	}
-	l.release(conn)
+	l.mu.Lock()
+	delete(l.preHTTP, conn)
+	l.mu.Unlock()
 }
 
 func (l *capeAcceptListener) closePreHTTP() {
 	l.mu.Lock()
 	l.closing = true
-	conns := make([]net.Conn, 0, len(l.conns))
-	for conn := range l.conns {
+	conns := make([]net.Conn, 0, len(l.preHTTP))
+	for conn := range l.preHTTP {
 		conns = append(conns, conn)
 	}
 	l.mu.Unlock()

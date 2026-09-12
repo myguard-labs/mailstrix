@@ -247,7 +247,11 @@ func TestCAPEDaemonTenantAuth(t *testing.T) {
 	if tenant, err := auth(r); err != nil || tenant != "alpha" {
 		t.Fatal("mixed-case bearer scheme rejected", tenant, err)
 	}
-	for _, malformed := range []string{"Bearerfixture-alpha", "Bearer ", "Bearer  fixture-alpha", "Bearer\tfixture-alpha"} {
+	r.Header.Set("Authorization", "Bearer   fixture-alpha")
+	if tenant, err := auth(r); err != nil || tenant != "alpha" {
+		t.Fatal("multiple-space bearer separator rejected", tenant, err)
+	}
+	for _, malformed := range []string{"Bearerfixture-alpha", "Bearer ", "Bearer\tfixture-alpha", "Bearer fixture-alpha extra", "Bearer fixture-alpha\t"} {
 		r.Header.Set("Authorization", malformed)
 		if _, err := auth(r); err == nil {
 			t.Fatalf("malformed bearer credential %q accepted", malformed)
