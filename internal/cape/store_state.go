@@ -197,7 +197,7 @@ func appendSubmissionTasks(j *Job, tasks []TaskRef) bool {
 		if i >= MaxTaskIDs {
 			break
 		}
-		if task.ID < 1 || task.ID > math.MaxInt32 || task.Generation != j.Generation || seen[task.ID] {
+		if task.ID < 1 || task.ID > maxTaskID || task.Generation != j.Generation || seen[task.ID] {
 			invalid = true
 			continue
 		}

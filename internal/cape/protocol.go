@@ -16,6 +16,9 @@ import (
 // transport byte and nesting limits. It includes keys, scalars and delimiters.
 const maxDecodedJSONTokens = 65536
 
+// maxTaskID is CAPE's signed 32-bit task identifier boundary.
+const maxTaskID = int64(math.MaxInt32)
+
 // jsonDocument rejects duplicate keys, nonfinite numbers, trailing documents and
 // excessive nesting. The optional visitor observes only fully decoded elements
 // of the root object's data.task_ids array, including before a later parse error.
@@ -184,7 +187,7 @@ func parseSubmission(body []byte, generation string) ([]TaskRef, error) {
 }
 
 func (c *Client) validTask(task TaskRef) bool {
-	return task.ID > 0 && task.ID <= math.MaxInt32 && task.Generation == c.generation
+	return task.ID > 0 && task.ID <= maxTaskID && task.Generation == c.generation
 }
 
 func (c *Client) read(parent context.Context, task TaskRef, path string, limit int64) (map[string]any, error) {

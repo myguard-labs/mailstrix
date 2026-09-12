@@ -100,7 +100,9 @@ func (s *Store) reserveRead(ctx context.Context, snapshot Job, delay time.Durati
 		if err != nil {
 			return err
 		}
-		if now.Before(j.NextAttempt) {
+		callbackWake := !j.PollWakeAt.IsZero() && !now.Before(j.PollWakeAt)
+		retryAfter := !j.RetryAfterUntil.IsZero() && now.Before(j.RetryAfterUntil)
+		if now.Before(j.NextAttempt) && (!callbackWake || retryAfter) {
 			return &Error{Code: Throttled}
 		}
 		if terminal(j.State) {
@@ -115,6 +117,7 @@ func (s *Store) reserveRead(ctx context.Context, snapshot Job, delay time.Durati
 		}
 		previousJob := j
 		j.NextAttempt = now.Add(delay)
+		j.RetryAfterUntil = time.Time{}
 		if j.ReadAttempts < 16 {
 			j.ReadAttempts++
 		}
@@ -147,6 +150,7 @@ func (s *Store) extendRetry(ctx context.Context, snapshot Job, delay time.Durati
 		}
 		previousJob := j
 		j.NextAttempt = next
+		j.RetryAfterUntil = next
 		j.Version++
 		return putJob(tx, j, previousJob)
 	})

@@ -79,7 +79,7 @@ type Job struct {
 	Version                                                     int64
 	ReservedBytes, PayloadBytes                                 int64
 	CreatedAt, IngressDeadline, QueueDeadline, AnalysisDeadline time.Time
-	TerminalAt, NextAttempt, AttemptAt                          time.Time
+	TerminalAt, NextAttempt, AttemptAt, RetryAfterUntil         time.Time
 	Attempts                                                    int64
 	SubmissionVersion                                           int64
 	SubmissionRecorded                                          bool

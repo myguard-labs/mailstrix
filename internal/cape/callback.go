@@ -255,7 +255,7 @@ func validCallbackSignature(known bool, stampErr error, seconds int64, stamp, ev
 }
 
 func validCallbackEvent(e callbackEvent, event string, seconds int64, key callbackKey) bool {
-	return e.Version == 1 && e.EventID == event && e.Timestamp == seconds && eventID(e.JobID) && key.tenants[e.Tenant] && key.generations[e.Generation] && e.TaskID > 0 && e.TaskID <= 2147483647
+	return e.Version == 1 && e.EventID == event && e.Timestamp == seconds && eventID(e.JobID) && key.tenants[e.Tenant] && key.generations[e.Generation] && e.TaskID > 0 && e.TaskID <= maxTaskID
 }
 
 func (h *callbackHandler) persistCallback(tx *sql.Tx, keyID, event string, seconds int64, key callbackKey, e callbackEvent) error {

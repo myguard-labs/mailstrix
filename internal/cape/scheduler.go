@@ -210,7 +210,10 @@ func (s *Scheduler) dispatch(ctx context.Context, live map[string]schedulerLive,
 				if _, exists := live[j.ID]; exists {
 					continue
 				}
-				if s.store.hooks.clock.Now().Before(j.NextAttempt) {
+				now := s.store.hooks.clock.Now()
+				callbackWake := !j.PollWakeAt.IsZero() && !now.Before(j.PollWakeAt)
+				retryAfter := !j.RetryAfterUntil.IsZero() && now.Before(j.RetryAfterUntil)
+				if now.Before(j.NextAttempt) && (!callbackWake || retryAfter) {
 					continue
 				}
 				_, deletion := cleanupTask(j)

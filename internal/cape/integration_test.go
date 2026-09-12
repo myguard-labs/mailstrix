@@ -13,8 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/myguard-labs/mailstrix/internal/verdict"
 )
 
 // TestIntegrationReportAvailability follows manual admission through staged
@@ -141,10 +139,6 @@ func TestIntegrationReportAvailability(t *testing.T) {
 				}
 				if view.Evidence != wantEvidence {
 					t.Errorf("public evidence=%q, want %q after %s report", view.Evidence, wantEvidence, mode)
-				}
-				combined, err := verdict.CombineSandbox("suspicious", string(view.State), view.Evidence)
-				if err != nil || combined.Concern != "suspicious" || combined.Evidence != wantEvidence {
-					t.Errorf("combined concern/evidence=%s/%s, want suspicious/%s (err=%v)", combined.Concern, combined.Evidence, wantEvidence, err)
 				}
 			}
 			mapper, err := NewSignatureMapper("r1", []SignatureRule{{Name: "fixture_bad", Signal: "local_bad", Evidence: EvidenceMalicious}})

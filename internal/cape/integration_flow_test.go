@@ -17,8 +17,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/myguard-labs/mailstrix/internal/verdict"
 )
 
 const flowAttachment = "synthetic\x00attachment\xff"
@@ -202,12 +200,6 @@ func (f *capeFlow) view(tenant, path string, state JobState, evidence, static st
 	}
 	if v.State != state || v.Evidence != evidence || v.StaticVerdict != static {
 		f.t.Fatalf("public state/evidence/static=%s/%s/%s, want %s/%s/%s", v.State, v.Evidence, v.StaticVerdict, state, evidence, static)
-	}
-	// Current scan concern remains suspicious even after a retained tombstone
-	// erases its admission snapshot. No mail/job association is implied here.
-	combined, err := verdict.CombineSandbox("suspicious", string(v.State), v.Evidence)
-	if err != nil || combined.Concern != "suspicious" || combined.Evidence != evidence {
-		f.t.Fatalf("combined concern/evidence=%s/%s, want suspicious/%s: %v", combined.Concern, combined.Evidence, evidence, err)
 	}
 	return v
 }

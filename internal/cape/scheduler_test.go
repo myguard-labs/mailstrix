@@ -331,6 +331,39 @@ func TestSchedulerBudgetBackoffHintsAndRestart(t *testing.T) {
 	}
 }
 
+func TestSchedulerCallbackWakesUnthrottledPoll(t *testing.T) {
+	var statusCalls atomic.Int32
+	client, fixtureConfig := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			if _, copyErr := io.Copy(io.Discard, r.Body); copyErr != nil {
+				t.Error(copyErr)
+			}
+			fmt.Fprint(w, success)
+			return
+		}
+		statusCalls.Add(1)
+		fmt.Fprint(w, `{"error":false,"data":"pending"}`)
+	})
+	_ = fixtureConfig
+	clock := newStoreClock()
+	s := testStore(t, storeConfig(t.TempDir()), clock)
+	j := schedulerAdmission(t, s, client, "alpha", "callback-wake")
+	q := testScheduler(t, s, client, nil, 1)
+	schedulerRound(t, q)
+	j = schedulerLookup(t, s, j)
+	if _, err := s.reserveRead(context.Background(), j, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	j = schedulerLookup(t, s, j)
+	cfg, handler, event := callbackForJob(t, s, clock, j, j.TaskIDs[0])
+	requireBridge(t, handler, bridgeRequest(t, cfg, event, nil), http.StatusAccepted)
+
+	schedulerRound(t, q)
+	if statusCalls.Load() != 1 {
+		t.Fatalf("callback wake status requests=%d, want 1", statusCalls.Load())
+	}
+}
+
 func TestSchedulerAuthPauseAndRecovery(t *testing.T) {
 	var calls atomic.Int32
 	c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); w.WriteHeader(http.StatusUnauthorized) })

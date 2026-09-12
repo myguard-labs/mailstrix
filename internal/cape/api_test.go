@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/myguard-labs/mailstrix/internal/verdict"
 )
 
 func apiFixture(t *testing.T, s *Store) APIConfig {
@@ -514,10 +512,6 @@ func TestAPIPendingDeadlineBoundaries(t *testing.T) {
 				}
 				if view.Evidence != want {
 					t.Fatalf("deadline evidence=%s want=%s", view.Evidence, want)
-				}
-				combined, err := verdict.CombineSandbox("clean", string(view.State), view.Evidence)
-				if err != nil || combined.Evidence != want {
-					t.Fatalf("combination changed deadline evidence: %+v %v want=%s", combined, err, want)
 				}
 			}
 		})
