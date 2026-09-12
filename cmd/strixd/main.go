@@ -31,6 +31,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -190,33 +191,55 @@ func cmdHealth() int {
 	return 0
 }
 
-// clamdDrain coordinates the two daemon exit paths with deferred scanner cleanup.
+// adapterDrain coordinates native clamd/CAPE ownership with scanner cleanup.
 // Only the main goroutine uses it. A failed drain is sticky: skip cleanup while
 // native callers remain. Scanner.Close currently stops feed refreshers only;
 // this conservative guard also protects any future native-resource cleanup.
-type clamdDrain struct {
-	service *mailstrix.ClamdService
+type adapterDrain struct {
+	service interface{ Shutdown(context.Context) error }
+	cape    interface{ Shutdown(context.Context) error }
 	stopped bool
 	err     error
 }
 
-func (d *clamdDrain) shutdown(ctx context.Context) error {
+func (d *adapterDrain) shutdown(ctx context.Context) error {
 	if !d.stopped {
 		d.stopped = true
-		d.err = d.service.Shutdown(ctx)
+		capeDone := make(chan error, 1)
+		go func() {
+			if d.cape == nil {
+				capeDone <- nil
+				return
+			}
+			capeDone <- d.cape.Shutdown(ctx)
+		}()
+		var clamdErr error
+		if d.service != nil {
+			clamdErr = d.service.Shutdown(ctx)
+		}
+		d.err = errors.Join(clamdErr, <-capeDone)
 	}
 	return d.err
 }
 
-func (d *clamdDrain) closeScanner(close func()) {
+func (d *adapterDrain) closeScanner(closeFn func()) {
 	if d.err == nil {
-		close()
+		closeFn()
 	}
 }
 
+func adapterDrainBudget(cfg *mailstrix.Config) time.Duration {
+	budget := cfg.ScanTimeout + 5*time.Second
+	if cfg.CAPEConfigFile != "" {
+		budget += 30 * time.Second
+	}
+	return budget
+}
+
 // shutdownAdapters shares one absolute deadline and joins every adapter before
-// deferred cleanup. The sticky clamd drain stays on the calling main goroutine.
-func shutdownAdapters(ctx context.Context, drain *clamdDrain, httpShutdown func(context.Context) error, icapShutdown func(context.Context)) error {
+// deferred cleanup. The sticky native-adapter drain stays on the calling main
+// goroutine.
+func shutdownAdapters(ctx context.Context, drain *adapterDrain, httpShutdown func(context.Context) error, icapShutdown func(context.Context)) error {
 	httpDone := make(chan error, 1)
 	icapDone := make(chan struct{})
 	go func() { httpDone <- httpShutdown(ctx) }()
@@ -237,6 +260,8 @@ func cmdServe(args []string) (exitCode int) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.StringVar(&cfg.Host, "host", cfg.Host, "HTTP bind host (MAILSTRIX_HOST); serves /scan,/metrics,/health")
 	fs.IntVar(&cfg.Port, "port", cfg.Port, "HTTP bind port (MAILSTRIX_PORT, default 8079)")
+	fs.StringVar(&cfg.CAPEConfigFile, "cape-config", cfg.CAPEConfigFile, "optional administrator CAPE config file; separate HTTPS listener (MAILSTRIX_CAPE_CONFIG_FILE)")
+	fs.StringVar(&cfg.CAPEPolicy, "cape-policy", cfg.CAPEPolicy, "sandbox adapter policy; only static-only supported (MAILSTRIX_CAPE_POLICY)")
 	fs.DurationVar(&cfg.BackendTimeout, "backend-timeout", cfg.BackendTimeout, "per-request backend budget (MAILSTRIX_BACKEND_TIMEOUT)")
 	fs.DurationVar(&cfg.ScanTimeout, "scan-timeout", cfg.ScanTimeout, "per-scan libyara timeout (MAILSTRIX_SCAN_TIMEOUT)")
 	fs.IntVar(&cfg.MaxConcurrent, "max-concurrent", cfg.MaxConcurrent, "max in-flight scans (MAILSTRIX_MAX_CONCURRENT)")
@@ -261,6 +286,10 @@ func cmdServe(args []string) (exitCode int) {
 	// is a no-op. The scanner copies cfg.ScanTimeout at construction time, so
 	// the clamp must happen before EnsureCachedRules/NewScanner.
 	cfg.Finalize()
+	if err := cfg.ValidateCAPE(); err != nil {
+		log.Printf("[mailstrix] invalid CAPE configuration")
+		return 2
+	}
 
 	logf := func(format string, a ...any) { log.Printf("[mailstrix] "+format, a...) }
 
@@ -283,8 +312,16 @@ func cmdServe(args []string) (exitCode int) {
 	}
 	// Stop the scanner's abuse.ch feed refreshers after a successful drain.
 	// A failed native drain conservatively leaves cleanup to process exit.
-	drain := &clamdDrain{}
+	drain := &adapterDrain{}
 	defer drain.closeScanner(scanner.Close)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), adapterDrainBudget(cfg))
+		defer cancel()
+		if err := drain.shutdown(ctx); err != nil {
+			exitCode = 1
+			log.Printf("[mailstrix] native adapter shutdown error: %v", err)
+		}
+	}()
 	if cfg.Canary {
 		logf("CANARY MODE: all matches tagged mailstrix_canary=1 (shadow/observe-only)")
 	}
@@ -299,23 +336,25 @@ func cmdServe(args []string) (exitCode int) {
 		return 2
 	}
 	srv.SetRulesUpdater(updater)
+	capeService, capeErr := srv.StartCAPE()
+	drain.cape = capeService
+	if errors.Is(capeErr, mailstrix.ErrCAPEConfig) {
+		log.Printf("[mailstrix] invalid CAPE configuration")
+		return 2
+	}
+	if capeErr != nil {
+		log.Printf("[mailstrix] CAPE unavailable; static scanning continues")
+	}
 	clamd, err := srv.StartClamd()
 	if err != nil {
 		log.Printf("[mailstrix] clamd startup error: %v", err)
 		return 2
 	}
 	drain.service = clamd
-	// Every exit path drains clamd before scanner.Close. A native scan cannot
-	// be interrupted by closing its socket. On timeout, skip scanner cleanup;
-	// Close currently stops feed refreshers and does not destroy the engine.
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), cfg.ScanTimeout+5*time.Second)
-		defer cancel()
-		if err := drain.shutdown(ctx); err != nil {
-			exitCode = 1
-			log.Printf("[mailstrix] clamd shutdown error: %v", err)
-		}
-	}()
+	// Every exit path drains clamd and CAPE before scanner.Close. A native scan
+	// cannot be interrupted by closing its socket. On timeout, skip scanner
+	// cleanup; Close currently stops feed refreshers and does not destroy the
+	// engine.
 	updateCtx, updateCancel := context.WithCancel(context.Background())
 	updateDone := make(chan struct{})
 	go func() { defer close(updateDone); updater.Run(updateCtx) }()
@@ -378,7 +417,7 @@ func cmdServe(args []string) (exitCode int) {
 		return 0
 	case sig := <-term:
 		logf("%s: draining (graceful shutdown)", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), cfg.ScanTimeout+5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), adapterDrainBudget(cfg))
 		defer cancel()
 		if err := shutdownAdapters(ctx, drain, srv.Shutdown, icapShutdown); err != nil {
 			log.Printf("[mailstrix] shutdown error: %v", err)

@@ -40,8 +40,10 @@ local rspamd_regexp = require "rspamd_regexp"
 local lua_util = require "lua_util"
 local N = "mailstrix"
 
--- Defaults; overridden by the matching section in local.d/mailstrix.conf.
+-- Defaults; overridden by the inline mailstrix section in rspamd.conf.local.
 local settings = {
+  -- This adapter performs static scans only; it has no authorized CAPE job binding.
+  cape_policy = "static-only",
   url = "http://127.0.0.1:8079/scan",
   token = "",                  -- shared secret; must equal strixd's MAILSTRIX_TOKEN
   token_file = "",             -- path to a file holding the token (preferred over
@@ -531,6 +533,19 @@ end
 local opts = rspamd_config:get_all_opt(N)
 if opts then
   settings = lua_util.override_defaults(settings, opts)
+end
+
+-- Validate the raw option: override_defaults can retain a default for an invalid
+-- type. Record a real configtest error before secret reads or symbol registration.
+-- An explicit lua include propagates this error to daemon startup. Auto-loader
+-- deployments also explicitly include mailstrix-preflight.lua (outside plugins.d).
+local cape_policy
+if type(opts) == "table" then cape_policy = opts.cape_policy end
+if cape_policy ~= nil and
+    (type(cape_policy) ~= "string" or (cape_policy ~= "" and cape_policy ~= "static-only")) then
+  require("lua_cfg_utils").push_config_error(N,
+      "unsupported cape_policy: adapter requires static-only")
+  error("unsupported cape_policy: adapter requires static-only")
 end
 
 -- Resolve the shared secret. A token_file (Docker secret / 0444 file) wins over

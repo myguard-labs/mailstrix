@@ -83,7 +83,7 @@ func TestClamdDrainNativeOwnership(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			defer cancel()
-			drain := &clamdDrain{service: service}
+			drain := &adapterDrain{service: service}
 			err = drain.shutdown(ctx)
 			if timeout && !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("drain error %v, want deadline", err)
@@ -112,8 +112,8 @@ func TestClamdDrainNativeOwnership(t *testing.T) {
 	}
 }
 
-func TestClamdDrainDisabledClosesScanner(t *testing.T) {
-	drain := &clamdDrain{}
+func TestAdapterDrainDisabledClosesScanner(t *testing.T) {
+	drain := &adapterDrain{}
 	if err := drain.shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestClamdShutdownConcurrentHTTP(t *testing.T) {
 		}
 		release()
 	}()
-	drain := &clamdDrain{service: service}
+	drain := &adapterDrain{service: service}
 	wantErr := errors.New("HTTP shutdown result")
 	err = shutdownAdapters(ctx, drain, func(got context.Context) error {
 		contexts <- got

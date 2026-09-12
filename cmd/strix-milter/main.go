@@ -127,6 +127,7 @@ func run(args []string) int {
 	maxBody := fs.Int64("max-body", 8<<20, "max message bytes buffered and scanned; a larger message is accepted with an unknown verdict, NOT scanned as a truncated prefix")
 	maxConns := fs.Int("max-conns", 64, "max concurrent MTA connections; further connections wait. Bounds memory at roughly max-conns x max-body, so a flood of large messages cannot OOM the filter (which would restart it and, with milter_default_action=accept, let mail through unscanned)")
 	logClean := fs.Bool("log-clean", false, "log clean verdicts too (noisy; infected/unknown are always logged)")
+	capePolicy := fs.String("cape-policy", envOr("MAILSTRIX_CAPE_POLICY", "static-only"), "sandbox policy; only static-only supported by this report-only adapter (MAILSTRIX_CAPE_POLICY)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -134,6 +135,10 @@ func run(args []string) int {
 	if *showVersion {
 		fmt.Println("strix-milter", version)
 		return 0
+	}
+	if err := verdict.ValidateReportOnlyPolicy(verdict.SandboxPolicy(*capePolicy)); err != nil {
+		fmt.Fprintln(os.Stderr, "strix-milter:", err)
+		return 2
 	}
 	if *url == "" {
 		fmt.Fprintln(os.Stderr, "strix-milter: -url (or MAILSTRIX_URL) is required")
