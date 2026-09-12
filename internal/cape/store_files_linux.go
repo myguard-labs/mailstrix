@@ -42,7 +42,8 @@ func openPrivateDirectory(path string) (*os.File, error) {
 
 func checkPrivate(f *os.File, directory bool) error {
 	var st unix.Stat_t
-	if unix.Fstat(int(f.Fd()), &st) != nil || st.Uid != uint32(os.Geteuid()) || st.Mode&0o777 != map[bool]uint32{true: 0o700, false: 0o600}[directory] {
+	euid := os.Geteuid()
+	if unix.Fstat(int(f.Fd()), &st) != nil || euid < 0 || uint64(st.Uid) != uint64(euid) || st.Mode&0o777 != map[bool]uint32{true: 0o700, false: 0o600}[directory] {
 		return ErrStoreUnavailable
 	}
 	if directory {
@@ -193,7 +194,9 @@ func filesystemCapacity(dir *os.File, path string) (capacity, error) {
 	if scan.Err() != nil || size >= 1<<20 || count != 1 || !found || fs.Bsize <= 0 || fs.Bsize > 1<<20 || fs.Blocks > uint64(PhysicalLimit/fs.Bsize) || fs.Bavail > fs.Blocks {
 		return capacity{}, ErrStoreUnavailable
 	}
-	c := capacity{total: int64(fs.Blocks) * fs.Bsize, available: int64(fs.Bavail) * fs.Bsize, block: fs.Bsize}
+	// fs.Blocks is bounded by PhysicalLimit/fs.Bsize above, and fs.Bavail cannot
+	// exceed fs.Blocks, so both conversions fit in int64.
+	c := capacity{total: int64(fs.Blocks) * fs.Bsize, available: int64(fs.Bavail) * fs.Bsize, block: fs.Bsize} // #nosec G115 -- bounds checked immediately above
 	if !validCapacity(c) {
 		return capacity{}, ErrStoreUnavailable
 	}

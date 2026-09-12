@@ -110,7 +110,7 @@ func (s *Store) enqueue(ctx context.Context, request EnqueueRequest, body io.Rea
 			var raw []byte
 			var existingJob Job
 			if rows.Scan(&raw) != nil || len(raw) > JobMetadataLimit+JobResultLimit || json.Unmarshal(raw, &existingJob) != nil {
-				rows.Close()
+				_ = rows.Close() // scan/validation failure is already the reported store error
 				return ErrStoreUnavailable
 			}
 			if reusable(existingJob, now) {
@@ -119,7 +119,9 @@ func (s *Store) enqueue(ctx context.Context, request EnqueueRequest, body io.Rea
 			}
 		}
 		e = rows.Err()
-		rows.Close()
+		if closeErr := rows.Close(); e == nil {
+			e = closeErr
+		}
 		if e != nil {
 			return ErrStoreUnavailable
 		}

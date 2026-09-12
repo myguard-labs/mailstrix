@@ -48,7 +48,7 @@ const (
 	// Closed indicates that the client no longer accepts work.
 	Closed Code = "cape_closed"
 	// Credential indicates local credential resolution failed.
-	Credential Code = "cape_credential"
+	Credential Code = "cape_credential" // #nosec G101 -- protocol error code, not credential material
 	// Unauthorized indicates that the endpoint rejected authentication.
 	Unauthorized Code = "cape_unauthorized"
 	// Throttled indicates that the endpoint requested bounded backoff.
@@ -414,7 +414,7 @@ func retryAfter(s string, now time.Time) time.Duration {
 			if n > 300 {
 				n = 300
 			}
-			d = time.Duration(n) * time.Second
+			d = time.Duration(n) * time.Second // #nosec G115 -- n is clamped to 300 above
 		} else if date, err := http.ParseTime(s); err == nil {
 			d = date.Sub(now)
 		}

@@ -163,7 +163,7 @@ func (s *Store) markCleanupDeadlines(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		jobs, cursor, err := nextMaintenanceBatch(tx, "'completed','cancelled','expired','failed'", s.cleanupDeadlineCursor)
+		jobs, cursor, err := nextMaintenanceBatch(tx, cleanupDeadlineStates, s.cleanupDeadlineCursor)
 		if err != nil {
 			return err
 		}

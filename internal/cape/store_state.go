@@ -271,13 +271,15 @@ func (s *Store) recover(ctx context.Context) error {
 		var raw []byte
 		var j Job
 		if rows.Scan(&raw) != nil || len(raw) > JobMetadataLimit+JobResultLimit || json.Unmarshal(raw, &j) != nil || !validJobID(j.ID) || len(jobs) >= 10000 {
-			rows.Close()
+			_ = rows.Close() // scan/validation failure is already the reported store error
 			return ErrStoreUnavailable
 		}
 		jobs[j.ID] = j
 	}
 	err = rows.Err()
-	rows.Close()
+	if closeErr := rows.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
 		return ErrStoreUnavailable
 	}

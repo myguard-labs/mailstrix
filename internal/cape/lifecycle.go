@@ -11,8 +11,9 @@ import (
 const maintenanceBatchSize = 256
 
 const (
-	deadlineStates = "'staging','queued','submitting','submit_uncertain','remote_pending','fetching'"
-	cleanupStates  = "'remote_pending','fetching','completed','failed','expired','cancelled'"
+	deadlineStates        = "'staging','queued','submitting','submit_uncertain','remote_pending','fetching'"
+	cleanupStates         = "'remote_pending','fetching','completed','failed','expired','cancelled'"
+	cleanupDeadlineStates = "'completed','cancelled','expired','failed'"
 )
 
 func scanJobBatch(rows *sql.Rows, limit int) ([]Job, error) {
@@ -36,7 +37,17 @@ func scanJobBatch(rows *sql.Rows, limit int) ([]Job, error) {
 // phase. The state/id index bounds JSON decoding and the cursor prevents an
 // unchanged retained tombstone from starving later jobs.
 func nextMaintenanceBatch(tx *sql.Tx, states, cursor string) ([]Job, string, error) {
-	query := "SELECT document FROM jobs WHERE state IN (" + states + ") AND id>? ORDER BY id LIMIT ?"
+	var query string
+	switch states {
+	case deadlineStates:
+		query = "SELECT document FROM jobs WHERE state IN ('staging','queued','submitting','submit_uncertain','remote_pending','fetching') AND id>? ORDER BY id LIMIT ?"
+	case cleanupStates:
+		query = "SELECT document FROM jobs WHERE state IN ('remote_pending','fetching','completed','failed','expired','cancelled') AND id>? ORDER BY id LIMIT ?"
+	case cleanupDeadlineStates:
+		query = "SELECT document FROM jobs WHERE state IN ('completed','cancelled','expired','failed') AND id>? ORDER BY id LIMIT ?"
+	default:
+		return nil, cursor, ErrStoreUnavailable
+	}
 	rows, err := tx.Query(query, cursor, maintenanceBatchSize)
 	if err != nil {
 		return nil, cursor, ErrStoreUnavailable

@@ -131,7 +131,7 @@ func capeReadFile(path string, limit int64) ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, ErrCAPEUnavailable
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- operator-selected daemon config or credential reference path
 	if err != nil {
 		return nil, ErrCAPEUnavailable
 	}
