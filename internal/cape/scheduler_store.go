@@ -145,12 +145,16 @@ func (s *Store) extendRetry(ctx context.Context, snapshot Job, delay time.Durati
 			return err
 		}
 		next := now.Add(delay)
-		if !next.After(j.NextAttempt) {
+		if !next.After(j.NextAttempt) && !next.After(j.RetryAfterUntil) {
 			return nil
 		}
 		previousJob := j
-		j.NextAttempt = next
-		j.RetryAfterUntil = next
+		if next.After(j.NextAttempt) {
+			j.NextAttempt = next
+		}
+		if next.After(j.RetryAfterUntil) {
+			j.RetryAfterUntil = next
+		}
 		j.Version++
 		return putJob(tx, j, previousJob)
 	})

@@ -364,6 +364,51 @@ func TestSchedulerCallbackWakesUnthrottledPoll(t *testing.T) {
 	}
 }
 
+func TestSchedulerCallbackRetainsShorterRetryAfter(t *testing.T) {
+	var statusCalls atomic.Int32
+	client, fixtureConfig := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			if _, copyErr := io.Copy(io.Discard, r.Body); copyErr != nil {
+				t.Error(copyErr)
+			}
+			fmt.Fprint(w, success)
+			return
+		}
+		statusCalls.Add(1)
+		fmt.Fprint(w, `{"error":false,"data":"pending"}`)
+	})
+	_ = fixtureConfig
+	clock := newStoreClock()
+	s := testStore(t, storeConfig(t.TempDir()), clock)
+	j := schedulerAdmission(t, s, client, "alpha", "callback-throttle")
+	q := testScheduler(t, s, client, nil, 1)
+	schedulerRound(t, q)
+	j = schedulerLookup(t, s, j)
+	if _, err := s.reserveRead(context.Background(), j, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	j = schedulerLookup(t, s, j)
+	if err := s.extendRetry(context.Background(), j, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	j = schedulerLookup(t, s, j)
+	if !j.NextAttempt.Equal(clock.Now().Add(time.Hour)) || !j.RetryAfterUntil.Equal(clock.Now().Add(2*time.Minute)) {
+		t.Fatal("shorter Retry-After was not retained independently of local backoff")
+	}
+	cfg, handler, event := callbackForJob(t, s, clock, j, j.TaskIDs[0])
+	requireBridge(t, handler, bridgeRequest(t, cfg, event, nil), http.StatusAccepted)
+	clock.advance(time.Minute)
+	schedulerRound(t, q)
+	if statusCalls.Load() != 0 {
+		t.Fatal("callback bypassed shorter authoritative Retry-After")
+	}
+	clock.advance(time.Minute)
+	schedulerRound(t, q)
+	if statusCalls.Load() != 1 {
+		t.Fatalf("expired Retry-After did not release callback wake: calls=%d", statusCalls.Load())
+	}
+}
+
 func TestSchedulerAuthPauseAndRecovery(t *testing.T) {
 	var calls atomic.Int32
 	c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); w.WriteHeader(http.StatusUnauthorized) })
