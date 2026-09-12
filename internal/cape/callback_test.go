@@ -155,6 +155,28 @@ func TestCallbackBinding(t *testing.T) {
 	}
 }
 
+func TestCallbackAcceptsOwnedMaxTaskID(t *testing.T) {
+	clock := newStoreClock()
+	s := testStore(t, storeConfig(t.TempDir()), clock)
+	a := enqueueBytes(t, s, "alpha", "callback-max-task")
+	j, err := s.BeginSubmission(context.Background(), "alpha", a.Job.ID, a.Job.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err = s.RecordSubmission(context.Background(), "alpha", j.ID, j.Version, Submission{Tasks: []TaskRef{{ID: maxTaskID, Generation: "g1"}}}, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := bridgeConfig(clock)
+	handler, err := NewCallbackHandler(s, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := bridgeEvent(clock, j, 1)
+	event.TaskID = maxTaskID
+	requireBridge(t, handler, bridgeRequest(t, cfg, event, nil), http.StatusAccepted)
+}
+
 func TestCallbackEnvelope(t *testing.T) {
 	for _, mode := range []string{"disabled", "http", "method", "path", "escaped", "query", "content_type", "encoding", "oversized", "chunked", "bad_json", "duplicate", "unknown", "header_event", "header_time", "double_header", "stale", "future", "boundary_old", "boundary_future"} {
 		t.Run(mode, func(t *testing.T) {

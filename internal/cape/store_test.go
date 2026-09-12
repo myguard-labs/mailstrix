@@ -574,7 +574,7 @@ func TestStoreSubmissionRestartNoReplay(t *testing.T) {
 }
 
 func TestStoreSubmissionOutcomesAndVersions(t *testing.T) {
-	for _, mode := range []string{"ack", "ambiguous", "partial", "too_many", "no_bytes"} {
+	for _, mode := range []string{"ack", "max_task_id", "ambiguous", "partial", "too_many", "no_bytes"} {
 		t.Run(mode, func(t *testing.T) {
 			clock := newStoreClock()
 			s := testStore(t, storeConfig(t.TempDir()), clock)
@@ -604,6 +604,9 @@ func TestStoreSubmissionOutcomesAndVersions(t *testing.T) {
 			case "ack":
 				sub.Tasks = []TaskRef{{ID: 42, Generation: "g1"}}
 				code = ""
+			case "max_task_id":
+				sub.Tasks = []TaskRef{{ID: maxTaskID, Generation: "g1"}}
+				code = ""
 			case "partial":
 				sub.Tasks = []TaskRef{{ID: 42, Generation: "g1"}, {ID: 43, Generation: "g1"}}
 				sub.UnknownDebt = true
@@ -624,8 +627,12 @@ func TestStoreSubmissionOutcomesAndVersions(t *testing.T) {
 			if !errors.Is(e, ErrConflict) {
 				t.Fatal("stale submission outcome accepted")
 			}
-			if mode == "ack" {
-				if j.State != RemotePending || len(j.TaskIDs) != 1 || j.TaskIDs[0] != 42 {
+			if mode == "ack" || mode == "max_task_id" {
+				wantTaskID := int64(42)
+				if mode == "max_task_id" {
+					wantTaskID = maxTaskID
+				}
+				if j.State != RemotePending || len(j.TaskIDs) != 1 || j.TaskIDs[0] != wantTaskID {
 					t.Fatal("acknowledged ownership not persisted")
 				}
 				if _, e = os.Stat(filepath.Join(s.cfg.Directory, "spool", j.ID+".blob")); !errors.Is(e, os.ErrNotExist) {

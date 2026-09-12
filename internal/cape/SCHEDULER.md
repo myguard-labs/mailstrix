@@ -28,11 +28,14 @@ Payload-open failures also become uncertain. The transport's explicit positive
 submitting rows to uncertain; the scheduler never automatically submits those.
 
 Safe reads persist their next attempt before dispatch. Exponential jitter stays
-between five seconds and five minutes; throttled Retry-After can only extend that
-retry time, within the transport's five-minute bound. Original one-hour queue and
-24-hour analysis deadlines never move. Callback hints are cleared only with
-checked work and cannot advance the persisted next attempt, bypass a request
-token, resurrect a terminal job or supply a verdict. Polling works without hints.
+between five seconds and five minutes. `NextAttempt` retains the later of its
+existing value and a bounded server Retry-After, while `RetryAfterUntil`
+independently retains the authoritative server throttle even when it is shorter
+than the local backoff. A callback can wake an ordinary delayed poll, but cannot
+bypass `RetryAfterUntil` before it expires. Original one-hour queue and 24-hour
+analysis deadlines never move. Callback hints are cleared only with checked work
+and cannot bypass a request token, resurrect a terminal job or supply a verdict.
+Polling works without hints.
 
 Only `reported` transitions remote_pending to fetching. A transport-validated
 report retains its exact task, generation and digest privately; publication

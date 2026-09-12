@@ -209,6 +209,17 @@ func TestTaskIDCap(t *testing.T) {
 	}
 }
 
+func TestMaxTaskIDAcceptedByParserAndClient(t *testing.T) {
+	tasks, err := parseSubmission([]byte(`{"error":[],"errors":[],"data":{"task_ids":[2147483647]}}`), "fixture-v1")
+	if err != nil || len(tasks) != 1 || tasks[0].ID != maxTaskID {
+		t.Fatalf("maximum task ID rejected by parser: tasks=%+v err=%v", tasks, err)
+	}
+	client := &Client{generation: "fixture-v1"}
+	if !client.validTask(TaskRef{ID: maxTaskID, Generation: "fixture-v1"}) {
+		t.Fatal("maximum task ID rejected by client validation")
+	}
+}
+
 func TestNoRedirectOrPOSTRetry(t *testing.T) {
 	for _, status := range []int{301, 302, 303, 307, 308, 429, 500, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
