@@ -533,12 +533,23 @@ which matches the fail-open posture above.
 | `-timeout` | `20s` | hard per-message deadline; on expiry the message is **accepted** as `unknown` |
 | `-max-body` | `8 MiB` | a larger message is accepted **unscanned** rather than scanned as a truncated prefix (which would be a silent miss) |
 | `-max-conns` | `64` | max concurrent MTA connections; bounds memory at roughly `max-conns × max-body`, so a flood of large messages cannot OOM the filter (an OOM restart would, with `milter_default_action = accept`, let mail through unscanned) |
+| `-cape-policy` / `MAILSTRIX_CAPE_POLICY` | `static-only` | Delivery always follows the current static verdict; this adapter is report-only. Accepted values are `static-only` and the empty string, which behave identically. An empty environment variable is treated as unset and selects the default. Any other value, including quarantine or temporary-failure policies, is rejected at startup with exit status 2. |
 | `-log-clean` | off | log clean verdicts too (noisy) |
 
 Keep the listener on loopback or a unix socket: anyone who can reach it can have
 messages scanned.
 
 ## Configuration
+
+Optional manual attachment detonation has a separate HTTPS listener configured
+by `MAILSTRIX_CAPE_CONFIG_FILE` (`strixd serve -cape-config`). It is disabled by
+default; `MAILSTRIX_CAPE_POLICY` supports only `static-only`. See the
+[CAPE daemon configuration](internal/mailstrix/CAPE.md) for reference-based
+credentials, tenant policy, storage prerequisites and shutdown behavior.
+Read the [CAPE operator guide](internal/mailstrix/CAPE-OPERATIONS.md) for
+explicit content/egress consent, retention exceptions and offline examples.
+Local tests do not establish physical spool capacity or remote purge;
+deployment activation remains conditional on that evidence.
 
 Settings use environment variables; `serve -help` lists available CLI overrides
 (flag > env > default). The optional clamd listener settings below are env-only.

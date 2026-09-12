@@ -26,6 +26,9 @@ const DefaultRulesURL = "https://github.com/myguard-labs/mailstrix/releases/down
 // LoadConfig. Field comments name the env var each value comes from. The
 // env-helper style mirrors gozer so the two backends configure identically.
 type Config struct {
+	CAPEConfigFile string // MAILSTRIX_CAPE_CONFIG_FILE; absent disables detonation
+	CAPEPolicy     string // MAILSTRIX_CAPE_POLICY; only static-only supported
+	capeConfig     *capeDaemonConfig
 	Host           string        // MAILSTRIX_HOST            (default 0.0.0.0)
 	Port           int           // MAILSTRIX_PORT            (default 8079)
 	BackendTimeout time.Duration // MAILSTRIX_BACKEND_TIMEOUT (default 1s)
@@ -201,6 +204,8 @@ type Config struct {
 // then sanitizes invalid numeric values.
 func LoadConfig() *Config {
 	c := &Config{
+		CAPEConfigFile:    strings.TrimSpace(os.Getenv("MAILSTRIX_CAPE_CONFIG_FILE")),
+		CAPEPolicy:        envStr("MAILSTRIX_CAPE_POLICY", "static-only"),
 		Host:              envStr("MAILSTRIX_HOST", "0.0.0.0"),
 		Port:              envInt("MAILSTRIX_PORT", 8079),
 		BackendTimeout:    envDur("MAILSTRIX_BACKEND_TIMEOUT", 1),

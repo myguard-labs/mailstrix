@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/myguard-labs/mailstrix/internal/verdict"
 )
 
 const icapProtoVersion = "ICAP/1.0"
@@ -24,6 +26,9 @@ var processStart = time.Now()
 // cancelled or the listener is closed. Safe to call concurrently with
 // ListenAndServe. Returns nil when shut down cleanly.
 func (s *Server) ListenAndServeICAP(ctx context.Context) error {
+	if err := verdict.ValidateReportOnlyPolicy(verdict.SandboxPolicy(s.cfg.CAPEPolicy)); err != nil {
+		return fmt.Errorf("icap: %w", err)
+	}
 	ln, err := net.Listen("tcp", s.cfg.ICAPAddr)
 	if err != nil {
 		return fmt.Errorf("icap listen %s: %w", s.cfg.ICAPAddr, err)

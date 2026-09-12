@@ -1149,6 +1149,10 @@ type ScanMeta struct {
 	// no candidates were supplied; in that case cacheKey is byte-identical to the
 	// pre-feature key (no cache split for the default-OFF path).
 	PWCandidates []string
+	// requireComplete is used only by the uncached CAPE admission scan. Mail
+	// callers retain recovered matches after native errors; admission must know
+	// whether this particular call completed without errors or budget exhaustion.
+	requireComplete bool
 }
 
 // cacheKey renders the metadata for the verdict cache key. The verdict depends on
@@ -1451,6 +1455,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	// otherwise it is the full set.
 	s.rawChannelScans.Add(1)
 	out, rawErr := s.scanOne(rawRules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, profile.ScanTimeout)
+	completionErr := rawErr
 	// A raw-scan failure (timeout on a pathologically slow buffer, or a libyara
 	// error) must NOT short-circuit extraction: a hostile outer container can be
 	// engineered to blow the raw-scan budget while hiding a clear-signal dropper
@@ -1512,6 +1517,12 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	}
 	if res.Panicked {
 		s.exPanicked.Add(1)
+	}
+	// CAPE admission requires every classification channel to complete. The
+	// ordinary mail path deliberately remains fail-open on malformed containers;
+	// completionErr is observed only when ScanMeta.requireComplete is set below.
+	if (res.Failed || res.Panicked) && completionErr == nil {
+		completionErr = fmt.Errorf("extractor did not complete")
 	}
 	if res.IsMSI {
 		s.exMSI.Add(1)
@@ -1677,6 +1688,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		}
 		m, serr := s.scanOne(streamRules, stream, vars, budget)
 		if serr != nil {
+			completionErr = serr
 			s.logf("scan of extracted stream failed (raw verdict kept): %v", serr)
 			return false
 		}
@@ -1843,6 +1855,17 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		}
 	}
 	out = s.applyResponseTags(out)
+	if meta.requireComplete {
+		// Extraction or the last native/feed call may consume the budget without
+		// another stream reaching the pre-scan check. Never certify that as a
+		// completed admission scan, even when recovered matches exist.
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			completionErr = context.DeadlineExceeded
+		}
+		if completionErr != nil {
+			return out, completionErr
+		}
+	}
 	// The raw scan failed but extraction/feeds recovered nothing: preserve the
 	// original fail-open-with-error contract (the server logs it as "no match").
 	// When something WAS recovered, the matches stand — that is the whole point of
