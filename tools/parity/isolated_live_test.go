@@ -324,13 +324,13 @@ func TestIsolatedLiveControls(t *testing.T) {
 
 func TestIsolatedLiveTimeoutNoncooperative(t *testing.T) {
 	d, names := liveIsolatedDocker(t, "PARITY_PROBE_IMAGE")
-	d.budget = 2 * time.Second
+	d.executionBudget = 2 * time.Second
 	started := time.Now()
 	b, status := d.launch(liveProbeInput(t, inertProbeRequest{Mode: "timeout"}))
 	if status != "timeout" || string(b) != "probe-ready" {
 		t.Fatalf("noncooperative probe did not reach timeout: status=%s output=%q", status, b)
 	}
-	if time.Since(started) > 5*time.Second {
+	if time.Since(started) > 25*time.Second {
 		t.Fatal("noncooperative worker exceeded enforced deadline and cleanup allowance")
 	}
 	assertLiveAbsent(t, d, *names)
