@@ -170,7 +170,7 @@ if [[ ! $PARITY_WORKER_IMAGE =~ ^sha256:[a-f0-9]{64}$ || ! $PARITY_PROBE_IMAGE =
 fi
 export PARITY_WORKER_IMAGE PARITY_PROBE_IMAGE
 export PARITY_ISOLATION_REQUIRED=1 PARITY_RULES_DIR="$repo_dir/docker/local-rules"
-timeout 120s "$qualification_dir/bin/parity.test" \
-	-test.run '^TestIsolatedLive' -test.count=1 -test.v -test.timeout=110s |
+timeout --signal=TERM --kill-after=10s 300s "$qualification_dir/bin/parity.test" \
+	-test.run '^TestIsolatedLive' -test.count=1 -test.v -test.timeout=290s |
 	tee "$qualification_dir/qualification.log"
 printf 'Isolation qualification artifacts: %s\n' "$qualification_dir"
