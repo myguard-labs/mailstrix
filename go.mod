@@ -15,6 +15,7 @@ require (
 	github.com/saferwall/pe v1.6.5
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
 	golang.org/x/sys v0.47.0
+	modernc.org/sqlite v1.58.0
 	www.velocidex.com/golang/oleparse v0.0.0-20251204214047-2e3e765e26a1
 )
 
@@ -24,11 +25,16 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/edsrzf/mmap-go v1.1.0 // indirect
 	github.com/emersion/go-message v0.18.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/stangelandcl/ppmd v0.1.0 // indirect
 	github.com/teamwork/test v0.0.0-20200108114543-02621bae84ad // indirect
@@ -38,6 +44,9 @@ require (
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
+	modernc.org/libc v1.75.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )
 
 replace www.velocidex.com/golang/oleparse => ./third_party/oleparse

@@ -107,6 +107,17 @@ This recipe follows that layout, not a fixed Mailcow release number.
    Omit the `lua =` line: Mailcow loads `plugins.d/` modules automatically,
    as shown in its upstream module-loading instructions. An additional explicit
    loader would risk loading the plugin twice.
+   Also copy `contrib/rspamd/mailstrix-preflight.lua` to
+   `data/conf/rspamd/mailstrix-preflight.lua` (outside `plugins.d/`) and add:
+
+   ```ucl
+   lua = "/etc/rspamd/mailstrix-preflight.lua";
+   ```
+
+   This validation-only include rejects unsupported `cape_policy` values before
+   workers start. Rspamd's module auto-loader logs plugin errors but can still
+   start the daemon; the explicit preflight is required even with both scan
+   toggles disabled. It does not register the plugin a second time.
 2. Merge the shipped `group "STRIX"` into
    `data/conf/rspamd/local.d/groups.conf`, preserving other groups.
 3. Add a read-only token-file bind mount to the `rspamd-mailcow` service at

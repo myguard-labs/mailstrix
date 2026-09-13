@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """Guard bounded failure artifacts for the optional parity qualification."""
 
+import re
 import shlex
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+qualification_script = (ROOT / "scripts/qualify-parity-isolation.sh").read_text()
+deadline = re.search(
+    r'timeout --signal=TERM --kill-after=10s (\d+)s .*parity\.test" \\\n'
+    r"\s+-test\.run .* -test\.timeout=(\d+)s",
+    qualification_script,
+)
+assert deadline is not None, "qualification must retain process and Go test deadlines"
+process_timeout, test_timeout = map(int, deadline.groups())
+assert process_timeout > test_timeout >= 240, (
+    "live isolation suite needs a bounded budget above its observed 110-second runtime"
+)
 workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
 steps = workflow["jobs"]["parity-isolation"]["steps"]
 qualification_step = next(step for step in steps

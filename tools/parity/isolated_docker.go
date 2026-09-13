@@ -34,12 +34,13 @@ func (d isolatedDocker) effectiveBudget() time.Duration {
 // retries, host scanner fallback, pulls or mounts. The daemon/kernel and selected
 // local image are trusted; a compromised kernel is outside this contract.
 type isolatedDocker struct {
-	image       string
-	identity    isolatedIdentity
-	runtime     isolatedRuntime
-	diagnostics io.Writer                                  // bounded local lifecycle messages, never child output
-	command     func(context.Context, ...string) *exec.Cmd // tests only
-	budget      time.Duration                              // tests only
+	image           string
+	identity        isolatedIdentity
+	runtime         isolatedRuntime
+	diagnostics     io.Writer                                  // bounded local lifecycle messages, never child output
+	command         func(context.Context, ...string) *exec.Cmd // tests only
+	budget          time.Duration                              // tests only
+	executionBudget time.Duration                              // tests only; starts after verified setup
 }
 
 type isolatedRuntime struct {
@@ -190,7 +191,13 @@ func (d isolatedDocker) launch(input []byte) (output []byte, status string) {
 	if !d.effective(b) {
 		return nil, "setup_error"
 	}
-	output, status = d.call(ctx, input, "start", "--attach", "--interactive", name)
+	executionCtx := ctx
+	executionCancel := func() {}
+	if d.executionBudget != 0 {
+		executionCtx, executionCancel = context.WithTimeout(ctx, d.executionBudget)
+	}
+	output, status = d.call(executionCtx, input, "start", "--attach", "--interactive", name)
+	executionCancel()
 	if status == "execution_error" {
 		stateBytes, stateStatus := d.call(ctx, nil, "inspect", "--format={{json .State}}", name)
 		var state struct{ OOMKilled bool }

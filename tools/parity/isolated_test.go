@@ -267,12 +267,16 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 		t.Run(tc.op+tc.mode+tc.cleanup, func(t *testing.T) {
 			d, calls := fakeIsolatedDocker(t, tc.op, tc.mode, tc.cleanup)
 			if tc.mode == "wait" {
-				d.budget = 150 * time.Millisecond
+				d.executionBudget = 150 * time.Millisecond
 			}
 			data := []byte("inert")
+			started := time.Now()
 			o := d.observe(sample{Format: "html", InputUnit: "file", Size: int64(len(data)), SHA256: digest(data)}, data)
 			if o.Status != tc.want {
 				t.Fatalf("status=%s want=%s", o.Status, tc.want)
+			}
+			if tc.mode == "wait" && time.Since(started) >= time.Second {
+				t.Fatal("execution deadline incorrectly included the setup budget")
 			}
 			name := (*calls)[0].args[2]
 			n := len(*calls)

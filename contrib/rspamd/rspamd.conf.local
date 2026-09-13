@@ -16,6 +16,10 @@
 lua = "/etc/rspamd/plugins.d/mailstrix.lua";
 
 mailstrix {
+  # Static scanning only; no automatic CAPE submissions or manual-job association.
+  # Empty/omitted also uses static-only. Other values/types fail configtest and
+  # startup through the explicit lua include above. No quarantine/tempfail integration.
+  cape_policy = "static-only";
   # strixd endpoint — IPv4, not a docker name (rspamd's RBL-only resolver can't
   # resolve container names). Match the address strixd binds on the shared net.
   url = "http://172.30.0.43:8079/scan";
