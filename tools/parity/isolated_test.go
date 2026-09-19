@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,22 @@ func TestIsolatedEffectiveControls(t *testing.T) {
 
 // The helper echoes only controlled fixtures; real pipes exercise cancellation,
 // bounded stream writers and process exit status without a Docker daemon.
+// isolatedHelperJSONDelayed stands in for a setup phase (Docker create/inspect)
+// that outlasts the execution budget. The delay comes from the environment so
+// the fixture stays inert and needs no arguments of its own. Kept out of the
+// helper's switch so that function stays under the complexity threshold.
+func isolatedHelperJSONDelayed(body string) int {
+	delay, err := time.ParseDuration(os.Getenv("PARITY_TEST_SETUP_DELAY_MS") + "ms")
+	if err != nil {
+		return 9
+	}
+	time.Sleep(delay)
+	if _, err := os.Stdout.Write([]byte(body)); err != nil {
+		return 2
+	}
+	return 0
+}
+
 func TestIsolatedProcessHelper(t *testing.T) {
 	i := slices.Index(os.Args, "--isolated-helper")
 	if i < 0 {
@@ -193,18 +210,7 @@ func TestIsolatedProcessHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	case "json-delay":
-		// Deterministic stand-in for a setup phase (Docker create/inspect) that
-		// outlasts the execution budget. The delay is read from the environment
-		// so the fixture stays inert and needs no arguments of its own.
-		delay, err := time.ParseDuration(os.Getenv("ISOLATED_HELPER_DELAY_MS") + "ms")
-		if err != nil {
-			os.Exit(9)
-		}
-		time.Sleep(delay)
-		if _, err := os.Stdout.Write([]byte(os.Args[i+2])); err != nil {
-			os.Exit(2)
-		}
-		os.Exit(0)
+		os.Exit(isolatedHelperJSONDelayed(os.Args[i+2]))
 	case "wait":
 		time.Sleep(10 * time.Second)
 		os.Exit(1)
@@ -232,7 +238,9 @@ func TestIsolatedProcessHelper(t *testing.T) {
 	}
 }
 
-func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string) (isolatedDocker, *[]processCall) {
+// setupDelay is an explicit parameter, not an ambient environment read: an
+// inherited value must never be able to reshape or fail an unrelated test.
+func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string, setupDelay time.Duration) (isolatedDocker, *[]processCall) {
 	t.Helper()
 	d := isolatedTestDocker()
 	d.budget = 2 * time.Second
@@ -260,7 +268,7 @@ func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string) (isolatedDoc
 		// Setup operations can be given a deterministic over-budget delay so a
 		// test can prove the execution deadline is armed only after verified
 		// setup rather than being inherited already-consumed.
-		if delay := os.Getenv("ISOLATED_HELPER_DELAY_MS"); delay != "" && (operation == "create" || operation == "inspect") {
+		if setupDelay > 0 && (operation == "create" || operation == "inspect") {
 			m = "json-delay"
 		}
 		if operation == failOp {
@@ -268,8 +276,8 @@ func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string) (isolatedDoc
 		}
 		cmd := exec.CommandContext(ctx, exe, "-test.run=^TestIsolatedProcessHelper$", "--", "--isolated-helper", m, b)
 		cmd.Env = []string{"GORACE=atexit_sleep_ms=0", "GOCOVERDIR=" + coverDir}
-		if delay := os.Getenv("ISOLATED_HELPER_DELAY_MS"); delay != "" {
-			cmd.Env = append(cmd.Env, "ISOLATED_HELPER_DELAY_MS="+delay)
+		if setupDelay > 0 {
+			cmd.Env = append(cmd.Env, "PARITY_TEST_SETUP_DELAY_MS="+strconv.FormatInt(setupDelay.Milliseconds(), 10))
 		}
 		cmd.WaitDelay = time.Second
 		calls = append(calls, processCall{slices.Clone(args), cmd})
@@ -287,7 +295,7 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 		{"", "", "error", "cleanup_error"}, {"rm", "error", "empty", "ok"},
 	} {
 		t.Run(tc.op+tc.mode+tc.cleanup, func(t *testing.T) {
-			d, calls := fakeIsolatedDocker(t, tc.op, tc.mode, tc.cleanup)
+			d, calls := fakeIsolatedDocker(t, tc.op, tc.mode, tc.cleanup, 0)
 			if tc.mode == "wait" {
 				d.executionBudget = 150 * time.Millisecond
 			}
@@ -320,8 +328,7 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 // instead of after verification makes this fail with a timeout.
 func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
 	const setupDelay, executionBudget = 900 * time.Millisecond, 150 * time.Millisecond
-	t.Setenv("ISOLATED_HELPER_DELAY_MS", "900")
-	d, calls := fakeIsolatedDocker(t, "", "", "empty")
+	d, calls := fakeIsolatedDocker(t, "", "", "empty", setupDelay)
 	d.budget = 8 * time.Second
 	d.executionBudget = executionBudget
 	if d.effectiveBudget() <= 2*setupDelay {
@@ -378,7 +385,7 @@ func TestIsolatedAliasesAndStopAfterUncertainty(t *testing.T) {
 
 func TestIsolatedCleanupFailureStopsCorpus(t *testing.T) {
 	m, hash, root := generated(t)
-	d, calls := fakeIsolatedDocker(t, "", "", "error")
+	d, calls := fakeIsolatedDocker(t, "", "", "error", 0)
 	r := isolatedCorpus(root, m, hash, d, d.observe)
 	starts := 0
 	for _, c := range *calls {
@@ -395,7 +402,7 @@ func TestIsolatedUncertainCreateStopsCorpus(t *testing.T) {
 	m, hash, root := generated(t)
 	for _, mode := range []string{"wait", "error", "stderr"} {
 		t.Run(mode, func(t *testing.T) {
-			d, calls := fakeIsolatedDocker(t, "create", mode, "empty")
+			d, calls := fakeIsolatedDocker(t, "create", mode, "empty", 0)
 			if mode == "wait" {
 				d.budget = 150 * time.Millisecond
 			}
@@ -415,7 +422,7 @@ func TestIsolatedUncertainCreateStopsCorpus(t *testing.T) {
 
 func TestIsolatedSetup(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		d, calls := fakeIsolatedDocker(t, "", "", "empty")
+		d, calls := fakeIsolatedDocker(t, "", "", "empty", 0)
 		if d.setup() == nil || len(*calls) != 0 {
 			t.Fatal("unsupported platform reached daemon or was accepted")
 		}
@@ -428,7 +435,7 @@ func TestIsolatedSetup(t *testing.T) {
 		{"", "", false}, {"info", "error", true}, {"info", "empty", true}, {"image", "error", true}, {"image", "empty", true}, {"start", "empty", true}, {"start", "error", true},
 	} {
 		t.Run(tc.op+tc.mode, func(t *testing.T) {
-			d, _ := fakeIsolatedDocker(t, tc.op, tc.mode, "empty")
+			d, _ := fakeIsolatedDocker(t, tc.op, tc.mode, "empty", 0)
 			err := d.setup()
 			if (err != nil) != tc.wantError {
 				t.Fatalf("setup error=%v", err)
@@ -439,7 +446,7 @@ func TestIsolatedSetup(t *testing.T) {
 		})
 	}
 	for _, image := range []string{"image:latest", "registry.example/image@sha256:" + strings.Repeat("a", 64), "sha256:short", "sha256:" + strings.Repeat("A", 64)} {
-		d, calls := fakeIsolatedDocker(t, "", "", "empty")
+		d, calls := fakeIsolatedDocker(t, "", "", "empty", 0)
 		d.image = image
 		if d.setup() == nil || len(*calls) != 0 {
 			t.Fatal("invalid image reached daemon")
@@ -448,7 +455,7 @@ func TestIsolatedSetup(t *testing.T) {
 }
 
 func TestIsolatedIdentityAndInputFailure(t *testing.T) {
-	d, calls := fakeIsolatedDocker(t, "", "", "empty")
+	d, calls := fakeIsolatedDocker(t, "", "", "empty", 0)
 	data := []byte("inert")
 	s := sample{Format: "html", InputUnit: "file", Size: 5, SHA256: digest(data)}
 	bad := s

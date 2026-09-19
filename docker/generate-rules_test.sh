@@ -153,8 +153,8 @@ import sys
 body = sys.argv[3]
 # Test-only fault injection: fabricate a count in the emitted body so a
 # count-omission oracle can be shown to REJECT it. Production is untouched.
-if os.environ.get("INJECT_RULES_COUNT"):
-    body = body.replace(", 0.0 MiB", f", {os.environ['INJECT_RULES_COUNT']} rules, 0.0 MiB", 1)
+if os.environ.get("MAILSTRIX_TEST_INJECT_RULES_COUNT"):
+    body = body.replace(", 0.0 MiB", f", {os.environ['MAILSTRIX_TEST_INJECT_RULES_COUNT']} rules, 0.0 MiB", 1)
 with open(os.environ["EVENTS"], "a", encoding="utf-8") as events:
     events.write(f"notify {sys.argv[2]}\n")
     events.write(f"notify-body {body}\n")
@@ -420,12 +420,9 @@ assert_valid_rules_count() {  # assert_valid_rules_count <input> [normalized-cou
     [ "$actual" -eq 0 ] || assert_event "valid rules count ${rules} failed"
     assert_receipt verify success "$expected"
     jq -e --argjson expected "$expected" '.rules == $expected' "${EVENTS}.manifest" >/dev/null || assert_event "valid rules count ${rules} manifest"
+    # The exact-body compare above owns every count case, including the
+    # zero-count omission: no separate substring branch is needed.
     assert_success_notification_body "valid rules count ${rules}" "$expected"
-    if [ "$expected" = 0 ]; then
-        ! grep -Eq 'notify-body .*[0-9]+ rules' "$EVENTS" >/dev/null || assert_event 'zero rules count must remain omitted from notification'
-    else
-        grep -F ", ${expected} rules," "$EVENTS" >/dev/null || assert_event "valid rules count ${rules} notification"
-    fi
     assert_success_event_order "valid rules count ${rules}" 1
 }
 
@@ -615,7 +612,7 @@ assert_partial_receipt_write_is_not_retried 0 0 1
 # exact-body oracle rather than pass on the absence of one literal.
 assert_fabricated_count_is_rejected() {
     local actual
-    INJECT_RULES_COUNT=42 run_script RULES_COUNT=0
+    MAILSTRIX_TEST_INJECT_RULES_COUNT=42 run_script RULES_COUNT=0
     [ "$actual" -eq 0 ] || assert_event 'fabricated-count fixture run failed'
     grep -F 'notify-body' "$EVENTS" | grep -F '42 rules' >/dev/null || assert_event 'fabricated-count fixture did not inject a count'
     if success_notification_body_matches 0; then
