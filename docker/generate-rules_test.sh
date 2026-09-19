@@ -3,7 +3,7 @@
 # and verifier error propagation with all external commands stubbed.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-for bin in awk date dirname jq mktemp python3; do
+for bin in awk date dd dirname jq mktemp python3; do
     command -v "$bin" >/dev/null 2>&1 || {
         printf 'FAIL: required test tool unavailable: %s\n' "$bin" >&2
         exit 2
@@ -44,7 +44,9 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --output)
             dir="${2#type=local,dest=}"
-            printf 'fixture bundle' > "$dir/compiled.yac"
+            # A discriminating size: 1572864 B renders 1.5 MiB under b/1048576
+            # but 1.6 MiB under b/1000000, so the body oracle pins the divisor.
+            dd if=/dev/zero of="$dir/compiled.yac" bs=1024 count=1536 2>/dev/null
             printf '4.5.2\n' > "$dir/libyara.version"
             shift ;;
         --iidfile) printf 'sha256:fixture\n' > "$2"; shift ;;
@@ -147,6 +149,7 @@ STUB
 cat >"$test_root/tools/discord-notify.py" <<'STUB'
 #!/usr/bin/env python3
 import os
+import re
 import signal
 import sys
 
@@ -154,7 +157,11 @@ body = sys.argv[3]
 # Test-only fault injection: fabricate a count in the emitted body so a
 # count-omission oracle can be shown to REJECT it. Production is untouched.
 if os.environ.get("MAILSTRIX_TEST_INJECT_RULES_COUNT"):
-    body = body.replace(", 0.0 MiB", f", {os.environ['MAILSTRIX_TEST_INJECT_RULES_COUNT']} rules, 0.0 MiB", 1)
+    # Insert in the production slot (before the size field) without depending on
+    # the rendered size value, so the count oracle and the size oracle stay
+    # independent of each other.
+    injected = os.environ["MAILSTRIX_TEST_INJECT_RULES_COUNT"]
+    body = re.sub(r"(\d+\.\d+ MiB)", injected + r" rules, \1", body, count=1)
 with open(os.environ["EVENTS"], "a", encoding="utf-8") as events:
     events.write(f"notify {sys.argv[2]}\n")
     events.write(f"notify-body {body}\n")
@@ -237,7 +244,7 @@ receipt = rows[0]
 if receipt.get("stage") != stage or receipt.get("status") != status:
     raise SystemExit(f"receipt stage/status {receipt!r}, want {stage}/{status}")
 if status == "success":
-    expected = {"version": 1, "libyara": "4.5.2", "rules": int(expected_rules), "size": 14, "loadable": True}
+    expected = {"version": 1, "libyara": "4.5.2", "rules": int(expected_rules), "size": 1572864, "loadable": True}
     if any(receipt.get(k) != v for k, v in expected.items()) or not receipt.get("checksum", "").startswith("sha256:") or not receipt.get("generated", "").endswith("Z"):
         raise SystemExit(f"success receipt lost fresh-verifier evidence: {receipt!r}")
 elif set(receipt) != {"schema", "stage", "status"}:
@@ -392,7 +399,7 @@ expected_success_body() {  # expected_success_body <normalized-count>; prints th
     local rules="$1" rules_line=""
     [ "$rules" = 0 ] || rules_line=", ${rules} rules"
     local bt='`'
-    printf 'Fresh compiled YARA bundle published to %s%s%s (v0→v1%s, 0.0 MiB, libyara 4.5.2). strixd %s%s%s clients update on next check.' \
+    printf 'Fresh compiled YARA bundle published to %s%s%s (v0→v1%s, 1.5 MiB, libyara 4.5.2). strixd %s%s%s clients update on next check.' \
         "$bt" rules-current "$bt" "$rules_line" "$bt" --fetch-rules "$bt"
 }
 
@@ -622,11 +629,11 @@ assert_fabricated_count_is_rejected() {
     success_notification_body_matches 42 || assert_event 'fabricated-count fixture body did not match its own expected body'
 }
 
-assert_fabricated_count_is_rejected
 assert_valid_rules_count 2147483647
 assert_valid_rules_count ' 42 ' 42
 assert_valid_rules_count $'\t\r\n\v\f0\f\v\n\r\t' 0
 assert_valid_rules_count $' \t2147483647\r\n' 2147483647
+assert_fabricated_count_is_rejected
 for invalid_rules in -1 +1 not-a-number 12oops 12e1 012 2147483648 9223372036854775808 ' ' $'\t\r\n\v\f' '4 2' $'4\t2' $'4\n2' ' 2147483648 ' ' 012 ' ' -1 '; do
     assert_invalid_rules_count_is_build_failure "$invalid_rules"
 done

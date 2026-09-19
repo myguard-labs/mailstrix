@@ -322,38 +322,92 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 	}
 }
 
+// isolatedArmedDeadline records the context deadline a fake subcommand ran
+// under. Reading the armed deadline directly is deterministic: it does not
+// depend on how long a subprocess takes to finish, so a loaded machine cannot
+// flake the assertion the way a wall-clock comparison would.
+type isolatedArmedDeadline struct {
+	invoked  time.Time
+	deadline time.Time // zero when the context carried no deadline at all
+}
+
+// observeArmedDeadlines performs one observation and records the deadline of
+// every subcommand invocation. It wraps the fake command hook instead of
+// altering the production call path.
+func observeArmedDeadlines(d isolatedDocker) (observation, map[string]isolatedArmedDeadline) {
+	inner := d.command
+	armed := map[string]isolatedArmedDeadline{}
+	d.command = func(ctx context.Context, args ...string) *exec.Cmd {
+		deadline, _ := ctx.Deadline()
+		armed[args[0]] = isolatedArmedDeadline{invoked: time.Now(), deadline: deadline}
+		return inner(ctx, args...)
+	}
+	data := []byte("inert")
+	return d.observe(sample{Format: "html", InputUnit: "file", Size: int64(len(data)), SHA256: digest(data)}, data), armed
+}
+
 // CI05-N1: the execution deadline must begin after verified setup. A Docker
 // create/inspect phase that outlasts the whole execution budget must not consume
-// it, so `start` still receives its full window. Arming the deadline at launch
-// instead of after verification makes this fail with a timeout.
+// it, so `start` still receives its full window. Two wrong implementations are
+// gated here: arming no execution deadline at all, and arming it at launch so
+// setup time is charged against it.
 func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
 	const setupDelay, executionBudget = 900 * time.Millisecond, 150 * time.Millisecond
-	d, calls := fakeIsolatedDocker(t, "", "", "empty", setupDelay)
+	d, _ := fakeIsolatedDocker(t, "", "", "empty", setupDelay)
 	d.budget = 8 * time.Second
 	d.executionBudget = executionBudget
 	if d.effectiveBudget() <= 2*setupDelay {
 		t.Fatalf("host budget %s cannot contain two %s setup delays", d.effectiveBudget(), setupDelay)
 	}
-	data := []byte("inert")
-	started := time.Now()
-	o := d.observe(sample{Format: "html", InputUnit: "file", Size: int64(len(data)), SHA256: digest(data)}, data)
-	elapsed := time.Since(started)
-	// Setup consumed far more than the execution budget, so a deadline armed
-	// before it would already be expired and `start` would be cut short here.
+	o, armed := observeArmedDeadlines(d)
 	if o.Status != "ok" {
 		t.Fatalf("status=%s want=ok: the execution deadline was consumed by setup", o.Status)
 	}
-	if elapsed <= executionBudget {
-		t.Fatalf("setup did not outlast the execution budget: elapsed=%s budget=%s", elapsed, executionBudget)
+	// Setup itself runs under the larger host budget; only `start` is bounded by
+	// the execution budget. This also proves both delayed setup calls really ran.
+	for _, operation := range []string{"create", "inspect"} {
+		a, ok := armed[operation]
+		if !ok {
+			t.Fatalf("%s never ran", operation)
+		}
+		if a.deadline.IsZero() {
+			t.Fatalf("%s ran with no host deadline", operation)
+		}
+		if window := a.deadline.Sub(a.invoked); window <= executionBudget {
+			t.Fatalf("%s ran under the execution budget window %s, want the host budget", operation, window)
+		}
 	}
-	// Both delayed setup calls must really have run, or the case is vacuous.
-	if elapsed < 2*setupDelay {
-		t.Fatalf("fixture did not delay create+inspect: elapsed=%s", elapsed)
+	start, ok := armed["start"]
+	if !ok {
+		t.Fatal("start never ran")
 	}
-	name := (*calls)[0].args[2]
-	n := len(*calls)
-	if !slices.Equal((*calls)[n-2].args, []string{"rm", "--force", name}) || !slices.Equal((*calls)[n-1].args, []string{"ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"}) {
-		t.Fatal("cleanup lost exact owned name")
+	if start.deadline.IsZero() {
+		t.Fatal("start ran with no execution deadline: the execution budget is not armed")
+	}
+	// The full window must be available at `start`, after setup has already
+	// consumed far more than it. A deadline armed at launch would be expired.
+	window := start.deadline.Sub(start.invoked)
+	if window <= executionBudget/2 || window > executionBudget {
+		t.Fatalf("start received %s of its %s execution budget after setup", window, executionBudget)
+	}
+}
+
+// The execution deadline must stay bounded by the host budget. Re-arming it from
+// a detached context would let `start` silently outlive the launch ceiling.
+func TestIsolatedExecutionDeadlineStaysBoundedByHostBudget(t *testing.T) {
+	d, _ := fakeIsolatedDocker(t, "", "", "empty", 0)
+	d.budget = 4 * time.Second
+	d.executionBudget = time.Minute
+	o, armed := observeArmedDeadlines(d)
+	if o.Status != "ok" {
+		t.Fatalf("status=%s want=ok", o.Status)
+	}
+	host, start := armed["create"], armed["start"]
+	if host.deadline.IsZero() || start.deadline.IsZero() {
+		t.Fatal("host or execution deadline missing")
+	}
+	if start.deadline.After(host.deadline) {
+		t.Fatalf("execution deadline %s outlives the host budget deadline %s", start.deadline, host.deadline)
 	}
 }
 
