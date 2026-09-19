@@ -397,6 +397,18 @@ func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
 	if !ok {
 		t.Fatal("start never ran")
 	}
+	// Prove the setup delays actually waited. Without this the case is vacuous:
+	// an inert delay plus a launch-armed deadline leaves `start` its full window
+	// and the test would pass. A sleep can only lengthen under load, so this
+	// lower bound cannot flake.
+	create, _ := firstArmed(armed, "create")
+	inspect, _ := firstArmed(armed, "inspect")
+	if elapsed := inspect.invoked.Sub(create.invoked); elapsed <= executionBudget {
+		t.Fatalf("create delay was %s, want more than the %s execution budget", elapsed, executionBudget)
+	}
+	if elapsed := start.invoked.Sub(inspect.invoked); elapsed <= executionBudget {
+		t.Fatalf("inspect delay was %s, want more than the %s execution budget", elapsed, executionBudget)
+	}
 	if start.deadline.IsZero() {
 		t.Fatal("start ran with no execution deadline: the execution budget is not armed")
 	}
