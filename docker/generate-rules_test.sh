@@ -3,7 +3,7 @@
 # and verifier error propagation with all external commands stubbed.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-for bin in awk date dirname jq mktemp python3; do
+for bin in awk date dd dirname jq mktemp python3 tr wc; do
     command -v "$bin" >/dev/null 2>&1 || {
         printf 'FAIL: required test tool unavailable: %s\n' "$bin" >&2
         exit 2
@@ -44,7 +44,13 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --output)
             dir="${2#type=local,dest=}"
-            printf 'fixture bundle' > "$dir/compiled.yac"
+            # A discriminating size: 1572864 B renders 1.5 MiB under b/1048576
+            # but 1.6 MiB under b/1000000, so the body oracle pins the divisor.
+            # Fail loudly here rather than letting a short write surface later as
+            # a confusing size/checksum mismatch.
+            dd if=/dev/zero of="$dir/compiled.yac" bs=1024 count=1536 2>/dev/null
+            [ "$(wc -c < "$dir/compiled.yac" | tr -d '[:space:]')" = 1572864 ] ||
+                { printf 'FAIL: fixture compiled.yac not 1572864 bytes\n' >&2; exit 2; }
             printf '4.5.2\n' > "$dir/libyara.version"
             shift ;;
         --iidfile) printf 'sha256:fixture\n' > "$2"; shift ;;
@@ -147,12 +153,22 @@ STUB
 cat >"$test_root/tools/discord-notify.py" <<'STUB'
 #!/usr/bin/env python3
 import os
+import re
 import signal
 import sys
 
+body = sys.argv[3]
+# Test-only fault injection: fabricate a count in the emitted body so a
+# count-omission oracle can be shown to REJECT it. Production is untouched.
+if os.environ.get("MAILSTRIX_TEST_INJECT_RULES_COUNT"):
+    # Insert in the production slot (before the size field) without depending on
+    # the rendered size value, so the count oracle and the size oracle stay
+    # independent of each other.
+    injected = os.environ["MAILSTRIX_TEST_INJECT_RULES_COUNT"]
+    body = re.sub(r"(\d+\.\d+ MiB)", injected + r" rules, \1", body, count=1)
 with open(os.environ["EVENTS"], "a", encoding="utf-8") as events:
     events.write(f"notify {sys.argv[2]}\n")
-    events.write(f"notify-body {sys.argv[3]}\n")
+    events.write(f"notify-body {body}\n")
 if os.environ.get("SIGNAL_SUCCESS_NOTIFY") == "1" and sys.argv[2].endswith("published"):
     with open(os.environ["EVENTS"] + ".signal-target", encoding="utf-8") as target:
         os.kill(int(target.read()), signal.SIGTERM)
@@ -232,7 +248,7 @@ receipt = rows[0]
 if receipt.get("stage") != stage or receipt.get("status") != status:
     raise SystemExit(f"receipt stage/status {receipt!r}, want {stage}/{status}")
 if status == "success":
-    expected = {"version": 1, "libyara": "4.5.2", "rules": int(expected_rules), "size": 14, "loadable": True}
+    expected = {"version": 1, "libyara": "4.5.2", "rules": int(expected_rules), "size": 1572864, "loadable": True}
     if any(receipt.get(k) != v for k, v in expected.items()) or not receipt.get("checksum", "").startswith("sha256:") or not receipt.get("generated", "").endswith("Z"):
         raise SystemExit(f"success receipt lost fresh-verifier evidence: {receipt!r}")
 elif set(receipt) != {"schema", "stage", "status"}:
@@ -383,17 +399,41 @@ assert_partial_receipt_write_is_not_retried() {  # <build-failure> <signal> <ser
     fi
 }
 
+expected_success_body() {  # expected_success_body <normalized-count>; prints the exact #builds body
+    local rules="$1" rules_line=""
+    [ "$rules" = 0 ] || rules_line=", ${rules} rules"
+    local bt='`'
+    printf 'Fresh compiled YARA bundle published to %s%s%s (v0→v1%s, 1.5 MiB, libyara 4.5.2). strixd %s%s%s clients update on next check.' \
+        "$bt" rules-current "$bt" "$rules_line" "$bt" --fetch-rules "$bt"
+}
+
+# The success body is matched EXACTLY, not by absence of one literal. A
+# substring oracle (`! grep 0 rules`) accepts a fabricated nonzero count, which
+# is precisely the CI-04-ZERO-NOTIFY escape this asserts against: any inserted,
+# rescaled or otherwise wrong count changes the body and fails here.
+#
+# The predicate is separate from the asserting wrapper so a negative control can
+# query the oracle without assert_event's `exit` tearing down the whole suite.
+success_notification_body_matches() {  # <normalized-count>
+    [ "$(grep -c '^notify-body ' "$EVENTS" || true)" -eq 1 ] || return 1
+    grep -Fx "notify-body $(expected_success_body "$1")" "$EVENTS" >/dev/null
+}
+
+assert_success_notification_body() {  # assert_success_notification_body <case> <normalized-count>
+    local name="$1" expected="$2"
+    [ "$(grep -c '^notify-body ' "$EVENTS" || true)" -eq 1 ] || assert_event "$name: notification body count"
+    success_notification_body_matches "$expected" || assert_event "$name: success notification body changed"
+}
+
 assert_valid_rules_count() {  # assert_valid_rules_count <input> [normalized-count]
     local rules="$1" expected="${2:-$1}" actual
     run_script RULES_COUNT="$rules"
     [ "$actual" -eq 0 ] || assert_event "valid rules count ${rules} failed"
     assert_receipt verify success "$expected"
     jq -e --argjson expected "$expected" '.rules == $expected' "${EVENTS}.manifest" >/dev/null || assert_event "valid rules count ${rules} manifest"
-    if [ "$expected" = 0 ]; then
-        ! grep -F '0 rules' "$EVENTS" >/dev/null || assert_event 'zero rules count must remain omitted from notification'
-    else
-        grep -F ", ${expected} rules," "$EVENTS" >/dev/null || assert_event "valid rules count ${rules} notification"
-    fi
+    # The exact-body compare above owns every count case, including the
+    # zero-count omission: no separate substring branch is needed.
+    assert_success_notification_body "valid rules count ${rules}" "$expected"
     assert_success_event_order "valid rules count ${rules}" 1
 }
 
@@ -578,10 +618,30 @@ assert_partial_receipt_write_is_not_retried 1 0 0
 assert_partial_receipt_write_is_not_retried 0 1 0
 assert_partial_receipt_write_is_not_retried 1 1 0
 assert_partial_receipt_write_is_not_retried 0 0 1
+# Negative control for CI-04-ZERO-NOTIFY: with a zero count the production body
+# carries no count at all, and a fabricated "42 rules" must be REJECTED by the
+# exact-body oracle rather than pass on the absence of one literal.
+assert_fabricated_count_is_rejected() {
+    local actual
+    # Explicit export/unset instead of the assignment-prefix form: that form's
+    # scoping around a function call differs across bash versions and POSIX mode.
+    export MAILSTRIX_TEST_INJECT_RULES_COUNT=42
+    run_script RULES_COUNT=0
+    unset MAILSTRIX_TEST_INJECT_RULES_COUNT
+    [ "$actual" -eq 0 ] || assert_event 'fabricated-count fixture run failed'
+    grep -Eq 'notify-body .*42 rules' "$EVENTS" || assert_event 'fabricated-count fixture did not inject a count'
+    if success_notification_body_matches 0; then
+        assert_event 'fabricated count body was accepted by the oracle'
+    fi
+    # Prove the same fixture is genuinely rejected (oracle is not blanket-failing).
+    success_notification_body_matches 42 || assert_event 'fabricated-count fixture body did not match its own expected body'
+}
+
 assert_valid_rules_count 2147483647
 assert_valid_rules_count ' 42 ' 42
 assert_valid_rules_count $'\t\r\n\v\f0\f\v\n\r\t' 0
 assert_valid_rules_count $' \t2147483647\r\n' 2147483647
+assert_fabricated_count_is_rejected
 for invalid_rules in -1 +1 not-a-number 12oops 12e1 012 2147483648 9223372036854775808 ' ' $'\t\r\n\v\f' '4 2' $'4\t2' $'4\n2' ' 2147483648 ' ' 012 ' ' -1 '; do
     assert_invalid_rules_count_is_build_failure "$invalid_rules"
 done

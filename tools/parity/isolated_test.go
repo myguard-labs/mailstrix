@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,22 @@ func TestIsolatedEffectiveControls(t *testing.T) {
 
 // The helper echoes only controlled fixtures; real pipes exercise cancellation,
 // bounded stream writers and process exit status without a Docker daemon.
+// isolatedHelperJSONDelayed stands in for a setup phase (Docker create/inspect)
+// that outlasts the execution budget. The delay comes from the environment so
+// the fixture stays inert and needs no arguments of its own. Kept out of the
+// helper's switch so that function stays under the complexity threshold.
+func isolatedHelperJSONDelayed(body string) int {
+	delay, err := time.ParseDuration(os.Getenv("PARITY_TEST_SETUP_DELAY_MS") + "ms")
+	if err != nil {
+		return 9
+	}
+	time.Sleep(delay)
+	if _, err := os.Stdout.Write([]byte(body)); err != nil {
+		return 2
+	}
+	return 0
+}
+
 func TestIsolatedProcessHelper(t *testing.T) {
 	i := slices.Index(os.Args, "--isolated-helper")
 	if i < 0 {
@@ -192,6 +209,8 @@ func TestIsolatedProcessHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		os.Exit(0)
+	case "json-delay":
+		os.Exit(isolatedHelperJSONDelayed(os.Args[i+2]))
 	case "wait":
 		time.Sleep(10 * time.Second)
 		os.Exit(1)
@@ -219,7 +238,9 @@ func TestIsolatedProcessHelper(t *testing.T) {
 	}
 }
 
-func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string) (isolatedDocker, *[]processCall) {
+// setupDelay is an explicit parameter, not an ambient environment read: an
+// inherited value must never be able to reshape or fail an unrelated test.
+func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string, setupDelay time.Duration) (isolatedDocker, *[]processCall) {
 	t.Helper()
 	d := isolatedTestDocker()
 	d.budget = 2 * time.Second
@@ -244,11 +265,20 @@ func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string) (isolatedDoc
 		case "ps":
 			m = cleanup
 		}
+		// Setup operations can be given a deterministic over-budget delay so a
+		// test can prove the execution deadline is armed only after verified
+		// setup rather than being inherited already-consumed.
+		if setupDelay > 0 && (operation == "create" || operation == "inspect") {
+			m = "json-delay"
+		}
 		if operation == failOp {
 			m = mode
 		}
 		cmd := exec.CommandContext(ctx, exe, "-test.run=^TestIsolatedProcessHelper$", "--", "--isolated-helper", m, b)
 		cmd.Env = []string{"GORACE=atexit_sleep_ms=0", "GOCOVERDIR=" + coverDir}
+		if setupDelay > 0 {
+			cmd.Env = append(cmd.Env, "PARITY_TEST_SETUP_DELAY_MS="+strconv.FormatInt(setupDelay.Milliseconds(), 10))
+		}
 		cmd.WaitDelay = time.Second
 		calls = append(calls, processCall{slices.Clone(args), cmd})
 		return cmd
@@ -265,7 +295,7 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 		{"", "", "error", "cleanup_error"}, {"rm", "error", "empty", "ok"},
 	} {
 		t.Run(tc.op+tc.mode+tc.cleanup, func(t *testing.T) {
-			d, calls := fakeIsolatedDocker(t, tc.op, tc.mode, tc.cleanup)
+			d, calls := fakeIsolatedDocker(t, tc.op, tc.mode, tc.cleanup, 0)
 			if tc.mode == "wait" {
 				d.executionBudget = 150 * time.Millisecond
 			}
@@ -289,6 +319,127 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// isolatedArmedDeadline records the context deadline a fake subcommand ran
+// under. Reading the armed deadline directly is deterministic: it does not
+// depend on how long a subprocess takes to finish, so a loaded machine cannot
+// flake the assertion the way a wall-clock comparison would.
+type isolatedArmedDeadline struct {
+	operation string
+	invoked   time.Time
+	deadline  time.Time // zero when the context carried no deadline at all
+}
+
+// firstArmed returns the first invocation of an operation. Recording every
+// invocation (not just the last per name) keeps the assertions honest: launch
+// inspects twice on some paths, so a name-keyed map could describe the wrong
+// call.
+func firstArmed(armed []isolatedArmedDeadline, operation string) (isolatedArmedDeadline, bool) {
+	for _, a := range armed {
+		if a.operation == operation {
+			return a, true
+		}
+	}
+	return isolatedArmedDeadline{}, false
+}
+
+// observeArmedDeadlines performs one observation and records the deadline of
+// every subcommand invocation. It wraps the fake command hook instead of
+// altering the production call path.
+func observeArmedDeadlines(d isolatedDocker) (observation, []isolatedArmedDeadline) {
+	inner := d.command
+	var armed []isolatedArmedDeadline
+	d.command = func(ctx context.Context, args ...string) *exec.Cmd {
+		deadline, _ := ctx.Deadline()
+		armed = append(armed, isolatedArmedDeadline{operation: args[0], invoked: time.Now(), deadline: deadline})
+		return inner(ctx, args...)
+	}
+	data := []byte("inert")
+	return d.observe(sample{Format: "html", InputUnit: "file", Size: int64(len(data)), SHA256: digest(data)}, data), armed
+}
+
+// CI05-N1: the execution deadline must begin after verified setup. A Docker
+// create/inspect phase that outlasts the whole execution budget must not consume
+// it, so `start` still receives its full window. Two wrong implementations are
+// gated here: arming no execution deadline at all, and arming it at launch so
+// setup time is charged against it.
+func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
+	// 500ms keeps ~3-10x headroom for the start subprocess under -race and a
+	// loaded runner; setupDelay still exceeds it so the property under test holds.
+	const setupDelay, executionBudget = 900 * time.Millisecond, 500 * time.Millisecond
+	d, _ := fakeIsolatedDocker(t, "", "", "empty", setupDelay)
+	d.budget = 8 * time.Second
+	d.executionBudget = executionBudget
+	if d.effectiveBudget() <= 2*setupDelay {
+		t.Fatalf("host budget %s cannot contain two %s setup delays", d.effectiveBudget(), setupDelay)
+	}
+	o, armed := observeArmedDeadlines(d)
+	if o.Status != "ok" {
+		t.Fatalf("status=%s want=ok: the execution deadline was consumed by setup", o.Status)
+	}
+	// Setup itself runs under the larger host budget; only `start` is bounded by
+	// the execution budget. This also proves both delayed setup calls really ran.
+	for _, operation := range []string{"create", "inspect"} {
+		a, ok := firstArmed(armed, operation)
+		if !ok {
+			t.Fatalf("%s never ran", operation)
+		}
+		if a.deadline.IsZero() {
+			t.Fatalf("%s ran with no host deadline", operation)
+		}
+		if window := a.deadline.Sub(a.invoked); window <= executionBudget {
+			t.Fatalf("%s ran under the execution budget window %s, want the host budget", operation, window)
+		}
+	}
+	start, ok := firstArmed(armed, "start")
+	if !ok {
+		t.Fatal("start never ran")
+	}
+	// Prove the setup delays actually waited. Without this the case is vacuous:
+	// an inert delay plus a launch-armed deadline leaves `start` its full window
+	// and the test would pass. A sleep can only lengthen under load, so this
+	// lower bound cannot flake.
+	create, _ := firstArmed(armed, "create")
+	inspect, _ := firstArmed(armed, "inspect")
+	if elapsed := inspect.invoked.Sub(create.invoked); elapsed <= executionBudget {
+		t.Fatalf("create delay was %s, want more than the %s execution budget", elapsed, executionBudget)
+	}
+	if elapsed := start.invoked.Sub(inspect.invoked); elapsed <= executionBudget {
+		t.Fatalf("inspect delay was %s, want more than the %s execution budget", elapsed, executionBudget)
+	}
+	if start.deadline.IsZero() {
+		t.Fatal("start ran with no execution deadline: the execution budget is not armed")
+	}
+	// The full window must be available at `start`, after setup has already
+	// consumed far more than it. A deadline armed at launch would be expired.
+	window := start.deadline.Sub(start.invoked)
+	if window <= executionBudget/2 || window > executionBudget {
+		t.Fatalf("start received %s of its %s execution budget after setup", window, executionBudget)
+	}
+}
+
+// The execution deadline must stay bounded by the host budget. Re-arming it from
+// a detached context would let `start` silently outlive the launch ceiling.
+func TestIsolatedExecutionDeadlineStaysBoundedByHostBudget(t *testing.T) {
+	d, _ := fakeIsolatedDocker(t, "", "", "empty", 0)
+	d.budget = 4 * time.Second
+	d.executionBudget = time.Minute
+	o, armed := observeArmedDeadlines(d)
+	if o.Status != "ok" {
+		t.Fatalf("status=%s want=ok", o.Status)
+	}
+	host, hostOK := firstArmed(armed, "create")
+	start, startOK := firstArmed(armed, "start")
+	if !hostOK || !startOK {
+		t.Fatalf("create ran=%t, start ran=%t; both are required", hostOK, startOK)
+	}
+	if host.deadline.IsZero() || start.deadline.IsZero() {
+		t.Fatal("host or execution deadline missing")
+	}
+	if start.deadline.After(host.deadline) {
+		t.Fatalf("execution deadline %s outlives the host budget deadline %s", start.deadline, host.deadline)
 	}
 }
 
@@ -320,7 +471,7 @@ func TestIsolatedAliasesAndStopAfterUncertainty(t *testing.T) {
 
 func TestIsolatedCleanupFailureStopsCorpus(t *testing.T) {
 	m, hash, root := generated(t)
-	d, calls := fakeIsolatedDocker(t, "", "", "error")
+	d, calls := fakeIsolatedDocker(t, "", "", "error", 0)
 	r := isolatedCorpus(root, m, hash, d, d.observe)
 	starts := 0
 	for _, c := range *calls {
@@ -337,7 +488,7 @@ func TestIsolatedUncertainCreateStopsCorpus(t *testing.T) {
 	m, hash, root := generated(t)
 	for _, mode := range []string{"wait", "error", "stderr"} {
 		t.Run(mode, func(t *testing.T) {
-			d, calls := fakeIsolatedDocker(t, "create", mode, "empty")
+			d, calls := fakeIsolatedDocker(t, "create", mode, "empty", 0)
 			if mode == "wait" {
 				d.budget = 150 * time.Millisecond
 			}
@@ -357,7 +508,7 @@ func TestIsolatedUncertainCreateStopsCorpus(t *testing.T) {
 
 func TestIsolatedSetup(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		d, calls := fakeIsolatedDocker(t, "", "", "empty")
+		d, calls := fakeIsolatedDocker(t, "", "", "empty", 0)
 		if d.setup() == nil || len(*calls) != 0 {
 			t.Fatal("unsupported platform reached daemon or was accepted")
 		}
@@ -370,7 +521,7 @@ func TestIsolatedSetup(t *testing.T) {
 		{"", "", false}, {"info", "error", true}, {"info", "empty", true}, {"image", "error", true}, {"image", "empty", true}, {"start", "empty", true}, {"start", "error", true},
 	} {
 		t.Run(tc.op+tc.mode, func(t *testing.T) {
-			d, _ := fakeIsolatedDocker(t, tc.op, tc.mode, "empty")
+			d, _ := fakeIsolatedDocker(t, tc.op, tc.mode, "empty", 0)
 			err := d.setup()
 			if (err != nil) != tc.wantError {
 				t.Fatalf("setup error=%v", err)
@@ -381,7 +532,7 @@ func TestIsolatedSetup(t *testing.T) {
 		})
 	}
 	for _, image := range []string{"image:latest", "registry.example/image@sha256:" + strings.Repeat("a", 64), "sha256:short", "sha256:" + strings.Repeat("A", 64)} {
-		d, calls := fakeIsolatedDocker(t, "", "", "empty")
+		d, calls := fakeIsolatedDocker(t, "", "", "empty", 0)
 		d.image = image
 		if d.setup() == nil || len(*calls) != 0 {
 			t.Fatal("invalid image reached daemon")
@@ -390,7 +541,7 @@ func TestIsolatedSetup(t *testing.T) {
 }
 
 func TestIsolatedIdentityAndInputFailure(t *testing.T) {
-	d, calls := fakeIsolatedDocker(t, "", "", "empty")
+	d, calls := fakeIsolatedDocker(t, "", "", "empty", 0)
 	data := []byte("inert")
 	s := sample{Format: "html", InputUnit: "file", Size: 5, SHA256: digest(data)}
 	bad := s
