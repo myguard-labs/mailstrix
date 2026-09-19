@@ -2,7 +2,6 @@ package extract
 
 import (
 	"os"
-	"sort"
 	"testing"
 	"time"
 
@@ -236,15 +235,25 @@ func TestRarPasswordHelpersMalformedInputDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestRarFixtureMemberLexiconsAreSorted proves the fixture member table stays
-// sorted. Any membership duplicated across case-sensitivity boundaries would
-// outlive submission as a latent table invariant break.
-func TestRarFixtureMemberLexiconsAreSorted(t *testing.T) {
-	names := make([]string, 0, len(rarFixtureMembers))
-	for name := range rarFixtureMembers {
-		names = append(names, name)
+// TestRarFixtureMembersMatchDocumentedContract pins the fixture member table
+// to the values documented in testdata/README.md. The exact member set and
+// sizes are what the Reader-path test depends on, so a fixture regeneration
+// that changes either fails here deterministically (no map-order dependence).
+func TestRarFixtureMembersMatchDocumentedContract(t *testing.T) {
+	want := map[string]int64{
+		"note.txt":   43,
+		"readme.txt": 36,
 	}
-	if !sort.StringsAreSorted(names) {
-		t.Fatalf("members unsorted: %v", names)
+	if len(rarFixtureMembers) != len(want) {
+		t.Fatalf("member count: got %d, want %d", len(rarFixtureMembers), len(want))
+	}
+	for name, size := range want {
+		got, ok := rarFixtureMembers[name]
+		if !ok {
+			t.Fatalf("missing member %q", name)
+		}
+		if got != size {
+			t.Fatalf("member %q size: got %d, want %d", name, got, size)
+		}
 	}
 }
