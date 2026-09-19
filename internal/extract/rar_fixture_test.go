@@ -235,25 +235,40 @@ func TestRarPasswordHelpersMalformedInputDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestRarFixtureMembersMatchDocumentedContract pins the fixture member table
-// to the values documented in testdata/README.md. The exact member set and
-// sizes are what the Reader-path test depends on, so a fixture regeneration
-// that changes either fails here deterministically (no map-order dependence).
+// TestRarFixtureMembersMatchDocumentedContract walks the real fixture with the
+// production reader and compares each member against the documented contract in
+// testdata/README.md. Reading the binary, not a same-file literal, means a
+// regeneration that drops or changes a member fails even if the Go table was
+// updated alongside it.
 func TestRarFixtureMembersMatchDocumentedContract(t *testing.T) {
-	want := map[string]int64{
-		"note.txt":   43,
-		"readme.txt": 36,
+	buf, err := os.ReadFile("testdata/" + rarFixtureName)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(rarFixtureMembers) != len(want) {
-		t.Fatalf("member count: got %d, want %d", len(rarFixtureMembers), len(want))
+	rr := openRarReader(buf, rarFixturePassword)
+	if rr == nil {
+		t.Fatal("openRarReader returned nil for the correct password")
 	}
-	for name, size := range want {
-		got, ok := rarFixtureMembers[name]
-		if !ok {
-			t.Fatalf("missing member %q", name)
+	seen := make(map[string]bool, len(rarFixtureMembers))
+	for {
+		h, err := rr.Next()
+		if err != nil {
+			t.Fatalf("walking fixture members: %v", err)
 		}
-		if got != size {
-			t.Fatalf("member %q size: got %d, want %d", name, got, size)
+		wantSize, ok := rarFixtureMembers[h.Name]
+		if !ok {
+			t.Fatalf("fixture member %q is not in the documented member set", h.Name)
+		}
+		if h.UnPackedSize != wantSize {
+			t.Fatalf("member %q size: got %d, want %d", h.Name, h.UnPackedSize, wantSize)
+		}
+		seen[h.Name] = true
+		// Next() on the last member returns io.EOF; loop again to observe it.
+		if len(seen) == len(rarFixtureMembers) {
+			if _, err := rr.Next(); err == nil {
+				t.Fatalf("expected EOF after %d documented members", len(rarFixtureMembers))
+			}
+			break
 		}
 	}
 }
