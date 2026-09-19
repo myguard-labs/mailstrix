@@ -352,7 +352,9 @@ func observeArmedDeadlines(d isolatedDocker) (observation, map[string]isolatedAr
 // gated here: arming no execution deadline at all, and arming it at launch so
 // setup time is charged against it.
 func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
-	const setupDelay, executionBudget = 900 * time.Millisecond, 150 * time.Millisecond
+	// 500ms keeps ~3-10x headroom for the start subprocess under -race and a
+	// loaded runner; setupDelay still exceeds it so the property under test holds.
+	const setupDelay, executionBudget = 900 * time.Millisecond, 500 * time.Millisecond
 	d, _ := fakeIsolatedDocker(t, "", "", "empty", setupDelay)
 	d.budget = 8 * time.Second
 	d.executionBudget = executionBudget
