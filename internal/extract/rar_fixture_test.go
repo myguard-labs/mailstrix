@@ -18,8 +18,8 @@ const rarFixturePassword = "fixture-password"
 
 // rarFixtureMembers holds the sole observable member contract of the fixture.
 // note.txt is asserted through the Reader path; readme.txt is the second
-// plaintext member, its presence proved by the validation helper (which always
-// reads the first file member), so its name/size are informational here.
+// header-encrypted member, its presence proved by the validation helper (which
+// always reads the first file member), so its name/size are informational here.
 var rarFixtureMembers = map[string]int64{
 	"note.txt":   43,
 	"readme.txt": 36,
@@ -228,9 +228,9 @@ func TestRarPasswordHelpersMalformedInputDoesNotPanic(t *testing.T) {
 			if got := crackRarPassword(tc.buf, []string{pw}, b, deadline); got != "" {
 				t.Fatalf("crackRarPassword returned %q on malformed input", got)
 			}
-			if maxAttempts := maxDecryptAttempts; b.decryptAttempts > maxAttempts {
-				t.Fatalf("decryptAttempts %d exceeded maxDecryptAttempts %d",
-					b.decryptAttempts, maxAttempts)
+			if maxAttempts := maxKDFDecryptAttempts; b.kdfAttempts > maxAttempts {
+				t.Fatalf("kdfAttempts %d exceeded maxKDFDecryptAttempts %d",
+					b.kdfAttempts, maxAttempts)
 			}
 		})
 	}

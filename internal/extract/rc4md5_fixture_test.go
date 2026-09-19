@@ -14,14 +14,14 @@ import (
 // ---------------------------------------------------------------------------
 //
 // All fixture ciphertext below is built with an in-test reference KDF taken
-// from MS-OFFCRYPTO §2.3.6.2 (the RC4 v1.1 MD5 derivation), matching rc4.py's
-// DocumentRC4._makekey in msoffcrypto-tool: MD5(utf16le(password))[0:5] || salt
-// repeated 16 times, MD5 again, take [0:5] || blockLE32, MD5 again, take
-// [0:16]. The production rc4MD5MakeKey/rc4MD5Decrypt are never called to build
-// ciphertext, so a KDF or decrypt drift fails the round-trip. (The packet's
-// "0x30..0x3B zeroing" note belongs to the separate §2.3.7.3 XOR-obfuscation
-// path; production rc4MD5MakeKey has no such zeroing and this fixture encodes
-// the observed behavior.)
+// from the RC4 v1.1 MD5 derivation as implemented by msoffcrypto's
+// DocumentRC4._makekey, which the production code labels MS-OFFCRYPTO §2.3.7.3:
+// MD5(utf16le(password))[0:5] || salt repeated 16 times, MD5 again, take [0:5]
+// || blockLE32, MD5 again, take [0:16]. The production rc4MD5MakeKey/
+// rc4MD5Decrypt are never called to build ciphertext, so a KDF or decrypt drift
+// fails the round-trip. (The packet's "0x30..0x3B zeroing" note belongs to the
+// separate XOR-obfuscation transform; production rc4MD5MakeKey has no such
+// zeroing and this fixture encodes the observed behavior.)
 
 func fixtureRefRC4MD5UTF16LE(password string) []byte {
 	// Matches production pwUTF16LE's byte-wise encoding; identical to true
