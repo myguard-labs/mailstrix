@@ -327,19 +327,33 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 // depend on how long a subprocess takes to finish, so a loaded machine cannot
 // flake the assertion the way a wall-clock comparison would.
 type isolatedArmedDeadline struct {
-	invoked  time.Time
-	deadline time.Time // zero when the context carried no deadline at all
+	operation string
+	invoked   time.Time
+	deadline  time.Time // zero when the context carried no deadline at all
+}
+
+// firstArmed returns the first invocation of an operation. Recording every
+// invocation (not just the last per name) keeps the assertions honest: launch
+// inspects twice on some paths, so a name-keyed map could describe the wrong
+// call.
+func firstArmed(armed []isolatedArmedDeadline, operation string) (isolatedArmedDeadline, bool) {
+	for _, a := range armed {
+		if a.operation == operation {
+			return a, true
+		}
+	}
+	return isolatedArmedDeadline{}, false
 }
 
 // observeArmedDeadlines performs one observation and records the deadline of
 // every subcommand invocation. It wraps the fake command hook instead of
 // altering the production call path.
-func observeArmedDeadlines(d isolatedDocker) (observation, map[string]isolatedArmedDeadline) {
+func observeArmedDeadlines(d isolatedDocker) (observation, []isolatedArmedDeadline) {
 	inner := d.command
-	armed := map[string]isolatedArmedDeadline{}
+	var armed []isolatedArmedDeadline
 	d.command = func(ctx context.Context, args ...string) *exec.Cmd {
 		deadline, _ := ctx.Deadline()
-		armed[args[0]] = isolatedArmedDeadline{invoked: time.Now(), deadline: deadline}
+		armed = append(armed, isolatedArmedDeadline{operation: args[0], invoked: time.Now(), deadline: deadline})
 		return inner(ctx, args...)
 	}
 	data := []byte("inert")
@@ -368,7 +382,7 @@ func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
 	// Setup itself runs under the larger host budget; only `start` is bounded by
 	// the execution budget. This also proves both delayed setup calls really ran.
 	for _, operation := range []string{"create", "inspect"} {
-		a, ok := armed[operation]
+		a, ok := firstArmed(armed, operation)
 		if !ok {
 			t.Fatalf("%s never ran", operation)
 		}
@@ -379,7 +393,7 @@ func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
 			t.Fatalf("%s ran under the execution budget window %s, want the host budget", operation, window)
 		}
 	}
-	start, ok := armed["start"]
+	start, ok := firstArmed(armed, "start")
 	if !ok {
 		t.Fatal("start never ran")
 	}
@@ -404,8 +418,8 @@ func TestIsolatedExecutionDeadlineStaysBoundedByHostBudget(t *testing.T) {
 	if o.Status != "ok" {
 		t.Fatalf("status=%s want=ok", o.Status)
 	}
-	host, hostOK := armed["create"]
-	start, startOK := armed["start"]
+	host, hostOK := firstArmed(armed, "create")
+	start, startOK := firstArmed(armed, "start")
 	if !hostOK || !startOK {
 		t.Fatalf("create ran=%t, start ran=%t; both are required", hostOK, startOK)
 	}

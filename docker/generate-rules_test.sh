@@ -3,7 +3,7 @@
 # and verifier error propagation with all external commands stubbed.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-for bin in awk date dd dirname jq mktemp python3; do
+for bin in awk date dd dirname jq mktemp python3 tr wc; do
     command -v "$bin" >/dev/null 2>&1 || {
         printf 'FAIL: required test tool unavailable: %s\n' "$bin" >&2
         exit 2
@@ -49,7 +49,7 @@ while [ "$#" -gt 0 ]; do
             # Fail loudly here rather than letting a short write surface later as
             # a confusing size/checksum mismatch.
             dd if=/dev/zero of="$dir/compiled.yac" bs=1024 count=1536 2>/dev/null
-            [ "$(stat -c '%s' "$dir/compiled.yac")" = 1572864 ] ||
+            [ "$(wc -c < "$dir/compiled.yac" | tr -d '[:space:]')" = 1572864 ] ||
                 { printf 'FAIL: fixture compiled.yac not 1572864 bytes\n' >&2; exit 2; }
             printf '4.5.2\n' > "$dir/libyara.version"
             shift ;;
@@ -623,7 +623,11 @@ assert_partial_receipt_write_is_not_retried 0 0 1
 # exact-body oracle rather than pass on the absence of one literal.
 assert_fabricated_count_is_rejected() {
     local actual
-    MAILSTRIX_TEST_INJECT_RULES_COUNT=42 run_script RULES_COUNT=0
+    # Explicit export/unset instead of the assignment-prefix form: that form's
+    # scoping around a function call differs across bash versions and POSIX mode.
+    export MAILSTRIX_TEST_INJECT_RULES_COUNT=42
+    run_script RULES_COUNT=0
+    unset MAILSTRIX_TEST_INJECT_RULES_COUNT
     [ "$actual" -eq 0 ] || assert_event 'fabricated-count fixture run failed'
     grep -Eq 'notify-body .*42 rules' "$EVENTS" || assert_event 'fabricated-count fixture did not inject a count'
     if success_notification_body_matches 0; then
