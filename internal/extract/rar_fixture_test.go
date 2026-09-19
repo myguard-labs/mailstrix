@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -234,10 +235,10 @@ func TestRarPasswordHelpersMalformedInputDoesNotPanic(t *testing.T) {
 }
 
 // TestRarFixtureMembersMatchDocumentedContract walks the real fixture with the
-// production reader and compares each member against the documented contract in
-// testdata/README.md. Reading the binary, not a same-file literal, means a
-// regeneration that drops or changes a member fails even if the Go table was
-// updated alongside it.
+// production reader until io.EOF and compares every member against the
+// documented contract in testdata/README.md. Reading the binary to EOF (and
+// rejecting duplicates) means a regeneration that drops, duplicates, or
+// changes a member fails even if the Go table was updated alongside it.
 func TestRarFixtureMembersMatchDocumentedContract(t *testing.T) {
 	buf, err := os.ReadFile("testdata/" + rarFixtureName)
 	if err != nil {
@@ -250,9 +251,16 @@ func TestRarFixtureMembersMatchDocumentedContract(t *testing.T) {
 	seen := make(map[string]bool, len(rarFixtureMembers))
 	for {
 		h, err := rr.Next()
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			t.Fatalf("walking fixture members: %v", err)
 		}
+		if seen[h.Name] {
+			t.Fatalf("duplicate fixture member %q", h.Name)
+		}
+		seen[h.Name] = true
 		wantSize, ok := rarFixtureMembers[h.Name]
 		if !ok {
 			t.Fatalf("fixture member %q is not in the documented member set", h.Name)
@@ -260,13 +268,8 @@ func TestRarFixtureMembersMatchDocumentedContract(t *testing.T) {
 		if h.UnPackedSize != wantSize {
 			t.Fatalf("member %q size: got %d, want %d", h.Name, h.UnPackedSize, wantSize)
 		}
-		seen[h.Name] = true
-		// Next() on the last member returns io.EOF; loop again to observe it.
-		if len(seen) == len(rarFixtureMembers) {
-			if _, err := rr.Next(); err == nil {
-				t.Fatalf("expected EOF after %d documented members", len(rarFixtureMembers))
-			}
-			break
-		}
+	}
+	if len(seen) != len(rarFixtureMembers) {
+		t.Fatalf("fixture member count: got %d, want %d", len(seen), len(rarFixtureMembers))
 	}
 }
