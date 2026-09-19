@@ -404,7 +404,11 @@ func TestIsolatedExecutionDeadlineStaysBoundedByHostBudget(t *testing.T) {
 	if o.Status != "ok" {
 		t.Fatalf("status=%s want=ok", o.Status)
 	}
-	host, start := armed["create"], armed["start"]
+	host, hostOK := armed["create"]
+	start, startOK := armed["start"]
+	if !hostOK || !startOK {
+		t.Fatalf("create ran=%t, start ran=%t; both are required", hostOK, startOK)
+	}
 	if host.deadline.IsZero() || start.deadline.IsZero() {
 		t.Fatal("host or execution deadline missing")
 	}

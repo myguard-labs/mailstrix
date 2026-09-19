@@ -46,7 +46,11 @@ while [ "$#" -gt 0 ]; do
             dir="${2#type=local,dest=}"
             # A discriminating size: 1572864 B renders 1.5 MiB under b/1048576
             # but 1.6 MiB under b/1000000, so the body oracle pins the divisor.
+            # Fail loudly here rather than letting a short write surface later as
+            # a confusing size/checksum mismatch.
             dd if=/dev/zero of="$dir/compiled.yac" bs=1024 count=1536 2>/dev/null
+            [ "$(stat -c '%s' "$dir/compiled.yac")" = 1572864 ] ||
+                { printf 'FAIL: fixture compiled.yac not 1572864 bytes\n' >&2; exit 2; }
             printf '4.5.2\n' > "$dir/libyara.version"
             shift ;;
         --iidfile) printf 'sha256:fixture\n' > "$2"; shift ;;
@@ -621,7 +625,7 @@ assert_fabricated_count_is_rejected() {
     local actual
     MAILSTRIX_TEST_INJECT_RULES_COUNT=42 run_script RULES_COUNT=0
     [ "$actual" -eq 0 ] || assert_event 'fabricated-count fixture run failed'
-    grep -F 'notify-body' "$EVENTS" | grep -F '42 rules' >/dev/null || assert_event 'fabricated-count fixture did not inject a count'
+    grep -Eq 'notify-body .*42 rules' "$EVENTS" || assert_event 'fabricated-count fixture did not inject a count'
     if success_notification_body_matches 0; then
         assert_event 'fabricated count body was accepted by the oracle'
     fi
