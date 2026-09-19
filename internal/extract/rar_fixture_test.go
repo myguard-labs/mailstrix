@@ -218,9 +218,7 @@ func TestRarPasswordHelpersMalformedInputDoesNotPanic(t *testing.T) {
 				if _, err := rr.Next(); err == nil {
 					t.Fatal("reader from truncated input succeeded at Next, want error")
 				}
-				return
-			}
-			if rr != nil {
+			} else if rr != nil {
 				t.Fatalf("openRarReader accepted malformed input (%s)", tc.name)
 			}
 			b := &archiveBudget{}
