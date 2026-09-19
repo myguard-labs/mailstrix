@@ -192,6 +192,19 @@ func TestIsolatedProcessHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		os.Exit(0)
+	case "json-delay":
+		// Deterministic stand-in for a setup phase (Docker create/inspect) that
+		// outlasts the execution budget. The delay is read from the environment
+		// so the fixture stays inert and needs no arguments of its own.
+		delay, err := time.ParseDuration(os.Getenv("ISOLATED_HELPER_DELAY_MS") + "ms")
+		if err != nil {
+			os.Exit(9)
+		}
+		time.Sleep(delay)
+		if _, err := os.Stdout.Write([]byte(os.Args[i+2])); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
 	case "wait":
 		time.Sleep(10 * time.Second)
 		os.Exit(1)
@@ -244,11 +257,20 @@ func fakeIsolatedDocker(t *testing.T, failOp, mode, cleanup string) (isolatedDoc
 		case "ps":
 			m = cleanup
 		}
+		// Setup operations can be given a deterministic over-budget delay so a
+		// test can prove the execution deadline is armed only after verified
+		// setup rather than being inherited already-consumed.
+		if delay := os.Getenv("ISOLATED_HELPER_DELAY_MS"); delay != "" && (operation == "create" || operation == "inspect") {
+			m = "json-delay"
+		}
 		if operation == failOp {
 			m = mode
 		}
 		cmd := exec.CommandContext(ctx, exe, "-test.run=^TestIsolatedProcessHelper$", "--", "--isolated-helper", m, b)
 		cmd.Env = []string{"GORACE=atexit_sleep_ms=0", "GOCOVERDIR=" + coverDir}
+		if delay := os.Getenv("ISOLATED_HELPER_DELAY_MS"); delay != "" {
+			cmd.Env = append(cmd.Env, "ISOLATED_HELPER_DELAY_MS="+delay)
+		}
 		cmd.WaitDelay = time.Second
 		calls = append(calls, processCall{slices.Clone(args), cmd})
 		return cmd
@@ -289,6 +311,42 @@ func TestIsolatedExecutionFailures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// CI05-N1: the execution deadline must begin after verified setup. A Docker
+// create/inspect phase that outlasts the whole execution budget must not consume
+// it, so `start` still receives its full window. Arming the deadline at launch
+// instead of after verification makes this fail with a timeout.
+func TestIsolatedExecutionDeadlineStartsAfterVerifiedSetup(t *testing.T) {
+	const setupDelay, executionBudget = 900 * time.Millisecond, 150 * time.Millisecond
+	t.Setenv("ISOLATED_HELPER_DELAY_MS", "900")
+	d, calls := fakeIsolatedDocker(t, "", "", "empty")
+	d.budget = 8 * time.Second
+	d.executionBudget = executionBudget
+	if d.effectiveBudget() <= 2*setupDelay {
+		t.Fatalf("host budget %s cannot contain two %s setup delays", d.effectiveBudget(), setupDelay)
+	}
+	data := []byte("inert")
+	started := time.Now()
+	o := d.observe(sample{Format: "html", InputUnit: "file", Size: int64(len(data)), SHA256: digest(data)}, data)
+	elapsed := time.Since(started)
+	// Setup consumed far more than the execution budget, so a deadline armed
+	// before it would already be expired and `start` would be cut short here.
+	if o.Status != "ok" {
+		t.Fatalf("status=%s want=ok: the execution deadline was consumed by setup", o.Status)
+	}
+	if elapsed <= executionBudget {
+		t.Fatalf("setup did not outlast the execution budget: elapsed=%s budget=%s", elapsed, executionBudget)
+	}
+	// Both delayed setup calls must really have run, or the case is vacuous.
+	if elapsed < 2*setupDelay {
+		t.Fatalf("fixture did not delay create+inspect: elapsed=%s", elapsed)
+	}
+	name := (*calls)[0].args[2]
+	n := len(*calls)
+	if !slices.Equal((*calls)[n-2].args, []string{"rm", "--force", name}) || !slices.Equal((*calls)[n-1].args, []string{"ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"}) {
+		t.Fatal("cleanup lost exact owned name")
 	}
 }
 

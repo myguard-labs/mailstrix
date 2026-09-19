@@ -150,9 +150,14 @@ import os
 import signal
 import sys
 
+body = sys.argv[3]
+# Test-only fault injection: fabricate a count in the emitted body so a
+# count-omission oracle can be shown to REJECT it. Production is untouched.
+if os.environ.get("INJECT_RULES_COUNT"):
+    body = body.replace(", 0.0 MiB", f", {os.environ['INJECT_RULES_COUNT']} rules, 0.0 MiB", 1)
 with open(os.environ["EVENTS"], "a", encoding="utf-8") as events:
     events.write(f"notify {sys.argv[2]}\n")
-    events.write(f"notify-body {sys.argv[3]}\n")
+    events.write(f"notify-body {body}\n")
 if os.environ.get("SIGNAL_SUCCESS_NOTIFY") == "1" and sys.argv[2].endswith("published"):
     with open(os.environ["EVENTS"] + ".signal-target", encoding="utf-8") as target:
         os.kill(int(target.read()), signal.SIGTERM)
@@ -383,14 +388,41 @@ assert_partial_receipt_write_is_not_retried() {  # <build-failure> <signal> <ser
     fi
 }
 
+expected_success_body() {  # expected_success_body <normalized-count>; prints the exact #builds body
+    local rules="$1" rules_line=""
+    [ "$rules" = 0 ] || rules_line=", ${rules} rules"
+    local bt='`'
+    printf 'Fresh compiled YARA bundle published to %s%s%s (v0→v1%s, 0.0 MiB, libyara 4.5.2). strixd %s%s%s clients update on next check.' \
+        "$bt" rules-current "$bt" "$rules_line" "$bt" --fetch-rules "$bt"
+}
+
+# The success body is matched EXACTLY, not by absence of one literal. A
+# substring oracle (`! grep 0 rules`) accepts a fabricated nonzero count, which
+# is precisely the CI-04-ZERO-NOTIFY escape this asserts against: any inserted,
+# rescaled or otherwise wrong count changes the body and fails here.
+#
+# The predicate is separate from the asserting wrapper so a negative control can
+# query the oracle without assert_event's `exit` tearing down the whole suite.
+success_notification_body_matches() {  # <normalized-count>
+    [ "$(grep -c '^notify-body ' "$EVENTS" || true)" -eq 1 ] || return 1
+    grep -Fx "notify-body $(expected_success_body "$1")" "$EVENTS" >/dev/null
+}
+
+assert_success_notification_body() {  # assert_success_notification_body <case> <normalized-count>
+    local name="$1" expected="$2"
+    [ "$(grep -c '^notify-body ' "$EVENTS" || true)" -eq 1 ] || assert_event "$name: notification body count"
+    success_notification_body_matches "$expected" || assert_event "$name: success notification body changed"
+}
+
 assert_valid_rules_count() {  # assert_valid_rules_count <input> [normalized-count]
     local rules="$1" expected="${2:-$1}" actual
     run_script RULES_COUNT="$rules"
     [ "$actual" -eq 0 ] || assert_event "valid rules count ${rules} failed"
     assert_receipt verify success "$expected"
     jq -e --argjson expected "$expected" '.rules == $expected' "${EVENTS}.manifest" >/dev/null || assert_event "valid rules count ${rules} manifest"
+    assert_success_notification_body "valid rules count ${rules}" "$expected"
     if [ "$expected" = 0 ]; then
-        ! grep -F '0 rules' "$EVENTS" >/dev/null || assert_event 'zero rules count must remain omitted from notification'
+        ! grep -Eq 'notify-body .*[0-9]+ rules' "$EVENTS" >/dev/null || assert_event 'zero rules count must remain omitted from notification'
     else
         grep -F ", ${expected} rules," "$EVENTS" >/dev/null || assert_event "valid rules count ${rules} notification"
     fi
@@ -578,6 +610,22 @@ assert_partial_receipt_write_is_not_retried 1 0 0
 assert_partial_receipt_write_is_not_retried 0 1 0
 assert_partial_receipt_write_is_not_retried 1 1 0
 assert_partial_receipt_write_is_not_retried 0 0 1
+# Negative control for CI-04-ZERO-NOTIFY: with a zero count the production body
+# carries no count at all, and a fabricated "42 rules" must be REJECTED by the
+# exact-body oracle rather than pass on the absence of one literal.
+assert_fabricated_count_is_rejected() {
+    local actual
+    INJECT_RULES_COUNT=42 run_script RULES_COUNT=0
+    [ "$actual" -eq 0 ] || assert_event 'fabricated-count fixture run failed'
+    grep -F 'notify-body' "$EVENTS" | grep -F '42 rules' >/dev/null || assert_event 'fabricated-count fixture did not inject a count'
+    if success_notification_body_matches 0; then
+        assert_event 'fabricated count body was accepted by the oracle'
+    fi
+    # Prove the same fixture is genuinely rejected (oracle is not blanket-failing).
+    success_notification_body_matches 42 || assert_event 'fabricated-count fixture body did not match its own expected body'
+}
+
+assert_fabricated_count_is_rejected
 assert_valid_rules_count 2147483647
 assert_valid_rules_count ' 42 ' 42
 assert_valid_rules_count $'\t\r\n\v\f0\f\v\n\r\t' 0
