@@ -363,7 +363,11 @@ func TestParseICAPEncapsulated(t *testing.T) {
 		{"req-hdr=0, res-hdr=100, res-body=512", []icapSection{{"req-hdr"}, {"res-hdr"}, {"res-body"}}},
 	}
 	for _, tc := range cases {
-		got := parseICAPEncapsulated(tc.in)
+		got, err := parseICAPEncapsulated(tc.in)
+		if err != nil {
+			t.Errorf("parseICAPEncapsulated(%q): unexpected error %v", tc.in, err)
+			continue
+		}
 		if len(got) != len(tc.want) {
 			t.Errorf("parseICAPEncapsulated(%q): got %v, want %v", tc.in, got, tc.want)
 			continue
@@ -1081,5 +1085,68 @@ func TestICAPShutdownDrainsRefusals(t *testing.T) {
 	s.ShutdownICAP(ctx)
 	if ctx.Err() != nil {
 		t.Fatal("ShutdownICAP did not drain before the deadline")
+	}
+}
+
+// TestParseICAPEncapsulatedRejectsMalformed (COR-14): every malformed form is
+// an error, never a silently shortened section list.
+func TestParseICAPEncapsulatedRejectsMalformed(t *testing.T) {
+	for _, in := range []string{
+		"",                                   // missing
+		"   ",                                // blank
+		"res-hdr",                            // no offset
+		"res-hdr=0, res-body=abc",            // non-numeric offset
+		"res-hdr=0, res-body=-1",             // negative offset
+		"res-hdr=100, res-body=0",            // decreasing offsets
+		"res-hdr=0, bogus-body=10",           // unknown section
+		"res-hdr=0",                          // no body section
+		"res-body=0, res-hdr=10",             // body not last
+		"res-hdr=0, res-body=5, null-body=9", // two body sections
+		"res-hdr=0,",                         // trailing empty entry
+	} {
+		if got, err := parseICAPEncapsulated(in); !errors.Is(err, errICAPEncapsulated) {
+			t.Errorf("parseICAPEncapsulated(%q) = %v, %v; want errICAPEncapsulated", in, got, err)
+		}
+	}
+	// Boundary: equal offsets (empty header section) are allowed.
+	if _, err := parseICAPEncapsulated("req-hdr=0, null-body=0"); err != nil {
+		t.Errorf("equal offsets rejected: %v", err)
+	}
+}
+
+// TestICAPEncapsulatedMissingOrMalformedIs400 (COR-14): a RESPMOD without a
+// valid Encapsulated header gets 400, and the connection is closed instead of
+// parsing the unread body as the next request.
+func TestICAPEncapsulatedMissingOrMalformedIs400(t *testing.T) {
+	eng := &fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}
+	s := newTestServer(eng, "")
+	addr := startTestICAPServer(t, s)
+	body := "malware payload"
+	chunk := fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(body), body)
+	for name, enc := range map[string]string{
+		"missing":   "",
+		"malformed": "Encapsulated: res-body\r\n",
+		"no-body":   "Encapsulated: res-hdr=0\r\n",
+	} {
+		req := "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\n" +
+			"Host: " + addr + "\r\n" +
+			"Allow: 204\r\n" + enc + "\r\n" + chunk +
+			// A pipelined OPTIONS must NOT be answered: the conn is dropped.
+			"OPTIONS icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n"
+		resp := doICAP(t, addr, req)
+		if !strings.HasPrefix(resp, "ICAP/1.0 400") {
+			t.Errorf("%s: want 400, got:\n%s", name, resp)
+		}
+		if strings.Count(resp, "ICAP/1.0 ") != 1 {
+			t.Errorf("%s: connection not closed after 400 (desync):\n%s", name, resp)
+		}
+	}
+	if n := eng.scans.Load(); n != 0 {
+		t.Errorf("scans = %d, want 0", n)
+	}
+	// Negative control: the same body with a valid header is scanned and blocked.
+	resp := doICAP(t, addr, icapRESPMODRequest(addr, body, true))
+	if !strings.HasPrefix(resp, "ICAP/1.0 200 OK") || !strings.Contains(resp, "MALWARE_TEST") {
+		t.Errorf("valid Encapsulated: want infected 200, got:\n%s", resp)
 	}
 }

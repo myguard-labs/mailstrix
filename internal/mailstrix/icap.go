@@ -229,12 +229,20 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 		_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + 60*time.Second))
 	}
 
-	sections := parseICAPEncapsulated(hdr.Get("Encapsulated"))
-
 	switch method {
 	case "OPTIONS":
 		return s.handleICAPOptions(w)
 	case "REQMOD", "RESPMOD":
+		// RFC 3507 §4.4.1: REQMOD/RESPMOD MUST carry Encapsulated. Without a
+		// valid one the body framing is unknown, so the body would never be
+		// read (a 204 clean for unscanned content) and its bytes would then be
+		// parsed as the next request. Answer 400 and drop the connection.
+		sections, encErr := parseICAPEncapsulated(hdr.Get("Encapsulated"))
+		if encErr != nil {
+			s.errf("ICAP %s 400: %v", method, encErr)
+			_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+			return encErr
+		}
 		return s.handleICAPMod(w, br, method, hdr, sections)
 	default:
 		_, _ = io.WriteString(w, icapProtoVersion+" 405 Method Not Allowed\r\n\r\n")
@@ -409,26 +417,54 @@ func icapISTag(fp string) string {
 	return `"` + fp + `"`
 }
 
-// parseICAPEncapsulated parses the Encapsulated header value into an ordered
-// slice of sections. Example: "req-hdr=0, res-hdr=412, res-body=1024".
-func parseICAPEncapsulated(v string) []icapSection {
+// parseICAPEncapsulated parses and validates the Encapsulated header value
+// (RFC 3507 §4.4.1) into its ordered sections. It rejects a missing or empty
+// header, unknown section names, non-numeric/negative/decreasing offsets, and a
+// list that does not end in exactly one body section (req-body, res-body,
+// opt-body or null-body), since any of those leaves the body framing unknown.
+func parseICAPEncapsulated(v string) ([]icapSection, error) {
+	if strings.TrimSpace(v) == "" {
+		return nil, errICAPEncapsulated
+	}
 	var out []icapSection
+	last := int64(-1)
 	for _, part := range strings.Split(v, ",") {
 		part = strings.TrimSpace(part)
 		i := strings.IndexByte(part, '=')
 		if i < 0 {
-			continue
+			return nil, errICAPEncapsulated
 		}
 		name := strings.TrimSpace(part[:i])
 		off, err := strconv.ParseInt(strings.TrimSpace(part[i+1:]), 10, 64)
-		if err != nil {
-			continue
+		if err != nil || off < 0 || off < last {
+			return nil, errICAPEncapsulated
 		}
-		_ = off // offset is parsed for validation only; sections are consumed by name
+		last = off
+		switch name {
+		case "req-hdr", "res-hdr", "req-body", "res-body", "opt-body", "null-body":
+		default:
+			return nil, errICAPEncapsulated
+		}
+		if len(out) > 0 && isICAPBodySection(out[len(out)-1].name) {
+			return nil, errICAPEncapsulated // a body section must be last
+		}
 		out = append(out, icapSection{name: name})
 	}
-	return out
+	if !isICAPBodySection(out[len(out)-1].name) {
+		return nil, errICAPEncapsulated
+	}
+	return out, nil
 }
+
+func isICAPBodySection(name string) bool {
+	switch name {
+	case "req-body", "res-body", "opt-body", "null-body":
+		return true
+	}
+	return false
+}
+
+var errICAPEncapsulated = errors.New("ICAP Encapsulated header missing or malformed")
 
 var errICAPBodyTooLarge = errors.New("ICAP body exceeds MaxBody limit")
 
