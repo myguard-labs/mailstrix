@@ -324,14 +324,17 @@ func TestIsolatedLiveControls(t *testing.T) {
 
 func TestIsolatedLiveTimeoutNoncooperative(t *testing.T) {
 	d, names := liveIsolatedDocker(t, "PARITY_PROBE_IMAGE")
-	d.executionBudget = 2 * time.Second
+	// The budget starts at "probe-ready", so a slow container start on a loaded
+	// runner cannot expire it before the probe is running (C4 flake).
+	d.readyBudget = 2 * time.Second
 	started := time.Now()
 	b, status := d.launch(liveProbeInput(t, inertProbeRequest{Mode: "timeout"}))
 	if status != "timeout" || string(b) != "probe-ready" {
 		t.Fatalf("noncooperative probe did not reach timeout: status=%s output=%q", status, b)
 	}
-	if time.Since(started) > 25*time.Second {
-		t.Fatal("noncooperative worker exceeded enforced deadline and cleanup allowance")
+	// Host budget plus the two 5s cleanup calls is the enforced ceiling.
+	if limit := d.effectiveBudget() + 10*time.Second; time.Since(started) > limit {
+		t.Fatalf("noncooperative worker exceeded enforced deadline and cleanup allowance %s", limit)
 	}
 	assertLiveAbsent(t, d, *names)
 	t.Log("ready noncooperative worker killed; parent alive; owned containers absent")

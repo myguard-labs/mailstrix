@@ -214,6 +214,15 @@ func TestIsolatedProcessHelper(t *testing.T) {
 	case "wait":
 		time.Sleep(10 * time.Second)
 		os.Exit(1)
+	case "late-ready":
+		// A worker whose container start outlasts the budget, then turns
+		// noncooperative once ready.
+		time.Sleep(isolatedLateReadyDelay)
+		if _, err := os.Stdout.Write([]byte("probe-ready")); err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(10 * time.Second)
+		os.Exit(1)
 	case "error":
 		os.Exit(7)
 	case "stderr":
@@ -641,4 +650,63 @@ func TestIsolatedReportBudgets(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isolatedLateReadyDelay is longer than the ready budgets below, so a budget
+// that counted container start-up would expire before "probe-ready".
+const isolatedLateReadyDelay = 600 * time.Millisecond
+
+// C4: TestIsolatedLiveTimeoutNoncooperative flaked with status=timeout and no
+// output because the 2s execution budget also paid for container start-up on a
+// loaded runner. readyBudget runs from the worker's first output instead.
+func TestIsolatedReadyBudget(t *testing.T) {
+	data := []byte("inert")
+	s := sample{Format: "html", InputUnit: "file", Size: int64(len(data)), SHA256: digest(data)}
+	launch := func(d isolatedDocker) ([]byte, string) {
+		input, err := encodeIsolatedRequest(isolatedRequest{1, "scan", s.Format, s.InputUnit, s.Size, s.SHA256}, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.launch(input)
+	}
+	t.Run("slow start then noncooperative", func(t *testing.T) {
+		d, _ := fakeIsolatedDocker(t, "start", "late-ready", "empty", 0)
+		d.budget = 8 * time.Second
+		d.readyBudget = 300 * time.Millisecond
+		started := time.Now()
+		b, status := launch(d)
+		if status != "timeout" || string(b) != "probe-ready" {
+			t.Fatalf("status=%s output=%q, want timeout after probe-ready", status, b)
+		}
+		if el := time.Since(started); el >= 8*time.Second {
+			t.Fatalf("ready budget did not fire; host budget ended the run after %s", el)
+		}
+	})
+	t.Run("negative control: execution budget pays for start-up", func(t *testing.T) {
+		d, _ := fakeIsolatedDocker(t, "start", "late-ready", "empty", 0)
+		d.budget = 8 * time.Second
+		d.executionBudget = 300 * time.Millisecond
+		if b, status := launch(d); status != "timeout" || len(b) != 0 {
+			t.Fatalf("status=%s output=%q, want timeout before any output", status, b)
+		}
+	})
+	t.Run("boundary: worker finishes inside the budget", func(t *testing.T) {
+		d, _ := fakeIsolatedDocker(t, "", "", "empty", 0)
+		d.readyBudget = 5 * time.Second
+		if _, status := launch(d); status != "ok" {
+			t.Fatalf("status=%s, want ok", status)
+		}
+	})
+	t.Run("silent worker stays bounded by the host budget", func(t *testing.T) {
+		d, _ := fakeIsolatedDocker(t, "start", "wait", "empty", 0)
+		d.budget = time.Second
+		d.readyBudget = 100 * time.Millisecond
+		started := time.Now()
+		if b, status := launch(d); status != "timeout" || len(b) != 0 {
+			t.Fatalf("status=%s output=%q, want timeout with no output", status, b)
+		}
+		if el := time.Since(started); el >= 8*time.Second {
+			t.Fatalf("silent worker ran %s past the 1s host budget", el)
+		}
+	})
 }
