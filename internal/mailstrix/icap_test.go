@@ -363,7 +363,11 @@ func TestParseICAPEncapsulated(t *testing.T) {
 		{"req-hdr=0, res-hdr=100, res-body=512", []icapSection{{"req-hdr"}, {"res-hdr"}, {"res-body"}}},
 	}
 	for _, tc := range cases {
-		got := parseICAPEncapsulated(tc.in)
+		got, err := parseICAPEncapsulated(tc.in)
+		if err != nil {
+			t.Errorf("parseICAPEncapsulated(%q): unexpected error %v", tc.in, err)
+			continue
+		}
 		if len(got) != len(tc.want) {
 			t.Errorf("parseICAPEncapsulated(%q): got %v, want %v", tc.in, got, tc.want)
 			continue
@@ -1088,23 +1092,38 @@ func TestICAPShutdownDrainsRefusals(t *testing.T) {
 // the first (the leader) and waits for it.
 type slowEngine struct {
 	*fakeEngine
-	delay time.Duration
+	delay   time.Duration
+	entered chan struct{} // signalled once a scan is running
+}
+
+func newSlowEngine(fe *fakeEngine, delay time.Duration) *slowEngine {
+	return &slowEngine{fakeEngine: fe, delay: delay, entered: make(chan struct{}, 1)}
 }
 
 func (e *slowEngine) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
+	select {
+	case e.entered <- struct{}{}:
+	default:
+	}
 	time.Sleep(e.delay)
 	return e.fakeEngine.Scan(buf, meta)
 }
 
 // icapLeaderFollower sends two identical RESPMOD requests, the second while the
 // first is still scanning, and returns both responses.
-func icapLeaderFollower(t *testing.T, s *Server, body string) (leader, follower string) {
+func icapLeaderFollower(t *testing.T, s *Server, eng *slowEngine, body string) (leader, follower string) {
 	t.Helper()
 	addr := startTestICAPServer(t, s)
 	req := icapRESPMODRequest(addr, body, true)
 	done := make(chan string, 1)
 	go func() { done <- doICAPWithin(t, addr, req, 10*time.Second) }()
-	time.Sleep(200 * time.Millisecond)
+	// Send the follower only once the leader is inside Scan, so it must
+	// coalesce onto the running flight rather than lead or hit the cache.
+	select {
+	case <-eng.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader scan never started")
+	}
 	follower = doICAPWithin(t, addr, req, 10*time.Second)
 	return <-done, follower
 }
@@ -1136,9 +1155,9 @@ func doICAPWithin(t *testing.T, addr, req string, d time.Duration) string {
 // than BackendTimeout must not turn an identical follower into a 204 clean;
 // the follower waits and gets the same infected verdict.
 func TestICAPCoalescedFollowerGetsLeaderVerdict(t *testing.T) {
-	eng := &slowEngine{fakeEngine: &fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}, delay: 1500 * time.Millisecond}
+	eng := newSlowEngine(&fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}, 1500*time.Millisecond)
 	s := newTestServer(eng, "")
-	leader, follower := icapLeaderFollower(t, s, "slow malware payload")
+	leader, follower := icapLeaderFollower(t, s, eng, "slow malware payload")
 	for name, resp := range map[string]string{"leader": leader, "follower": follower} {
 		if !strings.HasPrefix(resp, "ICAP/1.0 200 OK") || !strings.Contains(resp, "MALWARE_TEST") {
 			t.Errorf("%s: want infected 200, got:\n%s", name, resp)
@@ -1147,17 +1166,22 @@ func TestICAPCoalescedFollowerGetsLeaderVerdict(t *testing.T) {
 	if n := eng.scans.Load(); n != 1 {
 		t.Errorf("scans = %d, want 1 (follower coalesced)", n)
 	}
+	// cacheCoalesced is approximate (flight.go): it can count the leader too,
+	// so require only that the coalesced path was taken.
+	if n := s.metrics.cacheCoalesced.Load(); n < 1 {
+		t.Errorf("cacheCoalesced = %d, want >= 1", n)
+	}
 }
 
 // TestICAPCoalescedFollowerTimeoutIs503: when the leader outlasts even the
 // whole request budget, the follower answers 503, never 204 clean. Boundary:
 // BackendTimeout and ScanTimeout at their smallest useful values.
 func TestICAPCoalescedFollowerTimeoutIs503(t *testing.T) {
-	eng := &slowEngine{fakeEngine: &fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}, delay: 3 * time.Second}
+	eng := newSlowEngine(&fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}, 3*time.Second)
 	s := newTestServer(eng, "")
 	s.cfg.BackendTimeout = 100 * time.Millisecond
 	s.cfg.ScanTimeout = 100 * time.Millisecond
-	leader, follower := icapLeaderFollower(t, s, "very slow malware payload")
+	leader, follower := icapLeaderFollower(t, s, eng, "very slow malware payload")
 	if !strings.HasPrefix(follower, "ICAP/1.0 503") {
 		t.Errorf("follower: want 503, got:\n%s", follower)
 	}
@@ -1169,10 +1193,73 @@ func TestICAPCoalescedFollowerTimeoutIs503(t *testing.T) {
 // TestICAPCoalescedCleanFollowerControl: a slow clean leader still gives the
 // follower a 204, so the wait does not turn clean mail into errors.
 func TestICAPCoalescedCleanFollowerControl(t *testing.T) {
-	eng := &slowEngine{fakeEngine: &fakeEngine{count: 1, fp: "fp"}, delay: 1500 * time.Millisecond}
+	eng := newSlowEngine(&fakeEngine{count: 1, fp: "fp"}, 1500*time.Millisecond)
 	s := newTestServer(eng, "")
-	leader, follower := icapLeaderFollower(t, s, "slow clean payload")
+	leader, follower := icapLeaderFollower(t, s, eng, "slow clean payload")
 	if !strings.HasPrefix(leader, "ICAP/1.0 204") || !strings.HasPrefix(follower, "ICAP/1.0 204") {
 		t.Errorf("clean: want 204/204, got leader:\n%s\nfollower:\n%s", leader, follower)
+	}
+}
+
+// TestParseICAPEncapsulatedRejectsMalformed (COR-14): every malformed form is
+// an error, never a silently shortened section list.
+func TestParseICAPEncapsulatedRejectsMalformed(t *testing.T) {
+	for _, in := range []string{
+		"",                                   // missing
+		"   ",                                // blank
+		"res-hdr",                            // no offset
+		"res-hdr=0, res-body=abc",            // non-numeric offset
+		"res-hdr=0, res-body=-1",             // negative offset
+		"res-hdr=100, res-body=0",            // decreasing offsets
+		"res-hdr=0, bogus-body=10",           // unknown section
+		"res-hdr=0",                          // no body section
+		"res-body=0, res-hdr=10",             // body not last
+		"res-hdr=0, res-body=5, null-body=9", // two body sections
+		"res-hdr=0,",                         // trailing empty entry
+	} {
+		if got, err := parseICAPEncapsulated(in); !errors.Is(err, errICAPEncapsulated) {
+			t.Errorf("parseICAPEncapsulated(%q) = %v, %v; want errICAPEncapsulated", in, got, err)
+		}
+	}
+	// Boundary: equal offsets (empty header section) are allowed.
+	if _, err := parseICAPEncapsulated("req-hdr=0, null-body=0"); err != nil {
+		t.Errorf("equal offsets rejected: %v", err)
+	}
+}
+
+// TestICAPEncapsulatedMissingOrMalformedIs400 (COR-14): a RESPMOD without a
+// valid Encapsulated header gets 400, and the connection is closed instead of
+// parsing the unread body as the next request.
+func TestICAPEncapsulatedMissingOrMalformedIs400(t *testing.T) {
+	eng := &fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}
+	s := newTestServer(eng, "")
+	addr := startTestICAPServer(t, s)
+	body := "malware payload"
+	chunk := fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(body), body)
+	for name, enc := range map[string]string{
+		"missing":   "",
+		"malformed": "Encapsulated: res-body\r\n",
+		"no-body":   "Encapsulated: res-hdr=0\r\n",
+	} {
+		req := "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\n" +
+			"Host: " + addr + "\r\n" +
+			"Allow: 204\r\n" + enc + "\r\n" + chunk +
+			// A pipelined OPTIONS must NOT be answered: the conn is dropped.
+			"OPTIONS icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n"
+		resp := doICAP(t, addr, req)
+		if !strings.HasPrefix(resp, "ICAP/1.0 400") {
+			t.Errorf("%s: want 400, got:\n%s", name, resp)
+		}
+		if strings.Count(resp, "ICAP/1.0 ") != 1 {
+			t.Errorf("%s: connection not closed after 400 (desync):\n%s", name, resp)
+		}
+	}
+	if n := eng.scans.Load(); n != 0 {
+		t.Errorf("scans = %d, want 0", n)
+	}
+	// Negative control: the same body with a valid header is scanned and blocked.
+	resp := doICAP(t, addr, icapRESPMODRequest(addr, body, true))
+	if !strings.HasPrefix(resp, "ICAP/1.0 200 OK") || !strings.Contains(resp, "MALWARE_TEST") {
+		t.Errorf("valid Encapsulated: want infected 200, got:\n%s", resp)
 	}
 }
