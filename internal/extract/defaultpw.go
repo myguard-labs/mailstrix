@@ -322,6 +322,7 @@ func emitDecrypted(res *Result, plaintext []byte, deadline time.Time) {
 // rc4MD5MakeKey derives the 16-byte RC4 key for a given password, salt, and
 // block counter. Faithful port of DocumentRC4._makekey (md5 variant).
 func rc4MD5MakeKey(password string, salt []byte, block uint32) []byte {
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	h0 := md5.Sum([]byte(pwUTF16LE(password))) //#nosec G401 -- MD5 required by MS-OFFCRYPTO §2.3.7.3; protocol-mandated
 	truncated := h0[:5]
 	// intermediateBuffer = (truncated + salt) repeated 16 times = 336 bytes
@@ -330,10 +331,12 @@ func rc4MD5MakeKey(password string, salt []byte, block uint32) []byte {
 	for i := 0; i < 16; i++ {
 		buf = append(buf, unit...)
 	}
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	h1 := md5.Sum(buf) //#nosec G401 -- protocol-mandated MD5
 	truncated2 := h1[:5]
 	var blockBytes [4]byte
 	binary.LittleEndian.PutUint32(blockBytes[:], block)
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	hfinal := md5.Sum(append(truncated2, blockBytes[:]...)) //#nosec G401 -- protocol-mandated MD5
 	return hfinal[:16]
 }
@@ -344,6 +347,7 @@ func rc4MD5MakeKey(password string, salt []byte, block uint32) []byte {
 // MD5(verifier) == verifierHash.
 func rc4MD5VerifyPW(password string, salt, encVerifier, encVerifierHash []byte) bool {
 	key := rc4MD5MakeKey(password, salt, 0)
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	c, err := rc4.NewCipher(key) //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
 	if err != nil {
 		return false
@@ -352,6 +356,7 @@ func rc4MD5VerifyPW(password string, salt, encVerifier, encVerifierHash []byte) 
 	c.XORKeyStream(verifier, encVerifier[:16])
 	verifierHash := make([]byte, 16)
 	c.XORKeyStream(verifierHash, encVerifierHash[:16])
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	actual := md5.Sum(verifier) //#nosec G401 -- protocol-mandated MD5
 	return string(actual[:]) == string(verifierHash)
 }
@@ -376,7 +381,8 @@ func rc4MD5Decrypt(password string, salt, ciphertext []byte) []byte {
 		}
 		chunk := ciphertext[start:end]
 		key := rc4MD5MakeKey(password, salt, uint32(blk)) //#nosec G115 -- blk bounded by ciphertext length
-		c, err := rc4.NewCipher(key)                      //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
+		// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
+		c, err := rc4.NewCipher(key) //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
 		if err != nil {
 			break
 		}
@@ -401,9 +407,11 @@ func rc4SHA1MakeKey(password string, salt []byte, keySize int, block uint32) []b
 	pw := []byte(pwUTF16LE(password))
 	// Salt can share its backing array with the encrypted verifier that follows
 	// it. Keep password concatenation from overwriting those caller-owned bytes.
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	h0 := sha1.Sum(append(salt[:len(salt):len(salt)], pw...)) //#nosec G401 -- protocol-mandated SHA1
 	var blockBytes [4]byte
 	binary.LittleEndian.PutUint32(blockBytes[:], block)
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	hfinal := sha1.Sum(append(h0[:], blockBytes[:]...)) //#nosec G401 -- protocol-mandated SHA1
 	if keySize == 40 {
 		key := make([]byte, 16)
@@ -419,6 +427,7 @@ func rc4SHA1MakeKey(password string, salt []byte, keySize int, block uint32) []b
 // encryptedVerifierHash (20 bytes); compare SHA1(verifier) == verifierHash.
 func rc4SHA1VerifyPW(password string, salt, encVerifier, encVerifierHash []byte, keySize int) bool {
 	key := rc4SHA1MakeKey(password, salt, keySize, 0)
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	c, err := rc4.NewCipher(key) //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
 	if err != nil {
 		return false
@@ -431,6 +440,7 @@ func rc4SHA1VerifyPW(password string, salt, encVerifier, encVerifierHash []byte,
 	}
 	verifierHash := make([]byte, hashLen)
 	c.XORKeyStream(verifierHash, encVerifierHash[:hashLen])
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	actual := sha1.Sum(verifier) //#nosec G401 -- protocol-mandated SHA1
 	return string(actual[:]) == string(verifierHash[:hashLen])
 }
@@ -454,7 +464,8 @@ func rc4SHA1Decrypt(password string, salt []byte, keySize int, ciphertext []byte
 		}
 		chunk := ciphertext[start:end]
 		key := rc4SHA1MakeKey(password, salt, keySize, uint32(blk)) //#nosec G115 -- blk bounded by ciphertext length
-		c, err := rc4.NewCipher(key)                                //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
+		// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
+		c, err := rc4.NewCipher(key) //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
 		if err != nil {
 			break
 		}
@@ -767,6 +778,7 @@ func standardMakeKey(password string, info standardInfo) []byte {
 	const spinCount = 50000
 	salt := info.salt
 	pw := []byte(pwUTF16LE(password))
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	h := sha1.Sum(append(salt, pw...)) //#nosec G401 -- protocol-mandated SHA1
 	for i := 0; i < spinCount; i++ {
 		var iBytes [4]byte
@@ -774,11 +786,13 @@ func standardMakeKey(password string, info standardInfo) []byte {
 		buf := make([]byte, 4+len(h))
 		copy(buf, iBytes[:])
 		copy(buf[4:], h[:])
+		// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 		h = sha1.Sum(buf) //#nosec G401 -- protocol-mandated SHA1
 	}
 	// Block 0 finalization.
 	var blockBytes [4]byte
 	// blockBytes stays zero for block 0
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	hfinal := sha1.Sum(append(h[:], blockBytes[:]...)) //#nosec G401 -- protocol-mandated SHA1
 
 	cbHash := 20 // SHA1 digest size
@@ -791,6 +805,7 @@ func standardMakeKey(password string, info standardInfo) []byte {
 			buf1[i] = 0x36
 		}
 	}
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	x1 := sha1.Sum(buf1) //#nosec G401 -- protocol-mandated SHA1
 	buf2 := make([]byte, 64)
 	for i := 0; i < 64; i++ {
@@ -800,6 +815,7 @@ func standardMakeKey(password string, info standardInfo) []byte {
 			buf2[i] = 0x5C
 		}
 	}
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	x2 := sha1.Sum(buf2) //#nosec G401 -- protocol-mandated SHA1
 	x3 := append(x1[:], x2[:]...)
 	n := info.keySize / 8
@@ -820,6 +836,7 @@ func standardVerifyPW(password string, info standardInfo) bool {
 	// AES-ECB: decrypt encryptedVerifier (16 bytes)
 	verifier := make([]byte, 16)
 	block.Decrypt(verifier, info.encVerifier[:16])
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
 	expectedHash := sha1.Sum(verifier) //#nosec G401 -- protocol-mandated SHA1
 
 	// AES-ECB: decrypt encryptedVerifierHash (first 16 bytes, take first 20 bytes of result)

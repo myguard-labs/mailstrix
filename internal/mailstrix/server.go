@@ -976,6 +976,7 @@ func writeRaw(w http.ResponseWriter, code int, ctype string, body []byte) {
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(code)
+	// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter -- application/json or text/plain API response, not an HTML sink
 	_, _ = w.Write(body) // #nosec G705 -- application/json or text/plain API response, not an HTML/XSS sink
 }
 

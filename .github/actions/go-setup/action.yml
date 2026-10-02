@@ -24,4 +24,9 @@ runs:
         cache-dependency-path: go.sum
     - name: install libyara (CGO dep) ${{ inputs.packages }}
       shell: bash
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev ${{ inputs.packages }}
+      env:
+        EXTRA_PACKAGES: ${{ inputs.packages }}
+      run: |
+        # EXTRA_PACKAGES is a space-separated package list; word splitting is intended.
+        # shellcheck disable=SC2086
+        sudo apt-get update && sudo apt-get install -y --no-install-recommends libyara-dev $EXTRA_PACKAGES
