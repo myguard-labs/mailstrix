@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,7 @@ type isolatedDocker struct {
 	command         func(context.Context, ...string) *exec.Cmd // tests only
 	budget          time.Duration                              // tests only
 	executionBudget time.Duration                              // tests only; starts after verified setup
+	readyBudget     time.Duration                              // tests only; starts at the worker's first stdout byte
 }
 
 type isolatedRuntime struct {
@@ -60,6 +62,11 @@ func (d isolatedDocker) commandContext(ctx context.Context, args ...string) *exe
 // All daemon operations, including setup and cleanup, bound both output streams.
 // Client cancellation is followed by daemon-owned container removal in launch.
 func (d isolatedDocker) call(ctx context.Context, input []byte, args ...string) ([]byte, string) {
+	return d.callNotify(ctx, input, nil, args...)
+}
+
+// callNotify is call with an optional hook run once, on the first stdout write.
+func (d isolatedDocker) callNotify(ctx context.Context, input []byte, firstOutput func(), args ...string) ([]byte, string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stdout := &boundedComparatorOutput{limit: isolatedOutputLimit, cancel: cancel}
@@ -67,11 +74,14 @@ func (d isolatedDocker) call(ctx context.Context, input []byte, args ...string) 
 	cmd := d.commandContext(ctx, args...)
 	cmd.Stdin = bytes.NewReader(input)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if firstOutput != nil {
+		cmd.Stdout = &firstWriteNotifier{w: stdout, notify: firstOutput}
+	}
 	err := cmd.Run()
 	switch {
 	case stdout.overflow || stderr.overflow:
 		return nil, "output_limit"
-	case ctx.Err() != nil:
+	case ctx.Err() != nil && err != nil:
 		return stdout.Bytes(), "timeout"
 	case err != nil || stderr.Len() > 0:
 		return stdout.Bytes(), "execution_error"
@@ -196,7 +206,34 @@ func (d isolatedDocker) launch(input []byte) (output []byte, status string) {
 	if d.executionBudget != 0 {
 		executionCtx, executionCancel = context.WithTimeout(ctx, d.executionBudget)
 	}
-	output, status = d.call(executionCtx, input, "start", "--attach", "--interactive", name)
+	var firstOutput func()
+	if d.readyBudget != 0 {
+		// Container start-up is excluded: the budget runs from the worker's
+		// first output, so a slow runc start cannot expire it early.
+		var readyCancel context.CancelFunc
+		executionCtx, readyCancel = context.WithCancel(executionCtx)
+		var timer *time.Timer
+		var once sync.Once
+		var mu sync.Mutex
+		firstOutput = func() {
+			once.Do(func() {
+				mu.Lock()
+				timer = time.AfterFunc(d.readyBudget, readyCancel)
+				mu.Unlock()
+			})
+		}
+		outer := executionCancel
+		executionCancel = func() {
+			mu.Lock()
+			if timer != nil {
+				timer.Stop()
+			}
+			mu.Unlock()
+			readyCancel()
+			outer()
+		}
+	}
+	output, status = d.callNotify(executionCtx, input, firstOutput, "start", "--attach", "--interactive", name)
 	executionCancel()
 	if status == "execution_error" {
 		stateBytes, stateStatus := d.call(ctx, nil, "inspect", "--format={{json .State}}", name)
@@ -274,4 +311,16 @@ func (d isolatedDocker) observe(s sample, data []byte) observation {
 		return observation{Status: "identity_error"}
 	}
 	return observation{Status: r.Status, Matches: r.Symbols}
+}
+
+// firstWriteNotifier runs notify once, before the first write reaches w.
+type firstWriteNotifier struct {
+	w      io.Writer
+	notify func()
+	once   sync.Once
+}
+
+func (n *firstWriteNotifier) Write(p []byte) (int, error) {
+	n.once.Do(n.notify)
+	return n.w.Write(p)
 }
