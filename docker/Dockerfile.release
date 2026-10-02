@@ -12,7 +12,8 @@
 # this file then consumes).
 #
 # Requires VERSION to name a published release whose assets include
-# strixd-linux-${TARGETARCH} and strix-scan-linux-${TARGETARCH}.
+# strixd-linux-${TARGETARCH} and strix-scan-linux-${TARGETARCH}; strix-milter-linux-
+# ${TARGETARCH} is shipped too when the release has it.
 
 ARG YARA_VERSION=4.5.2
 
@@ -32,18 +33,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pulls prebuilt artifacts, so checksum-gate them). SHA256SUMS lists every asset;
 # filter to just the two we fetched and check.
 WORKDIR /out
+# strix-milter is optional: releases before it shipped (<= 1.2.0) lack the
+# asset, so it is fetched (and checksum-verified) only when SHA256SUMS lists it.
+# Every fetched binary must have exactly one SHA256SUMS line and pass it.
+# bins is a space-separated list: word splitting is intended.
+# hadolint ignore=SC2086
 RUN VER="${VERSION#v}" \
     && base="https://github.com/myguard-labs/mailstrix/releases/download/v${VER}" \
+    && curl -fsSL "${base}/SHA256SUMS"                      -o SHA256SUMS \
     && curl -fsSL "${base}/strixd-linux-${TARGETARCH}"      -o "strixd-linux-${TARGETARCH}" \
     && curl -fsSL "${base}/strix-scan-linux-${TARGETARCH}" -o "strix-scan-linux-${TARGETARCH}" \
-    && curl -fsSL "${base}/SHA256SUMS"                      -o SHA256SUMS \
-    && grep -E "  (strixd|strix-scan)-linux-${TARGETARCH}\$" SHA256SUMS > SHA256SUMS.arch \
-    && test -s SHA256SUMS.arch \
+    && bins="strixd strix-scan" \
+    && if grep -qE "  strix-milter-linux-${TARGETARCH}\$" SHA256SUMS; then \
+         curl -fsSL "${base}/strix-milter-linux-${TARGETARCH}" -o "strix-milter-linux-${TARGETARCH}" \
+         && bins="${bins} strix-milter"; \
+       fi \
+    && grep -E "  (strixd|strix-scan|strix-milter)-linux-${TARGETARCH}\$" SHA256SUMS > SHA256SUMS.all \
+    && for b in ${bins}; do grep -E "  ${b}-linux-${TARGETARCH}\$" SHA256SUMS.all; done > SHA256SUMS.arch \
+    && test "$(wc -l < SHA256SUMS.arch)" -eq "$(echo ${bins} | wc -w)" \
     && sha256sum -c SHA256SUMS.arch \
-    && mv "strixd-linux-${TARGETARCH}"      strixd \
-    && mv "strix-scan-linux-${TARGETARCH}" strix-scan \
-    && rm -f SHA256SUMS SHA256SUMS.arch \
-    && chmod +x strixd strix-scan
+    && for b in ${bins}; do mv "${b}-linux-${TARGETARCH}" "${b}"; done \
+    && mkdir -p bin && mv ${bins} bin/ \
+    && rm -f SHA256SUMS SHA256SUMS.all SHA256SUMS.arch \
+    && chmod +x bin/*
 # Ship the NOTICE alongside the binary (final image parity with docker/Dockerfile).
 COPY NOTICE /out/NOTICE
 
@@ -71,8 +83,9 @@ RUN ./bootstrap.sh \
 # yarac (a .yac is version- AND arch-locked to its compiler). This is the one
 # stage that runs target-arch code under a multi-arch bake.
 FROM yara AS rules
+# curl and ca-certificates are inherited from the yara stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates unzip python3 \
+        unzip python3 \
     && rm -rf /var/lib/apt/lists/*
 # filter-rules.py beside fetch-rules.sh (resolved via $(dirname "$0")) for the
 # `mail` profile per-rule mail-relevance/license filter.
@@ -120,7 +133,9 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
 
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
-COPY --from=fetch /out/strixd /usr/local/bin/strixd
+# Same three binaries as docker/Dockerfile's final image (strix-milter only
+# when the release carries it), so :latest and :testing behave alike.
+COPY --from=fetch /out/bin/ /usr/local/bin/
 COPY --from=rules /rules/compiled.yac /usr/share/mailstrix/compiled.yac
 COPY --from=rules /rules/local.yac /usr/share/mailstrix/local.yac
 COPY --from=rules /rules/sources.json /usr/share/mailstrix/sources.json
