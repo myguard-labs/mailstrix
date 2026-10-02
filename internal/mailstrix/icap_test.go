@@ -1083,3 +1083,96 @@ func TestICAPShutdownDrainsRefusals(t *testing.T) {
 		t.Fatal("ShutdownICAP did not drain before the deadline")
 	}
 }
+
+// slowEngine delays every scan so a second identical request coalesces onto
+// the first (the leader) and waits for it.
+type slowEngine struct {
+	*fakeEngine
+	delay time.Duration
+}
+
+func (e *slowEngine) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
+	time.Sleep(e.delay)
+	return e.fakeEngine.Scan(buf, meta)
+}
+
+// icapLeaderFollower sends two identical RESPMOD requests, the second while the
+// first is still scanning, and returns both responses.
+func icapLeaderFollower(t *testing.T, s *Server, body string) (leader, follower string) {
+	t.Helper()
+	addr := startTestICAPServer(t, s)
+	req := icapRESPMODRequest(addr, body, true)
+	done := make(chan string, 1)
+	go func() { done <- doICAPWithin(t, addr, req, 10*time.Second) }()
+	time.Sleep(200 * time.Millisecond)
+	follower = doICAPWithin(t, addr, req, 10*time.Second)
+	return <-done, follower
+}
+
+// doICAPWithin is doICAP with a caller-chosen connection deadline, for scans
+// that legitimately outlast doICAP's 5 s.
+func doICAPWithin(t *testing.T, addr, req string, d time.Duration) string {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Error(err)
+		return ""
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(d))
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Error(err)
+		return ""
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.CloseWrite()
+	}
+	var sb strings.Builder
+	_, _ = io.Copy(&sb, conn)
+	return sb.String()
+}
+
+// TestICAPCoalescedFollowerGetsLeaderVerdict (COR-02): a leader scan longer
+// than BackendTimeout must not turn an identical follower into a 204 clean;
+// the follower waits and gets the same infected verdict.
+func TestICAPCoalescedFollowerGetsLeaderVerdict(t *testing.T) {
+	eng := &slowEngine{fakeEngine: &fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}, delay: 1500 * time.Millisecond}
+	s := newTestServer(eng, "")
+	leader, follower := icapLeaderFollower(t, s, "slow malware payload")
+	for name, resp := range map[string]string{"leader": leader, "follower": follower} {
+		if !strings.HasPrefix(resp, "ICAP/1.0 200 OK") || !strings.Contains(resp, "MALWARE_TEST") {
+			t.Errorf("%s: want infected 200, got:\n%s", name, resp)
+		}
+	}
+	if n := eng.scans.Load(); n != 1 {
+		t.Errorf("scans = %d, want 1 (follower coalesced)", n)
+	}
+}
+
+// TestICAPCoalescedFollowerTimeoutIs503: when the leader outlasts even the
+// whole request budget, the follower answers 503, never 204 clean. Boundary:
+// BackendTimeout and ScanTimeout at their smallest useful values.
+func TestICAPCoalescedFollowerTimeoutIs503(t *testing.T) {
+	eng := &slowEngine{fakeEngine: &fakeEngine{count: 1, fp: "fp", matches: []Match{{Rule: "MALWARE_TEST"}}}, delay: 3 * time.Second}
+	s := newTestServer(eng, "")
+	s.cfg.BackendTimeout = 100 * time.Millisecond
+	s.cfg.ScanTimeout = 100 * time.Millisecond
+	leader, follower := icapLeaderFollower(t, s, "very slow malware payload")
+	if !strings.HasPrefix(follower, "ICAP/1.0 503") {
+		t.Errorf("follower: want 503, got:\n%s", follower)
+	}
+	if !strings.HasPrefix(leader, "ICAP/1.0 200 OK") {
+		t.Errorf("leader: want infected 200, got:\n%s", leader)
+	}
+}
+
+// TestICAPCoalescedCleanFollowerControl: a slow clean leader still gives the
+// follower a 204, so the wait does not turn clean mail into errors.
+func TestICAPCoalescedCleanFollowerControl(t *testing.T) {
+	eng := &slowEngine{fakeEngine: &fakeEngine{count: 1, fp: "fp"}, delay: 1500 * time.Millisecond}
+	s := newTestServer(eng, "")
+	leader, follower := icapLeaderFollower(t, s, "slow clean payload")
+	if !strings.HasPrefix(leader, "ICAP/1.0 204") || !strings.HasPrefix(follower, "ICAP/1.0 204") {
+		t.Errorf("clean: want 204/204, got leader:\n%s\nfollower:\n%s", leader, follower)
+	}
+}

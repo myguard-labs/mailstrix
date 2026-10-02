@@ -363,11 +363,12 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		return icapWrite200Clean(w, s.engine.Fingerprint())
 	}
 
-	// Admission gate (same budget as /scan). Bound the wait: the ICAP conn has no
-	// request-scoped context like the HTTP path (server.go:476), so without a
-	// timeout a stuck acquire on a dead follower pins an admission slot for the
-	// full scan lifetime. BackendTimeout matches the scan budget.
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.BackendTimeout)
+	// The ICAP conn has no request-scoped context like the HTTP path
+	// (server.go:476), so bound the request here. Slot acquisition is already
+	// capped at BackendTimeout by acquireOn; the context must also outlive a
+	// leader's whole scan, or a coalesced follower gives up after BackendTimeout
+	// while an identical leader is still scanning (COR-02).
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.BackendTimeout+s.cfg.ScanTimeout+clamdScanSlack)
 	defer cancel()
 	if !s.acquireOn(ctx, s.admit) {
 		s.metrics.busy.Add(1)
@@ -382,6 +383,13 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	icapMeta := ScanMeta{RawKey: streamDedupKey(buf)}
 	key := fp + ":icap:" + string(icapMeta.RawKey[:])
 	matches, cacheStatus := s.lookupOrScan(ctx, key, buf, icapMeta)
+	if cacheStatus == "canceled" {
+		// A follower that stopped waiting on its leader has no verdict: answer
+		// 503 so the client retries or applies its own policy, never 204 clean.
+		s.errf("ICAP %s %dB 503: gave up waiting on coalesced scan", method, len(buf))
+		_, _ = io.WriteString(w, icapProtoVersion+" 503 Service Unavailable\r\n\r\n")
+		return errors.New("icap coalesced wait timed out")
+	}
 	actionable := actionableMatches(matches)
 
 	if len(actionable) > 0 {
