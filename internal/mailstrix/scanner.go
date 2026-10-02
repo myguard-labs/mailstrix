@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"os"
@@ -1490,7 +1491,16 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	// Pre-extract any OLE2/OOXML macro source and account for it. The flags feed
 	// /metrics so this path is observable; the streams are scanned below. The
 	// same overall deadline bounds extraction time, not just the libyara scans.
-	xopts := profile.ExtractOptions(deadline)
+	// PERF-50: extraction gets at most half of the budget REMAINING after the raw
+	// scan, so a container padded with members that deflate to almost nothing
+	// but are slow to unpack/decode cannot spend the whole budget before a single
+	// extracted stream is scanned (the dropper member would then be dropped with
+	// err=nil and cached clean).
+	extractDeadline := deadline
+	if !deadline.IsZero() {
+		extractDeadline = time.Now().Add(time.Until(deadline) / 2)
+	}
+	xopts := profile.ExtractOptions(extractDeadline)
 	if s.archivePW {
 		// Effective candidate list, ORDERED most-signal-first so the size cap drops
 		// the low-signal tail: per-message candidates (body-header passwords, then
@@ -1506,6 +1516,12 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		xopts.ArchivePWEnabled = len(xopts.PWCandidates) > 0
 	}
 	res := extract.ExtractWithOptions(buf, xopts)
+	// Extractors stop between items once their deadline passes, so reaching it
+	// means members/blobs may have been left unextracted: the verdict is partial.
+	incomplete := !extractDeadline.IsZero() && !time.Now().Before(extractDeadline)
+	if incomplete {
+		s.logf("extraction budget exhausted; scan result is incomplete")
+	}
 	if res.IsDoc {
 		s.exDocs.Add(1)
 	}
@@ -1627,6 +1643,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		if !deadline.IsZero() {
 			if budget = time.Until(deadline); budget <= 0 {
 				s.logf("scan budget exhausted; %d streams + %d markers left unscanned", len(res.Streams), len(res.Markers))
+				incomplete = true
 				return true
 			}
 		}
@@ -1689,6 +1706,10 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		m, serr := s.scanOne(streamRules, stream, vars, budget)
 		if serr != nil {
 			completionErr = serr
+			// This stream went unscanned, so the verdict is partial whatever the
+			// clock says: libyara takes whole seconds, so a native timeout can
+			// fire while the shared deadline has not passed yet.
+			incomplete = true
 			s.logf("scan of extracted stream failed (raw verdict kept): %v", serr)
 			return false
 		}
@@ -1714,8 +1735,21 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		}
 		return false
 	}
-	for i, stream := range res.Streams {
-		if scanExtracted(stream, streamKeys[i], false) {
+	// PERF-50: scan real content (members, macros, objects) before the trailing
+	// static-decode blobs, and the real content smallest-first, so padding
+	// members cannot spend the budget ahead of a small dropper. The stable sort
+	// keeps extractor order among equal sizes.
+	order := make([]int, len(res.Streams))
+	for i := range order {
+		order[i] = i
+	}
+	if nReal := min(res.ContentStreams, len(res.Streams)); nReal > 1 {
+		sort.SliceStable(order[:nReal], func(a, b int) bool {
+			return len(res.Streams[order[a]]) < len(res.Streams[order[b]])
+		})
+	}
+	for _, i := range order {
+		if scanExtracted(res.Streams[i], streamKeys[i], false) {
 			break
 		}
 	}
@@ -1855,6 +1889,12 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		}
 	}
 	out = s.applyResponseTags(out)
+	if incomplete {
+		out = append(out, scanIncompleteMatch())
+		if completionErr == nil {
+			completionErr = ErrScanIncomplete
+		}
+	}
 	if meta.requireComplete {
 		// Extraction or the last native/feed call may consume the budget without
 		// another stream reaching the pre-scan check. Never certify that as a
@@ -1873,7 +1913,37 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	if rawErr != nil && len(out) == 0 {
 		return nil, rawErr
 	}
+	if incomplete {
+		return out, ErrScanIncomplete
+	}
 	return out, nil
+}
+
+// ErrScanIncomplete is returned by Scan, together with the matches it did
+// recover, when the wall-clock budget ran out before extraction finished or
+// before every extracted stream/marker was scanned. The matches are real but
+// the absence of one proves nothing, so callers must not cache the result as a
+// full verdict (PERF-50).
+var ErrScanIncomplete = errors.New("scan incomplete: budget exhausted before every extracted stream was scanned")
+
+// scanIncompleteRule names the synthetic SCAN-INCOMPLETE marker match appended
+// to a partial result, so the partial scan is visible in the response, the
+// rspamd history and the logs.
+const scanIncompleteRule = "MAILSTRIX_SCAN_INCOMPLETE"
+
+// scanIncompleteMatch builds the SCAN-INCOMPLETE marker. It is log-only
+// (mailstrix_allow=1, the same 0-weight route the rule allowlist uses): a slow
+// benign attachment must not be scored or reported as infected; mapping a
+// partial scan to an "unknown" verdict is the consumers' job.
+func scanIncompleteMatch() Match {
+	return Match{
+		Rule: scanIncompleteRule,
+		Tags: []string{"scan-incomplete"},
+		Meta: map[string]string{
+			"description":     "SCAN-INCOMPLETE: scan budget exhausted before every extracted stream was scanned",
+			"mailstrix_allow": "1",
+		},
+	}
 }
 
 // filterDenied applies the rule deny/allow lists to a match set. Denylisted rule
@@ -1933,6 +2003,15 @@ func (s *Scanner) applyResponseTags(in []Match) []Match {
 
 func matchIsLogOnly(m Match) bool {
 	return m.Meta != nil && (m.Meta["mailstrix_canary"] == "1" || m.Meta["mailstrix_allow"] == "1")
+}
+
+func hasActionable(matches []Match) bool {
+	for _, m := range matches {
+		if !matchIsLogOnly(m) {
+			return true
+		}
+	}
+	return false
 }
 
 func actionableMatches(matches []Match) []Match {
@@ -2054,6 +2133,11 @@ func (s *Scanner) MBazaarMetrics() mbazaar.Metrics {
 // so a buffer with no overrides keeps the cheaper rules.ScanMem path and only a
 // scan that actually sets a variable allocates a Scanner.
 func (s *Scanner) scanOne(rules *yara.Rules, buf []byte, vars scanVars, timeout time.Duration) ([]Match, error) {
+	// libyara takes whole seconds and treats 0 as "no limit", so a sub-second
+	// remaining budget would otherwise make this scan unbounded (PERF-50).
+	if timeout > 0 && timeout < time.Second {
+		timeout = time.Second
+	}
 	var mr yara.MatchRules
 	if vars.needsScanner() {
 		sc, gen, err := s.getScanner(rules)

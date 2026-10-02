@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -633,6 +634,13 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta 
 			defer func() { <-s.sem }()
 			return s.dispatch(buf, meta)
 		}()
+		if errors.Is(scanErr, ErrScanIncomplete) {
+			// PERF-50: a partial scan's recovered matches (and its log-only
+			// SCAN-INCOMPLETE marker) are returned, but never cached: caching
+			// would pin a possibly-missed dropper as clean for the whole TTL.
+			s.errf("/scan %dB scan incomplete (not cached): %v", len(buf), scanErr)
+			return scanned, false
+		}
 		if scanErr != nil {
 			// Fail open: a scan error is "no match" to the plugin so a scanner
 			// problem never blocks mail. A failed scan is NOT cached (don't

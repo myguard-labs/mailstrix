@@ -413,6 +413,10 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 		meta := ScanMeta{RawKey: streamDedupKey(body),
 			Effort: ResolveEffortLevel(0, false, c.s.autoEnvDefault(true), c.s.cfg.EffortMax)}
 		matches, err := c.s.dispatch(body, meta)
+		if errors.Is(err, ErrScanIncomplete) && hasActionable(matches) {
+			// A partial scan that still found something is a real detection.
+			err = nil
+		}
 		if err != nil {
 			c.s.metrics.errors.Add(1)
 			c.s.errf("clamd scan failed: %q", err)
@@ -424,14 +428,7 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 					c.s.vlogf("clamd %dB matches=%q", len(body), ruleNames(matches))
 				}
 			}
-			actionable := false
-			for _, match := range matches {
-				if !matchIsLogOnly(match) {
-					actionable = true
-					break
-				}
-			}
-			if actionable {
+			if hasActionable(matches) {
 				result <- "stream: Mailstrix.Match FOUND"
 			} else {
 				result <- "stream: OK"
