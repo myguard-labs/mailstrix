@@ -179,3 +179,27 @@ func TestExtractDistinctURLsStillCapped(t *testing.T) {
 		t.Fatalf("defanged duplicate repeated: %+v", got)
 	}
 }
+
+// TestNormalizeHTTPURLTrailingDotHost (COR-12): a root-dot FQDN normalizes to
+// the same URL and host as the plain name, so feed lookups match.
+func TestNormalizeHTTPURLTrailingDotHost(t *testing.T) {
+	wantNorm, wantHost, _ := urlcand.NormalizeHTTPURL("http://evil.com/x.exe")
+	for _, raw := range []string{
+		"http://evil.com./x.exe",
+		"http://EVIL.com../x.exe", // boundary: repeated dots
+		"http://evil.com.:80/x.exe",
+	} {
+		norm, host, _ := urlcand.NormalizeHTTPURL(raw)
+		if norm != wantNorm || host != wantHost {
+			t.Errorf("%s -> (%q, %q), want (%q, %q)", raw, norm, host, wantNorm, wantHost)
+		}
+	}
+	// Malformed: a host made only of dots is rejected, not normalized to "".
+	if norm, host, _ := urlcand.NormalizeHTTPURL("http://./x.exe"); norm != "" || host != "" {
+		t.Errorf("dot-only host -> (%q, %q), want rejection", norm, host)
+	}
+	// Negative: an inner dot is not touched.
+	if _, host, _ := urlcand.NormalizeHTTPURL("http://a.evil.com/x"); host != "a.evil.com" {
+		t.Errorf("inner dots changed: host %q", host)
+	}
+}
