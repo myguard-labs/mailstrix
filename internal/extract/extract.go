@@ -406,10 +406,21 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 	res.childOpts = opts
 	// oleparse walks attacker-controlled binary offsets; a malformed document can
 	// drive it to panic. Recover and mark it so the caller still scans raw bytes.
+	// preDecodeLen is the Streams length before the static-decode pass; -1 until
+	// that pass starts (then every stream so far is format-extractor content).
+	preDecodeLen := -1
 	defer func() {
 		if recover() != nil {
 			res.Failed = true
 			res.Panicked = true
+			// Run the same finaliser as the normal exit so PURE markers emitted
+			// before the panic still reach the Markers channel instead of being
+			// dropped from Streams by the scanner's marker filter (COR-17). A
+			// panic inside the finaliser itself only loses the finalisation.
+			func() {
+				defer func() { _ = recover() }()
+				finalizeStreams(&res, preDecodeLen)
+			}()
 		}
 	}()
 
@@ -541,7 +552,10 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 	// reversed payload hidden in a script body or a decompressed macro is decoded
 	// and re-scanned. Snapshotted internally so decoded blobs are not re-decoded
 	// (depth cap 1). Best-effort; binary container bytes are skipped.
-	preDecodeLen := len(res.Streams)
+	if afterFormatHook != nil {
+		afterFormatHook(&res)
+	}
+	preDecodeLen = len(res.Streams)
 	fromEncoded(buf, &res, opts)
 
 	// Base64-PE carving: the decode pass above emits a pad-prefixed PE as a stream
@@ -555,12 +569,17 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 	// overlays, CLR headers and ELF magic.
 	analyzeBinaries(buf, &res)
 
-	// Split the synthetic PURE markers out of Streams into the out-of-band Markers
-	// channel (PLAN-marker-channel Phase 1). Done here at the single exit so every
-	// emitter is covered regardless of format path, and AFTER the in-extraction
-	// has*Marker / countXLMMarker helpers have run against Streams. decodeMoved
-	// keeps DecodedStreams exact: an MSD-DEEPDECODE marker counted into that total
-	// is no longer in Streams, so subtract it.
+	finalizeStreams(&res, preDecodeLen)
+	return res
+}
+
+// afterFormatHook, when set by a test, runs between format extraction and the
+// static-decode pass (panic-injection seam for COR-17). Always nil in production.
+var afterFormatHook func(*Result)
+
+// finalizeStreams is the single exit step of ExtractWithOptions, shared by
+// the normal return and the panic-recover path.
+func finalizeStreams(res *Result, preDecodeLen int) {
 	// Co-locate the scattered XLM markers into one document-level buffer so the
 	// multi-marker stacker rules can satisfy their conjunctions (markers are
 	// emitted as separate Streams entries, each scanned independently — the same
@@ -580,16 +599,24 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		res.Streams = append(res.Streams, bs)
 	}
 
+	if preDecodeLen < 0 || preDecodeLen > len(res.Streams) {
+		preDecodeLen = len(res.Streams)
+	}
 	for _, s := range res.Streams[:preDecodeLen] {
 		if !isPureMarker(s) {
 			res.ContentStreams++
 		}
 	}
+	// Split the synthetic PURE markers out of Streams into the out-of-band Markers
+	// channel (PLAN-marker-channel Phase 1). Done here at the single exit so every
+	// emitter is covered regardless of format path, and AFTER the in-extraction
+	// has*Marker / countXLMMarker helpers have run against Streams. decodeMoved
+	// keeps DecodedStreams exact: an MSD-DEEPDECODE marker counted into that total
+	// is no longer in Streams, so subtract it.
 	content, markers, decodeMoved := splitPureMarkers(res.Streams)
 	res.Streams = content
 	res.Markers = markers
 	res.DecodedStreams -= decodeMoved
-	return res
 }
 
 // expired reports whether the extraction deadline has passed. A zero deadline
