@@ -256,6 +256,10 @@ type Result struct {
 	// IsDoc is true when buf was a recognised OLE2/OOXML container (magic hit),
 	// whether or not any macro was found.
 	IsDoc bool
+	// TopType names the type the top-level dispatch recognised buf as (one of
+	// the TopType* constants; "" when buf was not a container). Unlike the Is*
+	// flags it is never set by a nested member, so it describes buf itself.
+	TopType string
 	// Encrypted is true for an ECMA-376 encrypted OOXML (an OLE2 wrapper holding
 	// EncryptionInfo/EncryptedPackage). The real document is AES-wrapped, so no
 	// macros are extractable here — we flag it but do not decrypt (that needs a
@@ -362,6 +366,20 @@ func Extract(buf []byte, deadline time.Time) Result {
 	return ExtractWithOptions(buf, FullOptions(deadline))
 }
 
+// Result.TopType values: the container type the top-level dispatch matched.
+const (
+	TopTypeOLE           = "ole"
+	TopTypeZip           = "zip"
+	TopTypeArchive       = "archive"
+	TopTypePDF           = "pdf"
+	TopTypeRTF           = "rtf"
+	TopTypeLNK           = "lnk"
+	TopTypeOneNote       = "onenote"
+	TopTypeTNEF          = "tnef"
+	TopTypeSLK           = "slk"
+	TopTypeSpreadsheetML = "spreadsheetml"
+)
+
 // ExtractWithOptions reports the plaintext hidden inside an OLE2/OOXML container —
 // the decompressed VBA macro source — plus flags describing what the buffer was.
 // For anything that is not a recognised container it returns the zero Result
@@ -398,9 +416,11 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 
 	switch {
 	case bytes.HasPrefix(buf, oleMagic):
+		res.TopType = TopTypeOLE
 		res.IsDoc = true
 		fromOLE(buf, &res, b, 0, deadline)
 	case bytes.HasPrefix(buf, zipMagic):
+		res.TopType = TopTypeZip
 		res.IsDoc = true // zip magic matched — a container attempt (per Result.IsDoc)
 		// A zip is either an OOXML/ODF Office document (handle via the macro path
 		// only — dumping its parts would scan ordinary body XML and invite FPs) or
@@ -420,39 +440,46 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// A non-zip archive (gz/7z/rar). Unpack members (recursing into nested
 		// archives/containers) so a dropped payload is scanned, not just the
 		// opaque outer bytes.
+		res.TopType = TopTypeArchive
 		res.IsDoc = true
 		fromArchive(buf, &res, b, 0, deadline)
 	case isPDF(buf):
 		// A PDF: inflate its FlateDecode object streams so hidden JS / actions /
 		// embedded files are scanned, not buried in compressed objects.
+		res.TopType = TopTypePDF
 		res.IsDoc = true
 		fromPDF(buf, &res, opts)
 	case isRTF(buf):
 		// An RTF document: hex-decode its \objdata embedded-object groups so a
 		// dropped OLE2 doc / package / OLENativeStream payload (CVE-2017-0199 /
 		// -11882, OLE2Link) is scanned, not buried in the RTF hex.
+		res.TopType = TopTypeRTF
 		res.IsDoc = true
 		fromRTF(buf, &res, b, 0, deadline)
 	case isLNK(buf):
 		// A Windows shell link (.lnk): surface its StringData (command-line
 		// arguments / paths) so the dropper command is matched, not buried in the
 		// SHLLINK binary.
+		res.TopType = TopTypeLNK
 		res.IsDoc = true
 		fromLNK(buf, &res)
 	case isOneNote(buf):
 		// A standalone OneNote section (.one) — neither OLE2 nor ZIP. Carve its
 		// embedded FileDataStoreObject payloads (the maldoc delivery vector).
+		res.TopType = TopTypeOneNote
 		res.IsDoc = true
 		fromOneNote(buf, &res, b, 0, deadline)
 	case isTNEF(buf):
 		// A TNEF (winmail.dat) blob — Outlook/Exchange wraps the real attachment
 		// payload here; unwrap each attachment/body part for scanning.
+		res.TopType = TopTypeTNEF
 		res.IsDoc = true
 		fromTNEF(buf, &res, b, 0, deadline)
 	case isSLK(buf):
 		// A SYLK (.slk) spreadsheet — plain text, but Excel executes its XLM/DDE
 		// cell formulas, so it's a macro-dropper carrier. Fold the C-record
 		// E-field formulas through the shared XLM sink.
+		res.TopType = TopTypeSLK
 		res.IsDoc = true
 		fromSLK(buf, &res, deadline)
 	case isSpreadsheetML(buf):
@@ -460,6 +487,7 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// Excel executes its cell formulas, so a DDE command formula in an
 		// ss:Formula / <Data> cell is a macro-less command-execution carrier.
 		// Surface CSV-DDE markers for the DDE command form.
+		res.TopType = TopTypeSpreadsheetML
 		fromSpreadsheetML(buf, &res, deadline)
 	default:
 		// Not a container. The buffer may still hide an MS Script Encoder block
