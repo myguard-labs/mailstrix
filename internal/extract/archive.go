@@ -294,8 +294,6 @@ func emitMember(data []byte, res *Result, b *archiveBudget, depth int, deadline 
 	extractChild(data, res, b, depth+1, deadline)
 }
 
-// readMember reads one archive member from rc, bounded by maxBytesPerMember so a
-// member that lies about its size can't exhaust memory. Returns nil on error.
 // readMember reads one archive member, hard-capped at maxBytesPerMember. declared
 // is the member's declared uncompressed size (0 when the format/stream does not
 // expose one); PERF-40 uses it to pre-size the buffer via preallocHint, clamped to
@@ -307,7 +305,11 @@ func readMember(rc io.Reader, declared uint64) []byte {
 	if h := preallocHint(declared, maxBytesPerMember); h > 0 {
 		buf.Grow(h)
 	}
-	if _, err := buf.ReadFrom(io.LimitReader(rc, maxBytesPerMember)); err != nil {
+	// A read error (bad CRC, truncated gzip trailer or tar member) still returns
+	// the bytes produced so far, as unzip/gunzip deliver them: dropping the whole
+	// member let a one-byte corruption hide its payload from the scan (COR-06).
+	// An error with zero output stays nil.
+	if _, err := buf.ReadFrom(io.LimitReader(rc, maxBytesPerMember)); err != nil && buf.Len() == 0 {
 		return nil
 	}
 	return buf.Bytes()

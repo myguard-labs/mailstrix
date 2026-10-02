@@ -1512,7 +1512,9 @@ func readZipEntry(f *zip.File) []byte {
 		b.Grow(h)
 	}
 	// Hard ceiling independent of the (untrusted) zip-header size field.
-	if _, err := b.ReadFrom(io.LimitReader(rc, maxBytesPerBin)); err != nil {
+	// A bad CRC or truncated entry keeps the bytes read so far (COR-06): a
+	// corrupted vbaProject.bin must not hide its macros from the scan.
+	if _, err := b.ReadFrom(io.LimitReader(rc, maxBytesPerBin)); err != nil && b.Len() == 0 {
 		return nil
 	}
 	return b.Bytes()
