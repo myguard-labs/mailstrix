@@ -952,6 +952,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fg("decrypt_workers_abandoned", "archive-decrypt decoders still running after their watchdog gave up", clampU64(abandoned))
 	fg("decrypt_workers_limit", "archive-decrypt worker pool size", clampU64(int64(limit)))
 	fm("decrypt_attempts_refused_total", "archive-decrypt attempts refused because the worker pool was full", clampU64(refused))
+	fm("xlm_emulator_panics_total", "XLM macro emulator runs that panicked and were recovered (partial output kept)", clampU64(extract.XLMEmulatorPanics()))
 
 	writeRaw(w, http.StatusOK, "text/plain; version=0.0.4", []byte(b.String()))
 }

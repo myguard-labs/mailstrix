@@ -1018,3 +1018,12 @@ func TestPEDF22RawKeySeedValueUnchanged(t *testing.T) {
 		t.Errorf("fallback path: seed = %x, want %x", seed2, want)
 	}
 }
+
+// TestMetricsExposeXLMEmulatorPanics (COR-23): the recovered-panic counter is
+// published on /metrics.
+func TestMetricsExposeXLMEmulatorPanics(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1}, "")
+	if body := get(s, "/metrics").Body.String(); !strings.Contains(body, "xlm_emulator_panics_total ") {
+		t.Fatalf("xlm_emulator_panics_total missing from /metrics:\n%s", body)
+	}
+}

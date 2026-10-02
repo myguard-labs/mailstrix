@@ -19,6 +19,7 @@ package extract
 
 import (
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -186,6 +187,18 @@ func emulDepthClass(m *xlmMachine) string {
 	return "shallow"
 }
 
+// xlmEmulPanics counts emulator panics swallowed by emulateXLMCells' top-level
+// recover; XLMEmulatorPanics exposes it for /metrics.
+var xlmEmulPanics atomic.Int64
+
+// XLMEmulatorPanics reports how many XLM emulator runs panicked and were
+// recovered since process start.
+func XLMEmulatorPanics() int64 { return xlmEmulPanics.Load() }
+
+// xlmEmulTestHook, when set by a test, runs inside the emulator's recover
+// scope (panic-injection seam). Always nil in production.
+var xlmEmulTestHook func()
+
 // emulateXLMCells is the live entry point for the bounded XLM emulator (D6).
 // It populates a machine from cells, finds the Auto_Open entry coordinate via
 // a three-tier name lookup, runs the emulator, and falls back to
@@ -200,14 +213,19 @@ func emulateXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline 
 		cells = cells[:maxEmulCells]
 	}
 
-	// Top-level recover — emulator must never panic live.
+	// Top-level recover — emulator must never panic live. Partial *out is
+	// already accumulated; count the panic so it shows on /metrics as
+	// xlm_emulator_panics_total instead of vanishing (COR-23).
 	defer func() {
-		if r := recover(); r != nil {
-			// Partial *out is already accumulated; just stop.
+		if recover() != nil {
+			xlmEmulPanics.Add(1)
 		}
 	}()
 
 	m := newMachine(out, totalOutput, deadline)
+	if xlmEmulTestHook != nil {
+		xlmEmulTestHook()
+	}
 
 	// Populate grid from cells. Use a fixed sheet name; OOXML path does not
 	// carry the workbook-level sheet name at this call site.
