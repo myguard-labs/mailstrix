@@ -1706,9 +1706,10 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		m, serr := s.scanOne(streamRules, stream, vars, budget)
 		if serr != nil {
 			completionErr = serr
-			if !deadline.IsZero() && !time.Now().Before(deadline) {
-				incomplete = true
-			}
+			// This stream went unscanned, so the verdict is partial whatever the
+			// clock says: libyara takes whole seconds, so a native timeout can
+			// fire while the shared deadline has not passed yet.
+			incomplete = true
 			s.logf("scan of extracted stream failed (raw verdict kept): %v", serr)
 			return false
 		}

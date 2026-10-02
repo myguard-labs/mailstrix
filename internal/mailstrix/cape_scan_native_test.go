@@ -188,8 +188,11 @@ func TestCAPENativeExtractedFailure(t *testing.T) {
 			if failures != 1 {
 				t.Fatalf("native %s timeout count=%d want 1", channel, failures)
 			}
+			// libyara got whole seconds and timed out before the shared deadline:
+			// the stream went unscanned, so the mail verdict is incomplete
+			// (PERF-50) with only the log-only marker, never a cacheable clean.
 			ordinary, err := sc.Scan(body, ScanMeta{})
-			if err != nil || len(ordinary) != 0 || failures != 2 {
+			if !errors.Is(err, ErrScanIncomplete) || len(ordinary) != 1 || ordinary[0].Rule != scanIncompleteRule || failures != 2 {
 				t.Fatalf("mail recovery: matches=%v err=%v failures=%d", ordinary, err, failures)
 			}
 			requireCAPEUnknown(t, s, makePlainZIP(t, [][]byte{[]byte("benign child")}))

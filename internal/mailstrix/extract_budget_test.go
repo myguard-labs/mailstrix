@@ -168,3 +168,54 @@ func TestScanNonZipControl(t *testing.T) {
 		t.Fatalf("clean body: matches=%+v err=%v", m, err)
 	}
 }
+
+// stallOnQRule makes libyara time out on any buffer starting with 'Q' and
+// match nothing on anything else, so only the extracted member stalls: the
+// raw zip starts with "PK".
+const stallOnQRule = `rule Stall_On_Q { condition: uint8(0) == 0x51 and for all i in (1..1000000000): (i > 0) }`
+
+func singleMemberZip(t *testing.T, name string, body []byte) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	w, err := zw.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// TestScanExtractedStreamTimeoutIsIncomplete: libyara takes whole seconds, so
+// with ~2.9 s left an extracted-stream scan gets 2 s and times out while the
+// shared deadline has not passed. That stream was never scanned, so the
+// verdict must still be ErrScanIncomplete with the marker, never a nil-error
+// (cacheable) clean result.
+func TestScanExtractedStreamTimeoutIsIncomplete(t *testing.T) {
+	s := newScanner(t, writeRules(t, eicarRule+stallOnQRule))
+	s.scanTimeout = 2900 * time.Millisecond
+	start := time.Now()
+	m, err := s.Scan(singleMemberZip(t, "q.txt", []byte("Q stalls the native scan")), ScanMeta{})
+	if elapsed := time.Since(start); elapsed >= s.scanTimeout {
+		t.Fatalf("precondition: scan took %v, want the native timeout before the %v deadline", elapsed, s.scanTimeout)
+	}
+	if !errors.Is(err, ErrScanIncomplete) || !hasRule(m, scanIncompleteRule) {
+		t.Fatalf("stream timeout: matches=%+v err=%v, want incomplete", m, err)
+	}
+}
+
+// TestScanExtractedStreamCleanControl: the same container whose member does
+// not stall completes with a nil error and no marker.
+func TestScanExtractedStreamCleanControl(t *testing.T) {
+	s := newScanner(t, writeRules(t, eicarRule+stallOnQRule))
+	s.scanTimeout = 2900 * time.Millisecond
+	m, err := s.Scan(singleMemberZip(t, "a.txt", []byte("A harmless member")), ScanMeta{})
+	if err != nil || len(m) != 0 {
+		t.Fatalf("clean member: matches=%+v err=%v, want complete clean", m, err)
+	}
+}
