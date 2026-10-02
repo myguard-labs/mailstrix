@@ -128,18 +128,20 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 				continue
 			}
 			// Resolve: substitute value (quote it so fold treats it as a string literal).
-			evaluating[key] = true
-			b.WriteString(quoteXLMStringLiteral(val))
-			evaluating[key] = false
-			i = end
-			changed = true
-			resolved++
-			if b.Len()+len(s)-i > maxResolvedExprLen {
-				// Self-multiplying refs: keep the tail unresolved and stop.
+			quoted := quoteXLMStringLiteral(val)
+			if b.Len()+len(quoted)+len(s)-end > maxResolvedExprLen {
+				// Self-multiplying refs or an oversized value: keep this ref and
+				// the tail unresolved and stop.
 				b.WriteString(s[i:])
 				capped = true
 				break
 			}
+			evaluating[key] = true
+			b.WriteString(quoted)
+			evaluating[key] = false
+			i = end
+			changed = true
+			resolved++
 		}
 		s = b.String()
 		if !changed || capped {
