@@ -304,29 +304,24 @@ func parseRedirectLine(rest []byte) (name string, echoText []byte, ok bool) {
 	return name, text, true
 }
 
-// stripEchoPrefix strips a leading "echo " or "echo." from a trimmed line and
-// returns (text, true). "echo." → empty line (batch idiom for a blank line).
-// Returns ("", false) if the line does not start with echo.
+// stripEchoPrefix strips a leading echo command from a trimmed line and returns
+// (text, true). cmd.exe ends the command word at a space, tab or one of
+// .(:;,=/+[] and echoes everything after that one delimiter, so "echo.TEXT",
+// "echo(TEXT", "echo:TEXT" and "echo<TAB>TEXT" all print TEXT and a bare
+// "echo." prints an empty line (COR-10). Returns ("", false) if the line does
+// not start with echo.
 func stripEchoPrefix(line []byte) ([]byte, bool) {
-	lower := make([]byte, min(len(line), 6))
-	for i := range lower {
-		b := line[i]
-		if b >= 'A' && b <= 'Z' {
-			b += 'a' - 'A'
-		}
-		lower[i] = b
+	if len(line) < 4 || !bytes.EqualFold(line[:4], []byte("echo")) {
+		return nil, false
 	}
-	if bytes.HasPrefix(lower, []byte("echo.")) {
-		return []byte{}, true
+	if len(line) == 4 {
+		return []byte{}, true // bare "echo" at end of line -> empty
 	}
-	if bytes.HasPrefix(lower, []byte("echo ")) {
+	switch line[4] {
+	case ' ', '\t', '.', '(', ':', ';', ',', '=', '/', '+', '[', ']':
 		return line[5:], true
 	}
-	// bare "echo" at end of line → empty.
-	if len(line) == 4 && bytes.Equal(lower, []byte("echo")) {
-		return []byte{}, true
-	}
-	return nil, false
+	return nil, false // "echoX...": a different command word
 }
 
 // caretUnescape removes batch caret escapes: "^X" → "X" (including "^^" → "^").
