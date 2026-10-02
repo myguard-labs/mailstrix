@@ -33,6 +33,8 @@ const (
 
 	// maxRTFObjects bounds how many \objdata groups we carve from one document.
 	maxRTFObjects = 64
+	// maxRTFObjDataGroups bounds \\objdata groups examined, empty ones included.
+	maxRTFObjDataGroups = 4096
 	// maxBytesPerRTFObject caps one decoded object blob (raw scan covers the rest).
 	maxBytesPerRTFObject = 16 << 20
 	// maxTotalRTF caps cumulative carved/decoded bytes from one document.
@@ -242,21 +244,24 @@ func fromRTF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 		res.Streams = append(res.Streams, []byte("RTF-OBJUPDATE"))
 	}
 
-	var total, objs int
+	var total, objs, groups int
 	rest := buf
 	for {
 		// Bound both the cumulative byte/stream work AND the number of \objdata
 		// groups examined — a hostile message stuffed with thousands of empty/
 		// malformed groups yields no streams, so a stream-count guard alone would
 		// never trip; objs caps the decode/index work regardless of yield.
-		if objs >= maxRTFObjects || len(res.Streams) >= maxStreams || total >= maxTotalRTF || expired(deadline) || bud.spent() {
+		// COR-07: only non-empty objects count toward maxRTFObjects, so empty
+		// \objdata padding cannot hide a real object; groups bounds the index
+		// and decode work for empty or malformed groups separately.
+		if objs >= maxRTFObjects || groups >= maxRTFObjDataGroups || len(res.Streams) >= maxStreams || total >= maxTotalRTF || expired(deadline) || bud.spent() {
 			break
 		}
 		idx := bytes.Index(rest, []byte(rtfObjDataKW))
 		if idx < 0 {
 			break
 		}
-		objs++
+		groups++
 		// Advance past the control word; the hex run starts after any control-word
 		// delimiter (a space, or the bytes up to the next `{`/`}`/`\`).
 		rest = rest[idx+len(rtfObjDataKW):]
@@ -264,6 +269,7 @@ func fromRTF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 		if len(blob) == 0 {
 			continue
 		}
+		objs++
 		if len(blob) > maxBytesPerRTFObject {
 			blob = blob[:maxBytesPerRTFObject]
 		}
