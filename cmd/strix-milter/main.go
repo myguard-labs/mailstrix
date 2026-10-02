@@ -416,6 +416,12 @@ func (s *strixMilter) classify() (status string, rules []string, family, info st
 	// scanFilename gives the name/extension-keyed rules something consistent to
 	// fire on, matching what strix-scan sends for a message read off disk.
 	matches, err := s.client.Scan(ctx, scanFilename, s.msg)
+	var degraded *verdict.DegradedError
+	if errors.As(err, &degraded) {
+		// strixd answered but computed no complete verdict (COR-04): unknown,
+		// never clean.
+		return statusUnknown, nil, "", "no complete verdict: " + sanitizeHeaderValue(degraded.Reason)
+	}
 	if err != nil {
 		// Fail-open, the absolute rule on every scan path: a scanner outage,
 		// timeout or non-200 must never block mail.

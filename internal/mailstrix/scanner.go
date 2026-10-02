@@ -1534,9 +1534,16 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	if res.Panicked {
 		s.exPanicked.Add(1)
 	}
-	// CAPE admission requires every classification channel to complete. The
-	// ordinary mail path deliberately remains fail-open on malformed containers;
-	// completionErr is observed only when ScanMeta.requireComplete is set below.
+	// An extractor panic aborted extraction mid-way, so members may be missing:
+	// the verdict is partial (COR-05) and is marked incomplete, never cached or
+	// reported clean. res.Failed alone stays fail-open for mail: it also flags
+	// ordinary parse rejections of corrupt input (a non-OLE *.bin member, an
+	// unopenable OOXML zip) whose bytes the raw scan already covered, and its
+	// deadline cases are caught by the extraction-budget check above. CAPE
+	// admission fails on either via completionErr.
+	if res.Panicked {
+		incomplete = true
+	}
 	if (res.Failed || res.Panicked) && completionErr == nil {
 		completionErr = fmt.Errorf("extractor did not complete")
 	}
@@ -1940,10 +1947,52 @@ func scanIncompleteMatch() Match {
 		Rule: scanIncompleteRule,
 		Tags: []string{"scan-incomplete"},
 		Meta: map[string]string{
-			"description":     "SCAN-INCOMPLETE: scan budget exhausted before every extracted stream was scanned",
+			"description":     "SCAN-INCOMPLETE: not every extracted stream was scanned (budget, scan error or extractor panic)",
 			"mailstrix_allow": "1",
 		},
 	}
+}
+
+// scanDegradedRule names the synthetic marker the server attaches when no full
+// verdict was computed for a body: the scan errored or no scan slot was free
+// (COR-04). Like SCAN-INCOMPLETE it is log-only; consumers read it as
+// "unknown", never "clean".
+const scanDegradedRule = "MAILSTRIX_SCAN_DEGRADED"
+
+// Degraded reasons reported in the /scan response's degraded field.
+const (
+	degradedIncomplete = "incomplete"
+	degradedError      = "error"
+	degradedBusy       = "busy"
+)
+
+func scanDegradedMatch(reason string) Match {
+	return Match{
+		Rule: scanDegradedRule,
+		Tags: []string{"scan-degraded"},
+		Meta: map[string]string{
+			"description":     "SCAN-DEGRADED: no complete verdict (" + reason + ")",
+			"reason":          reason,
+			"mailstrix_allow": "1",
+		},
+	}
+}
+
+// degradedReason reports why a match set is not a complete verdict, or "" when
+// it is one.
+func degradedReason(matches []Match) string {
+	for _, m := range matches {
+		switch m.Rule {
+		case scanDegradedRule:
+			if r := m.Meta["reason"]; r != "" {
+				return r
+			}
+			return degradedError
+		case scanIncompleteRule:
+			return degradedIncomplete
+		}
+	}
+	return ""
 }
 
 // filterDenied applies the rule deny/allow lists to a match set. Denylisted rule
