@@ -81,7 +81,7 @@ func (d isolatedDocker) callNotify(ctx context.Context, input []byte, firstOutpu
 	switch {
 	case stdout.overflow || stderr.overflow:
 		return nil, "output_limit"
-	case ctx.Err() != nil:
+	case ctx.Err() != nil && err != nil:
 		return stdout.Bytes(), "timeout"
 	case err != nil || stderr.Len() > 0:
 		return stdout.Bytes(), "execution_error"
