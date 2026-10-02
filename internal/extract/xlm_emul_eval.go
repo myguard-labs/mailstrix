@@ -16,6 +16,14 @@ import (
 // evalExpr will attempt before returning a partial result.
 const maxRefResolvePasses = 32
 
+// maxResolvedExprLen caps the text evalExpr builds by substituting cell values
+// for refs. A value that names its own cell (or a cycle of cells) more than once
+// multiplies the expression on every pass; the evaluating set cannot stop that
+// because each substitution is a flat string write, not a recursive eval. Excel
+// limits a text result to 32767 characters, so twice that already holds any
+// real formula result with room for the surrounding expression.
+const maxResolvedExprLen = 1 << 16
+
 // reR1C1 matches R1C1-style references (Rrow Ccol) where row and col are each
 // 1–7 decimal digits. The negative lookbehind is approximated by the caller
 // checking the preceding byte.
@@ -73,6 +81,7 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 	s := formula
 
 	// Step 1: iteratively resolve A1 and R1C1 refs.
+	capped := false
 	for pass := 0; pass < maxRefResolvePasses; pass++ {
 		if expired(m.deadline) {
 			break
@@ -125,10 +134,16 @@ func evalExpr(m *xlmMachine, sheetName, formula string, evaluating map[string]bo
 			i = end
 			changed = true
 			resolved++
+			if b.Len()+len(s)-i > maxResolvedExprLen {
+				// Self-multiplying refs: keep the tail unresolved and stop.
+				b.WriteString(s[i:])
+				capped = true
+				break
+			}
 		}
 		s = b.String()
-		if !changed {
-			break // converged
+		if !changed || capped {
+			break // converged, or the expression hit its size cap
 		}
 	}
 
