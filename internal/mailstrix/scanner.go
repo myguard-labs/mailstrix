@@ -1735,19 +1735,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		}
 		return false
 	}
-	// PERF-50: scan real content (members, macros, objects) before the trailing
-	// static-decode blobs, and the real content smallest-first, so padding
-	// members cannot spend the budget ahead of a small dropper. The stable sort
-	// keeps extractor order among equal sizes.
-	order := make([]int, len(res.Streams))
-	for i := range order {
-		order[i] = i
-	}
-	if nReal := min(res.ContentStreams, len(res.Streams)); nReal > 1 {
-		sort.SliceStable(order[:nReal], func(a, b int) bool {
-			return len(res.Streams[order[a]]) < len(res.Streams[order[b]])
-		})
-	}
+	order := streamScanOrder(res.Streams, res.ContentStreams)
 	for _, i := range order {
 		if scanExtracted(res.Streams[i], streamKeys[i], false) {
 			break
@@ -1917,6 +1905,24 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		return out, ErrScanIncomplete
 	}
 	return out, nil
+}
+
+// streamScanOrder returns the order in which Scan visits extracted streams
+// (PERF-50): the first nContent entries (real members, macros, objects) come
+// first, smallest-first, then the trailing static-decode blobs in extractor
+// order, so padding members cannot spend the budget ahead of a small dropper.
+// The stable sort keeps extractor order among equal sizes.
+func streamScanOrder(streams [][]byte, nContent int) []int {
+	order := make([]int, len(streams))
+	for i := range order {
+		order[i] = i
+	}
+	if nReal := min(nContent, len(streams)); nReal > 1 {
+		sort.SliceStable(order[:nReal], func(a, b int) bool {
+			return len(streams[order[a]]) < len(streams[order[b]])
+		})
+	}
+	return order
 }
 
 // ErrScanIncomplete is returned by Scan, together with the matches it did
