@@ -39,13 +39,28 @@ jobs:
       actions: write   # buildx GHA layer cache (--cache-to/from type=gha)
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+        with:
+          # The PR merge commit plus its first parent (the base tip), so the
+          # test stage can diff exactly this PR's changes.
+          fetch-depth: 2
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: build test stage (go vet + go test -race in-image)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          # On a PR, test only the changed packages and their importers; any
+          # other trigger (workflow_call from release.yml) passes no list,
+          # which runs the whole suite.
+          changed=""
+          if [ "$EVENT_NAME" = pull_request ]; then
+            changed="$(git diff --name-only HEAD^1 HEAD | tr '\n' ' ')"
+          fi
+          echo "changed files: ${changed:-<full suite>}"
           docker buildx build --target test -f docker/Dockerfile -t strixd-test \
             --load \
+            --build-arg CHANGED_FILES="$changed" \
             --cache-from type=gha,scope=strixd-build \
             --cache-to type=gha,mode=max,scope=strixd-build \
             .

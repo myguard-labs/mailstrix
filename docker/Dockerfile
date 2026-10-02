@@ -88,10 +88,17 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # ---- tests (built into the image build so CI fails on a bad commit) ---------
 FROM build AS test
+# CHANGED_FILES (space-separated, repository-relative) narrows `go test` to the
+# changed packages and their importers (tools/testscope). Empty, or any change
+# testscope cannot map (go.mod, build/CI files, ...), runs the whole suite;
+# a docs-only change runs no tests. `go vet` always covers everything.
+ARG CHANGED_FILES=""
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go vet ./... \
-    && go test -race -tags yara_static ./...
+    && pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
+    && echo "go test scope: ${pkgs:-<none, docs-only change>}" \
+    && if [ -n "$pkgs" ]; then go test -race -tags yara_static $pkgs; fi
 
 # ---- binary export (release artifacts; not part of the runtime image) -------
 # Optional parity image uses only trusted repository rule sources. It has no
