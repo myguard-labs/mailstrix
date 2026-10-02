@@ -139,8 +139,9 @@ ENTRYPOINT ["/usr/local/bin/strixd", "fetch-rules", "-verify-only"]
 # compiler. Fetch the public rulesets, then precompile them into one .yac so the
 # runtime never compiles ~10k rules itself (that peaked >3 GB and OOM-killed).
 FROM yara AS rules
+# curl and ca-certificates are inherited from the yara stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates unzip python3 \
+        unzip python3 \
     && rm -rf /var/lib/apt/lists/*
 # filter-rules.py must sit beside fetch-rules.sh (resolved via $(dirname "$0"))
 # so the `mail` profile per-rule mail-relevance/license filter runs.
