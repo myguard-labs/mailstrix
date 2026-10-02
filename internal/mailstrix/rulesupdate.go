@@ -3,6 +3,7 @@ package mailstrix
 import (
 	"context"
 	"fmt"
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- poll-interval jitter only, not security-relevant randomness
 	"math/rand/v2"
 	"net/http"
 	"path/filepath"

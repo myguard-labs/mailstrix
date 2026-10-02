@@ -290,6 +290,7 @@ func openStore(ctx context.Context, cfg StoreConfig, hooks storeHooks) (_ *Store
 	}
 	for pragma, want := range map[string]int64{"busy_timeout": 1000, "foreign_keys": 1, "temp_store": 2, "wal_autocheckpoint": 32, "journal_size_limit": 0} {
 		var got int64
+		// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query, go.lang.security.audit.sqli.gosql-sqli.gosql-sqli -- pragma comes from the literal map above, never from input
 		if s.db.QueryRowContext(ctx, "PRAGMA "+pragma).Scan(&got) != nil || got != want {
 			return nil, ErrStoreUnavailable
 		}

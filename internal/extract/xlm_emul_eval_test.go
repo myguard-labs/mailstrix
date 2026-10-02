@@ -144,3 +144,66 @@ func TestEvalExprDeadlineExpired(t *testing.T) {
 	// Fail-open: result may be partial or empty, must not panic.
 	_ = got
 }
+
+// TestEvalExprSelfRefGrowthCapped covers a cell whose value names itself more
+// than once. Each pass substituted the value back in, so the expression tripled
+// per pass and only the wall-clock deadline stopped it (FuzzEmulateXLM spent its
+// whole 1s budget on a 40-byte input). The resolved expression must now stop
+// growing at maxResolvedExprLen without relying on the deadline.
+func TestEvalExprSelfRefGrowthCapped(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		formula string
+	}{
+		{"self ref twice", "A1&A1", "=A1"},
+		{"self ref three times", "A1 A1 A1", "=A1&A1"},
+		{"mutual refs", "B1&B1", "=A1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := make([][]byte, 0)
+			total := 0
+			// Far deadline: the cap, not the clock, must end the expansion.
+			m := newMachine(&out, &total, time.Now().Add(time.Hour))
+			m.setCell("Sheet1", "A1", "", tc.value)
+			m.setCell("Sheet1", "B1", "", "A1&A1")
+			start := time.Now()
+			got := evalExpr(m, "Sheet1", tc.formula, nil)
+			if el := time.Since(start); el > 5*time.Second {
+				t.Fatalf("evalExpr ran %v; expansion not capped", el)
+			}
+			if limit := maxResolvedExprLen; len(got) > limit {
+				t.Fatalf("result length %d exceeds bound %d", len(got), limit)
+			}
+		})
+	}
+}
+
+// TestEvalExprResolveBelowCapUnchanged is the boundary control: a ref chain
+// whose resolved text stays under maxResolvedExprLen resolves completely.
+func TestEvalExprResolveBelowCapUnchanged(t *testing.T) {
+	m := newEvalTestMachine()
+	chunk := strings.Repeat("x", maxResolvedExprLen/4)
+	m.setCell("Sheet1", "A1", "", chunk)
+	m.setCell("Sheet1", "B1", "", chunk)
+	got := evalExpr(m, "Sheet1", `=A1&B1&"tail"`, nil)
+	if want := chunk + chunk + "tail"; got != want {
+		t.Fatalf("got %d bytes, want the fully resolved %d bytes", len(got), len(want))
+	}
+}
+
+// TestEvalExprOversizedValueNotSubstituted: a single cell value larger than the
+// cap must not be written at all, so the cap holds even on the first ref.
+func TestEvalExprOversizedValueNotSubstituted(t *testing.T) {
+	m := newEvalTestMachine()
+	big := strings.Repeat("x", maxResolvedExprLen+1)
+	m.setCell("Sheet1", "A1", "", big)
+	got := evalExpr(m, "Sheet1", `=A1&"tail"`, nil)
+	if len(got) > maxResolvedExprLen {
+		t.Fatalf("result length %d exceeds cap %d", len(got), maxResolvedExprLen)
+	}
+	if strings.Contains(got, big[:1024]) {
+		t.Fatal("oversized value was substituted")
+	}
+}

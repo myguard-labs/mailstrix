@@ -562,6 +562,7 @@ class Adapter:
         if self.process_uncertain:
             return Call(status="backend_unavailable")
         try:
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query -- self.execute runs a docker argv list, not SQL
             result = self.execute(DOCKER + args, **kwargs)
         except BaseException as error:
             if getattr(error, PROCESS_STATUS_ATTRIBUTE, "") in (

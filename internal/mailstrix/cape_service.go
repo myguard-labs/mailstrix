@@ -61,6 +61,7 @@ func (l *capeAcceptListener) Accept() (net.Conn, error) {
 		select {
 		case l.slots <- struct{}{}:
 			wrapped := &capeAcceptConn{Conn: conn}
+			// nosemgrep: trailofbits.go.missing-unlock-before-return.missing-unlock-before-return -- closure only stores l.release; it runs later, after l.mu.Unlock below
 			wrapped.release = func() { l.release(wrapped) }
 			l.conns[wrapped] = struct{}{}
 			l.preHTTP[wrapped] = struct{}{}
