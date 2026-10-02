@@ -144,10 +144,11 @@ var (
 	// A run of an even number of hex digits (grouped in pairs so the match is
 	// always byte-aligned for hex.DecodeString).
 	reHex = regexp.MustCompile(fmt.Sprintf(`(?:[0-9A-Fa-f]{2}){%d,}`, minHexRun/2))
-	// VBA Chr(N)/ChrW(N) with optional surrounding concat operators and string literals.
+	// VBA Chr(N)/ChrW(N)/ChrB(N) and their $ forms (Chr$, ChrW$, "Chr (")
+	// with optional surrounding concat operators and string literals (COR-11).
 	// VBA uses "" to escape a literal " inside a string, so we allow doubled-quote
 	// escapes with (?:[^"]|"")* instead of [^"]*.
-	reChrConcat = regexp.MustCompile(`(?i)(?:"(?:[^"]|"")*"|Chr[W]?\(\d{1,5}\))(?:\s*[&+]\s*(?:"(?:[^"]|"")*"|Chr[W]?\(\d{1,5}\)))+`)
+	reChrConcat = regexp.MustCompile(`(?i)(?:"(?:[^"]|"")*"|Chr[WB]?\$?\s*\(\d{1,5}\))(?:\s*[&+]\s*(?:"(?:[^"]|"")*"|Chr[WB]?\$?\s*\(\d{1,5}\)))+`)
 
 	// VBA Replace("str","old","new") with all literal string arguments.
 	reReplace = regexp.MustCompile(`(?i)Replace\(\s*"((?:[^"]|"")*)"\s*,\s*"((?:[^"]|"")*)"\s*,\s*"((?:[^"]|"")*)"\s*\)`)
@@ -172,7 +173,7 @@ var (
 	reEnviron = regexp.MustCompile(`(?i)Environ\$?\(\s*"((?:[^"]|"")*)"\s*\)`)
 
 	// Tokens inside a Chr/ChrW concat chain: a string literal or a Chr(N) call.
-	reChrTok = regexp.MustCompile(`(?i)"((?:[^"]|"")*)"|Chr[W]?\((\d{1,5})\)`)
+	reChrTok = regexp.MustCompile(`(?i)"((?:[^"]|"")*)"|Chr[WB]?\$?\s*\((\d{1,5})\)`)
 
 	// Dridex-obfuscated string literal: a quoted run of >=20 alphanumerics
 	// (olevba.py:899 re_dridex_string). dridexNotHex gates out plain hex strings
