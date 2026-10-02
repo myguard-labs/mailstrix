@@ -4,7 +4,7 @@
 # the mailstrix.lua plugin targets the IPv4 directly).
 services:
   strixd:
-    image: myguard-labs/mailstrix:latest
+    image: eilandert/mailstrix:latest
     container_name: strixd
     restart: unless-stopped
     # ~74 MB image + rules RSS (~90-200 MiB under macro/zip load) + in-flight

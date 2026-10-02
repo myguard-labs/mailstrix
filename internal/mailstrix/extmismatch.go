@@ -93,11 +93,26 @@ func extMismatch(res extract.Result, ext string) string {
 		if isOfficeExt(ext) {
 			return ""
 		}
+		// IsDoc also covers non-Office top-level types whose own extension sits in
+		// benignExts: a PDF named .pdf, a TNEF named winmail.dat, an Excel-2003
+		// XML named .xml. Keyed on TopType, not IsPDF/IsTNEF, because those are
+		// also set by nested members (a zip named .pdf holding a PDF is a rename).
+		if ownExt, ok := topTypeOwnExt[res.TopType]; ok && ext == ownExt {
+			return ""
+		}
 		if _, benign := benignExts[ext]; benign {
 			return "office-doc:" + claimed(ext)
 		}
 	}
 	return ""
+}
+
+// topTypeOwnExt maps a top-level extract type to the benignExts entry that
+// correctly names it.
+var topTypeOwnExt = map[string]string{
+	extract.TopTypePDF:           ".pdf",
+	extract.TopTypeTNEF:          ".dat",
+	extract.TopTypeSpreadsheetML: ".xml",
 }
 
 // claimed strips the leading dot for the marker body (".jpg" -> "jpg").

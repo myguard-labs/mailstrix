@@ -196,7 +196,7 @@ The image already bakes ~10k rules, so a token is all you need:
 docker run -d --name strixd \
     -e MAILSTRIX_TOKEN=changeme \
     -p 8079:8079 \
-    myguard-labs/mailstrix
+    eilandert/mailstrix
 
 # ask it something:
 printf 'hello' | curl -s -H 'X-MAILSTRIX-Token: changeme' \
@@ -213,17 +213,25 @@ docker run -d --name strixd \
     -e MAILSTRIX_RULES_DIR=/rules \
     -v "$PWD/myrules:/rules:ro" \
     -p 8079:8079 \
-    myguard-labs/mailstrix
+    eilandert/mailstrix
 ```
 
 Send an attachment name so name-keyed rules fire (base64 — the name is
-attacker-controlled, encoding it stops header injection):
+attacker-controlled, encoding it stops header injection). To check that
+detection works end to end, send the harmless
+[EICAR test string](https://www.eicar.org/download-anti-malware-testfile/):
 
 ```sh
-printf 'MZ...' | curl -s -H 'X-MAILSTRIX-Token: changeme' \
-    -H "X-MAILSTRIX-Filename: $(printf 'invoice.exe' | base64)" \
+printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' |
+    curl -s -H 'X-MAILSTRIX-Token: changeme' \
+    -H "X-MAILSTRIX-Filename: $(printf 'eicar.com' | base64)" \
     --data-binary @- http://127.0.0.1:8079/scan
+# -> {"matches":[{"rule":"SUSP_Just_EICAR",…},{"rule":"TRELLIX_ARC_Malw_Eicar",…}]}
 ```
+
+A few placeholder bytes such as `MZ...` are not malware and correctly return
+`{"matches":[]}`; test with a real sample. Set `MAILSTRIX_VERBOSE=1` to log one
+line per request.
 
 > **Token is optional but recommended.** Set `MAILSTRIX_TOKEN` (or
 > `MAILSTRIX_TOKEN_FILE`) and the caller must present the same secret as a `Bearer`
@@ -921,6 +929,19 @@ icap_service mailstrix_req reqmod_precache bypass=1 icap://strixd:1344/scan
 icap_service mailstrix_resp respmod_precache bypass=1 icap://strixd:1344/scan
 adaptation_access mailstrix_req allow all
 adaptation_access mailstrix_resp allow all
+```
+
+### Testing with c-icap-client
+
+`c-icap-client` (from the c-icap package) sends the file given with `-f` as the
+encapsulated body. `-req`/`-resp` take a **URL**, not a file: without `-f` no
+body is sent, nothing is scanned, and the reply is always `204`.
+
+```sh
+c-icap-client -i 127.0.0.1 -p 1344 -f test.pdf -req http://example.test/test.pdf
+# -> Blocked: PDF_OpenAction_JS          (a PDF that auto-runs JavaScript)
+c-icap-client -i 127.0.0.1 -p 1344 -f eicar.com -resp http://example.test/eicar.com
+# -> Blocked: SUSP_Just_EICAR
 ```
 
 ### Metrics
