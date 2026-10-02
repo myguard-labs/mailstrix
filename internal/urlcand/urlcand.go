@@ -131,7 +131,9 @@ func NormalizeHTTPURL(raw string) (norm, host, ip string) {
 	if (scheme != "http" && scheme != "https") || u.Host == "" {
 		return "", "", ""
 	}
-	h := strings.ToLower(u.Hostname())
+	// A fully-qualified "evil.com." resolves like "evil.com"; drop the root dot
+	// so feed exact/host lookups match (COR-12).
+	h := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
 	if h == "" {
 		return "", "", ""
 	}

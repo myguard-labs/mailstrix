@@ -211,6 +211,10 @@ func zipWithMember(t *testing.T, name string, body []byte) []byte {
 // and FullSetOnly_Rule would fire instead.
 func TestBigFileGateRedirectsOversizedExtractedStream(t *testing.T) {
 	s := newBigScanner(t, 100*1024) // 100 KiB threshold
+	// No wall-clock budget: this test is about routing, not PERF-50 budgets,
+	// and under -race on a loaded runner extracting the 300 KiB member can
+	// outlast half of the default 8 s, making the scan incomplete.
+	s.scanTimeout = 0
 	member := bothMarkers(300 * 1024)
 	z := zipWithMember(t, "payload.bin", member)
 	if int64(len(z)) > 100*1024 {
