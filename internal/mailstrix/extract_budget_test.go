@@ -4,69 +4,60 @@ import (
 	"archive/zip"
 	"bytes"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 )
 
-// slowProseRule makes every prose stream expensive to scan, standing in for
-// the full production ruleset on multi-MiB members (PERF-50): ~0.5 s/MiB in
-// libyara, while unpacking the same bytes stays cheap even under -race.
-const slowProseRule = `
-rule Slow_Prose_Regex
+// slowBigRule stands in for the full production ruleset on multi-MiB members
+// (PERF-50): any stream over 1 MiB spins in libyara until its timeout, so one
+// padding member scanned first spends the whole remaining budget. The raw zip
+// and the small dropper stay under 1 MiB and match nothing here.
+const slowBigRule = `
+rule Slow_Big_Stream
 {
-    strings:
-        $r = /[a-z]{1,64}\s+[a-z]{1,64}\s+[a-z]{1,64}\s+[a-z]{1,64}[0-9]/
     condition:
-        $r
+        filesize > 1048576 and for all i in (1..1000000000): (i > 0)
 }
 `
 
-// proseParagraph returns a deterministic ~4 KiB paragraph of varied words: it
-// deflates well when repeated but gives the scan real work.
-func proseParagraph() string {
-	words := []string{"invoice", "meeting", "quarterly", "Report", "attached", "please", "review", "budget",
-		"approved", "Finance", "team", "schedule", "deadline", "Contract", "signed", "customer", "delivery",
-		"project", "update", "Status", "pending", "regards", "thanks", "office", "Monday", "Friday"}
-	var b strings.Builder
-	x := uint32(2463534242)
-	for b.Len() < 4096 {
-		x ^= x << 13
-		x ^= x >> 17
-		x ^= x << 5
-		b.WriteString(words[x%uint32(len(words))])
-		if x%7 == 0 {
-			b.WriteString(". ")
-		} else {
-			b.WriteByte(' ')
-		}
-	}
-	return b.String()
-}
-
-// padSize is one padding member: six of them cost well over budgetTimeout to
-// scan, while unpacking all six stays far below half of it.
+// padSize is one padding member and padCount how many the padded fixture
+// carries. The padding is a repeating control-byte pattern: it deflates to
+// almost nothing and the static decoders skip it as non-text, so extraction
+// stays fast even under -race on a loaded runner and only the (deliberately
+// slow) stream scans compete for the budget.
+// The slow rule spins until its timeout on any stream over 1 MiB, so a single
+// padding member already spends the whole budget; two keep the fixture plural
+// while keeping extraction (which scales with padding volume) small.
 const (
-	padSize       = 2 << 20
+	padSize       = 1<<20 + 4096
+	padCount      = 2
 	budgetTimeout = 4 * time.Second
 )
 
-// paddedDropperZip builds the PERF-50 shape: pad prose members that deflate to
+func binaryPad(first byte) []byte {
+	pad := make([]byte, padSize)
+	for i := range pad {
+		pad[i] = byte(i % 31)
+	}
+	pad[0] = first // distinct per member so stream dedup cannot collapse them
+	return pad
+}
+
+// paddedDropperZip builds the PERF-50 shape: padding members that deflate to
 // almost nothing but are slow to scan, followed by a small EICAR "dropper"
-// member. pad=0 yields the unpadded control.
+// member. The dropper is last in the archive, so it is found within budget
+// only if the scanner visits small content streams first. pad=0 yields the
+// unpadded control.
 func paddedDropperZip(t *testing.T, pad int) []byte {
 	t.Helper()
-	prose := []byte(strings.Repeat(proseParagraph(), padSize/4096+1)[:padSize])
 	var b bytes.Buffer
 	zw := zip.NewWriter(&b)
 	for i := 0; i < pad; i++ {
-		w, err := zw.Create("notes" + string(rune('a'+i)) + ".txt")
+		w, err := zw.Create("blob" + string(rune('a'+i)) + ".bin")
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Distinct first byte per pad so stream dedup cannot collapse them.
-		prose[0] = byte('a' + i)
-		if _, err := w.Write(prose); err != nil {
+		if _, err := w.Write(binaryPad(byte(0x80 + i))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -94,18 +85,18 @@ func hasRule(ms []Match, rule string) bool {
 
 func budgetScanner(t *testing.T, timeout time.Duration) *Scanner {
 	t.Helper()
-	s := newScanner(t, writeRules(t, eicarRule+slowProseRule))
+	s := newScanner(t, writeRules(t, eicarRule+slowBigRule))
 	s.scanTimeout = timeout
 	return s
 }
 
-// TestScanPaddedZipFindsDropperAndMarksIncomplete: six 2 MiB prose members
-// cost more than the whole budget to scan. The small dropper member must still
+// TestScanPaddedZipFindsDropperAndMarksIncomplete: the padding members cost
+// more than the whole budget to scan. The small dropper member must still
 // be found, and the budget hit must surface as ErrScanIncomplete plus a
 // log-only SCAN-INCOMPLETE marker rather than a nil-error verdict.
 func TestScanPaddedZipFindsDropperAndMarksIncomplete(t *testing.T) {
 	s := budgetScanner(t, budgetTimeout)
-	m, err := s.Scan(paddedDropperZip(t, 6), ScanMeta{})
+	m, err := s.Scan(paddedDropperZip(t, padCount), ScanMeta{})
 	if !hasRule(m, "EICAR_Test_File") {
 		t.Fatalf("padded zip: dropper member not detected; matches=%+v err=%v", m, err)
 	}
@@ -145,11 +136,15 @@ func TestScanUnpaddedZipCompleteControl(t *testing.T) {
 // reached first depends on unpack speed). With the limit disabled the same
 // input completes with no marker.
 func TestScanBudgetBoundary(t *testing.T) {
-	m, err := budgetScanner(t, time.Nanosecond).Scan(paddedDropperZip(t, 6), ScanMeta{})
+	m, err := budgetScanner(t, time.Nanosecond).Scan(paddedDropperZip(t, padCount), ScanMeta{})
 	if !errors.Is(err, ErrScanIncomplete) || !hasRule(m, scanIncompleteRule) {
 		t.Fatalf("minimum budget: matches=%+v err=%v, want incomplete", m, err)
 	}
-	m, err = budgetScanner(t, 0).Scan(paddedDropperZip(t, 1), ScanMeta{})
+	// No limit: the slow-loop rule would run to completion (~30 s), so this
+	// leg uses EICAR-only rules; it checks the no-limit path, not scan cost.
+	unlimited := newScanner(t, writeRules(t, eicarRule))
+	unlimited.scanTimeout = 0
+	m, err = unlimited.Scan(paddedDropperZip(t, 1), ScanMeta{})
 	if err != nil || !hasRule(m, "EICAR_Test_File") || hasRule(m, scanIncompleteRule) {
 		t.Fatalf("no budget limit: matches=%+v err=%v, want complete EICAR", m, err)
 	}
@@ -217,5 +212,38 @@ func TestScanExtractedStreamCleanControl(t *testing.T) {
 	m, err := s.Scan(singleMemberZip(t, "a.txt", []byte("A harmless member")), ScanMeta{})
 	if err != nil || len(m) != 0 {
 		t.Fatalf("clean member: matches=%+v err=%v, want complete clean", m, err)
+	}
+}
+
+// TestStreamScanOrder (PERF-50): real content streams are visited
+// smallest-first ahead of the trailing decode blobs, deterministically and
+// independent of runner speed. Boundary: zero/one content stream and a
+// content count larger than the slice keep extractor order.
+func TestStreamScanOrder(t *testing.T) {
+	big, mid, small := make([]byte, 300), make([]byte, 200), make([]byte, 10)
+	blob := make([]byte, 1)
+	cases := []struct {
+		name     string
+		streams  [][]byte
+		nContent int
+		want     []int
+	}{
+		{"padding before dropper", [][]byte{big, mid, small, blob}, 3, []int{2, 1, 0, 3}},
+		{"decode blobs stay last", [][]byte{big, blob, blob}, 1, []int{0, 1, 2}},
+		{"equal sizes keep order", [][]byte{mid, mid, small}, 3, []int{2, 0, 1}},
+		{"no content streams", [][]byte{big, small}, 0, []int{0, 1}},
+		{"content count past end", [][]byte{big, small}, 9, []int{1, 0}},
+		{"empty", nil, 0, []int{}},
+	}
+	for _, tc := range cases {
+		got := streamScanOrder(tc.streams, tc.nContent)
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
+			}
+		}
 	}
 }
