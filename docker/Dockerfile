@@ -93,6 +93,8 @@ FROM build AS test
 # testscope cannot map (go.mod, build/CI files, ...), runs the whole suite;
 # a docs-only change runs no tests. `go vet` always covers everything.
 ARG CHANGED_FILES=""
+# CHANGED_FILES and pkgs are space-separated lists: word splitting is intended.
+# hadolint ignore=SC2086
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go vet ./... \
