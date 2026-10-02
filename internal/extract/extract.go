@@ -341,6 +341,11 @@ type Result struct {
 	// macro/extracted-stream metrics aren't inflated by decode output. >0 means
 	// the pass fired.
 	DecodedStreams int
+	// ContentStreams is how many leading Streams entries came from the format
+	// extractors, before any static-decode output (decoded blobs and the PEs
+	// carved from them). The scanner scans these first so decode output cannot
+	// spend the shared budget ahead of a real member (PERF-50).
+	ContentStreams int
 
 	// VBAStreams holds the decompressed VBA macro-source streams (the codes()
 	// output) — a SUBSET of Streams, by content identity. The scanner sets the VBA
@@ -575,6 +580,11 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		res.Streams = append(res.Streams, bs)
 	}
 
+	for _, s := range res.Streams[:preDecodeLen] {
+		if !isPureMarker(s) {
+			res.ContentStreams++
+		}
+	}
 	content, markers, decodeMoved := splitPureMarkers(res.Streams)
 	res.Streams = content
 	res.Markers = markers

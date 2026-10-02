@@ -86,8 +86,10 @@ func TestCAPENativeRawFailureRecovered(t *testing.T) {
 			body := []byte(feedURLBody)
 			_, err = sc.scanOne(sc.rules.Load(), body, scanVars{}, time.Second)
 			requireCAPENativeTimeout(t, err)
+			// The raw scan spends the whole budget, so the mail result is
+			// incomplete (PERF-50) but still carries the recovered feed hit.
 			ordinary, err := sc.Scan(body, ScanMeta{})
-			if err != nil || len(ordinary) == 0 {
+			if !errors.Is(err, ErrScanIncomplete) || len(ordinary) == 0 {
 				t.Fatalf("mail recovery: matches=%v err=%v", ordinary, err)
 			}
 			for _, m := range ordinary {
@@ -243,8 +245,8 @@ func TestCAPENativeBudgetExhausted(t *testing.T) {
 				t.Fatal("budget-only failure precondition missing")
 			}
 			sc.bigNilWarned.Store(false)
-			if _, err := sc.Scan(body, ScanMeta{}); err != nil {
-				t.Fatalf("mail budget behavior changed: %v", err)
+			if _, err := sc.Scan(body, ScanMeta{}); !errors.Is(err, ErrScanIncomplete) {
+				t.Fatalf("mail budget hit not marked incomplete: %v", err)
 			}
 			sc.bigFileThreshold = 0
 			requireCAPEUnknown(t, s, body)

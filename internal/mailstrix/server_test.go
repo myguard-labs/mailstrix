@@ -491,6 +491,25 @@ func TestPanicNotCached(t *testing.T) {
 	}
 }
 
+func TestIncompleteScanNotCachedButReturned(t *testing.T) {
+	// PERF-50: a budget-hit scan returns its recovered matches plus the
+	// SCAN-INCOMPLETE marker, but must never be cached as a full verdict.
+	eng := &fakeEngine{matches: []Match{{Rule: "R"}, scanIncompleteMatch()}, err: ErrScanIncomplete, count: 1, fp: "A"}
+	s := newCachingServer(eng, "tok")
+	for i := 0; i < 2; i++ {
+		w := post(s, "samebody", map[string]string{"X-MAILSTRIX-Token": "tok"})
+		if w.Code != 200 {
+			t.Fatalf("req %d code = %d", i, w.Code)
+		}
+		if body := w.Body.String(); !strings.Contains(body, `"R"`) || !strings.Contains(body, scanIncompleteRule) {
+			t.Fatalf("req %d body lost partial matches: %s", i, body)
+		}
+	}
+	if got := eng.scans.Load(); got != 2 {
+		t.Errorf("incomplete verdict was cached: Scan ran %d times for 2 identical requests, want 2", got)
+	}
+}
+
 func TestCleanVerdictIsCached(t *testing.T) {
 	// Sanity counterpart: a successful scan IS cached (second identical request
 	// does not rescan), so TestPanicNotCached proves the panic path specifically.

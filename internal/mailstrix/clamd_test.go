@@ -160,6 +160,8 @@ func TestClamdVerdictsAndFragmentation(t *testing.T) {
 		{name: "all-logonly", body: "all-logonly", matches: []Match{{Rule: "shadow", Meta: map[string]string{"mailstrix_canary": "1"}}, {Rule: "allowed", Meta: map[string]string{"mailstrix_allow": "1"}}}, reply: "stream: OK\x00"},
 		{name: "error", body: "bad", err: errors.New("secret\nOK"), matches: []Match{{Rule: "also"}}, reply: "stream: scan failed ERROR\x00"},
 		{name: "panic", body: "panic", panicScan: true, reply: "stream: scan failed ERROR\x00"},
+		{name: "incomplete-match", body: "partial", err: ErrScanIncomplete, matches: []Match{{Rule: "active"}, scanIncompleteMatch()}, reply: "stream: Mailstrix.Match FOUND\x00"},
+		{name: "incomplete-marker-only", body: "partial-clean", err: ErrScanIncomplete, matches: []Match{scanIncompleteMatch()}, reply: "stream: scan failed ERROR\x00"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &clamdTestEngine{call: func(b []byte, meta ScanMeta) ([]Match, error) {
@@ -199,7 +201,7 @@ func TestClamdVerdictsAndFragmentation(t *testing.T) {
 			}
 			<-c.done
 			var wantErrors uint64
-			if tc.err != nil || tc.panicScan {
+			if tc.panicScan || (tc.err != nil && strings.HasSuffix(tc.reply, "ERROR\x00")) {
 				wantErrors = 1
 			}
 			if got := s.metrics.errors.Load(); got != wantErrors {
