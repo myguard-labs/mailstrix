@@ -25,9 +25,12 @@ rule Slow_Big_Stream
 // almost nothing and the static decoders skip it as non-text, so extraction
 // stays fast even under -race on a loaded runner and only the (deliberately
 // slow) stream scans compete for the budget.
+// The slow rule spins until its timeout on any stream over 1 MiB, so a single
+// padding member already spends the whole budget; two keep the fixture plural
+// while keeping extraction (which scales with padding volume) small.
 const (
-	padSize       = 2 << 20
-	padCount      = 6
+	padSize       = 1<<20 + 4096
+	padCount      = 2
 	budgetTimeout = 4 * time.Second
 )
 
@@ -87,8 +90,8 @@ func budgetScanner(t *testing.T, timeout time.Duration) *Scanner {
 	return s
 }
 
-// TestScanPaddedZipFindsDropperAndMarksIncomplete: six 2 MiB padding members
-// cost more than the whole budget to scan. The small dropper member must still
+// TestScanPaddedZipFindsDropperAndMarksIncomplete: the padding members cost
+// more than the whole budget to scan. The small dropper member must still
 // be found, and the budget hit must surface as ErrScanIncomplete plus a
 // log-only SCAN-INCOMPLETE marker rather than a nil-error verdict.
 func TestScanPaddedZipFindsDropperAndMarksIncomplete(t *testing.T) {
