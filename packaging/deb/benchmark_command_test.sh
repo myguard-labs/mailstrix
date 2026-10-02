@@ -66,7 +66,13 @@ assert docker_tags, "Dockerfile test command has no build tags to compare"
 assert benchmark_tags == docker_tags, \
     f"benchmark tags {sorted(benchmark_tags)} != Docker test tags {sorted(docker_tags)}"
 assert "-race" in docker_args, "Docker test stage no longer runs the race detector"
-assert "./..." in docker_args, "Docker test stage no longer covers every Go package"
+# The test stage either runs ./... directly or runs the package set chosen by
+# tools/testscope, which falls back to ./... whenever no PR file list is given
+# (release workflow_call) or a change cannot be mapped to packages safely.
+stage = stage_match.group(1)
+scoped = any(a.rstrip(";") == "$pkgs" for a in docker_args) and "go run ./tools/testscope ${CHANGED_FILES}" in stage
+assert "./..." in docker_args or scoped, \
+    "Docker test stage no longer covers every Go package (directly or via tools/testscope)"
 assert "-bench=." in benchmark_args, "maintenance command no longer runs benchmarks"
 arm_tokens = shlex.split(arm_build.replace("\\\n", " "))
 assert arm_job["runs-on"] == "ubuntu-24.04-arm", "race-arm64 no longer runs natively"
