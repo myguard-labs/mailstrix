@@ -94,11 +94,21 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		fromOneNote(data, res, b, depth, deadline)
 	case isTNEF(data):
 		fromTNEF(data, res, b, depth, deadline)
+	case isSLK(data):
+		// A SYLK spreadsheet inside an archive or .msg executes its XLM/DDE cell
+		// formulas just like a top-level one (COR-09).
+		fromSLK(data, res, deadline)
+	case isSpreadsheetML(data):
+		// Excel-2003 XML spreadsheet child: DDE command formulas (COR-09).
+		fromSpreadsheetML(data, res, deadline)
 	default:
 		// Not a recognised container — it may still be an MS Script Encoder block
 		// (#@~^…^#~@) carried as a child (.vbe/.jse inside an archive/.msg). Decode
 		// it so the keyword rules match; a no-op for ordinary bytes.
 		fromEncodedScript(data, res, deadline)
+		// A zipped or attached .csv/.tsv may carry the DDE command form; the
+		// top-level text path already runs this (COR-09). Self-gating.
+		fromCSVDDE(data, res, deadline)
 		// It may also be an HTML/SVG part smuggling a payload (atob→Blob→download,
 		// a force-downloaded base64 data: URI, or a scripted <svg>) — e.g. an .html
 		// attachment delivered inside a .zip or .msg rather than as the top-level
