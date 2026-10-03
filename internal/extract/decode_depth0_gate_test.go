@@ -37,6 +37,9 @@ func TestFromEncodedDepth0GateBehaviour(t *testing.T) {
 				got = true
 			}
 		}
+		if !c.want && len(res.Streams) != 0 {
+			t.Errorf("%s: got %d streams, want 0", c.name, len(res.Streams))
+		}
 		if got != c.want {
 			t.Errorf("%s: payload recovered=%v, want %v (%d streams)", c.name, got, c.want, len(res.Streams))
 		}

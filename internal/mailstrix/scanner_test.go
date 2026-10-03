@@ -788,18 +788,6 @@ func TestScanRaceReload(t *testing.T) {
 	wg.Wait()
 }
 
-func sameRules(m []Match, want []string) bool {
-	if len(m) != len(want) {
-		return false
-	}
-	for i := range want {
-		if m[i].Rule != want[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // TestStreamDeduplication verifies that identical extracted streams are skipped
 // before YARA scanning and counted in the Deduped metric. The fixture
 // (dup_vba_streams.xlsm) is a zip with two identical vbaProject.bin entries,
