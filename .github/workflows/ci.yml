@@ -56,6 +56,7 @@ jobs:
           changed=""
           if [ "$EVENT_NAME" = pull_request ]; then
             changed="$(git diff --name-only HEAD^1 HEAD | tr '\n' ' ')"
+            changed="--changed -- $changed"
           fi
           echo "changed files: ${changed:-<full suite>}"
           docker buildx build --target test -f docker/Dockerfile -t strixd-test \
@@ -181,6 +182,8 @@ jobs:
             go install "golang.org/x/vuln/cmd/govulncheck@v1.6.0"
           [ -x "$HOME/go/bin/gosec" ] ||
             go install "github.com/securego/gosec/v2/cmd/gosec@v2.27.1"
+      - name: changed-test-scope contract
+        run: bash ci/testscope_test.sh
       - name: gofmt
         run: |
           unformatted=$(gofmt -l cmd internal)
