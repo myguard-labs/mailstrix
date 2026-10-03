@@ -199,6 +199,13 @@ var (
 		`(?:"((?:[^"]|"")*)"|([A-Za-z]\w{0,63}))\s*\)`)
 	vbaReplaceNeedle = []byte("replace(")
 
+	// PERF-51 literal gates for the other fold regexes (lower-case for
+	// containsASCIIFold).
+	vbaChrNeedle        = []byte("chr")
+	vbaArrayNeedle      = []byte("array(")
+	vbaStrReverseNeedle = []byte("strreverse(")
+	vbaEnvironNeedle    = []byte("environ")
+
 	// MSD-encodings: compiled regexes for the 6 new encoding patterns.
 
 	// \xHH hex-escape sequences: literal \x followed by two hex digits, repeated min minXEscRun times.
@@ -252,8 +259,14 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 		src = src[:maxFoldInput]
 	}
 
-	// Chr/ChrW concat
-	matches := reChrConcat.FindAll(src, maxMatches)
+	// PERF-51: literal gates. Each fold regex below needs its literal, so a
+	// cheap scalar scan skips the whole-buffer regex pass when it is absent.
+	// A concat chain needs a '&' or '+' between two tokens, each a string
+	// literal or a Chr call.
+	var matches [][]byte
+	if bytes.ContainsAny(src, "&+") && (bytes.ContainsRune(src, '"') || containsASCIIFold(src, vbaChrNeedle)) {
+		matches = reChrConcat.FindAll(src, maxMatches)
+	}
 	for _, m := range matches {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return false
@@ -300,7 +313,10 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 	}
 
 	// Array(N,...) Xor K
-	xorMatches := reArrayXor.FindAllSubmatch(src, maxMatches)
+	var xorMatches [][][]byte
+	if containsASCIIFold(src, vbaArrayNeedle) {
+		xorMatches = reArrayXor.FindAllSubmatch(src, maxMatches)
+	}
 	for _, m := range xorMatches {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return false
@@ -325,7 +341,10 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 	}
 
 	// StrReverse("literal") — emit the reversed cleartext.
-	revMatches := reStrReverse.FindAllSubmatch(src, maxMatches)
+	var revMatches [][][]byte
+	if containsASCIIFold(src, vbaStrReverseNeedle) {
+		revMatches = reStrReverse.FindAllSubmatch(src, maxMatches)
+	}
 	for _, m := range revMatches {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return false
@@ -338,7 +357,10 @@ func foldVBAStrings(src []byte, deadline time.Time, emit func([]byte) bool) bool
 
 	// Environ("NAME") — emit a VBA-ENVIRON %NAME% marker so a rule can flag
 	// env-var probing.
-	envMatches := reEnviron.FindAllSubmatch(src, maxMatches)
+	var envMatches [][][]byte
+	if containsASCIIFold(src, vbaEnvironNeedle) {
+		envMatches = reEnviron.FindAllSubmatch(src, maxMatches)
+	}
 	for _, m := range envMatches {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return false
