@@ -127,3 +127,66 @@ func TestChangedScopeExplicitMappings(t *testing.T) {
 		}
 	}
 }
+
+func TestChangedExternalInputs(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m/internal/cape", Dir: "/r/internal/cape"})
+	for _, tc := range []struct{ file, want string }{
+		{"internal/mailstrix/CAPE.md", "example.com/m/internal/mailstrix"},
+		{"internal/cape/STORE.md", "example.com/m/internal/cape"},
+		{"internal/mailstrix/CAPE-OPERATIONS.md", "example.com/m/internal/cape"},
+		{"docker/fetch-rules.sh", "example.com/m/internal/extract"},
+		{"docker/local-rules/deleted.yara", "example.com/m/internal/extract example.com/m/internal/mailstrix"},
+		{"contrib/clamd/test_clients.py", "example.com/m/internal/mailstrix"},
+		{"internal/extract/testdata/deleted.eml", "example.com/m/internal/extract example.com/m/internal/mailstrix"},
+		{"third_party/oleparse/oleparse.go", "example.com/m/cmd/strixd example.com/m/internal/extract example.com/m/internal/mailstrix"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			got, err := selectChangedPackages([]string{tc.file}, graph, "/r")
+			if err != nil || strings.Join(got, " ") != tc.want {
+				t.Fatalf("got %v, %v; want %s", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelectTestOnlyDoesNotRunProductionConsumers(t *testing.T) {
+	for _, file := range []string{"internal/extract/archive_test.go", "internal/extract/testdata/deleted.eml", "internal/mbazaar/client_test.go"} {
+		got := sel(file)
+		owner := "example.com/m/" + strings.Split(file, "/")[0] + "/" + strings.Split(file, "/")[1]
+		if got != owner {
+			t.Fatalf("%s: got %s, want only %s", file, got, owner)
+		}
+	}
+}
+
+func TestSelectTestImporterOrderIndependent(t *testing.T) {
+	graph := []pkg{
+		{ImportPath: "m/a", Dir: "/r/a"},
+		{ImportPath: "m/b", Dir: "/r/b", TestImports: []string{"m/a"}},
+		{ImportPath: "m/c", Dir: "/r/c", XTestImports: []string{"m/b"}},
+	}
+	for _, reverse := range []bool{false, true} {
+		if reverse {
+			graph[0], graph[2] = graph[2], graph[0]
+		}
+		got := strings.Join(selectPackages([]string{"a/source.go"}, graph, "/r"), " ")
+		if got != "m/a m/b" {
+			t.Fatalf("reverse=%v: got %s", reverse, got)
+		}
+	}
+}
+
+func TestSelectRejectsTestdataPrefixLookalike(t *testing.T) {
+	got := selectPackages([]string{"internal/verdict/testdatabase/x.eml"}, testGraph(), "/r")
+	if !reflect.DeepEqual(got, []string{all}) {
+		t.Fatalf("unmapped sibling accepted: %v", got)
+	}
+}
+
+func TestSelectGraphWithRootPackage(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m", Dir: "/r"})
+	got := selectPackages([]string{"internal/verdict/verdict.go"}, graph, "/r")
+	if strings.Join(got, " ") != "example.com/m/internal/verdict" {
+		t.Fatalf("unrelated root package selected: %v", got)
+	}
+}

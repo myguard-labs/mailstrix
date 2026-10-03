@@ -61,6 +61,8 @@ func selectChangedPackages(changed []string, pkgs []pkg, root string) ([]string,
 	for _, f := range changed {
 		f = path.Clean(strings.TrimPrefix(strings.TrimSpace(f), "./"))
 		switch {
+		case len(externalInputs(f)) > 0:
+			goFiles = append(goFiles, externalInputs(f)...)
 		case f == "." || strings.HasSuffix(f, ".md"):
 			continue
 		case globalInputs[f]:
@@ -88,6 +90,26 @@ func selectChangedPackages(changed []string, pkgs []pkg, root string) ([]string,
 		sort.Strings(selected)
 	}
 	return selected, nil
+}
+
+// External runtime/test inputs must select their real Go consumers before generic
+// documentation or script handling. Keep these in step with the tests reading them.
+func externalInputs(f string) []string {
+	switch {
+	case f == "internal/mailstrix/CAPE.md", f == "contrib/clamd/test_clients.py":
+		return []string{"internal/mailstrix/input_test.go"}
+	case f == "internal/cape/STORE.md", f == "internal/mailstrix/CAPE-OPERATIONS.md":
+		return []string{"internal/cape/input_test.go"}
+	case strings.HasPrefix(f, "internal/extract/testdata/"):
+		return []string{f, "internal/mailstrix/input_test.go"}
+	case f == "docker/fetch-rules.sh":
+		return []string{"internal/extract/input_test.go"}
+	case strings.HasPrefix(f, "docker/local-rules/"):
+		return []string{"internal/extract/input_test.go", "internal/mailstrix/input_test.go"}
+	case strings.HasPrefix(f, "third_party/oleparse/") && !strings.HasSuffix(f, ".md"):
+		return []string{"internal/extract/input.go"}
+	}
+	return nil
 }
 
 var globalInputs = map[string]bool{
@@ -160,16 +182,24 @@ func selectPackages(changed []string, pkgs []pkg, root string) []string {
 		byDir[rel] = p.ImportPath
 	}
 	direct := map[string]bool{}
+	testOnly := map[string]bool{}
 	for _, f := range changed {
 		f = path.Clean(strings.TrimPrefix(strings.TrimSpace(f), "./"))
 		if f == "." || f == "" {
 			continue
 		}
-		if !strings.HasSuffix(f, ".md") && !inPackage(f, byDir, direct) {
+		if strings.HasSuffix(f, ".md") {
+			continue
+		}
+		owners := direct
+		if strings.HasSuffix(f, "_test.go") || strings.Contains(f, "/testdata/") {
+			owners = testOnly
+		}
+		if !inPackage(f, byDir, owners) {
 			return []string{all}
 		}
 	}
-	if len(direct) == 0 {
+	if len(direct) == 0 && len(testOnly) == 0 {
 		return nil // documentation-only change: nothing to test
 	}
 	// Packages whose (non-test) dependency closure contains a changed package.
@@ -179,11 +209,19 @@ func selectPackages(changed []string, pkgs []pkg, root string) []string {
 			affected[p.ImportPath] = true
 		}
 	}
-	// Plus packages whose tests import an affected package.
+	// Test dependencies observe production changes, never other packages' test-only changes.
+	production := make(map[string]bool, len(affected))
+	for ip := range affected {
+		production[ip] = true
+	}
+	// Plus packages whose tests import a production-affected package.
 	for _, p := range pkgs {
-		if anyIn(p.TestImports, affected) || anyIn(p.XTestImports, affected) {
+		if anyIn(p.TestImports, production) || anyIn(p.XTestImports, production) {
 			affected[p.ImportPath] = true
 		}
+	}
+	for ip := range testOnly {
+		affected[ip] = true
 	}
 	out := make([]string, 0, len(affected))
 	for ip := range affected {
@@ -206,7 +244,7 @@ func inPackage(f string, byDir map[string]string, direct map[string]bool) bool {
 			continue
 		}
 		// Only the package's own dir or its testdata subtree belongs to it.
-		if d == dir || strings.HasPrefix(dir, d+"/testdata") {
+		if d == dir || (dir == d+"/testdata" || strings.HasPrefix(dir, d+"/testdata/")) {
 			direct[ip] = true
 			return true
 		}
