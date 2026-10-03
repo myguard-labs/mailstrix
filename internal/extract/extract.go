@@ -454,15 +454,12 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// a plain archive whose members may be droppers (unpack them). The macro
 		// path also flags Failed on an unopenable (corrupt) zip; never member-dump
 		// an Office doc.
-		officeZip := fromOOXML(buf, &res, deadline, opts)
-		if !officeZip {
-			fromArchive(buf, &res, b, 0, deadline)
-		} else {
-			// Office-classified: the macro path owns the body parts, but a dropper can
-			// ride as a non-office SIBLING member (spoofed-container evasion). Unpack
-			// only the members that are themselves carriers — zero body-text FP.
-			fromOfficeZipCarriers(buf, &res, b, 0, deadline)
-		}
+		//
+		// Office-classified: the macro path owns the body parts, but a dropper can
+		// ride as a non-office SIBLING member (spoofed-container evasion), so only
+		// the members that are themselves carriers are unpacked — zero body-text FP.
+		// PERF-55: fromZip parses the central directory once for all of this.
+		fromZip(buf, &res, b, 0, deadline, opts, true)
 	case isArchive(buf):
 		// A non-zip archive (gz/7z/rar). Unpack members (recursing into nested
 		// archives/containers) so a dropped payload is scanned, not just the
@@ -996,30 +993,14 @@ func fromOOXML(buf []byte, res *Result, deadline time.Time, opts *Options) (offi
 		res.Failed = true
 		return false
 	}
+	return fromOOXMLZip(zr, res, deadline, opts)
+}
 
-	// Compute the office-zip classification from the already-open zr using the
-	// same predicate and maxZipEntries bound as isOfficeZip — eliminating the
-	// second zip.NewReader call that isOfficeZip(buf) would otherwise perform.
-	// First-match short-circuit mirrors isOfficeZip exactly.
-	for i, f := range zr.File {
-		if i >= maxZipEntries {
-			break
-		}
-		switch f.Name {
-		case "[Content_Types].xml", "mimetype":
-			officeZip = true
-		}
-		// Classification predicate (isOfficeClassPart, NOT isOfficePartName): a bare
-		// META-INF/ must not mark Office, else a Java .jar / Android .apk (which carry
-		// META-INF/MANIFEST.MF but no office root) would take the macro path and never
-		// have its .class / nested-jar payload members unpacked. Mirrors isOfficeZip.
-		if !officeZip && isOfficeClassPart(f.Name) {
-			officeZip = true
-		}
-		if officeZip {
-			break
-		}
-	}
+// fromOOXMLZip is fromOOXML over an already-open zip reader (PERF-55), so the
+// dispatch sites parse the central directory once for both this macro path and
+// the member/carrier walk that follows.
+func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options) (officeZip bool) {
+	officeZip = isOfficeZipReader(zr)
 
 	// Build a shared name→entry index for fromOOXMLXLM's O(1) workbook lookup.
 	// IMPORTANT: keep-FIRST semantics (`if _, ok := idx[f.Name]; !ok`) so that

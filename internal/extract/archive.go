@@ -98,6 +98,11 @@ func isOfficeZip(buf []byte) bool {
 	if err != nil {
 		return false
 	}
+	return isOfficeZipReader(zr)
+}
+
+// isOfficeZipReader is isOfficeZip over an already-open reader (PERF-55).
+func isOfficeZipReader(zr *zip.Reader) bool {
 	for i, f := range zr.File {
 		if i >= maxZipEntries {
 			break
@@ -163,6 +168,14 @@ func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int,
 	}
 	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
 	if err != nil {
+		return
+	}
+	fromOfficeZipCarriersZip(zr, res, b, depth, deadline)
+}
+
+// fromOfficeZipCarriersZip is fromOfficeZipCarriers over an open reader.
+func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	if b == nil || depth > maxNestDepth || b.spent() || expired(deadline) {
 		return
 	}
 	for i, f := range zr.File {
@@ -336,6 +349,49 @@ func unpackZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 	if err != nil {
 		return
 	}
+	unpackZipReader(zr, buf, res, b, depth, deadline)
+}
+
+// fromZip dispatches one zip with a single central-directory parse (PERF-55):
+// an Office document gets the macro path plus the carrier-only sibling walk, a
+// plain archive gets member unpacking. top marks the top-level container, where
+// an unopenable zip is a parse failure (res.Failed); nested, it is skipped, as
+// before. The guards mirror fromArchive's for the member walk.
+func fromZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time, opts *Options, top bool) {
+	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
+	if err != nil {
+		if top {
+			res.Failed = true
+		}
+		return
+	}
+	if !top && !isOfficeZipReader(zr) {
+		// Nested plain archive: the macro path never ran here before.
+		if !zipMemberWalkOK(buf, b, depth, deadline) {
+			return
+		}
+		unpackZipReader(zr, buf, res, b, depth, deadline)
+		return
+	}
+	if fromOOXMLZip(zr, res, deadline, opts) {
+		fromOfficeZipCarriersZip(zr, res, b, depth, deadline)
+		return
+	}
+	if !zipMemberWalkOK(buf, b, depth, deadline) {
+		return
+	}
+	unpackZipReader(zr, buf, res, b, depth, deadline)
+}
+
+// zipMemberWalkOK is fromArchive's gate for the zip branch: depth, budget and
+// deadline, plus the local-file signature it dispatches on.
+func zipMemberWalkOK(buf []byte, b *archiveBudget, depth int, deadline time.Time) bool {
+	return depth <= maxArchiveDepth && !b.spent() && !expired(deadline) && bytes.HasPrefix(buf, zipMagic)
+}
+
+// unpackZipReader is unpackZip over an already-open reader; buf is kept for
+// the lazily-built password-decrypt reader.
+func unpackZipReader(zr *zip.Reader, buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
 	res.IsArchive = true
 	// pwc is non-nil only when MAILSTRIX_ARCHIVE_PW is enabled and candidates were
 	// sourced. zdec is a lazily-built yeka/zip reader over the same buffer, used to
