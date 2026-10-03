@@ -488,7 +488,7 @@ func envSet(name, def string) map[string]struct{} {
 // warnInvalidEnv logs a set but unparsable numeric variable (COR-20), so a
 // value like "8s" for a seconds field is not silently replaced by the default.
 func warnInvalidEnv(name, raw string) {
-	log.Printf("[mailstrix] WARNING: invalid %s=%q (not a number); using the default", name, raw)
+	log.Printf("[mailstrix] WARNING: invalid %s=%q (not a number); using the default", name, raw) // #nosec G706 -- name is a constant env var name; %q escapes the operator-set value, so no control bytes or newlines reach the log
 }
 
 func envInt(name string, def int) int {
