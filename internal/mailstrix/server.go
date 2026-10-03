@@ -166,7 +166,7 @@ func (s *Server) ListenAndServe() error {
 		Handler:           s,
 		ReadHeaderTimeout: 10 * time.Second, // Slowloris guard
 		ReadTimeout:       s.cfg.BackendTimeout + 20*time.Second,
-		WriteTimeout:      s.cfg.BackendTimeout + 25*time.Second,
+		WriteTimeout:      s.httpWriteTimeout(),
 		IdleTimeout:       60 * time.Second,
 	}
 	s.httpSrv.Store(srv)
@@ -1194,3 +1194,10 @@ func ruleNames(m []Match) string {
 }
 
 func msSince(t time.Time) float64 { return float64(time.Since(t).Microseconds()) / 1000 }
+
+// httpWriteTimeout bounds one HTTP response. The write deadline runs from the
+// end of the request header to the last response byte, so it must cover a
+// whole scan, not only the backend budget (COR-18).
+func (s *Server) httpWriteTimeout() time.Duration {
+	return s.cfg.BackendTimeout + s.cfg.ScanTimeout + clamdScanSlack + 25*time.Second
+}

@@ -8,8 +8,11 @@
 package mailstrix
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -418,6 +421,37 @@ func normalizeToken(t string) string {
 // envOrFile returns the trimmed contents of $<name>_FILE if that file exists,
 // else the trimmed value of $<name>. Lets a secret be supplied via a mounted
 // file (Docker secrets / the 0444 token file pattern) instead of the env.
+// secretFileVars lists every secret read through envOrFile. ValidateSecrets
+// checks that each *_FILE that is set can be read.
+var secretFileVars = []string{
+	"MAILSTRIX_TOKEN", "MAILSTRIX_TOKEN_NEXT",
+	"MAILSTRIX_URLHAUS_KEY", "MAILSTRIX_MBAZAAR_KEY", "MAILSTRIX_THREATFOX_KEY",
+}
+
+// ErrSecretFile reports a *_FILE secret that is set but cannot be read.
+var ErrSecretFile = errors.New("secret file set but unreadable")
+
+// ValidateSecrets fails when a secret's *_FILE variable is set but the file
+// cannot be read (COR-16). envOrFile then falls back to the plain variable,
+// which for an unset MAILSTRIX_TOKEN would serve /scan unauthenticated, so
+// the daemon must refuse to start instead. Only variable names are logged.
+func ValidateSecrets() error {
+	var bad []string
+	for _, name := range secretFileVars {
+		f := os.Getenv(name + "_FILE")
+		if f == "" {
+			continue
+		}
+		if _, err := os.ReadFile(f); err != nil { // #nosec G304 G703 -- operator-provided secret path (*_FILE env), not attacker input
+			bad = append(bad, name+"_FILE")
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("%w: %s", ErrSecretFile, strings.Join(bad, ", "))
+	}
+	return nil
+}
+
 func envOrFile(name string) string {
 	if f := os.Getenv(name + "_FILE"); f != "" {
 		if b, err := os.ReadFile(f); err == nil { // #nosec G304 G703 -- operator-provided secret path (*_FILE env), not attacker input
@@ -451,11 +485,23 @@ func envSet(name, def string) map[string]struct{} {
 	return out
 }
 
+// warnInvalidEnv logs a set but unparsable numeric variable (COR-20), so a
+// value like "8s" for a seconds field is not silently replaced by the default.
+func warnInvalidEnv(name, raw string) {
+	log.Printf("[mailstrix] WARNING: invalid %s=%q (not a number); using the default", name, raw)
+}
+
 func envInt(name string, def int) int {
-	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name))); err == nil {
-		return n
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
 	}
-	return def
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		warnInvalidEnv(name, raw)
+		return def
+	}
+	return n
 }
 
 // envIntAuto is envInt that also accepts the literal "auto" (case-insensitive),
@@ -471,21 +517,34 @@ func envIntAuto(name string, def int) int {
 	if n, err := strconv.Atoi(v); err == nil {
 		return n
 	}
+	warnInvalidEnv(name, v)
 	return def
 }
 
 func envInt64(name string, def int64) int64 {
-	if n, err := strconv.ParseInt(strings.TrimSpace(os.Getenv(name)), 10, 64); err == nil {
-		return n
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
 	}
-	return def
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		warnInvalidEnv(name, raw)
+		return def
+	}
+	return n
 }
 
-// envDur reads a value expressed in seconds (float) into a Duration.
+// envDur reads a value expressed in seconds (float) into a Duration. NaN,
+// infinities and non-numeric input are rejected with a warning (COR-20).
 func envDur(name string, defSecs float64) time.Duration {
 	secs := defSecs
-	if f, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(name)), 64); err == nil {
-		secs = f
+	if raw := strings.TrimSpace(os.Getenv(name)); raw != "" {
+		f, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			warnInvalidEnv(name, raw)
+		} else {
+			secs = f
+		}
 	}
 	return time.Duration(secs * float64(time.Second))
 }
