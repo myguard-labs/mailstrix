@@ -1875,6 +1875,14 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		fedSeen[rawSeed] = struct{}{}
 		addFeedHits(buf)
 		for i, stream := range res.Streams {
+			// PERF-52: URL extraction costs ~50 ms/MiB, so many large streams
+			// could run seconds past the shared deadline. Stop at the deadline
+			// and mark the verdict incomplete instead.
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
+				s.logf("scan budget exhausted during reputation lookups; %d streams left unchecked", len(res.Streams)-i)
+				incomplete = true
+				break
+			}
 			k := streamKeys[i]
 			if _, dup := fedSeen[k]; dup {
 				continue

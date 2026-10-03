@@ -51,8 +51,10 @@ var (
 )
 
 const (
-	// maxPDFStreams bounds how many object streams we inflate from one PDF.
+	// maxPDFStreams bounds how many object streams we emit from one PDF.
 	maxPDFStreams = 256
+	// maxPDFAttempts bounds every stream body examined, junk included.
+	maxPDFAttempts = 4 * maxPDFStreams
 	// maxBytesPerPDFStream caps one inflated stream (decompression-bomb guard);
 	// the raw scan still covers anything larger.
 	maxBytesPerPDFStream = 8 << 20
@@ -94,7 +96,11 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 	// many non-deflate `stream … endstream` bodies would otherwise force unbounded
 	// zlib/flate attempts (none of which increment len(res.Streams)). The deadline
 	// also bounds wall-clock so many FlateDecode inflates can't overrun the budget.
-	for attempts < maxPDFStreams && len(res.Streams) < maxStreams && total < maxTotalPDF && !expired(deadline) {
+	// COR-07: maxPDFStreams counts only streams that decoded to something;
+	// non-deflate junk bodies spend the larger maxPDFAttempts instead, so a run
+	// of junk streams cannot hide a later FlateDecode ObjStm.
+	var produced int
+	for attempts < maxPDFAttempts && produced < maxPDFStreams && len(res.Streams) < maxStreams && total < maxTotalPDF && !expired(deadline) {
 		rel := bytes.Index(scan[pos:], pdfStreamKW)
 		if rel < 0 {
 			break
@@ -202,6 +208,7 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 		}
 		res.Streams = append(res.Streams, dec)
 		total += len(dec)
+		produced++
 	}
 
 	// Structural dropper indicators (PDF-DEEPEN): action/JS/launch/embedded-file

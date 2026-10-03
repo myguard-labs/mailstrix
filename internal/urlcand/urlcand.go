@@ -47,15 +47,19 @@ type Candidate struct {
 	normalized bool
 }
 
+// scanFactor bounds regexp matches examined per Extract call to scanFactor
+// times maxURLs, so duplicate padding costs bounded work.
+const scanFactor = 16
+
 // Extract extracts URL candidates from data. If maxURLs <= 0 it defaults to 64.
 // Raw candidates (Deobf=false) come first; defanged candidates (Deobf=true)
 // follow using the remaining budget. The total number of candidates never
 // exceeds maxURLs.
 //
-// The extraction mirrors the semantics of the old per-checker inline loop:
-// budget is decremented once per regex match (not per normalized/valid URL),
-// so the same first-N matches are produced regardless of which checker
-// subsequently processes them.
+// Budget is decremented once per distinct regex match (not per normalized/valid
+// URL), so the same first-N distinct matches are produced regardless of which
+// checker subsequently processes them. A defanged match identical to a raw one
+// is not repeated.
 func Extract(data []byte, maxURLs int) []Candidate {
 	if maxURLs <= 0 {
 		maxURLs = 64
@@ -69,8 +73,13 @@ func Extract(data []byte, maxURLs int) []Candidate {
 		return nil
 	}
 	budget := maxURLs
+	// COR-07: a repeated URL spends no budget, so padding a body with one URL
+	// many times cannot push later distinct URLs past maxURLs. Scanning stops
+	// after maxURLs*scanFactor matches to bound the regexp work.
+	scanCap := maxURLs * scanFactor
+	seen := map[string]struct{}{}
 
-	matches := urlRe.FindAll(data, budget)
+	matches := urlRe.FindAll(data, scanCap)
 	if len(matches) == 0 && !defangPossible {
 		return nil
 	}
@@ -80,16 +89,24 @@ func Extract(data []byte, maxURLs int) []Candidate {
 		if budget <= 0 {
 			break
 		}
+		if _, dup := seen[string(m)]; dup {
+			continue
+		}
+		seen[string(m)] = struct{}{}
 		budget--
 		out = append(out, NewCandidate(string(m), false))
 	}
 
 	if budget > 0 && defangPossible {
 		if defanged := defang(data); defanged != "" {
-			for _, m := range urlRe.FindAll([]byte(defanged), budget) {
+			for _, m := range urlRe.FindAll([]byte(defanged), scanCap) {
 				if budget <= 0 {
 					break
 				}
+				if _, dup := seen[string(m)]; dup {
+					continue
+				}
+				seen[string(m)] = struct{}{}
 				budget--
 				out = append(out, NewCandidate(string(m), true))
 			}
