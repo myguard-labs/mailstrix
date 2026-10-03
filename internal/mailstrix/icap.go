@@ -273,14 +273,32 @@ func (s *Server) handleICAPOptions(w io.Writer) error {
 // one complete HTTP header section (request/response line + headers + blank line).
 // Used to skip encapsulated HTTP header sections inside an ICAP body.
 func skipHTTPHeaders(br *bufio.Reader) error {
-	for {
+	_, err := readHTTPHeaders(br)
+	return err
+}
+
+// readHTTPHeaders reads one encapsulated HTTP header section and returns it
+// re-terminated with CRLF, including the closing blank line, so a clean
+// verdict can echo it unchanged (COR-03). The section is capped at
+// maxICAPHeaderBytes and maxICAPHeaderCount lines.
+func readHTTPHeaders(br *bufio.Reader) ([]byte, error) {
+	var out []byte
+	for n := 0; ; n++ {
 		line, err := readBoundedLine(br, maxICAPHeaderLine)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if n > maxICAPHeaderCount {
+			return nil, errICAPTooManyHeaders
+		}
+		out = append(out, line...)
+		out = append(out, '\r', '\n')
+		if len(out) > maxICAPHeaderBytes {
+			return nil, errICAPHeadTooLarge
 		}
 		// Blank line (CR stripped by readBoundedLine → "") terminates the section.
 		if line == "" {
-			return nil
+			return out, nil
 		}
 	}
 }
@@ -296,27 +314,26 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	// clean verdict because we'd scan only the empty preview bytes.
 	hasPreview := hdr.Get("Preview") != ""
 
-	// Count header sections that precede the body, then read past them.
+	// Read the encapsulated HTTP header sections that precede the body. They are
+	// not scanned, but a clean verdict without Allow: 204 echoes them back
+	// unchanged (COR-03). Encapsulated HTTP headers start with a request/status
+	// line (e.g. "HTTP/1.1 200 OK") followed by MIME-style headers, so they are
+	// read line by line up to the blank line rather than with
+	// textproto.ReadMIMEHeader (which would choke on the leading line).
 	var hasBody bool
-	hdrCount := 0
+	var echo icapEcho
 	for _, sec := range sections {
 		switch sec.name {
 		case "req-hdr", "res-hdr":
-			hdrCount++
+			raw, herr := readHTTPHeaders(br)
+			if herr != nil {
+				_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+				return herr
+			}
+			echo.hdrs = append(echo.hdrs, icapEchoHdr{name: sec.name, raw: raw})
 		case "req-body", "res-body", "opt-body":
 			hasBody = true
-		}
-	}
-
-	// Consume encapsulated HTTP header sections (not needed for scanning).
-	// Encapsulated HTTP headers start with a request/status line (e.g. "HTTP/1.1 200 OK")
-	// followed by MIME-style headers. We skip them by reading lines until a blank line,
-	// which is simpler and more robust than textproto.ReadMIMEHeader (which would choke
-	// on the leading request/status line).
-	for i := 0; i < hdrCount; i++ {
-		if herr := skipHTTPHeaders(br); herr != nil {
-			_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
-			return herr
+			echo.bodyName = sec.name
 		}
 	}
 
@@ -368,7 +385,7 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 			_, err := io.WriteString(w, icapProtoVersion+" 204 No Modification\r\n\r\n")
 			return err
 		}
-		return icapWrite200Clean(w, s.engine.Fingerprint())
+		return icapWriteEcho(w, s.engine.Fingerprint(), echo, nil)
 	}
 
 	// The ICAP conn has no request-scoped context like the HTTP path
@@ -420,7 +437,7 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		_, err := io.WriteString(w, icapProtoVersion+" 204 No Modification\r\n\r\n")
 		return err
 	}
-	return icapWrite200Clean(w, fp)
+	return icapWriteEcho(w, fp, echo, buf)
 }
 
 // icapISTag produces a quoted ISTag from the engine fingerprint (≤32 chars).
@@ -667,21 +684,46 @@ func readICAPChunkedBody(r *bufio.Reader, maxBytes int64) ([]byte, bool, error) 
 	}
 }
 
-// icapWrite200Clean sends an ICAP 200 OK with an empty body (no modification)
-// when the client did not advertise Allow: 204.
-func icapWrite200Clean(w io.Writer, fp string) error {
-	body := "clean\r\n"
-	resHdr := "HTTP/1.1 200 OK\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n"
-	chunkHex := strconv.FormatInt(int64(len(body)), 16)
+// icapEcho holds the encapsulated sections of a request, in arrival order, so
+// a clean verdict can return them unmodified.
+type icapEcho struct {
+	hdrs     []icapEchoHdr
+	bodyName string // "req-body", "res-body" or "opt-body"; "" when none
+}
+
+type icapEchoHdr struct {
+	name string // "req-hdr" or "res-hdr"
+	raw  []byte
+}
+
+// icapWriteEcho answers a clean verdict when the client did not advertise
+// Allow: 204: ICAP 200 OK carrying the original encapsulated headers and body
+// unchanged (RFC 3507 §4.6), instead of a synthetic replacement (COR-03).
+func icapWriteEcho(w io.Writer, fp string, e icapEcho, body []byte) error {
+	var enc []string
+	off := 0
+	var head strings.Builder
+	for _, h := range e.hdrs {
+		enc = append(enc, fmt.Sprintf("%s=%d", h.name, off))
+		head.Write(h.raw)
+		off += len(h.raw)
+	}
+	if e.bodyName != "" && len(body) > 0 {
+		enc = append(enc, fmt.Sprintf("%s=%d", e.bodyName, off))
+	} else {
+		enc = append(enc, fmt.Sprintf("null-body=%d", off))
+	}
 	var sb strings.Builder
 	sb.WriteString(icapProtoVersion + " 200 OK\r\n")
 	sb.WriteString("ISTag: " + icapISTag(fp) + "\r\n")
-	sb.WriteString(fmt.Sprintf("Encapsulated: res-hdr=0, res-body=%d\r\n", len(resHdr)))
+	sb.WriteString("Encapsulated: " + strings.Join(enc, ", ") + "\r\n")
 	sb.WriteString("\r\n")
-	sb.WriteString(resHdr)
-	sb.WriteString(chunkHex + "\r\n")
-	sb.WriteString(body)
-	sb.WriteString("\r\n0\r\n\r\n")
+	sb.WriteString(head.String())
+	if e.bodyName != "" && len(body) > 0 {
+		sb.WriteString(strconv.FormatInt(int64(len(body)), 16) + "\r\n")
+		sb.Write(body)
+		sb.WriteString("\r\n0\r\n\r\n")
+	}
 	_, err := io.WriteString(w, sb.String())
 	return err
 }
