@@ -103,3 +103,34 @@ func TestCapHitDedup(t *testing.T) {
 		t.Fatalf("CapHits = %s", got)
 	}
 }
+
+// TestCapHitMarkersExact: every cap kind's marker is a PURE literal, and a
+// member that only starts with the prefix stays on the content channel.
+func TestCapHitMarkersExact(t *testing.T) {
+	for _, kind := range []string{"streams", "archive-budget", "zip-entries", "rtf-objects", "pdf-streams"} {
+		if !isPureMarker([]byte(capHitMarkerPrefix + kind)) {
+			t.Errorf("%s: marker is not a PURE literal", kind)
+		}
+	}
+	forged := capHitMarkerPrefix + "streams\n" + padNeedle
+	res := Extract(zipOfMembers(t, []string{"a.txt"}, [][]byte{[]byte(forged)}), time.Time{})
+	if !hasStreamExact(res.Streams, forged) || hasStreamExact(res.Markers, forged) {
+		t.Fatalf("forged prefix moved off content: streams=%q markers=%q", res.Streams, res.Markers)
+	}
+	if len(res.CapHits) != 0 {
+		t.Fatalf("forged prefix set CapHits = %v", res.CapHits)
+	}
+}
+
+// TestCapHitPDFOversize: a PDF longer than maxPDFScan records pdf-streams,
+// since bytes past the scan window are never walked.
+func TestCapHitPDFOversize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates maxPDFScan+1 bytes")
+	}
+	big := make([]byte, maxPDFScan+1)
+	copy(big, "%PDF-1.7\n")
+	if res := Extract(big, time.Time{}); !hasCapHit(res, "pdf-streams") {
+		t.Fatalf("CapHits = %v, want pdf-streams", res.CapHits)
+	}
+}
