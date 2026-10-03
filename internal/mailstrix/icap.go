@@ -3,6 +3,8 @@ package mailstrix
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +33,9 @@ func (s *Server) ListenAndServeICAP(ctx context.Context) error {
 	}
 	ln, err := net.Listen("tcp", s.cfg.ICAPAddr)
 	if err != nil {
+		// A configured ICAP listener that cannot bind must not leave /ready
+		// green (COR-15).
+		s.icapDown.Store(true)
 		return fmt.Errorf("icap listen %s: %w", s.cfg.ICAPAddr, err)
 	}
 	s.icapLn.Store(&ln)
@@ -49,6 +54,10 @@ func (s *Server) ListenAndServeICAP(ctx context.Context) error {
 				s.icapWg.Wait()
 				return nil
 			default:
+				// Accept failed outside shutdown: stop serving, release the
+				// socket and fail readiness instead of only logging (COR-15).
+				s.icapDown.Store(true)
+				_ = ln.Close() // #nosec G104 -- already failing; close error is not actionable
 				return err
 			}
 		}
@@ -245,8 +254,10 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 		}
 		return s.handleICAPMod(w, br, method, hdr, sections)
 	default:
+		// The body framing of an unknown method is unknown, so its bytes would
+		// be parsed as the next request: answer 405 and close (COR-19).
 		_, _ = io.WriteString(w, icapProtoVersion+" 405 Method Not Allowed\r\n\r\n")
-		return nil
+		return errors.New("icap: unsupported method " + strconv.Quote(method))
 	}
 }
 
@@ -441,11 +452,12 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 }
 
 // icapISTag produces a quoted ISTag from the engine fingerprint (≤32 chars).
+// It hashes the whole fingerprint (COR-13): the fingerprint starts with the
+// constant extract.Version, so its first 8 bytes never changed on a reload.
+// RFC 3507 caps ISTag at 32 bytes; 16 hex digits plus quotes fit.
 func icapISTag(fp string) string {
-	if len(fp) > 8 {
-		fp = fp[:8]
-	}
-	return `"` + fp + `"`
+	sum := sha256.Sum256([]byte(fp))
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
 }
 
 // parseICAPEncapsulated parses and validates the Encapsulated header value

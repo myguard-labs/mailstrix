@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -112,8 +114,8 @@ func TestICAPOptions(t *testing.T) {
 	if !strings.Contains(resp, "Allow: 204") {
 		t.Errorf("OPTIONS: missing Allow: 204:\n%s", resp)
 	}
-	if !strings.Contains(resp, `ISTag: "testfp"`) {
-		t.Errorf("OPTIONS: wrong ISTag, want testfp:\n%s", resp)
+	if !strings.Contains(resp, "ISTag: "+icapISTag("testfp")+"\r\n") {
+		t.Errorf("OPTIONS: wrong ISTag, want %s:\n%s", icapISTag("testfp"), resp)
 	}
 }
 
@@ -124,8 +126,43 @@ func TestICAPISTagTracksFingerprint(t *testing.T) {
 
 	optReq := "OPTIONS icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\nEncapsulated: null-body=0\r\n\r\n"
 	resp1 := doICAP(t, addr, optReq)
-	if !strings.Contains(resp1, `"fp1"`) {
-		t.Errorf("ISTag should contain fp1, got:\n%s", resp1)
+	if !strings.Contains(resp1, "ISTag: "+icapISTag("fp1")) {
+		t.Errorf("ISTag should be derived from fp1, got:\n%s", resp1)
+	}
+}
+
+// TestICAPISTagHashesWholeFingerprint (COR-13): fingerprints that share the
+// constant extract.Version prefix still give different ISTags, the tag stays
+// within RFC 3507's 32 bytes, and equal fingerprints give equal tags.
+func TestICAPISTagHashesWholeFingerprint(t *testing.T) {
+	a := icapISTag("ole2+msi-v1:rules-aaaa")
+	b := icapISTag("ole2+msi-v1:rules-bbbb")
+	if a == b {
+		t.Fatalf("same-prefix fingerprints share ISTag %s", a)
+	}
+	if a != icapISTag("ole2+msi-v1:rules-aaaa") {
+		t.Fatal("ISTag not deterministic")
+	}
+	for _, tag := range []string{a, b, icapISTag("")} {
+		if len(tag) > 32 || !strings.HasPrefix(tag, `"`) || !strings.HasSuffix(tag, `"`) {
+			t.Errorf("malformed ISTag %q", tag)
+		}
+	}
+}
+
+// TestICAPUnknownMethodCloses (COR-19): an unknown method gets 405 and the
+// connection is closed, so its body is never parsed as the next request.
+func TestICAPUnknownMethodCloses(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fp"}, "")
+	addr := startTestICAPServer(t, s)
+	req := "PURGE icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n" +
+		"OPTIONS icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\nEncapsulated: null-body=0\r\n\r\n"
+	resp := doICAP(t, addr, req)
+	if !strings.HasPrefix(resp, "ICAP/1.0 405 Method Not Allowed\r\n\r\n") {
+		t.Fatalf("want 405, got:\n%q", resp)
+	}
+	if strings.Contains(resp, "Methods: REQMOD") {
+		t.Fatalf("connection kept serving after 405:\n%q", resp)
 	}
 }
 
@@ -1263,5 +1300,31 @@ func TestICAPEncapsulatedMissingOrMalformedIs400(t *testing.T) {
 	resp := doICAP(t, addr, icapRESPMODRequest(addr, body, true))
 	if !strings.HasPrefix(resp, "ICAP/1.0 200 OK") || !strings.Contains(resp, "MALWARE_TEST") {
 		t.Errorf("valid Encapsulated: want infected 200, got:\n%s", resp)
+	}
+}
+
+// TestICAPBindFailureFailsReady (COR-15): a configured ICAP listener that
+// cannot bind makes /ready 503 instead of only logging.
+func TestICAPBindFailureFailsReady(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fp"}, "")
+	ready := func() int {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+		return rec.Code
+	}
+	if code := ready(); code != http.StatusOK {
+		t.Fatalf("control: /ready = %d before any ICAP failure", code)
+	}
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	s.cfg.ICAPAddr = busy.Addr().String()
+	if err := s.ListenAndServeICAP(context.Background()); err == nil {
+		t.Fatal("bind to a taken port succeeded")
+	}
+	if code := ready(); code != http.StatusServiceUnavailable {
+		t.Fatalf("/ready = %d after ICAP bind failure, want 503", code)
 	}
 }

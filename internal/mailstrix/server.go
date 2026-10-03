@@ -107,6 +107,7 @@ type Server struct {
 	draining atomic.Bool                 // true once Shutdown begins -> /ready 503s
 
 	icapLn        atomic.Pointer[net.Listener]
+	icapDown      atomic.Bool // ICAP listener failed to bind or stopped accepting -> /ready 503s (COR-15)
 	icapWg        sync.WaitGroup
 	icapConns     chan struct{} // live-connection cap, taken at accept() (pre-admission)
 	icapRefuse    chan struct{} // bounds concurrent 503-refusal goroutines
@@ -368,6 +369,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.draining.Load() {
 			writeText(w, http.StatusServiceUnavailable, "draining")
+			return
+		}
+		if s.icapDown.Load() {
+			writeText(w, http.StatusServiceUnavailable, "icap listener down")
 			return
 		}
 		// Stale rules do NOT fail readiness: old rules still catch most malware,
