@@ -3,7 +3,6 @@
 import itertools
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import textwrap
@@ -14,21 +13,41 @@ APPLICATION_JOBS = ('docker', 'parity-isolation', 'lint')
 
 
 def jobs():
-    source = WORKFLOW.read_text()
-    starts = list(re.finditer(r'^  ([a-z][a-z-]*):\n', source, re.M))
-    return {
-        match[1]: source[
-            match.end():starts[i + 1].start() if i + 1 < len(starts) else None
-        ]
-        for i, match in enumerate(starts)
-    }
+    """Return top-level job bodies using YAML indentation, not formatting regexes."""
+    lines = WORKFLOW.read_text().splitlines(keepends=True)
+    jobs_start = lines.index('jobs:\n') + 1
+    found = {}
+    name = None
+    body = []
+    for line in lines[jobs_start:]:
+        if (line.startswith('  ') and not line.startswith('   ')
+                and line.rstrip().endswith(':')):
+            if name is not None:
+                found[name] = ''.join(body)
+            name = line.strip()[:-1]
+            body = []
+        elif name is not None:
+            body.append(line)
+    if name is not None:
+        found[name] = ''.join(body)
+    return found
 
 
 def script(job):
-    match = re.search(r'^        run: \|\n((?:          .*\n|\n)+)', job, re.M)
-    if not match:
-        raise AssertionError('workflow job has no shell script')
-    return textwrap.dedent(match[1])
+    """Return the first literal run block, accepting any valid deeper indent."""
+    lines = job.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.lstrip() == 'run: |\n':
+            parent_indent = len(line) - len(line.lstrip())
+            body = []
+            for candidate in lines[index + 1:]:
+                if candidate.strip():
+                    indent = len(candidate) - len(candidate.lstrip())
+                    if indent <= parent_indent:
+                        break
+                body.append(candidate)
+            return textwrap.dedent(''.join(body))
+    raise AssertionError('workflow job has no literal shell script')
 
 
 class WorkflowContract(unittest.TestCase):
@@ -52,12 +71,33 @@ class WorkflowContract(unittest.TestCase):
               return "$GIT_STATUS"
             }
             '''
-            result = subprocess.run(
-                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+            result = subprocess.run(  # noqa: S603 - executes the reviewed workflow
+                ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                  fake_git + script(self.jobs['changes'])],
                 env=env, capture_output=True, text=True, check=False,
             )
             return result.returncode, output.read_text() if output.exists() else ''
+
+    def docker_scope(self, paths, event='pull_request'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / 'paths'
+            fixture.write_text(''.join(f'{path}\n' for path in paths))
+            env = dict(os.environ, EVENT_NAME=event, DIFF_FIXTURE=str(fixture))
+            fake_commands = '''git() {
+              expected="diff --name-only HEAD^1 HEAD -- . :(exclude)ci/**"
+              test "$*" = "$expected" || return 99
+              while IFS= read -r path; do
+                case "$path" in ci/*) ;; *) printf '%s\\n' "$path" ;; esac
+              done < "$DIFF_FIXTURE"
+            }
+            docker() { printf 'docker-args:%s\\n' "$*"; }
+            '''
+            return subprocess.run(  # noqa: S603 - executes the reviewed workflow
+                ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+                 fake_commands + script(self.jobs['docker'])],
+                env=env, capture_output=True, text=True, check=False,
+            )
 
     def test_docs_only(self):
         for paths in (['README.md'], ['contrib/postfix/README.md', 'docs/usage.md'],
@@ -88,6 +128,21 @@ class WorkflowContract(unittest.TestCase):
         status, output = self.classify(['README.md'], git_status=1)
         self.assertNotEqual(status, 0)
         self.assertEqual(output, '')
+
+    def test_docker_changed_scope(self):
+        for paths in (['ci/workflow_contract_test.py'], []):
+            with self.subTest(paths=paths):
+                result = self.docker_scope(paths)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('changed files: <full suite>', result.stdout)
+                self.assertIn('CHANGED_FILES=', result.stdout)
+                self.assertNotIn('CHANGED_FILES=--changed --', result.stdout)
+        result = self.docker_scope(['internal/scan/scan.go'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('CHANGED_FILES=--changed -- internal/scan/scan.go', result.stdout)
+        result = self.docker_scope(['internal/scan/scan.go'], event='workflow_call')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('changed files: <full suite>', result.stdout)
 
     def test_wiring(self):
         self.assertIn('fetch-depth: 2', self.jobs['changes'])
@@ -125,8 +180,8 @@ class WorkflowContract(unittest.TestCase):
                 accepted = (application in ('true', 'false')
                             and results[:2] == ('success', 'success')
                             and results[2:] == (expected,) * 3)
-                result = subprocess.run(
-                    ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+                result = subprocess.run(  # noqa: S603 - reviewed workflow script
+                    ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                      script(self.jobs['ci-ok'])],
                     env=env, capture_output=True, text=True, check=False,
                 )

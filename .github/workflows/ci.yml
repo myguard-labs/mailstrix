@@ -95,7 +95,9 @@ jobs:
             # context, so its host-side contracts cannot identify a package in
             # the in-image graph. Do not feed those paths to its package mapper.
             changed="$(git diff --name-only HEAD^1 HEAD -- . ':(exclude)ci/**' | tr '\n' ' ')"
-            changed="--changed -- $changed"
+            # An empty in-image path set (for example, a ci/-only PR) must run
+            # the full suite rather than passing an empty --changed selection.
+            if [ -n "$changed" ]; then changed="--changed -- $changed"; fi
           fi
           echo "changed files: ${changed:-<full suite>}"
           docker buildx build --target test -f docker/Dockerfile -t strixd-test \
