@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"path"
 	"strings"
 	"time"
 
@@ -279,7 +280,10 @@ func emitMember(data []byte, res *Result, b *archiveBudget, depth int, deadline 
 			res.Panicked = true
 		}
 	}()
-	if len(data) == 0 || b.spent() || len(res.Streams) >= maxStreams {
+	// A member below minMemberBytes cannot carry a payload any rule could
+	// match; emitting it would only let padding spend the stream and member
+	// budgets (COR-07).
+	if len(data) < minMemberBytes || b.spent() || len(res.Streams) >= maxStreams {
 		return
 	}
 	b.members++
@@ -331,8 +335,13 @@ func unpackZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 	// build so a second encrypted member reuses it (or skips after a build failure).
 	pwc := pwCandidates(res)
 	var zdec *zipDecryptReader
-	for i, f := range zr.File {
-		if i >= maxZipEntries || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+	// COR-07: visit executable/script members before everything else, so a run
+	// of cheap padding members cannot exhaust maxStreams or the member budget
+	// before a z.vbs at the end is reached. The stable order keeps archive order
+	// within each class.
+	for n, i := range zipVisitOrder(zr.File) {
+		f := zr.File[i]
+		if n >= maxZipEntries || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
 			break
 		}
 		if f.FileInfo().IsDir() || strings.HasSuffix(f.Name, "/") {
@@ -1065,4 +1074,37 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 		emitted = true
 	}
 	return emitted
+}
+
+// minMemberBytes is the smallest archive member worth emitting as a stream.
+const minMemberBytes = 4
+
+// priorityMemberExts are member name extensions scanned first: executables,
+// scripts, shortcuts, installers and macro-capable documents.
+var priorityMemberExts = map[string]bool{
+	".exe": true, ".dll": true, ".scr": true, ".com": true, ".pif": true, ".cpl": true,
+	".msi": true, ".msp": true, ".msix": true, ".appx": true, ".jar": true,
+	".js": true, ".jse": true, ".vbs": true, ".vbe": true, ".wsf": true, ".wsh": true,
+	".hta": true, ".ps1": true, ".psm1": true, ".bat": true, ".cmd": true, ".lnk": true,
+	".url": true, ".iso": true, ".img": true, ".vhd": true, ".vhdx": true, ".one": true,
+	".docm": true, ".dotm": true, ".xlsm": true, ".xlam": true, ".xlsb": true, ".xll": true,
+	".pptm": true, ".ppam": true, ".doc": true, ".xls": true, ".ppt": true, ".rtf": true,
+	".chm": true, ".reg": true, ".svg": true, ".html": true, ".htm": true,
+}
+
+// zipVisitOrder returns the indexes of files with priority members first, each
+// class in archive order.
+func zipVisitOrder(files []*zip.File) []int {
+	order := make([]int, 0, len(files))
+	for i, f := range files {
+		if priorityMemberExts[strings.ToLower(path.Ext(f.Name))] {
+			order = append(order, i)
+		}
+	}
+	for i, f := range files {
+		if !priorityMemberExts[strings.ToLower(path.Ext(f.Name))] {
+			order = append(order, i)
+		}
+	}
+	return order
 }
