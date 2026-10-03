@@ -763,11 +763,16 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 	// available as extra sources. Each source is processed independently here
 	// (its decode tree is fed through decodeSourceTree as before) because the
 	// defang-then-redecode path is already one extra source, not a BFS item.
-	for _, src := range sources {
+	// PERF-63: remember each source's mostlyText verdict (0 unknown, 1 text,
+	// 2 not text) so the prefilter below does not rescan it.
+	textState := make([]uint8, len(sources))
+	for i, src := range sources {
 		if expired(deadline) || len(res.Streams) >= maxStreams {
 			break
 		}
+		textState[i] = 2
 		if mostlyText(src) {
+			textState[i] = 1
 			if ud, ok := undefang(src); ok && len(ud) >= minDecodedLen {
 				if len(ud) > maxBytesPerDecodedBlob {
 					ud = ud[:maxBytesPerDecodedBlob]
@@ -796,8 +801,9 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 	// markers would be discarded by the BFS loop without emitting blobs or deep
 	// markers, so dropping it here saves the per-source state and queue slots.
 	decodeSources := sources[:0]
-	for _, src := range sources {
-		if mostlyText(src) && mayBeEncoded(src) {
+	for i, src := range sources {
+		text := textState[i] == 1 || (textState[i] == 0 && mostlyText(src))
+		if text && mayBeEncoded(src) {
 			decodeSources = append(decodeSources, src)
 		}
 	}
@@ -864,7 +870,9 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 			st.blobs >= maxDecodedBlobs || st.cum >= maxCumulativeDecoded {
 			continue
 		}
-		if !mostlyText(cur.data) {
+		// PERF-63: depth-0 items are the prefiltered sources, which already
+		// passed mostlyText and mayBeEncoded above; only children need the gates.
+		if cur.depth > 0 && !mostlyText(cur.data) {
 			continue
 		}
 		// PERF-4: cheap scalar pre-gate. Prose passes mostlyText but has no long
@@ -874,7 +882,7 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 		// still passes. Only no-op work on plain text is skipped. Gated before
 		// st.iters++ so a skip does not consume the per-source iteration budget
 		// (strictly leaves more budget for real items — never less work).
-		if !mayBeEncoded(cur.data) {
+		if cur.depth > 0 && !mayBeEncoded(cur.data) {
 			continue
 		}
 		st.iters++

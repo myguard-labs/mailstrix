@@ -1515,7 +1515,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	out = filterMarkerChannel(out, false)
 	// Build the dedup identity set once from the raw matches so that the stream
 	// loop below can update it incrementally instead of rebuilding it on every
-	// stream (O(N) total rather than O(N²) — PERF: mergeMatches-seen). Use a
+	// stream (O(N) total rather than O(N²)). Use a
 	// struct key instead of "namespace/rule" concatenation so stream merges do
 	// not allocate one synthetic key string per match.
 	type matchKey struct {
@@ -2287,35 +2287,6 @@ func (s *Scanner) scanOne(rules *yara.Rules, buf []byte, vars scanVars, timeout 
 		out = append(out, Match{Rule: m.Rule, Namespace: m.Namespace, Tags: m.Tags, Meta: meta})
 	}
 	return out, nil
-}
-
-// mergeMatches appends matches found in an extracted macro stream to the
-// raw-scan matches, skipping any rule already reported so a rule that fires on
-// both the container and its decompressed macro is listed once. Raw matches
-// keep their position; new ones are appended in stream order.
-//
-// Identity is namespace+identifier, NOT the identifier alone: yarad compiles
-// each rule file into its own namespace precisely because public rulesets reuse
-// the same rule name across files (see Match.Namespace). Keying on the name
-// alone would silently drop a genuinely different stream-only rule whose name
-// collides with an unrelated raw match — and undercount exStreamMatches.
-func mergeMatches(into, more []Match) []Match {
-	if len(more) == 0 {
-		return into
-	}
-	id := func(m Match) string { return m.Namespace + "/" + m.Rule }
-	seen := make(map[string]struct{}, len(into)+len(more))
-	for i := range into {
-		seen[id(into[i])] = struct{}{}
-	}
-	for _, m := range more {
-		if _, dup := seen[id(m)]; dup {
-			continue
-		}
-		seen[id(m)] = struct{}{}
-		into = append(into, m)
-	}
-	return into
 }
 
 // markerTag is the YARA tag carried by yarad's PURE-marker rules (PLAN

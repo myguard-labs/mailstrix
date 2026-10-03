@@ -717,36 +717,6 @@ func TestRulesetModUnix(t *testing.T) {
 	}
 }
 
-func TestMergeMatches(t *testing.T) {
-	raw := []Match{{Rule: "A"}, {Rule: "B"}}
-	got := mergeMatches(raw, []Match{{Rule: "B"}, {Rule: "C"}})
-	if want := []string{"A", "B", "C"}; !sameRules(got, want) {
-		t.Errorf("dedup/order wrong: %+v want %v", got, want)
-	}
-	if got := mergeMatches(raw, nil); len(got) != 2 {
-		t.Errorf("nil more changed length: %+v", got)
-	}
-	if got := mergeMatches(nil, []Match{{Rule: "X"}}); !sameRules(got, []string{"X"}) {
-		t.Errorf("nil into lost stream match: %+v", got)
-	}
-
-	// Identity is namespace+name, not name alone: a stream-only rule whose
-	// identifier collides with an UNRELATED raw match in a different namespace must
-	// be KEPT (public rulesets reuse rule names across files). Same namespace+name
-	// is still deduped.
-	rawNs := []Match{{Rule: "Dropper", Namespace: "fileA.yar"}}
-	merged := mergeMatches(rawNs, []Match{
-		{Rule: "Dropper", Namespace: "fileB.yar"}, // different rule, same name -> keep
-		{Rule: "Dropper", Namespace: "fileA.yar"}, // exact same rule -> dedup
-	})
-	if len(merged) != 2 {
-		t.Fatalf("namespace dedup wrong: got %d matches, want 2 (%+v)", len(merged), merged)
-	}
-	if merged[1].Namespace != "fileB.yar" {
-		t.Errorf("cross-namespace same-name match was dropped: %+v", merged)
-	}
-}
-
 // TestScanRaceReload (STAB-10) hammers concurrent Scan() calls while Reload()
 // and ReloadDenylist() fire simultaneously. Run with -race to verify no data
 // races exist in the scanner pool / rule-generation machinery.
@@ -816,18 +786,6 @@ func TestScanRaceReload(t *testing.T) {
 	}()
 
 	wg.Wait()
-}
-
-func sameRules(m []Match, want []string) bool {
-	if len(m) != len(want) {
-		return false
-	}
-	for i := range want {
-		if m[i].Rule != want[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // TestStreamDeduplication verifies that identical extracted streams are skipped
