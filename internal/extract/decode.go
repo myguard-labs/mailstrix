@@ -1411,15 +1411,19 @@ func tryBase64(run []byte) ([]byte, bool) {
 	if len(run) > maxB64Encoded {
 		run = run[:maxB64Encoded] // mult of 4, all-alphabet prefix (any '=' is past the cut)
 	}
-	if dec, err := base64.StdEncoding.DecodeString(string(run)); err == nil {
-		return dec, true
+	// PERF-60: decode the []byte directly; DecodeString(string(run)) copied
+	// the run first.
+	dst := make([]byte, base64.StdEncoding.DecodedLen(len(run)))
+	if n, err := base64.StdEncoding.Decode(dst, run); err == nil {
+		return dst[:n], true
 	}
-	s := strings.TrimRight(string(run), "=")
+	s := bytes.TrimRight(run, "=")
 	if len(s)%4 == 1 { // not a valid raw-base64 length
 		return nil, false
 	}
-	if dec, err := base64.RawStdEncoding.DecodeString(s); err == nil {
-		return dec, true
+	dst = make([]byte, base64.RawStdEncoding.DecodedLen(len(s)))
+	if n, err := base64.RawStdEncoding.Decode(dst, s); err == nil {
+		return dst[:n], true
 	}
 	return nil, false
 }
@@ -1454,8 +1458,9 @@ func decodeHexRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool 
 		if len(run) > maxHexEncoded {
 			run = run[:maxHexEncoded]
 		}
-		if dec, err := hex.DecodeString(string(run)); err == nil {
-			if !emit(dec) {
+		dec := make([]byte, hex.DecodedLen(len(run)))
+		if n, err := hex.Decode(dec, run); err == nil {
+			if !emit(dec[:n]) {
 				return false
 			}
 		}
