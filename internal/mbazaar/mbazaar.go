@@ -26,6 +26,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -209,6 +210,13 @@ func (c *Checker) refreshOnce() error {
 	}
 	hs, err := parseFeed(body)
 	if err != nil {
+		return err
+	}
+	prev := 0
+	if old := c.set.Load(); old != nil {
+		prev = len(old.m)
+	}
+	if err := checkFeedSize(prev, len(hs.m)); err != nil {
 		return err
 	}
 	c.set.Store(hs)
@@ -398,4 +406,21 @@ func (c *Checker) Metrics() Metrics {
 		Lookups:         c.lookups.Load(),
 		Hits:            c.hits.Load(),
 	}
+}
+
+// COR-08: a refresh that returns HTTP 200 with zero entries, or with a tiny
+// fraction of a large previous set, is a broken upstream response, not a
+// real feed. Reject it so the last-good set and the warm-start cache stay.
+const (
+	minFeedForDropCheck = 1000
+	maxFeedDropFactor   = 10
+)
+
+var errFeedShrank = errors.New("feed refresh rejected: empty or collapsed")
+
+func checkFeedSize(prev, next int) error {
+	if next == 0 || (prev >= minFeedForDropCheck && next*maxFeedDropFactor < prev) {
+		return fmt.Errorf("%w (%d -> %d entries)", errFeedShrank, prev, next)
+	}
+	return nil
 }
