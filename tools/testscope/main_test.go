@@ -89,3 +89,41 @@ func TestDecodePackagesMalformed(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
+
+func TestChangedScopeExplicitMappings(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m/tools/testscope", Dir: "/r/tools/testscope"})
+	for _, tc := range []struct {
+		name  string
+		files []string
+		want  string
+		bad   bool
+	}{
+		{"empty-diff", nil, "", false},
+		{"docs", []string{"README.md"}, "", false},
+		{"workflow", []string{".github/workflows/ci.yml"}, "example.com/m/tools/testscope", false},
+		{"shell-contract", []string{"scripts/smoke.sh", "packaging/deb/env_keys_test.sh", "ci/testscope_test.sh", "docker/Dockerfile.release"}, "", false},
+		{"leaf", []string{"internal/verdict/verdict.go"}, "example.com/m/internal/verdict", false},
+		{"importers", []string{"internal/extract/archive.go"}, "example.com/m/cmd/strixd example.com/m/internal/extract example.com/m/internal/mailstrix", false},
+		{"test-only-importer", []string{"internal/mbazaar/a.go"}, "example.com/m/internal/mailstrix example.com/m/internal/mbazaar", false},
+		{"testdata", []string{"internal/verdict/testdata/a.eml"}, "example.com/m/internal/verdict", false},
+		{"deleted-package", []string{"internal/gone/a.go"}, "", true},
+		{"unknown-script", []string{"scripts/unknown.go"}, "", true},
+		{"unknown-ci-input", []string{"ci/unknown.txt"}, "", true},
+		{"unknown-workflow-code", []string{".github/unknown.go"}, "", true},
+		{"mixed-unknown", []string{"internal/verdict/a.go", "unknown.txt"}, "", true},
+		{"global-does-not-hide-unknown", []string{"go.mod", "unknown.txt"}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := selectChangedPackages(tc.files, graph, "/r")
+			if (err != nil) != tc.bad || strings.Join(got, " ") != tc.want {
+				t.Fatalf("got %v, %v; want %q, error=%v", got, err, tc.want, tc.bad)
+			}
+		})
+	}
+	for _, file := range []string{"go.mod", "go.sum", "docker/Dockerfile", ".dockerignore"} {
+		got, err := selectChangedPackages([]string{file}, graph, "/r")
+		if err != nil || len(got) != len(graph) || strings.Join(got, " ") == all {
+			t.Fatalf("global %s: got %v, %v", file, got, err)
+		}
+	}
+}

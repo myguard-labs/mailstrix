@@ -1,15 +1,16 @@
 // Command testscope prints the Go packages whose tests a change must run: the
 // packages containing changed files plus every package that imports them,
-// directly or through tests. It prints "./..." (the whole suite) whenever the
-// change cannot be mapped safely: no file list, a module or build input
-// (go.mod, go.sum, Dockerfile, workflows, scripts), or a file outside any Go
-// package directory. Usage: testscope [changed-file ...]
+// directly or through tests. It prints "./..." (the whole suite) when
+// invoked with no list (release/maintenance). Explicit changed paths select
+// affected packages, with non-Go CI inputs mapped explicitly and unknown paths
+// rejected. Usage: testscope [--changed] [changed-file ...]
 package main
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -31,14 +32,90 @@ type pkg struct {
 const all = "./..."
 
 func main() {
+	changed := flag.Bool("changed", false, "select a PR change; refuse unmapped inputs instead of testing everything")
+	flag.Parse()
 	pkgs, root, err := listPackages()
 	if err != nil {
-		// Fail safe: an unreadable package graph means test everything.
 		fmt.Fprintln(os.Stderr, "testscope:", err)
-		fmt.Println(all)
+		os.Exit(1)
+	}
+	if !*changed && len(flag.Args()) == 0 {
+		fmt.Println(strings.Join(selectPackages(flag.Args(), pkgs, root), " "))
 		return
 	}
-	fmt.Println(strings.Join(selectPackages(os.Args[1:], pkgs, root), " "))
+	selected, err := selectChangedPackages(flag.Args(), pkgs, root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "testscope:", err)
+		os.Exit(1)
+	}
+	fmt.Println(strings.Join(selected, " "))
+}
+
+// selectChangedPackages keeps PR selection explicit. Shared module/native-build
+// inputs affect every package; workflow edits select the selector's own tests,
+// while shell/package/release-image inputs have their separate CI contract tests.
+// Unknown and deleted package paths require an explicit mapping before CI runs.
+func selectChangedPackages(changed []string, pkgs []pkg, root string) ([]string, error) {
+	var goFiles []string
+	global := false
+	for _, f := range changed {
+		f = path.Clean(strings.TrimPrefix(strings.TrimSpace(f), "./"))
+		switch {
+		case f == "." || strings.HasSuffix(f, ".md"):
+			continue
+		case globalInputs[f]:
+			global = true
+		case workflowInput(f):
+			goFiles = append(goFiles, "tools/testscope/main.go")
+		case separateContract(f):
+			continue // covered by the corresponding script/workflow/image contracts
+		default:
+			goFiles = append(goFiles, f)
+		}
+	}
+	var selected []string
+	if len(goFiles) > 0 {
+		selected = selectPackages(goFiles, pkgs, root)
+		if len(selected) == 1 && selected[0] == all {
+			return nil, fmt.Errorf("unmapped changed paths: add an impact mapping before running PR unit tests")
+		}
+	}
+	if global {
+		selected = make([]string, 0, len(pkgs))
+		for _, p := range pkgs {
+			selected = append(selected, p.ImportPath)
+		}
+		sort.Strings(selected)
+	}
+	return selected, nil
+}
+
+var globalInputs = map[string]bool{
+	"go.mod": true, "go.sum": true, "docker/Dockerfile": true, ".dockerignore": true,
+}
+
+func workflowInput(f string) bool {
+	ext := path.Ext(f)
+	return strings.HasPrefix(f, ".github/") && (ext == ".yml" || ext == ".yaml")
+}
+
+var contractFiles = map[string]bool{
+	"ci/testscope_test.sh": true, "docker/Dockerfile.release": true, "docker/docker-compose.yml": true,
+}
+
+var contractExtensions = map[string]map[string]bool{
+	"scripts":   {".sh": true},
+	"docker":    {".sh": true},
+	"packaging": {".sh": true, ".py": true, ".yaml": true, ".env": true, ".service": true, ".sysusers": true},
+}
+
+func separateContract(f string) bool {
+	if contractFiles[f] {
+		return true
+	}
+	// Only the namespace matters; no separator means an unmapped root input.
+	root, _, _ := strings.Cut(f, "/")
+	return contractExtensions[root][path.Ext(f)]
 }
 
 func listPackages() ([]pkg, string, error) {
