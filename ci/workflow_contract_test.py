@@ -71,7 +71,7 @@ class WorkflowContract(unittest.TestCase):
               return "$GIT_STATUS"
             }
             '''
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603 - execute the checked workflow script
                 ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                  fake_git + script(self.jobs['changes'])],
                 env=env, capture_output=True, text=True, check=False,
@@ -93,7 +93,7 @@ class WorkflowContract(unittest.TestCase):
             }
             docker() { printf 'docker-args:%s\\n' "$*"; }
             '''
-            return subprocess.run(
+            return subprocess.run(  # noqa: S603 - execute the checked workflow script
                 ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                  fake_commands + script(self.jobs['docker'])],
                 env=env, capture_output=True, text=True, check=False,
@@ -180,7 +180,7 @@ class WorkflowContract(unittest.TestCase):
                 accepted = (application in ('true', 'false')
                             and results[:2] == ('success', 'success')
                             and results[2:] == (expected,) * 3)
-                result = subprocess.run(
+                result = subprocess.run(  # noqa: S603 - execute the checked workflow script
                     ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                      script(self.jobs['ci-ok'])],
                     env=env, capture_output=True, text=True, check=False,
