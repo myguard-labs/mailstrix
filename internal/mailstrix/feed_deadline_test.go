@@ -39,13 +39,24 @@ func urlHeavyZip(t *testing.T, n int) []byte {
 func TestReputationLoopStopsAtDeadline(t *testing.T) {
 	s := newURLhausScanner(t)
 	defer s.Close()
-	s.scanTimeout = 1500 * time.Millisecond
-	z := urlHeavyZip(t, 80)
+	// Calibrate the per-member cost on this machine (load, -race, CPU count)
+	// with an unbounded one-member scan; the allowed overrun is a few
+	// members, while the old unbounded loop cost all 80.
+	s.scanTimeout = 0
 	t0 := time.Now()
+	if _, err := s.Scan(urlHeavyZip(t, 1), ScanMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	perMember := time.Since(t0)
+
+	const members = 80
+	s.scanTimeout = 1500 * time.Millisecond
+	z := urlHeavyZip(t, members)
+	t0 = time.Now()
 	m, err := s.Scan(z, ScanMeta{})
 	elapsed := time.Since(t0)
-	if elapsed > s.scanTimeout+3*time.Second {
-		t.Fatalf("scan took %v, want close to the %v budget", elapsed, s.scanTimeout)
+	if limit := s.scanTimeout + 4*perMember + time.Second; elapsed > limit {
+		t.Fatalf("scan took %v, want at most %v (budget %v, %v per member)", elapsed, limit, s.scanTimeout, perMember)
 	}
 	if !errors.Is(err, ErrScanIncomplete) || !hasRule(m, scanIncompleteRule) {
 		t.Fatalf("want incomplete, got matches=%v err=%v", m, err)
