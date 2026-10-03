@@ -91,8 +91,12 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 	var total, attempts int
 	pos := 0
 	// Pre-scan the bare-integer length objects so an indirect `/Length N G R`
-	// resolves without an xref (AUDIT-PDF-ENDSTREAM); nil when none exist.
+	// resolves without an xref (AUDIT-PDF-ENDSTREAM). A PDF with none gets the
+	// shared empty map, not nil, so scrubPDFForNames does not rescan (PERF-61).
 	lengths := pdfIndirectLengths(scan)
+	if lengths == nil {
+		lengths = noPDFLengths
+	}
 	// Cap inflate ATTEMPTS, not just emitted streams: a hostile PDF stuffed with
 	// many non-deflate `stream … endstream` bodies would otherwise force unbounded
 	// zlib/flate attempts (none of which increment len(res.Streams)). The deadline
@@ -347,6 +351,10 @@ func isPDFNameTerminator(c byte) bool {
 // comment, or binary stream (AUDIT-PDF-LEXER). Single linear pass, fail-open.
 // lengths is the pdfIndirectLengths map fromPDF already built for scan
 // (PERF-61); nil builds it here.
+// noPDFLengths is the read-only "scanned, found none" lengths map. Lookups
+// on it miss exactly like lookups on nil; it is never written.
+var noPDFLengths = map[int]int{}
+
 func scrubPDFForNames(scan []byte, lengths map[int]int) ([]byte, int) {
 	out := make([]byte, 0, len(scan))
 	count := 0
