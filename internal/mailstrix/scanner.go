@@ -131,6 +131,11 @@ type Scanner struct {
 	// so the shared Redis L2 stays correctly partitioned without breaking cross-replica
 	// cache sharing. Changes on every reload that alters the rule sources.
 	contentFP atomic.Pointer[string]
+	// policyFP memoises scoringPolicyHash (PERF-53): its inputs (canary,
+	// archive-password policy and wordlist, allowlist) are fixed at construction,
+	// yet Fingerprint runs per request, cache hits included.
+	policyOnce sync.Once
+	policyFP   string
 
 	// Observability for the OLE/OOXML pre-extract path (see ExtractMetrics).
 	// Without these the document-extraction code is invisible in /metrics.
@@ -298,9 +303,19 @@ func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, err
 		// generation (destroy its idle scanners so the C memory is freed, not
 		// leaked) and install a fresh one for the current rules. A benign race
 		// where two goroutines both install just means one extra empty gen.
+		// PERF-64: only install a generation for the CURRENT (main or big-file) rules. During a
+		// reload, a scan still holding the previous rules would otherwise replace
+		// the new generation and destroy its idle scanners, flip-flopping the pool
+		// until in-flight old-rules scans drain. Such a scan gets a one-off
+		// generation instead; putScanner destroys its scanner on return because
+		// that generation is never the live one.
 		old := gen
 		gen = &scannerGen{rules: rules}
-		s.scanners.Store(gen)
+		if rules != s.rules.Load() && rules != s.bigRules.Load() {
+			old = nil
+		} else {
+			s.scanners.Store(gen)
+		}
 		if old != nil {
 			for _, sc := range old.drain() {
 				sc.Destroy()
@@ -717,7 +732,12 @@ func (s *Scanner) Fingerprint() string {
 	if p := s.denylistFP.Load(); p != nil {
 		dl = *p
 	}
-	return extract.Version + ":" + fp + ":" + ch + ":" + dl + ":" + s.scoringPolicyHash()
+	return extract.Version + ":" + fp + ":" + ch + ":" + dl + ":" + s.policyFingerprint()
+}
+
+func (s *Scanner) policyFingerprint() string {
+	s.policyOnce.Do(func() { s.policyFP = s.scoringPolicyHash() })
+	return s.policyFP
 }
 
 func (s *Scanner) scoringPolicyHash() string {
@@ -1258,10 +1278,28 @@ func dedupCandidates(in []string) []string {
 // capDedupCandidates is dedupCandidates with a hard size cap at
 // maxEffectivePWCandidates, applied to the FULLY-ORDERED list (per-request
 // candidates first, then base) so the cap drops low-signal tail entries.
-func capDedupCandidates(in []string) []string {
-	out := dedupCandidates(in)
-	if len(out) > maxEffectivePWCandidates {
-		out = out[:maxEffectivePWCandidates]
+//
+// PERF-54: it walks the lists in order and stops at the cap, so a large boot
+// wordlist behind the cap is never trimmed, hashed or copied per scan. The
+// result is identical to deduping the concatenation and truncating it.
+func capDedupCandidates(lists ...[]string) []string {
+	seen := make(map[string]struct{}, maxEffectivePWCandidates)
+	out := make([]string, 0, maxEffectivePWCandidates)
+	for _, in := range lists {
+		for _, c := range in {
+			if len(out) == maxEffectivePWCandidates {
+				return out
+			}
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if _, dup := seen[c]; dup {
+				continue
+			}
+			seen[c] = struct{}{}
+			out = append(out, c)
+		}
 	}
 	return out
 }
@@ -1507,12 +1545,12 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		// filename tokens) come BEFORE the process-constant base (defaults ∪
 		// wordlist). This way a large boot wordlist can't starve the per-message
 		// candidates out of the final capped list. Deduped + capped once at the end.
-		eff := make([]string, 0, len(meta.PWCandidates)+len(s.archivePWDefaults)+len(s.archivePWWordlist)+maxFilenameTokens)
-		eff = append(eff, meta.PWCandidates...)             // highest signal: explicit body password
-		eff = append(eff, filenameTokens(meta.Filename)...) // next: password-in-name (capped)
-		eff = append(eff, s.archivePWDefaults...)           // built-ins: survive the cap (small, high-value)
-		eff = append(eff, s.archivePWWordlist...)           // lowest signal: trimmed first by the cap
-		xopts.PWCandidates = capDedupCandidates(eff)
+		xopts.PWCandidates = capDedupCandidates(
+			meta.PWCandidates,             // highest signal: explicit body password
+			filenameTokens(meta.Filename), // next: password-in-name (capped)
+			s.archivePWDefaults,           // built-ins: survive the cap (small, high-value)
+			s.archivePWWordlist,           // lowest signal: trimmed first by the cap
+		)
 		xopts.ArchivePWEnabled = len(xopts.PWCandidates) > 0
 	}
 	res := extract.ExtractWithOptions(buf, xopts)
@@ -1646,7 +1684,15 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	// the budget is exhausted so the caller stops the whole sweep. Markers and
 	// Streams share one `seen` set and one budget — a marker byte-identical to a
 	// real stream is scanned once, and markers can't overrun the deadline.
+	// PERF-68: per-scan counters so the budget log reports what is actually left
+	// and the oversized-stream reroute logs once per scan, not once per stream.
+	var streamsVisited, markersVisited, oversizedRerouted int
 	scanExtracted := func(stream []byte, h [16]byte, markerChannel bool) (stop bool) {
+		if markerChannel {
+			markersVisited++
+		} else {
+			streamsVisited++
+		}
 		if _, dup := seen[h]; dup {
 			s.exDeduped.Add(1)
 			return false
@@ -1655,7 +1701,8 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		budget := s.scanTimeout
 		if !deadline.IsZero() {
 			if budget = time.Until(deadline); budget <= 0 {
-				s.logf("scan budget exhausted; %d streams + %d markers left unscanned", len(res.Streams), len(res.Markers))
+				s.logf("scan budget exhausted; %d streams + %d markers left unscanned",
+					len(res.Streams)-streamsVisited+1, max(len(res.Markers)-markersVisited+1, 0))
 				incomplete = true
 				return true
 			}
@@ -1684,7 +1731,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 			if big := s.bigRules.Load(); big != nil {
 				streamRules = big
 				s.bigFileStreamScans.Add(1)
-				s.logf("oversized extracted stream (%dB > %dB threshold): scanning against big-file ruleset instead of full set", len(stream), s.bigFileThreshold)
+				oversizedRerouted++
 			} else if s.bigNilWarned.CompareAndSwap(false, true) {
 				s.logf("WARNING: oversized extracted stream (%dB) but no big-file ruleset loaded; using full set (may time out)", len(stream))
 			}
@@ -1777,10 +1824,13 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 			break
 		}
 	}
+	if oversizedRerouted > 0 {
+		s.logf("%d oversized extracted streams (> %dB threshold): scanned against big-file ruleset instead of full set", oversizedRerouted, s.bigFileThreshold)
+	}
 	// Drop denylisted rule names (public-ruleset demo/noise rules) before the
 	// synthetic feed matches are added, so MALWAREBAZAAR_*/URLHAUS_* are never
-	// affected by the rule denylist. Allowlist tags for YARA matches are applied
-	// here; a final response-tagging pass below covers synthetic feed hits too.
+	// affected by the rule denylist. Allowlist tags are applied once, by the
+	// response-tagging pass below, which covers YARA and feed hits alike.
 	out = s.filterDenied(out)
 	// Record rule names for the top-matches counter (observability via /version).
 	if len(out) > 0 {
@@ -2015,32 +2065,20 @@ func degradedReason(matches []Match) string {
 	return ""
 }
 
-// filterDenied applies the rule deny/allow lists to a match set. Denylisted rule
-// names (public-ruleset demo/noise that are pure FPs for mail) are dropped;
-// allowlisted names are KEPT but tagged `mailstrix_allow=1` so the plugin can score
-// them log-only without losing their visibility in the history. Order is
-// preserved; a no-op when both lists are empty. Deny wins if a name is in both.
+// filterDenied drops denylisted rule names (public-ruleset demo/noise that are
+// pure FPs for mail) from a match set. Order is preserved; a no-op when the
+// denylist is empty. Allowlisted names are tagged `mailstrix_allow=1` later, once,
+// by applyResponseTags (PERF-62), which every Scan result passes through after
+// this filter. Deny wins if a name is in both lists.
 func (s *Scanner) filterDenied(in []Match) []Match {
 	deny := s.denylist.Load()
-	if (deny == nil || len(*deny) == 0) && len(s.allowlist) == 0 {
-		return in
-	}
-	if len(in) == 0 {
+	if deny == nil || len(*deny) == 0 || len(in) == 0 {
 		return in
 	}
 	out := in[:0]
 	for _, m := range in {
-		name := strings.ToLower(m.Rule)
-		if deny != nil {
-			if _, denied := (*deny)[name]; denied {
-				continue
-			}
-		}
-		if _, allow := s.allowlist[name]; allow {
-			if m.Meta == nil {
-				m.Meta = map[string]string{}
-			}
-			m.Meta["mailstrix_allow"] = "1"
+		if _, denied := (*deny)[strings.ToLower(m.Rule)]; denied {
+			continue
 		}
 		out = append(out, m)
 	}
