@@ -107,7 +107,10 @@ func (c *lruCache) Get(key string) ([]Match, bool) {
 	// L1 miss: try the shared Redis layer, and on a hit promote into L1.
 	if c.redis != nil {
 		if m, ok := c.redis.get(key); ok {
-			c.Put(key, m)
+			// Promote into L1 only: writing the hit back to Redis would add a
+			// marshal + SET on the request path and refresh the L2 TTL forever
+			// (PERF-56).
+			c.putLocal(key, m)
 			return m, true
 		}
 	}
@@ -115,6 +118,14 @@ func (c *lruCache) Get(key string) ([]Match, bool) {
 }
 
 func (c *lruCache) Put(key string, matches []Match) {
+	c.putLocal(key, matches)
+	if c.redis != nil {
+		c.redis.put(key, matches, c.ttl)
+	}
+}
+
+// putLocal stores matches in the in-process LRU only.
+func (c *lruCache) putLocal(key string, matches []Match) {
 	c.mu.Lock()
 	if el, ok := c.items[key]; ok {
 		e := el.Value.(*entry)
@@ -130,9 +141,6 @@ func (c *lruCache) Put(key string, matches []Match) {
 			c.evictions.Add(1)
 		}
 		c.mu.Unlock()
-	}
-	if c.redis != nil {
-		c.redis.put(key, matches, c.ttl)
 	}
 }
 

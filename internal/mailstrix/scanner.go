@@ -2237,7 +2237,7 @@ func (s *Scanner) scanOne(rules *yara.Rules, buf []byte, vars scanVars, timeout 
 		if len(m.Metas) > 0 {
 			meta = make(map[string]string, len(m.Metas))
 			for _, kv := range m.Metas {
-				meta[kv.Identifier] = fmt.Sprintf("%v", kv.Value)
+				meta[kv.Identifier] = metaString(kv.Value)
 			}
 		}
 		out = append(out, Match{Rule: m.Rule, Namespace: m.Namespace, Tags: m.Tags, Meta: meta})
@@ -2321,4 +2321,24 @@ func filterMarkerChannel(in []Match, markerChannel bool) []Match {
 		}
 	}
 	return out
+}
+
+// metaString renders a YARA meta value. libyara meta values are strings,
+// integers or booleans, so a type switch avoids fmt.Sprintf reflection per
+// value (PERF-65); anything else falls back to %v.
+func metaString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case int32:
+		return strconv.FormatInt(int64(t), 10)
+	case bool:
+		return strconv.FormatBool(t)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
