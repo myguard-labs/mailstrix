@@ -47,24 +47,14 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		// A zip: an Office document gets the macro path only — part-dumping its body
 		// XML would scan ordinary text and invite FPs (mirror the top-level guard);
 		// a plain archive gets member unpacking.
-		if isOfficeZip(data) {
-			// Thread the request's effort/decode/XLM-fold caps into the nested OOXML
-			// (same as the PDF branch below). With nil opts the XLM-fold sheet/formula
-			// caps fall back to the package MAX, so a nested .docm/.xlsm did MORE fold
-			// work than a low-effort request asked for — effort could only be shed at
-			// the top level, never on a carried Office doc. res.childOpts carries the
-			// caps; the call's own deadline is the live budget, so it is passed
-			// separately and overrides childOpts.Deadline. nil childOpts (top-level
-			// Extract / tests building Result directly) keeps the prior MAX-cap
-			// behaviour via the opts accessors' nil fallback.
-			fromOOXML(data, res, deadline, res.childOpts)
-			// Also carrier-unpack non-office sibling members of a nested Office zip
-			// (spoofed-container dropper carried inside an archive/.msg). Zero
-			// body-text FP — only carrier members are routed through extractChild.
-			fromOfficeZipCarriers(data, res, b, depth, deadline)
-		} else {
-			fromArchive(data, res, b, depth, deadline)
-		}
+		//
+		// The nested Office doc gets the request's effort/decode/XLM-fold caps via
+		// res.childOpts (nil keeps the MAX-cap fallback); the call's deadline is the
+		// live budget and overrides childOpts.Deadline. Its non-office sibling
+		// members are carrier-unpacked (spoofed-container dropper inside an
+		// archive/.msg) with zero body-text FP. PERF-55: fromZip opens the zip
+		// once for the classification, the macro path and the member walk.
+		fromZip(data, res, b, depth, deadline, res.childOpts, false)
 	case isArchive(data):
 		fromArchive(data, res, b, depth, deadline)
 	case bytes.HasPrefix(data, oleMagic):
