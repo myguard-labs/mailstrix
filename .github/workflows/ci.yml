@@ -27,11 +27,47 @@ permissions:
   contents: read
 
 jobs:
+  # Only an explicit documentation allowlist may bypass application jobs.
+  # Release callers and empty/unknown changes retain the complete gate.
+  changes:
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 5
+    outputs:
+      application: ${{ steps.scope.outputs.application }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+        with:
+          fetch-depth: 2
+      - name: classify application impact
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          application=true
+          if [ "$EVENT_NAME" = pull_request ]; then
+            git diff --name-only -z --no-renames HEAD^1 HEAD > "$RUNNER_TEMP/changed-paths"
+            seen=false
+            application=false
+            while IFS= read -r -d '' path; do
+              seen=true
+              case "$path" in
+                README.md|contrib/*/README.md|docs/*.md) ;;
+                *) application=true ;;
+              esac
+            done < "$RUNNER_TEMP/changed-paths"
+            if [ "$seen" = false ]; then application=true; fi
+          fi
+          echo "application=$application" >> "$GITHUB_OUTPUT"
+      - name: CI workflow contract fixtures
+        run: python3 -B ci/workflow_contract_test.py
+
   # Authoritative gate: build + test exactly as the production image does (CGO
   # against the statically-built libyara). The Dockerfile `test` target runs
   # `go vet` + `go test -race -tags yara_static`; then we build the final image,
   # run it against a local EICAR rule, and smoke the HTTP contract.
   docker:
+    needs: changes
+    if: ${{ needs.changes.outputs.application == 'true' }}
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 30
     permissions:
@@ -110,6 +146,8 @@ jobs:
         run: scripts/smoke.sh strixd:ci
 
   parity-isolation:
+    needs: changes
+    if: ${{ needs.changes.outputs.application == 'true' }}
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 20
     steps:
@@ -136,6 +174,8 @@ jobs:
           if-no-files-found: warn
 
   lint:
+    needs: changes
+    if: ${{ needs.changes.outputs.application == 'true' }}
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     steps:
@@ -381,3 +421,31 @@ jobs:
   # gate (docker + lint + scanners) stays fast; release.yml reuses THIS workflow
   # (workflow_call) so a tagged release re-runs docker+lint+scanners before
   # publishing. asan/codeql/fuzz run on the monthly cadence, not per release.
+
+  # Stable required check: never accept failed/cancelled gates or unexpected
+  # skips. The scanners retain documentation, workflow and packaging contracts.
+  ci-ok:
+    if: ${{ always() }}
+    needs: [changes, docker, parity-isolation, lint, scanners]
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 5
+    steps:
+      - name: require meaningful gates
+        env:
+          APPLICATION: ${{ needs.changes.outputs.application }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SCANNERS_RESULT: ${{ needs.scanners.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          PARITY_RESULT: ${{ needs.parity-isolation.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          test "$SCANNERS_RESULT" = success
+          case "$APPLICATION" in
+            true) expected=success ;;
+            false) expected=skipped ;;
+            *) exit 1 ;;
+          esac
+          for result in "$DOCKER_RESULT" "$PARITY_RESULT" "$LINT_RESULT"; do
+            test "$result" = "$expected"
+          done
