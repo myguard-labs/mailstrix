@@ -251,7 +251,8 @@ that shipped it.
 
 When strixd could not compute a complete verdict, the reply still answers 200
 (fail-open) but adds `"degraded"` and an `X-MAILSTRIX-Degraded` header with the
-reason: `incomplete` (scan budget ran out, an extracted stream failed to scan,
+reason: `incomplete` (scan budget ran out, an extraction cap such as the
+stream or archive-member limit stopped the walk, an extracted stream failed to scan,
 or an extractor crashed), `error` (the scan failed) or `busy` (no scan slot
 freed up in time). A log-only `MAILSTRIX_SCAN_INCOMPLETE` or
 `MAILSTRIX_SCAN_DEGRADED` match names it too. Treat a degraded reply with no

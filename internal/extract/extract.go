@@ -356,6 +356,13 @@ type Result struct {
 	// entry, so a content-hash membership test identifies them.
 	VBAStreams [][]byte
 
+	// CapHits names each extraction cap that stopped the walk while input was
+	// left (COR-07b): "streams", "archive-budget", "zip-entries", "rtf-objects"
+	// or "pdf-streams", each at most once, in first-hit order. finalizeStreams
+	// emits one EXTRACT-CAP-HIT marker per kind, and the scanner treats any
+	// hit as an incomplete scan, so a capped walk is never cached as clean.
+	CapHits []string
+
 	// childOpts carries the request's effort Options down the nested-carrier walk
 	// (extractChild) so a nested PDF honors the same PDFDeepen / DecodeDepth /
 	// DecodeIterations caps as a top-level one. nil => FullOptions (top-level
@@ -597,6 +604,10 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// stacking verdict. Built AFTER the XLM stacker so XLM presence can count.
 	if bs := joinBehaviorScore(res.Streams); bs != nil {
 		res.Streams = append(res.Streams, bs)
+	}
+
+	for _, kind := range res.CapHits {
+		res.Streams = append(res.Streams, []byte(capHitMarkerPrefix+kind))
 	}
 
 	if preDecodeLen < 0 || preDecodeLen > len(res.Streams) {
@@ -1607,4 +1618,31 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 		total += len(b)
 	}
 	return out
+}
+
+// capHitMarkerPrefix tags the PURE marker emitted once per CapHits kind; the
+// kind is a yarad literal, never attacker bytes.
+const capHitMarkerPrefix = "EXTRACT-CAP-HIT kind="
+
+// capHit records that the cap named kind stopped extraction while input was
+// left. Repeats of a kind are ignored.
+func (r *Result) capHit(kind string) {
+	for _, k := range r.CapHits {
+		if k == kind {
+			return
+		}
+	}
+	r.CapHits = append(r.CapHits, kind)
+}
+
+// archiveCapHit records which shared cap (stream count or archive budget)
+// stopped a member walk, if either did. It records nothing when the walk
+// stopped for another reason (deadline, end of input).
+func archiveCapHit(res *Result, b *archiveBudget) {
+	switch {
+	case len(res.Streams) >= maxStreams:
+		res.capHit("streams")
+	case b != nil && b.spent():
+		res.capHit("archive-budget")
+	}
 }

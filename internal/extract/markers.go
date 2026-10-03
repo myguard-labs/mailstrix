@@ -67,6 +67,7 @@ var pureMarkerPrefixes = []string{
 	userFormMarker + "\n", // userform.go combined buffer
 	xlmStackerPrefix,      // joinXLMStackerMarkers combined buffer
 	behaviorScorePrefix,   // joinBehaviorScore combined buffer
+	capHitMarkerPrefix,    // extract.go finalizeStreams (COR-07b)
 }
 
 // xlmStackerPrefix tags the document-level combined XLM-marker buffer built by

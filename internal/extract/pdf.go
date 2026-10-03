@@ -100,9 +100,20 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 	// non-deflate junk bodies spend the larger maxPDFAttempts instead, so a run
 	// of junk streams cannot hide a later FlateDecode ObjStm.
 	var produced int
-	for attempts < maxPDFAttempts && produced < maxPDFStreams && len(res.Streams) < maxStreams && total < maxTotalPDF && !expired(deadline) {
+	for {
 		rel := bytes.Index(scan[pos:], pdfStreamKW)
 		if rel < 0 {
+			break
+		}
+		if attempts >= maxPDFAttempts || produced >= maxPDFStreams || total >= maxTotalPDF {
+			res.capHit("pdf-streams") // COR-07b: a stream body is left unvisited
+			break
+		}
+		if len(res.Streams) >= maxStreams {
+			res.capHit("streams")
+			break
+		}
+		if expired(deadline) {
 			break
 		}
 		kwAt := pos + rel
