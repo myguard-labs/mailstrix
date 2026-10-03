@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -146,5 +147,79 @@ func TestRC4MD5VerifyPWFixture(t *testing.T) {
 	}
 	if rc4MD5VerifyPW("wrong-password", salt, enc[:16], enc[16:]) {
 		t.Fatal("wrong RC4-MD5 verifier password accepted")
+	}
+}
+
+// fixtureRC4MD5Workbook models the bounded FILEPASS + encrypted-tail layout
+// consumed by fromDefaultPWRC4. It is a parser fixture, not an Excel writer.
+func fixtureRC4MD5Workbook(t *testing.T, size int, password string) (body, ciphertext []byte) {
+	t.Helper()
+	salt := []byte("0123456789abcdef")
+	verifier := []byte("16-byte fixture?")
+	hash := md5.Sum(verifier) //#nosec G401 -- protocol-mandated MD5
+	verification := fixtureRefRC4MD5Encrypt(t, append(bytes.Clone(verifier), hash[:]...), password, salt)
+	body = append([]byte{1, 0, 1, 0, 1, 0}, salt...)
+	body = append(body, verification...)
+
+	const payload = "RC4-MD5 public extraction payload"
+	rgce := append(biffStr8(payload), 0x21, 110, 0) // EXEC
+	formula := make([]byte, 22+len(rgce))
+	binary.LittleEndian.PutUint16(formula[20:], uint16(len(rgce)))
+	copy(formula[22:], rgce)
+	bof := []byte{0, 6, 0x40, 0} // BIFF8 macrosheet
+	tail := append(biffRecord(0x0809, bof), biffRecord(0x0006, formula)...)
+	// End the observable formula at byte 511/512/513 to cover both sides
+	// of rekeying. EOF follows so CFB padding cannot affect the oracle.
+	plain := append(biffRecord(0x003C, make([]byte, size-len(tail)-4)), tail...)
+	plain = append(plain, biffRecord(0x000A, nil)...)
+	return body, fixtureRefRC4MD5Encrypt(t, plain, password, salt)
+}
+
+func TestExtractRC4MD5WorkbookFixture(t *testing.T) {
+	const payload = "RC4-MD5 public extraction payload"
+	for _, streamName := range []string{"Workbook", "Book"} {
+		t.Run(streamName, func(t *testing.T) {
+			for _, size := range []int{511, 512, 513, 1500} {
+				t.Run(fmt.Sprint(size), func(t *testing.T) {
+					body, ciphertext := fixtureRC4MD5Workbook(t, size, "VelvetSweatshop")
+					wrongBody, wrongCiphertext := fixtureRC4MD5Workbook(t, size, "not-a-default-password")
+					cases := []struct {
+						name             string
+						body, ciphertext []byte
+						decrypted        bool
+					}{
+						{"valid", body, ciphertext, true},
+						{"wrong-password", wrongBody, wrongCiphertext, false},
+						{"wrong-verifier", append(bytes.Clone(body[:38]), bytes.Repeat([]byte{0}, 16)...), ciphertext, false},
+						{"truncated-verifier", body[:53], ciphertext, false},
+						{"unsupported-version", append([]byte{1, 0, 9, 0, 1, 0}, body[6:]...), ciphertext, false},
+					}
+					for _, tc := range cases {
+						t.Run(tc.name, func(t *testing.T) {
+							wb := append(biffBOF(), biffRecord(0x002F, tc.body)...)
+							wb = append(wb, tc.ciphertext...)
+							res := Extract(fixtureCFB(t, []cfbEntry{{name: streamName, mse: 2, data: wb}}), time.Time{})
+							// A minimal workbook has no VBA project: Extract reports Failed on
+							// that fallback, independently of successful default-password emission.
+							if !res.IsDoc || !res.Encrypted || res.Panicked {
+								t.Fatalf("workbook flags: IsDoc=%t Encrypted=%t Panicked=%t", res.IsDoc, res.Encrypted, res.Panicked)
+							}
+							requireFixtureStream(t, res.Markers, "ENCRYPTION-RC4")
+							if tc.decrypted {
+								requireFixtureStream(t, res.Streams, "=EXEC("+payload+")")
+								requireFixtureStream(t, res.Markers, "DEFAULTPW-DECRYPTED")
+								requireFixtureMarker(t, res, "XLM-STACK", "XLM-DANGEROUS-FUNC EXEC")
+							} else {
+								for _, stream := range append(append([][]byte(nil), res.Streams...), res.Markers...) {
+									if bytes.Contains(stream, []byte(payload)) || bytes.Equal(stream, []byte("DEFAULTPW-DECRYPTED")) || bytes.HasPrefix(stream, []byte("XLM-DANGEROUS-FUNC")) {
+										t.Fatalf("rejected RC4-MD5 workbook emitted plaintext or decrypted marker: %q", stream)
+									}
+								}
+							}
+						})
+					}
+				})
+			}
+		})
 	}
 }
