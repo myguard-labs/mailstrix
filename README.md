@@ -508,6 +508,9 @@ separately; `strix-milter` reassembles them into the complete RFC 5322 message
 before posting it — the same bytes `strix-scan` sends for an `.eml`. Scanning the
 body alone would strip the MIME framing (`Content-Type`, `boundary`,
 `Content-Transfer-Encoding`, attachment `filename`) that the extractor needs.
+strixd splits the message into its MIME parts, decodes base64 and
+quoted-printable, and unpacks each attachment as if that file had been posted on
+its own (at most 256 parts per message; `message/rfc822` parts are walked too).
 
 ### Postfix
 

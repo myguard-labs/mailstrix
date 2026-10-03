@@ -1,0 +1,179 @@
+package extract
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
+	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net/mail"
+	"net/textproto"
+	"strings"
+	"time"
+)
+
+const (
+	// maxMIMEParts bounds the leaf parts walked across one message, so a
+	// message stuffed with thousands of tiny parts cannot spend the scan.
+	maxMIMEParts = 256
+	// mimeSniffLen bounds how far into the input the header block is looked
+	// for when deciding whether the input is an RFC 5322 message at all.
+	mimeSniffLen = 16 << 10
+)
+
+// isMIMEMessage reports whether buf starts with an RFC 5322 header block that
+// declares a MIME Content-Type (COR-01). It needs a Content-Type header plus
+// one other message header, all before the first blank line, so ordinary
+// text that happens to contain "Content-Type:" is not taken for a message.
+func isMIMEMessage(buf []byte) bool {
+	head := buf
+	if len(head) > mimeSniffLen {
+		head = head[:mimeSniffLen]
+	}
+	end := bytes.Index(head, []byte("\n\r\n"))
+	if e := bytes.Index(head, []byte("\n\n")); e >= 0 && (end < 0 || e < end) {
+		end = e
+	}
+	if end < 0 {
+		return false
+	}
+	var hasType, hasOther bool
+	for _, line := range bytes.Split(head[:end+1], []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' { // folded continuation line
+			continue
+		}
+		colon := bytes.IndexByte(line, ':')
+		if colon <= 0 || bytes.ContainsAny(line[:colon], " \t") {
+			return false // not a header line: not a header block
+		}
+		switch strings.ToLower(string(line[:colon])) {
+		case "content-type":
+			hasType = true
+		case "mime-version", "from", "to", "subject", "date", "received", "message-id", "return-path":
+			hasOther = true
+		}
+	}
+	return hasType && hasOther
+}
+
+// fromMIME walks an RFC 5322 message (COR-01): multipart bodies are split,
+// base64 and quoted-printable parts are decoded, and each leaf part is emitted
+// and dispatched through extractChild, so an attachment is unpacked like the
+// same file submitted on its own. message/rfc822 parts recurse. The walk is
+// bounded by maxMIMEParts, the nest depth, the shared archive budget and the
+// deadline; a malformed message keeps whatever parts decoded before the error.
+func fromMIME(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	defer func() {
+		if recover() != nil {
+			res.Panicked = true
+		}
+	}()
+	parts := 0
+	walkMIMEMessage(buf, res, b, depth, deadline, &parts)
+}
+
+func walkMIMEMessage(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int) {
+	if depth > maxNestDepth {
+		return
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(buf))
+	if err != nil {
+		return
+	}
+	walkMIMEEntity(textproto.MIMEHeader(msg.Header), msg.Body, res, b, depth, deadline, parts)
+}
+
+func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int) {
+	if depth > maxNestDepth || *parts >= maxMIMEParts || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+		return
+	}
+	mediaType, params, err := mime.ParseMediaType(h.Get("Content-Type"))
+	if err != nil {
+		mediaType = "text/plain" // RFC 2045 default; also covers a malformed type
+	}
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return
+		}
+		mr := multipart.NewReader(body, boundary)
+		for {
+			p, err := mr.NextRawPart()
+			if err != nil {
+				return // end of parts, or a malformed boundary: keep what we have
+			}
+			walkMIMEEntity(p.Header, p, res, b, depth+1, deadline, parts)
+			if *parts >= maxMIMEParts || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+				return
+			}
+		}
+	}
+	data := decodeMIMEBody(h.Get("Content-Transfer-Encoding"), body)
+	if len(data) == 0 {
+		return
+	}
+	*parts++
+	if mediaType == "message/rfc822" {
+		walkMIMEMessage(data, res, b, depth+1, deadline, parts)
+		return
+	}
+	emitMIMEPart(data, res, b, depth, deadline)
+}
+
+// decodeMIMEBody undoes the transfer encoding, capped at maxBytesPerMember. A
+// decode error keeps the bytes produced so far, as a mail client would.
+func decodeMIMEBody(cte string, body io.Reader) []byte {
+	var r io.Reader
+	switch strings.ToLower(strings.TrimSpace(cte)) {
+	case "base64":
+		r = base64.NewDecoder(base64.StdEncoding, &base64Filter{r: bufio.NewReader(body)})
+	case "quoted-printable":
+		r = quotedprintable.NewReader(body)
+	default:
+		r = body
+	}
+	var out bytes.Buffer
+	if _, err := out.ReadFrom(io.LimitReader(r, maxBytesPerMember)); err != nil && out.Len() == 0 {
+		return nil
+	}
+	return out.Bytes()
+}
+
+// base64Filter drops bytes outside the base64 alphabet (spaces, tabs, stray
+// punctuation), which the stdlib decoder would reject; CR and LF it already
+// skips.
+type base64Filter struct{ r io.ByteReader }
+
+func (f *base64Filter) Read(p []byte) (int, error) {
+	n := 0
+	for n < len(p) {
+		c, err := f.r.ReadByte()
+		if err != nil {
+			return n, err
+		}
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=' {
+			p[n] = c
+			n++
+		}
+	}
+	return n, nil
+}
+
+// emitMIMEPart appends one decoded part and dispatches it like an archive
+// member, but without flagging the input as an archive.
+func emitMIMEPart(data []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	if len(data) < minMemberBytes || b.spent() || len(res.Streams) >= maxStreams {
+		return
+	}
+	b.members++
+	b.total += len(data)
+	res.Streams = append(res.Streams, data)
+	res.IsMIME = true
+	extractChild(data, res, b, depth+1, deadline)
+}

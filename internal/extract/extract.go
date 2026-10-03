@@ -332,6 +332,9 @@ type Result struct {
 	// HasXLMFold is true when at least one XLM formula was constant-folded
 	// and the folded cleartext was emitted for YARA scanning.
 	HasXLMFold bool
+	// IsMIME is true when buf was an RFC 5322 message whose MIME parts were
+	// decoded and dispatched for scanning (COR-01).
+	IsMIME bool
 	// IsSLK is true when buf was recognised as a SYLK (.slk) spreadsheet, whose
 	// C-record E-field formulas were scanned for XLM/DDE droppers.
 	IsSLK bool
@@ -383,6 +386,7 @@ const (
 	TopTypeTNEF          = "tnef"
 	TopTypeSLK           = "slk"
 	TopTypeSpreadsheetML = "spreadsheetml"
+	TopTypeMIME          = "mime"
 )
 
 // ExtractWithOptions reports the plaintext hidden inside an OLE2/OOXML container —
@@ -505,6 +509,12 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// Surface CSV-DDE markers for the DDE command form.
 		res.TopType = TopTypeSpreadsheetML
 		fromSpreadsheetML(buf, &res, deadline)
+	case isMIMEMessage(buf):
+		// A whole mail message (milter, strix-scan .eml): split the MIME parts
+		// and decode base64/quoted-printable, so each attachment is unpacked
+		// like the same file submitted on its own (COR-01).
+		res.TopType = TopTypeMIME
+		fromMIME(buf, &res, b, 0, deadline)
 	default:
 		// Not a container. The buffer may still hide an MS Script Encoder block
 		// (#@~^...^#~@) — an encoded VBScript/JScript that raw-byte rules can't see
