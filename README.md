@@ -235,7 +235,9 @@ line per request.
 
 > **Token is optional but recommended.** Set `MAILSTRIX_TOKEN` (or
 > `MAILSTRIX_TOKEN_FILE`) and the caller must present the same secret as a `Bearer`
-> header or `X-MAILSTRIX-Token`. Leave it unset (or `none`/`0`/`off`) to run an
+> header or `X-MAILSTRIX-Token`. A `*_FILE` secret that is set but cannot be read
+> stops `strixd serve` with exit code 2 instead of falling back to the plain variable.
+> Leave it unset (or `none`/`0`/`off`) to run an
 > **open** scanner for a trusted private network — strixd logs a loud warning,
 > since anyone who can reach the port can submit CPU-costly scans.
 
@@ -615,6 +617,9 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_BIGFILE_RULES` | baked seed | optional `.yac` bundle scanned for oversized buffers; unset ⇒ the baked `local.yac` seed set |
 | `MAILSTRIX_RULE_DENYLIST` | `http` | comma-sep rule names to suppress (case-insensitive); set empty to disable |
 | `MAILSTRIX_RULE_ALLOWLIST` | — | comma-sep rule names to force log-only (kept + tagged `mailstrix_allow`); deny wins if in both |
+| `MAILSTRIX_DENYLIST_FILE` | — | optional file of rule names to suppress (one per line, `#` comments, case-insensitive), merged with `MAILSTRIX_RULE_DENYLIST`; re-read on SIGHUP; missing or unreadable logs a warning and keeps the env list |
+| `MAILSTRIX_CACHE_DIR` | — (disabled) | writable dir for the live rule bundle; reseeded from `MAILSTRIX_SEED_RULES` when its `compiled.yac` is missing or unreadable |
+| `MAILSTRIX_SEED_RULES` | — | baked read-only `.yac` used to (re)seed `MAILSTRIX_CACHE_DIR` |
 | `MAILSTRIX_CANARY` | `0` | tag every match as log-only canary/shadow output; shipped rspamd/SpamAssassin/Sieve/ICAP integrations observe but do not score/block these hits |
 | `MAILSTRIX_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `:1344`. When set, strixd also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. |
 | `MAILSTRIX_CLAMD_TCP_ADDR` | — (disabled) | Explicit `host:port` |
