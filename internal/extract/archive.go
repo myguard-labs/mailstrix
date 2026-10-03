@@ -167,6 +167,10 @@ func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int,
 	}
 	for i, f := range zr.File {
 		if i >= maxZipEntries || b.spent() || expired(deadline) || len(res.Streams) >= maxStreams {
+			if i >= maxZipEntries {
+				res.capHit("zip-entries")
+			}
+			archiveCapHit(res, b)
 			break
 		}
 		// Skip office body/metadata/relationship parts — the macro path owns those.
@@ -283,7 +287,11 @@ func emitMember(data []byte, res *Result, b *archiveBudget, depth int, deadline 
 	// A member below minMemberBytes cannot carry a payload any rule could
 	// match; emitting it would only let padding spend the stream and member
 	// budgets (COR-07).
-	if len(data) < minMemberBytes || b.spent() || len(res.Streams) >= maxStreams {
+	if len(data) < minMemberBytes {
+		return
+	}
+	if b.spent() || len(res.Streams) >= maxStreams {
+		archiveCapHit(res, b)
 		return
 	}
 	b.members++
@@ -342,6 +350,10 @@ func unpackZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 	for n, i := range zipVisitOrder(zr.File) {
 		f := zr.File[i]
 		if n >= maxZipEntries || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+			if n >= maxZipEntries {
+				res.capHit("zip-entries")
+			}
+			archiveCapHit(res, b)
 			break
 		}
 		if f.FileInfo().IsDir() || strings.HasSuffix(f.Name, "/") {
@@ -415,6 +427,7 @@ func unpackTar(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 	res.IsArchive = true
 	for {
 		if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+			archiveCapHit(res, b)
 			break
 		}
 		h, err := tr.Next()
@@ -519,6 +532,7 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 	}
 	for i, f := range zr.File {
 		if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+			archiveCapHit(res, b)
 			break
 		}
 		if f.FileInfo().IsDir() {
@@ -640,6 +654,7 @@ func open7zMemberPlain(f *sevenzip.File) (out []byte, ok bool) {
 func emit7zMembers(zr *sevenzip.Reader, res *Result, b *archiveBudget, depth int, deadline time.Time) (emitted bool) {
 	for i, f := range zr.File {
 		if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+			archiveCapHit(res, b)
 			break
 		}
 		if f.FileInfo().IsDir() || f.UncompressedSize > maxBytesPerMember {
@@ -941,6 +956,7 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 	idx := -1
 	for {
 		if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+			archiveCapHit(res, b)
 			break
 		}
 		h, err := rr.Next()

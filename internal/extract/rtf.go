@@ -255,6 +255,15 @@ func fromRTF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 		// \objdata padding cannot hide a real object; groups bounds the index
 		// and decode work for empty or malformed groups separately.
 		if objs >= maxRTFObjects || groups >= maxRTFObjDataGroups || len(res.Streams) >= maxStreams || total >= maxTotalRTF || expired(deadline) || bud.spent() {
+			// COR-07b: signal a cap only when another \objdata group is left.
+			if bytes.Contains(rest, []byte(rtfObjDataKW)) {
+				if objs >= maxRTFObjects || groups >= maxRTFObjDataGroups || total >= maxTotalRTF {
+					res.capHit("rtf-objects")
+				}
+				if len(res.Streams) >= maxStreams {
+					res.capHit("streams")
+				}
+			}
 			break
 		}
 		idx := bytes.Index(rest, []byte(rtfObjDataKW))

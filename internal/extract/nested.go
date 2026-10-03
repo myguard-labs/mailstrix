@@ -35,8 +35,11 @@ const maxNestDepth = maxArchiveDepth
 // fail-open like the rest of the package (Extract's recover still covers a panic
 // from any sub-parser).
 func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
-	if b == nil || len(data) == 0 || depth > maxNestDepth || b.spent() ||
-		len(res.Streams) >= maxStreams || expired(deadline) {
+	if b == nil || len(data) == 0 || depth > maxNestDepth || expired(deadline) {
+		return
+	}
+	if b.spent() || len(res.Streams) >= maxStreams {
+		archiveCapHit(res, b) // COR-07b: the member's own content is not walked
 		return
 	}
 	switch {

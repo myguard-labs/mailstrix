@@ -49,6 +49,13 @@ var pureMarkerLiterals = map[string]struct{}{
 	"PE-DOTNET":               {}, // binanalyze.go
 	"PE-ANOMALY":              {}, // binanalyze.go
 	"ELF-EXECUTABLE":          {}, // binanalyze.go
+	// COR-07b cap signals, matched exactly so attacker content that merely
+	// starts with the prefix is never moved off the content channel.
+	capHitMarkerPrefix + "streams":        {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "archive-budget": {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "zip-entries":    {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "rtf-objects":    {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "pdf-streams":    {}, // extract.go finalizeStreams
 }
 
 // msdDeepDecodePrefix is the PURE marker emitted by the static-decode pass; the

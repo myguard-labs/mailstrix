@@ -124,6 +124,7 @@ var parityMarkers = map[string]markerKind{
 	"OLE2-EXTRA-DATA":     internalMarker, // label on data appended past FAT coverage; carved tail scanned by content rules
 	"MSIX-IDENTITY":       internalMarker,
 	"MSIX-APPLICATION":    internalMarker,
+	"EXTRACT-CAP-HIT":     internalMarker, // COR-07b cap signal; the scanner reads Result.CapHits, no rule
 	"MSIX-PROTOCOL":       internalMarker,
 	// CAB folder used LZX/Quantum (yarad decompresses only MSZIP/store); diagnostic
 	// label, not inherently malicious — the raw outer bytes are still scanned.
