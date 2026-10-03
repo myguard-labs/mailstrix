@@ -154,6 +154,32 @@ func TestCandidateNormalizationFields(t *testing.T) {
 	}
 }
 
+// TestExtractRepeatedURLPaddingDoesNotHideDistinct (COR-07): one URL repeated
+// many times spends no budget, so a later distinct URL is still returned.
+func TestExtractRepeatedURLPaddingDoesNotHideDistinct(t *testing.T) {
+	data := strings.Repeat("http://pad.example/x ", 200) + "http://evil.example/drop.exe"
+	got := urlcand.Extract([]byte(data), 64)
+	if len(got) != 2 || got[0].Raw != "http://pad.example/x" || got[1].Raw != "http://evil.example/drop.exe" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// TestExtractDistinctURLsStillCapped (negative/boundary): the cap still holds
+// for distinct URLs, and a defanged copy of a raw URL is not repeated.
+func TestExtractDistinctURLsStillCapped(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 100; i++ {
+		b.WriteString("http://h" + strings.Repeat("a", i%26+1) + ".example/" + string(rune('a'+i%26)) + strings.Repeat("z", i/26) + " ")
+	}
+	if got := urlcand.Extract([]byte(b.String()), 64); len(got) != 64 {
+		t.Fatalf("distinct cap: got %d, want 64", len(got))
+	}
+	got := urlcand.Extract([]byte("http://dup.example/a and hxxp://dup[.]example/a"), 64)
+	if len(got) != 1 {
+		t.Fatalf("defanged duplicate repeated: %+v", got)
+	}
+}
+
 // TestNormalizeHTTPURLTrailingDotHost (COR-12): a root-dot FQDN normalizes to
 // the same URL and host as the plain name, so feed lookups match.
 func TestNormalizeHTTPURLTrailingDotHost(t *testing.T) {
