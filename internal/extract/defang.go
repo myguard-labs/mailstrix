@@ -22,6 +22,12 @@ var reHxxp = regexp.MustCompile(`(?i)hxxp(s?)(:|(?:\[))`)
 // position (immediately followed by "://" or "[:]").
 var reFxp = regexp.MustCompile(`(?i)fxp(:|(?:\[))`)
 
+// Literal gates for reHxxp and reFxp: neither can match without its needle.
+var (
+	defangHxxpNeedle = []byte("hxxp")
+	defangFxpNeedle  = []byte("fxp")
+)
+
 // defangLiterals is an ordered list of (old, new) byte-literal replacements
 // applied AFTER the regex scheme fixes. Each pair is unambiguous: these
 // exact byte sequences appear exclusively in defanged IOCs, not in normal
@@ -80,16 +86,12 @@ func undefang(buf []byte) ([]byte, bool) {
 		src = src[:maxFoldInput]
 	}
 
-	// Fast path: scan for any marker byte before allocating anything.
-	// 'h', 'f', '[', '(', '{' cover all trigger characters.
-	hasTrigger := false
-	for _, b := range src {
-		if b == '[' || b == '(' || b == '{' || b == 'h' || b == 'H' || b == 'f' || b == 'F' {
-			hasTrigger = true
-			break
-		}
-	}
-	if !hasTrigger {
+	// Fast path: every literal defang starts with '[', '(' or '{', and the
+	// scheme regexes need the literal "hxxp" or "fxp" (PERF-51: a bare 'h' or
+	// 'f' used to wake the whole pass on almost any prose).
+	hasHxxp := containsASCIIFold(src, defangHxxpNeedle)
+	hasFxp := containsASCIIFold(src, defangFxpNeedle)
+	if !hasHxxp && !hasFxp && !bytes.ContainsAny(src, "[({") {
 		return buf, false
 	}
 
@@ -97,28 +99,32 @@ func undefang(buf []byte) ([]byte, bool) {
 	// reHxxp captures group 1 = optional 's', group 2 = trailing delimiter.
 	// reHxxp and reFxp use ReplaceAllFunc with submatch expansion via
 	// FindSubmatch so we can re-emit the captured delimiter character.
-	out := reHxxp.ReplaceAllFunc(src, func(m []byte) []byte {
-		sub := reHxxp.FindSubmatch(m)
-		// sub[1] = optional 's', sub[2] = ':' or '['
-		s := ""
-		if len(sub) > 1 && len(sub[1]) > 0 {
-			s = "s"
-		}
-		delim := []byte(":")
-		if len(sub) > 2 && len(sub[2]) > 0 {
-			delim = sub[2]
-		}
-		return append([]byte("http"+s), delim...)
-	})
-
-	out = reFxp.ReplaceAllFunc(out, func(m []byte) []byte {
-		sub := reFxp.FindSubmatch(m)
-		delim := []byte(":")
-		if len(sub) > 1 && len(sub[1]) > 0 {
-			delim = sub[1]
-		}
-		return append([]byte("ftp"), delim...)
-	})
+	out := src
+	if hasHxxp {
+		out = reHxxp.ReplaceAllFunc(out, func(m []byte) []byte {
+			sub := reHxxp.FindSubmatch(m)
+			// sub[1] = optional 's', sub[2] = ':' or '['
+			s := ""
+			if len(sub) > 1 && len(sub[1]) > 0 {
+				s = "s"
+			}
+			delim := []byte(":")
+			if len(sub) > 2 && len(sub[2]) > 0 {
+				delim = sub[2]
+			}
+			return append([]byte("http"+s), delim...)
+		})
+	}
+	if hasFxp {
+		out = reFxp.ReplaceAllFunc(out, func(m []byte) []byte {
+			sub := reFxp.FindSubmatch(m)
+			delim := []byte(":")
+			if len(sub) > 1 && len(sub[1]) > 0 {
+				delim = sub[1]
+			}
+			return append([]byte("ftp"), delim...)
+		})
+	}
 
 	// Apply ordered literal replacements.
 	for _, pair := range defangLiterals {
