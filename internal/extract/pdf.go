@@ -86,6 +86,7 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 	scan := buf
 	if len(scan) > maxPDFScan {
 		scan = scan[:maxPDFScan]
+		res.capHit("pdf-streams") // COR-07b: bytes past maxPDFScan are never walked
 	}
 	var total, attempts int
 	pos := 0
@@ -100,9 +101,20 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 	// non-deflate junk bodies spend the larger maxPDFAttempts instead, so a run
 	// of junk streams cannot hide a later FlateDecode ObjStm.
 	var produced int
-	for attempts < maxPDFAttempts && produced < maxPDFStreams && len(res.Streams) < maxStreams && total < maxTotalPDF && !expired(deadline) {
+	for {
 		rel := bytes.Index(scan[pos:], pdfStreamKW)
 		if rel < 0 {
+			break
+		}
+		if attempts >= maxPDFAttempts || produced >= maxPDFStreams || total >= maxTotalPDF {
+			res.capHit("pdf-streams") // COR-07b: a stream body is left unvisited
+			break
+		}
+		if len(res.Streams) >= maxStreams {
+			res.capHit("streams")
+			break
+		}
+		if expired(deadline) {
 			break
 		}
 		kwAt := pos + rel
@@ -239,7 +251,11 @@ var pdfIndicatorNames = [][]byte{
 // when a '#' or a candidate name actually appears in the raw bytes, so a PDF with
 // none of these pays nothing. Bounded, fail-open, deadline-aware.
 func fromPDFIndicators(scan []byte, res *Result, deadline time.Time) {
-	if expired(deadline) || len(res.Streams) >= maxStreams {
+	if expired(deadline) {
+		return
+	}
+	if len(res.Streams) >= maxStreams {
+		res.capHit("streams") // COR-07b: the indicator pass is skipped
 		return
 	}
 	buf := scan

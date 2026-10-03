@@ -1544,6 +1544,12 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	if res.Panicked {
 		incomplete = true
 	}
+	// COR-07b: an extraction cap stopped the walk with input left, so members
+	// past the cap were never scanned; the verdict is partial like a panic.
+	if len(res.CapHits) > 0 {
+		s.logf("extraction cap hit (%s); scan marked incomplete", strings.Join(res.CapHits, ","))
+		incomplete = true
+	}
 	if (res.Failed || res.Panicked) && completionErr == nil {
 		completionErr = fmt.Errorf("extractor did not complete")
 	}
