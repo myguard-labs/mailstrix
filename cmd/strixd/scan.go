@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -199,7 +200,7 @@ func scanItemFromReader(path string, r io.Reader, scanner *mailstrix.Scanner, ma
 	if maxBody > 0 {
 		// Read one byte beyond the cap so we can distinguish "exactly at cap" from
 		// "exceeds cap" without consuming the whole stream.
-		limited, err := io.ReadAll(io.LimitReader(r, maxBody+1))
+		limited, err := readAllSized(r, maxBody+1)
 		if err != nil {
 			return scanItem{Path: path, Err: err.Error()}
 		}
@@ -209,7 +210,7 @@ func scanItemFromReader(path string, r io.Reader, scanner *mailstrix.Scanner, ma
 		buf = limited
 	} else {
 		var err error
-		buf, err = io.ReadAll(r)
+		buf, err = readAllSized(r, -1)
 		if err != nil {
 			return scanItem{Path: path, Err: err.Error()}
 		}
@@ -243,4 +244,28 @@ func printItem(it scanItem, quiet bool) {
 			}
 		}
 	}
+}
+
+// readAllSized reads r up to limit bytes (limit < 0: no limit). When r is a
+// regular file its size pre-sizes the buffer, so a large attachment is read in
+// one allocation instead of repeated regrowth (PERF-67).
+func readAllSized(r io.Reader, limit int64) ([]byte, error) {
+	var b bytes.Buffer
+	if f, ok := r.(*os.File); ok {
+		if st, err := f.Stat(); err == nil && st.Mode().IsRegular() {
+			hint := st.Size() + 1 // +1 so a read at limit+1 never regrows
+			if limit >= 0 && hint > limit+1 {
+				hint = limit + 1
+			}
+			if hint > 0 && hint <= 1<<30 {
+				b.Grow(int(hint))
+			}
+		}
+	}
+	src := r
+	if limit >= 0 {
+		src = io.LimitReader(r, limit)
+	}
+	_, err := b.ReadFrom(src)
+	return b.Bytes(), err
 }

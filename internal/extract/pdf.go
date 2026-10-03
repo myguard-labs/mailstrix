@@ -189,10 +189,13 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 				// genuine cleartext often yields junk; we therefore do NOT replace `dec`
 				// with it (that would corrupt the common cleartext case) but emit it as an
 				// ADDITIONAL stream so a real raw-deflate payload is still surfaced.
-				if x := rawInflatePDF(decoded); len(x) > 0 && !bytes.Equal(x, dec) &&
-					len(res.Streams) < maxStreams && total+len(x) < maxTotalPDF {
-					res.Streams = append(res.Streams, x)
-					total += len(x)
+				// PERF-59: inflate at most what the remaining PDF budget can keep,
+				// instead of up to maxBytesPerPDFStream that is then discarded.
+				if room := maxTotalPDF - total - 1; room > 0 && len(res.Streams) < maxStreams {
+					if x := rawInflatePDFLimit(decoded, room); len(x) > 0 && !bytes.Equal(x, dec) {
+						res.Streams = append(res.Streams, x)
+						total += len(x)
+					}
 				}
 			}
 		} else {
@@ -747,19 +750,29 @@ func zlibInflatePDF(body []byte) []byte {
 // unchecksummed, so this can yield junk from genuine cleartext — the caller emits
 // the result as an ADDITIONAL stream, never as a replacement. Bounded.
 func rawInflatePDF(body []byte) []byte {
-	if len(body) < 2 {
+	return rawInflatePDFLimit(body, maxBytesPerPDFStream)
+}
+
+// rawInflatePDFLimit is rawInflatePDF capped at min(limit,
+// maxBytesPerPDFStream) output bytes.
+func rawInflatePDFLimit(body []byte, limit int) []byte {
+	if len(body) < 2 || limit <= 0 {
 		return nil
 	}
 	fr := flate.NewReader(bytes.NewReader(body))
-	return readInflated(fr)
+	return readInflatedLimit(fr, min(limit, maxBytesPerPDFStream))
 }
 
 // readInflated reads a decompressor bounded by maxBytesPerPDFStream. A
 // decompression error after some output still returns what was produced (a
 // truncated-but-useful stream is better than nothing); zero output returns nil.
 func readInflated(r io.Reader) []byte {
+	return readInflatedLimit(r, maxBytesPerPDFStream)
+}
+
+func readInflatedLimit(r io.Reader, limit int) []byte {
 	var b bytes.Buffer
-	_, _ = b.ReadFrom(io.LimitReader(r, maxBytesPerPDFStream))
+	_, _ = b.ReadFrom(io.LimitReader(r, int64(limit)))
 	if rc, ok := r.(io.Closer); ok {
 		_ = rc.Close()
 	}
