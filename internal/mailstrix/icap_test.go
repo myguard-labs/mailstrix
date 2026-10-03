@@ -300,17 +300,19 @@ func TestICAPChunkedBodyMalformedSize(t *testing.T) {
 	}
 }
 
-func TestICAPScanErrorFailsOpen(t *testing.T) {
+// TestICAPScanErrorNotClean (COR-04): an engine error is no verdict, so ICAP
+// answers 500 rather than 204 clean; an incomplete scan with a detection is
+// still blocked.
+func TestICAPScanErrorNotClean(t *testing.T) {
 	eng := &fakeEngine{count: 1, err: fmt.Errorf("scan engine exploded")}
-	s := newTestServer(eng, "")
-	addr := startTestICAPServer(t, s)
-
-	req := icapRESPMODRequest(addr, "some content", true)
-	resp := doICAP(t, addr, req)
-
-	// Fail-open: engine error -> treat as clean -> 204
-	if !strings.HasPrefix(resp, "ICAP/1.0 204") {
-		t.Errorf("scan error should fail-open to 204, got:\n%s", resp)
+	addr := startTestICAPServer(t, newTestServer(eng, ""))
+	if resp := doICAP(t, addr, icapRESPMODRequest(addr, "some content", true)); !strings.HasPrefix(resp, "ICAP/1.0 500") {
+		t.Errorf("scan error: want 500, got:\n%s", resp)
+	}
+	eng = &fakeEngine{count: 1, err: ErrScanIncomplete, matches: []Match{{Rule: "MALWARE_TEST"}, scanIncompleteMatch()}}
+	addr = startTestICAPServer(t, newTestServer(eng, ""))
+	if resp := doICAP(t, addr, icapRESPMODRequest(addr, "bad content", true)); !strings.HasPrefix(resp, "ICAP/1.0 200 OK") {
+		t.Errorf("incomplete with detection: want infected 200, got:\n%s", resp)
 	}
 }
 

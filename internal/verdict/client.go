@@ -98,8 +98,19 @@ func (c *Client) Scan(ctx context.Context, name string, buf []byte) ([]Match, er
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
+	// A degraded result with an actionable match is still a detection; without
+	// one it is not a clean verdict, so report it as an error (callers map it
+	// to "unknown" / their fail-open policy) rather than as zero matches.
+	if out.Degraded != "" && len(Actionable(out.Matches)) == 0 {
+		return out.Matches, &DegradedError{Reason: out.Degraded}
+	}
 	return out.Matches, nil
 }
+
+// DegradedError reports that strixd answered without a complete verdict.
+type DegradedError struct{ Reason string }
+
+func (e *DegradedError) Error() string { return "no complete verdict: " + e.Reason }
 
 // CloseIdle closes any pooled keep-alive connections. One-shot CLI callers use
 // this; the long-lived milter deliberately does not (it wants the pool).

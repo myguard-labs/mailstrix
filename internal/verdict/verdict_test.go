@@ -3,6 +3,7 @@ package verdict
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -256,5 +257,35 @@ func TestClientCallerContextCancels(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("took %s — the caller's context did not bound the call", elapsed)
+	}
+}
+
+func degradedStub(t *testing.T, body string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return NewClient(srv.URL, "", "test", time.Second)
+}
+
+// TestClientDegraded (COR-04): a degraded answer without an actionable match
+// is a *DegradedError; with one the detection stands; a complete answer and a
+// malformed body behave as before.
+func TestClientDegraded(t *testing.T) {
+	_, err := degradedStub(t, `{"matches":[],"degraded":"error"}`).Scan(context.Background(), "", []byte("x"))
+	var d *DegradedError
+	if !errors.As(err, &d) || d.Reason != "error" {
+		t.Fatalf("degraded no match: err = %v", err)
+	}
+	m, err := degradedStub(t, `{"matches":[{"rule":"EVIL"}],"degraded":"incomplete"}`).Scan(context.Background(), "", []byte("x"))
+	if err != nil || len(m) != 1 {
+		t.Fatalf("degraded with detection: %v %v", m, err)
+	}
+	if _, err := degradedStub(t, `{"matches":[]}`).Scan(context.Background(), "", []byte("x")); err != nil {
+		t.Fatalf("complete clean: %v", err)
+	}
+	if _, err := degradedStub(t, `{"matches":[},`).Scan(context.Background(), "", []byte("x")); err == nil || errors.As(err, &d) {
+		t.Fatalf("malformed body: %v", err)
 	}
 }

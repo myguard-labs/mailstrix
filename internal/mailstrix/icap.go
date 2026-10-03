@@ -399,6 +399,12 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		return errors.New("icap coalesced wait timed out")
 	}
 	actionable := actionableMatches(matches)
+	if reason := degradedReason(matches); reason != "" && len(actionable) == 0 {
+		// No complete verdict (COR-04): never answer 204/clean for it.
+		s.errf("ICAP %s %dB 500: no complete verdict (%s)", method, len(buf), reason)
+		_, _ = io.WriteString(w, icapProtoVersion+" 500 Server Error\r\n\r\n")
+		return errors.New("icap scan degraded: " + reason)
+	}
 
 	if len(actionable) > 0 {
 		s.metrics.icapInfected.Add(1)

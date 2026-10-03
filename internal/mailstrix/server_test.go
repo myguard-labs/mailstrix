@@ -451,12 +451,15 @@ func TestBadLength(t *testing.T) {
 	}
 }
 
-func TestScanErrorFailsOpen(t *testing.T) {
+// TestScanErrorFailsOpenAsDegraded (COR-04): a scan error still answers 200
+// (fail-open, mail is never blocked) but marks the result degraded so clients
+// report "unknown", not "clean".
+func TestScanErrorFailsOpenAsDegraded(t *testing.T) {
 	eng := &fakeEngine{err: bytes.ErrTooLarge, count: 1}
 	s := newTestServer(eng, "tok")
 	w := post(s, "x", map[string]string{"X-MAILSTRIX-Token": "tok"})
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"matches":[]`) {
-		t.Errorf("scan error should fail open 200 empty, got %d %s", w.Code, w.Body.String())
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"degraded":"error"`) || w.Header().Get("X-MAILSTRIX-Degraded") != "error" {
+		t.Errorf("scan error: want 200 degraded=error, got %d %s hdr=%q", w.Code, w.Body.String(), w.Header().Get("X-MAILSTRIX-Degraded"))
 	}
 }
 
@@ -1025,5 +1028,62 @@ func TestMetricsExposeXLMEmulatorPanics(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1}, "")
 	if body := get(s, "/metrics").Body.String(); !strings.Contains(body, "xlm_emulator_panics_total ") {
 		t.Fatalf("xlm_emulator_panics_total missing from /metrics:\n%s", body)
+	}
+}
+
+// TestScanIncompleteIsDegraded: an incomplete scan without a detection is
+// degraded=incomplete; with an actionable match the detection stands and the
+// response still flags the partial scan.
+func TestScanIncompleteIsDegraded(t *testing.T) {
+	eng := &fakeEngine{count: 1, err: ErrScanIncomplete, matches: []Match{scanIncompleteMatch()}}
+	w := post(newTestServer(eng, ""), "x", nil)
+	if !strings.Contains(w.Body.String(), `"degraded":"incomplete"`) {
+		t.Fatalf("incomplete: %s", w.Body.String())
+	}
+	eng = &fakeEngine{count: 1, err: ErrScanIncomplete, matches: []Match{{Rule: "EVIL"}, scanIncompleteMatch()}}
+	w = post(newTestServer(eng, ""), "y", nil)
+	if !strings.Contains(w.Body.String(), `"rule":"EVIL"`) || !strings.Contains(w.Body.String(), `"degraded":"incomplete"`) {
+		t.Fatalf("incomplete with detection: %s", w.Body.String())
+	}
+}
+
+// TestScanNoSlotIsDegradedBusy: when no scan slot frees up within the budget
+// the answer is degraded=busy, not an empty clean result.
+func TestScanNoSlotIsDegradedBusy(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1}, "")
+	s.cfg.BackendTimeout = 20 * time.Millisecond
+	for i := 0; i < cap(s.sem); i++ {
+		s.sem <- struct{}{}
+	}
+	w := post(s, "x", nil)
+	if !strings.Contains(w.Body.String(), `"degraded":"busy"`) {
+		t.Fatalf("no slot: %s", w.Body.String())
+	}
+}
+
+// TestScanCleanNotDegraded (negative control): a complete clean scan carries
+// no degraded field or header.
+func TestScanCleanNotDegraded(t *testing.T) {
+	w := post(newTestServer(&fakeEngine{count: 1}, ""), "x", nil)
+	if strings.Contains(w.Body.String(), "degraded") || w.Header().Get("X-MAILSTRIX-Degraded") != "" {
+		t.Fatalf("clean scan flagged degraded: %s", w.Body.String())
+	}
+}
+
+func TestDegradedReason(t *testing.T) {
+	cases := []struct {
+		in   []Match
+		want string
+	}{
+		{nil, ""},
+		{[]Match{{Rule: "X"}}, ""},
+		{[]Match{scanIncompleteMatch()}, degradedIncomplete},
+		{[]Match{scanDegradedMatch(degradedBusy)}, degradedBusy},
+		{[]Match{{Rule: scanDegradedRule}}, degradedError}, // malformed: no reason
+	}
+	for _, tc := range cases {
+		if got := degradedReason(tc.in); got != tc.want {
+			t.Errorf("degradedReason(%v) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

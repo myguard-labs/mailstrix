@@ -247,7 +247,17 @@ The `/scan` reply names the rule **and** its source ruleset file:
 
 The list is `[]` (never `null`) when nothing matched. `namespace` is the file the
 rule was compiled from, so a generic rule like `http` is traceable to the set
-that shipped it. For the hardened container setup (read-only rootfs, dropped
+that shipped it.
+
+When strixd could not compute a complete verdict, the reply still answers 200
+(fail-open) but adds `"degraded"` and an `X-MAILSTRIX-Degraded` header with the
+reason: `incomplete` (scan budget ran out, an extracted stream failed to scan,
+or an extractor crashed), `error` (the scan failed) or `busy` (no scan slot
+freed up in time). A log-only `MAILSTRIX_SCAN_INCOMPLETE` or
+`MAILSTRIX_SCAN_DEGRADED` match names it too. Treat a degraded reply with no
+actionable match as **unknown, not clean**; any actionable match in it is still
+a real detection. Degraded results are never cached. ICAP answers `500` instead
+of `204` for them. For the hardened container setup (read-only rootfs, dropped
 caps, Docker secret, static IPv4) see
 [`docker/docker-compose.yml`](docker/docker-compose.yml).
 
@@ -475,7 +485,7 @@ Ready-to-copy MTA config (Postfix `main.cf` + `milter_header_checks`, the Sendma
 | `X-Mailstrix-Status` | `clean`, `infected`, or `unknown` |
 | `X-Mailstrix-Rules` | comma-separated actionable rule names (on `infected`) |
 | `X-Mailstrix-Family` | the malware family, when a rule carried one |
-| `X-Mailstrix-Info` | why the verdict is `unknown` (outage, oversized, empty) |
+| `X-Mailstrix-Info` | why the verdict is `unknown` (outage, no complete verdict, oversized, empty) |
 | `X-Mailstrix-Version` | the `strix-milter` version |
 
 `unknown` means *not scanned* — it is **not** a clean bill of health. Decide

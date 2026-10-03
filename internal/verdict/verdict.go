@@ -26,6 +26,9 @@ type Match struct {
 // Response is strixd's /scan response body.
 type Response struct {
 	Matches []Match `json:"matches"`
+	// Degraded is non-empty when strixd computed no complete verdict
+	// (incomplete scan, scan error, no scan slot).
+	Degraded string `json:"degraded,omitempty"`
 }
 
 // Verdict is the structured result of a scan. Family is the single canonical

@@ -68,6 +68,10 @@ type ScanEngine interface {
 // null) when nothing matched, so the plugin can branch on length alone.
 type scanResponse struct {
 	Matches []Match `json:"matches"`
+	// Degraded is set when no complete verdict was computed (incomplete scan,
+	// scan error, no scan slot): consumers must treat the result as unknown,
+	// not clean, unless an actionable match is present (COR-04).
+	Degraded string `json:"degraded,omitempty"`
 }
 
 // Server is the HTTP front-end: auth, body limits, the bounded-concurrency
@@ -588,7 +592,11 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if matches == nil {
 		matches = []Match{}
 	}
-	writeJSON(w, http.StatusOK, scanResponse{Matches: matches})
+	degraded := degradedReason(matches)
+	if degraded != "" {
+		w.Header().Set("X-MAILSTRIX-Degraded", degraded)
+	}
+	writeJSON(w, http.StatusOK, scanResponse{Matches: matches, Degraded: degraded})
 	// Log the matched rule NAMES (not just a count) whenever something fires, at
 	// info level — this is the cheap, accurate way to see which rules fire on
 	// real mail and spot over-firing/FP rules to tune or demote. A per-rule
@@ -628,7 +636,7 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta 
 		if !s.acquireOn(ctx, s.sem) {
 			s.metrics.busy.Add(1)
 			s.errf("/scan %dB no scan slot within budget (fail-open)", len(buf))
-			return nil, true
+			return []Match{scanDegradedMatch(degradedBusy)}, true
 		}
 		scanned, scanErr := func() ([]Match, error) {
 			defer func() { <-s.sem }()
@@ -650,7 +658,7 @@ func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta 
 			// amplify the failure under load.
 			s.metrics.errors.Add(1)
 			s.errf("/scan %dB scan error (fail-open): %v", len(buf), scanErr)
-			return nil, false
+			return []Match{scanDegradedMatch(degradedError)}, false
 		}
 		// Cache PUT, including optional Redis L2 SET, runs after the scan slot is
 		// released. A healthy-but-slow Redis may still delay this response a little

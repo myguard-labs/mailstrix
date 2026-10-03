@@ -1121,3 +1121,22 @@ func TestSanitizeCapIsInclusiveOfTheEllipsis(t *testing.T) {
 		t.Fatalf("a truncated value must say so, got %q", got[len(got)-8:])
 	}
 }
+
+// TestDegradedVerdictIsUnknown (COR-04): strixd answering degraded with no
+// detection stamps "unknown" with the reason, never "clean".
+func TestDegradedVerdictIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"matches":[],"degraded":"incomplete"}`))
+	}))
+	t.Cleanup(srv.Close)
+	s, stamped, _ := newTestMilter(t, baseCfg(srv.URL))
+	if got := feedBody(t, s, []byte("hello")); got != milter.RespAccept {
+		t.Fatalf("response = %v, want RespAccept", got)
+	}
+	if v, _ := headerValue(*stamped, hdrStatus); v != statusUnknown {
+		t.Fatalf("%s = %q, want %q", hdrStatus, v, statusUnknown)
+	}
+	if info, _ := headerValue(*stamped, hdrInfo); !strings.Contains(info, "no complete verdict: incomplete") {
+		t.Fatalf("%s = %q", hdrInfo, info)
+	}
+}
