@@ -39,10 +39,14 @@ class ImpactTests(unittest.TestCase):
 
     def test_named_consumers_and_unrelated_controls(self):
         for path, selected, unrelated in [
-            ("internal/verdict/verdict.go", ["go", "image"], ["postfix", "rspamd"]),
-            ("internal/extract/pdf_test.go", ["go"], ["image", "parity"]),
-            ("internal/extract/testdata/document.doc", ["go"], ["image", "parity"]),
-            ("internal/mailstrix/CAPE.md", ["go"], ["image", "parity"]),
+            ("internal/verdict/verdict.go", ["go", "image", "postfix"], ["rspamd"]),
+            ("internal/extract/pdf_test.go", ["go"], ["image", "parity", "postfix"]),
+            (
+                "internal/extract/testdata/document.doc",
+                ["go"],
+                ["image", "parity", "postfix"],
+            ),
+            ("internal/mailstrix/CAPE.md", ["go"], ["image", "parity", "postfix"]),
             (
                 "docker/fetch-rules.sh",
                 ["go", "image", "ruleargs"],
@@ -62,10 +66,19 @@ class ImpactTests(unittest.TestCase):
             ),
             (
                 "contrib/postfix/Dockerfile.integration",
-                ["postfix", "dockerfiles"],
+                ["postfix", "dockerfiles", "docker"],
                 ["image", "go"],
             ),
-            ("go.sum", ["go", "image", "parity", "dependencies"], ["rspamd"]),
+            (
+                "cmd/strix-milter/main.go",
+                ["go", "image", "postfix", "docker"],
+                ["rspamd"],
+            ),
+            (
+                "go.sum",
+                ["go", "image", "parity", "dependencies", "postfix"],
+                ["rspamd"],
+            ),
             ("ci/parity_cache_test.py", ["qualification", "scope"], ["image", "go"]),
         ]:
             with self.subTest(path=path):

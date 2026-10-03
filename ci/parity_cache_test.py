@@ -73,9 +73,15 @@ class ParityCacheTest(unittest.TestCase):
         reads = [args[i + 1] for i, arg in enumerate(args) if arg == "--cache-from"]
         writes = [args[i + 1] for i, arg in enumerate(args) if arg == "--cache-to"]
         self.assertEqual(
-            reads, ["type=gha,scope=strixd-build", "type=gha,scope=mailstrix-parity"]
+            reads,
+            [
+                "type=gha,scope=strixd-build",
+                "type=gha,scope=mailstrix-parity-parity-runtime",
+            ],
         )
-        self.assertEqual(writes, ["type=gha,mode=max,scope=mailstrix-parity"])
+        self.assertEqual(
+            writes, ["type=gha,mode=max,scope=mailstrix-parity-parity-runtime"]
+        )
 
     def test_malformed_mode_rejects_before_any_docker_invocation(self):
         for mode in ("invalid", "2", "true", " "):

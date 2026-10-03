@@ -71,9 +71,7 @@ cache_args=()
 case ${CI_PARITY_CACHE:-0} in
 0) ;;
 1)
-	cache_args=(--cache-from "type=gha,scope=strixd-build"
-		--cache-from "type=gha,scope=mailstrix-parity"
-		--cache-to "type=gha,mode=max,scope=mailstrix-parity")
+	cache_args=(--cache-from "type=gha,scope=strixd-build")
 	;;
 *)
 	printf '%s\n' 'CI_PARITY_CACHE must be 0 or 1.' >&2
@@ -162,6 +160,11 @@ if ((cleanup_images)); then
 	trap cleanup EXIT
 fi
 for target in parity-runtime parity-probe-runtime parity-qualification-bin; do
+	build_cache_args=("${cache_args[@]}")
+	if [[ ${CI_PARITY_CACHE:-0} == 1 ]]; then
+		build_cache_args+=(--cache-from "type=gha,scope=mailstrix-parity-$target"
+			--cache-to "type=gha,mode=max,scope=mailstrix-parity-$target")
+	fi
 	output_args=(--load --iidfile "$qualification_dir/$target.id")
 	if [[ $target == parity-qualification-bin ]]; then
 		output_args=(--output "type=local,dest=$qualification_dir/bin")
@@ -172,7 +175,7 @@ for target in parity-runtime parity-probe-runtime parity-qualification-bin; do
 	fi
 	if ! timeout 900s docker "${docker_args[@]}" buildx build \
 		--platform linux/amd64 --target "$target" -f docker/Dockerfile \
-		"${cache_args[@]}" "${output_args[@]}" . >"$qualification_dir/$target.log" 2>&1; then
+		"${build_cache_args[@]}" "${output_args[@]}" . >"$qualification_dir/$target.log" 2>&1; then
 		tail -60 "$qualification_dir/$target.log" >&2
 		exit 1
 	fi

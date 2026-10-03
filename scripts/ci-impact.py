@@ -42,7 +42,17 @@ RULES = {
         "docker/local-rules/*",
         "scripts/qualify-parity-isolation.sh",
     ],
-    "postfix": ["contrib/postfix/*"],
+    "postfix": [
+        "contrib/postfix/*",
+        "cmd/strix-milter/*.go",
+        "cmd/strixd/*.go",
+        "internal/*.go",
+        "third_party/*",
+        "go.mod",
+        "go.sum",
+        "docker/Dockerfile",
+        ".dockerignore",
+    ],
     "rspamd": ["contrib/rspamd/*", ".luacheckrc"],
     "spamassassin": ["contrib/spamassassin/*"],
     "python": ["tools/parity/*.py", "tools/parity/comparator-pins.json"],
@@ -57,6 +67,7 @@ RULES = {
         "scripts/ci-*",
         "ci/ci_impact_test.py",
         "ci/ci_go_checks_test.py",
+        "ci/ci_integration_test.py",
         "ci/parity_cache_test.py",
     ],
     "maintscript": [
@@ -219,8 +230,14 @@ def plan(paths, full=False):
             for p in paths
         ):
             selected.discard("parity")
+        if not any(
+            matches(p, RULES["postfix"])
+            and not p.endswith(("_test.go", ".md"))
+            and "/testdata/" not in p
+            for p in paths
+        ):
+            selected.discard("postfix")
         for key in [
-            "postfix",
             "rspamd",
             "spamassassin",
             "python",
@@ -240,6 +257,7 @@ def plan(paths, full=False):
                 "scripts/ci-*",
                 "ci/ci_impact_test.py",
                 "ci/ci_go_checks_test.py",
+                "ci/ci_integration_test.py",
             ],
         )
         for p in paths
@@ -255,7 +273,7 @@ def plan(paths, full=False):
     result["changed_files"] = (
         "" if full else "--changed -- " + " ".join(sorted(go_paths))
     )
-    result["docker"] = result["go"] or result["image"]
+    result["docker"] = result["go"] or result["image"] or result["postfix"]
     return result
 
 

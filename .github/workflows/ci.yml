@@ -100,8 +100,11 @@ jobs:
       - if: needs.changes.outputs.docker == 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
+      - if: needs.changes.outputs.docker == 'true'
+        uses: crazy-max/ghaction-github-runtime@3cb05d89e1f492524af3d41a1c98c83bc3025124  # v3
+
       - name: build test stage (affected vet + race tests in-image)
-        if: needs.changes.outputs.go == 'true'
+        if: needs.changes.outputs.go == 'true' || needs.changes.outputs.postfix == 'true'
         env:
           CHANGED_FILES: ${{ needs.changes.outputs.changed_files }}
         run: |
@@ -137,6 +140,12 @@ jobs:
             --build-arg CACHEBUST=rules-${{ hashFiles('docker/local-rules/**','docker/fetch-rules.sh','docker/compile-rules.sh','docker/Dockerfile') }} \
             .
 
+      - name: Postfix milter policy integration (isolated, harmless messages)
+        if: needs.changes.outputs.postfix == 'true'
+        run: |
+          docker build -f contrib/postfix/Dockerfile.integration -t mailstrix-postfix-test contrib/postfix
+          timeout 90s docker run --rm --network none mailstrix-postfix-test
+
       - name: trivy image scan (HIGH,CRITICAL)
         if: needs.changes.outputs.image == 'true'
         run: |
@@ -163,6 +172,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: crazy-max/ghaction-github-runtime@3cb05d89e1f492524af3d41a1c98c83bc3025124  # v3
       - name: qualify optional Mailstrix isolation with inert fixtures
         env:
           CI_PARITY_CACHE: "1"
@@ -384,19 +394,6 @@ jobs:
         if: needs.changes.outputs.workflows == 'true'
         run: docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/woodruffw/zizmor:1.6.0 --format plain .github/workflows/
 
-  postfix:
-    needs: changes
-    if: needs.changes.outputs.postfix == 'true'
-    runs-on: [self-hosted, builder02, docker]
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
-      - name: Postfix milter policy integration (isolated, harmless messages)
-        run: |
-          docker build -f contrib/postfix/Dockerfile.integration -t mailstrix-postfix-test contrib/postfix
-          timeout 90s docker run --rm --network none mailstrix-postfix-test
-
-
   rspamd:
     needs: changes
     if: needs.changes.outputs.rspamd == 'true'
@@ -457,8 +454,8 @@ jobs:
             prove -v -I contrib/spamassassin contrib/spamassassin/t/mailstrix.t
             d=/etc/spamassassin
             install -m644 contrib/spamassassin/Mailstrix.pm "$d/Mailstrix.pm"
-            install -m644 contrib/spamassassin/strixd.pre "$d/strixd.pre"
-            install -m644 contrib/spamassassin/strixd.cf "$d/strixd.cf"
+            install -m644 contrib/spamassassin/mailstrix.pre "$d/mailstrix.pre"
+            install -m644 contrib/spamassassin/mailstrix.cf "$d/mailstrix.cf"
             spamassassin --lint
           '
 

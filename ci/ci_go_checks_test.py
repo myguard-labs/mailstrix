@@ -56,9 +56,14 @@ if [[ $name == go && $1 == list ]]; then printf '%s\\n' "$FIXTURE"; fi
             "go <run> <./tools/testscope> <--changed> <--> <internal/extract/pdf.go>",
             trace,
         )
-        for name in ["staticcheck", "govulncheck", "gosec"]:
+        for name in ["staticcheck", "govulncheck"]:
             self.assertIn(f"{name} <example/extract> <example/server>", trace)
         self.assertIn("go <vet> <example/extract> <example/server>", trace)
+        gosec_line = next(
+            line for line in trace.splitlines() if line.startswith("gosec ")
+        )
+        self.assertRegex(gosec_line, r"^gosec </[^>]+>$")
+        self.assertNotIn("example/", gosec_line)
         self.assertNotIn("<./...>", trace)
 
     def test_empty_explicit_scope_runs_no_analyzers(self):

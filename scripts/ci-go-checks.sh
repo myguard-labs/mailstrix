@@ -27,7 +27,8 @@ done <<<"$directories"
 go vet "${package_args[@]}"
 staticcheck "${package_args[@]}"
 govulncheck "${package_args[@]}"
-gosec "${package_args[@]}"
+mapfile -t gosec_directories <<<"$directories"
+gosec "${gosec_directories[@]}"
 # The replaced module's own tests are outside the root package graph.
 if [[ " ${CHANGED_FILES-} " == *' third_party/oleparse/'* || -z ${CHANGED_FILES-} ]]; then
 	(cd third_party/oleparse && go test -race ./...)
