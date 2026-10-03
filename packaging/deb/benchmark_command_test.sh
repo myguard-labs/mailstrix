@@ -74,6 +74,24 @@ scoped = any(a.rstrip(";") == "$pkgs" for a in docker_args) and "go run ./tools/
 assert "./..." in docker_args or scoped, \
     "Docker test stage no longer covers every Go package (directly or via tools/testscope)"
 assert "-bench=." in benchmark_args, "maintenance command no longer runs benchmarks"
+
+
+def assert_benchmark_only(args):
+    assert "-run" in args and args[args.index("-run") + 1] == "^$", \
+        "maintenance benchmarks must skip ordinary unit tests already run by the Docker test stage"
+
+
+assert_benchmark_only(benchmark_args)
+# Negative control: removing the filter must fail the same contract assertion.
+without_filter = list(benchmark_args)
+filter_index = without_filter.index("-run")
+del without_filter[filter_index:filter_index + 2]
+try:
+    assert_benchmark_only(without_filter)
+except AssertionError:
+    pass
+else:
+    raise AssertionError("benchmark-only negative control did not reject an unfiltered command")
 arm_tokens = shlex.split(arm_build.replace("\\\n", " "))
 assert arm_job["runs-on"] == "ubuntu-24.04-arm", "race-arm64 no longer runs natively"
 assert "--target" in arm_tokens and arm_tokens[arm_tokens.index("--target") + 1] == "test", \

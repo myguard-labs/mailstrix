@@ -88,19 +88,19 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # ---- tests (built into the image build so CI fails on a bad commit) ---------
 FROM build AS test
-# CHANGED_FILES (space-separated, repository-relative) narrows `go test` to the
-# changed packages and their importers (tools/testscope). Empty, or any change
-# testscope cannot map (go.mod, build/CI files, ...), runs the whole suite;
-# a docs-only change runs no tests. `go vet` always covers everything.
+# CHANGED_FILES narrows tests and vet to changed packages and real consumers.
+# No list preserves full release/maintenance coverage. Explicit unknown inputs
+# fail selection; documentation without a test contract selects no packages.
 ARG CHANGED_FILES=""
 # CHANGED_FILES and pkgs are space-separated lists: word splitting is intended.
 # hadolint ignore=SC2086
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go vet ./... \
-    && pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
+    pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
     && echo "go test scope: ${pkgs:-<none, docs-only change>}" \
-    && if [ -n "$pkgs" ]; then go test -race -tags yara_static $pkgs; fi
+    && if [ -n "$pkgs" ]; then \
+        go vet -tags yara_static $pkgs && go test -race -tags yara_static $pkgs; \
+    fi
 
 # ---- binary export (release artifacts; not part of the runtime image) -------
 # Optional parity image uses only trusted repository rule sources. It has no

@@ -50,10 +50,12 @@ grep -q 'invalid character' "$scope_bin_dir/graph-error"
 go tool covdata textfmt -i "$scope_bin_dir/cov" -o "$scope_bin_dir/cli.out"
 
 # shellcheck disable=SC2016 # literal workflow variable, not shell expansion
-grep -q 'CHANGED_FILES="$changed"' .github/workflows/ci.yml
+grep -q 'scripts/ci-plan.sh' .github/workflows/ci.yml
+grep -q 'scripts/ci-impact.py' scripts/ci-plan.sh
 grep -q 'go run ./tools/testscope.*CHANGED_FILES' docker/Dockerfile
 grep -q 'bash ci/testscope_test.sh' .github/workflows/ci.yml
-grep -q -- '--changed --' .github/workflows/ci.yml
+grep -q 'scripts/ci-go-checks.sh' .github/workflows/ci.yml
+grep -q -- '--changed --' scripts/ci-impact.py
 python3 - "$scope_bin_dir/unit.out" "$scope_bin_dir/cli.out" "$scope_bin_dir/merged.out" <<'COVER'
 import sys
 counts = {}

@@ -3,7 +3,9 @@
 # Usage: bash scripts/qualify-parity-isolation.sh [--cleanup-images] [--] NEW_OUTPUT_DIRECTORY
 # Requires a local Docker daemon with cgroup v2 and the repository build inputs.
 # Creates local images, bounded temporary containers and retained build/test logs.
-# No external corpus, public rule refresh, deployment changes or dry-run mode.
+# CI_PARITY_CACHE=1 enables GitHub Actions BuildKit caches; default local builds
+# use only the builder cache. No external corpus, public rule refresh, deployment
+# changes or dry-run mode.
 # Extend named TestIsolatedLive tests for additional enforcement claims.
 set -euo pipefail
 if [[ $# -gt 0 ]]; then
@@ -65,6 +67,17 @@ mkdir -- "$output_dir"
 qualification_dir=$(cd -- "$output_dir" && pwd)
 cd -- "$repo_dir"
 docker_args=(--host unix:///var/run/docker.sock)
+cache_args=()
+case ${CI_PARITY_CACHE:-0} in
+0) ;;
+1)
+	cache_args=(--cache-from "type=gha,scope=strixd-build")
+	;;
+*)
+	printf '%s\n' 'CI_PARITY_CACHE must be 0 or 1.' >&2
+	exit 2
+	;;
+esac
 owned_tags=()
 cleanup_owned_images() {
 	local tag identity image_id image_owner inspect_status inspect_error stderr_file failed=0
@@ -147,6 +160,11 @@ if ((cleanup_images)); then
 	trap cleanup EXIT
 fi
 for target in parity-runtime parity-probe-runtime parity-qualification-bin; do
+	build_cache_args=("${cache_args[@]}")
+	if [[ ${CI_PARITY_CACHE:-0} == 1 ]]; then
+		build_cache_args+=(--cache-from "type=gha,scope=mailstrix-parity-$target"
+			--cache-to "type=gha,mode=max,scope=mailstrix-parity-$target")
+	fi
 	output_args=(--load --iidfile "$qualification_dir/$target.id")
 	if [[ $target == parity-qualification-bin ]]; then
 		output_args=(--output "type=local,dest=$qualification_dir/bin")
@@ -157,7 +175,7 @@ for target in parity-runtime parity-probe-runtime parity-qualification-bin; do
 	fi
 	if ! timeout 900s docker "${docker_args[@]}" buildx build \
 		--platform linux/amd64 --target "$target" -f docker/Dockerfile \
-		"${output_args[@]}" . >"$qualification_dir/$target.log" 2>&1; then
+		"${build_cache_args[@]}" "${output_args[@]}" . >"$qualification_dir/$target.log" 2>&1; then
 		tail -60 "$qualification_dir/$target.log" >&2
 		exit 1
 	fi
