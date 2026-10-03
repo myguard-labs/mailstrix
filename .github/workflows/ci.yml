@@ -1,4 +1,4 @@
-# strixd CI — the per-PR/push gate. Authoritative job is `docker` (self-contained
+# strixd CI — the change-selected PR gate. Authoritative job is `docker` (self-contained
 # libyara); `lint` + `scanners` run alongside. Deep/slow, low-per-PR-yield checks
 # (asan, codeql, fuzz) run MONTHLY in maintenance.yml, NOT on every PR. Exposed
 # via workflow_call so release.yml runs this same gate before publishing. Build
@@ -27,39 +27,51 @@ permissions:
   contents: read
 
 jobs:
-  # Only an explicit documentation allowlist may bypass application jobs.
-  # Release callers and empty/unknown changes retain the complete gate.
   changes:
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 5
     outputs:
-      application: ${{ steps.scope.outputs.application }}
+      go: ${{ steps.plan.outputs.go }}
+      image: ${{ steps.plan.outputs.image }}
+      parity: ${{ steps.plan.outputs.parity }}
+      postfix: ${{ steps.plan.outputs.postfix }}
+      rspamd: ${{ steps.plan.outputs.rspamd }}
+      spamassassin: ${{ steps.plan.outputs.spamassassin }}
+      python: ${{ steps.plan.outputs.python }}
+      prometheus: ${{ steps.plan.outputs.prometheus }}
+      dependencies: ${{ steps.plan.outputs.dependencies }}
+      workflows: ${{ steps.plan.outputs.workflows }}
+      shell: ${{ steps.plan.outputs.shell }}
+      dockerfiles: ${{ steps.plan.outputs.dockerfiles }}
+      scope: ${{ steps.plan.outputs.scope }}
+      maintscript: ${{ steps.plan.outputs.maintscript }}
+      generate: ${{ steps.plan.outputs.generate }}
+      pins: ${{ steps.plan.outputs.pins }}
+      qualification: ${{ steps.plan.outputs.qualification }}
+      runners: ${{ steps.plan.outputs.runners }}
+      ruleargs: ${{ steps.plan.outputs.ruleargs }}
+      filter: ${{ steps.plan.outputs.filter }}
+      envkeys: ${{ steps.plan.outputs.envkeys }}
+      readme: ${{ steps.plan.outputs.readme }}
+      links: ${{ steps.plan.outputs.links }}
+      smoke: ${{ steps.plan.outputs.smoke }}
+      benchmark: ${{ steps.plan.outputs.benchmark }}
+      dockerignore: ${{ steps.plan.outputs.dockerignore }}
+      docker: ${{ steps.plan.outputs.docker }}
+      changed_files: ${{ steps.plan.outputs.changed_files }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
         with:
           fetch-depth: 2
-      - name: classify application impact
-        id: scope
+      - name: impact planner regression controls
+        run: python3 -B -m unittest discover -s ci -p 'ci_*_test.py'
+      - name: required check contract fixtures
+        run: python3 -B ci/workflow_contract_test.py
+      - name: plan affected CI domains
+        id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
-        run: |
-          application=true
-          if [ "$EVENT_NAME" = pull_request ]; then
-            git diff --name-only -z --no-renames HEAD^1 HEAD > "$RUNNER_TEMP/changed-paths"
-            seen=false
-            application=false
-            while IFS= read -r -d '' path; do
-              seen=true
-              case "$path" in
-                README.md|contrib/*/README.md|docs/*.md) ;;
-                *) application=true ;;
-              esac
-            done < "$RUNNER_TEMP/changed-paths"
-            if [ "$seen" = false ]; then application=true; fi
-          fi
-          echo "application=$application" >> "$GITHUB_OUTPUT"
-      - name: CI workflow contract fixtures
-        run: python3 -B ci/workflow_contract_test.py
+        run: bash scripts/ci-plan.sh
 
   # Authoritative gate: build + test exactly as the production image does (CGO
   # against the statically-built libyara). The Dockerfile `test` target runs
@@ -67,47 +79,53 @@ jobs:
   # run it against a local EICAR rule, and smoke the HTTP contract.
   docker:
     needs: changes
-    if: ${{ needs.changes.outputs.application == 'true' }}
+    # Keep the authoritative check reporting even when domains are unaffected.
+    # A failed/cancelled planner must never turn into successful skipped checks.
+    if: ${{ always() }}
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 30
     permissions:
       contents: read
       actions: write   # buildx GHA layer cache (--cache-to/from type=gha)
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+      - name: require a successful impact plan
+        env:
+          PLAN_RESULT: ${{ needs.changes.result }}
+        run: test "$PLAN_RESULT" = success
+      - if: needs.changes.outputs.docker == 'true'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
         with:
           # The PR merge commit plus its first parent (the base tip), so the
           # test stage can diff exactly this PR's changes.
           fetch-depth: 2
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - if: needs.changes.outputs.docker == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      - name: build test stage (go vet + go test -race in-image)
+      - if: needs.changes.outputs.docker == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8
+        with:
+          script: |
+            if (!process.env.ACTIONS_RUNTIME_TOKEN || !(process.env.ACTIONS_RESULTS_URL || process.env.ACTIONS_CACHE_URL)) {
+              throw new Error("BuildKit cache runtime is unavailable");
+            }
+            core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+            for (const name of ["ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL", "ACTIONS_CACHE_URL", "ACTIONS_CACHE_SERVICE_V2"]) {
+              if (process.env[name]) core.exportVariable(name, process.env[name]);
+            }
+
+      - name: build test stage (affected vet + race tests in-image)
+        if: needs.changes.outputs.go == 'true' || needs.changes.outputs.postfix == 'true'
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          CHANGED_FILES: ${{ needs.changes.outputs.changed_files }}
         run: |
-          # On a PR, test only the changed packages and their importers; any
-          # other trigger (workflow_call from release.yml) passes no list,
-          # which runs the whole suite.
-          changed=""
-          if [ "$EVENT_NAME" = pull_request ]; then
-            # ci/ is intentionally absent from the deny-by-default Docker build
-            # context, so its host-side contracts cannot identify a package in
-            # the in-image graph. Do not feed those paths to its package mapper.
-            changed="$(git diff --name-only HEAD^1 HEAD -- . ':(exclude)ci/**' | tr '\n' ' ')"
-            # An empty in-image path set (for example, a ci/-only PR) must run
-            # the full suite rather than passing an empty --changed selection.
-            if [ -n "$changed" ]; then changed="--changed -- $changed"; fi
-          fi
-          echo "changed files: ${changed:-<full suite>}"
           docker buildx build --target test -f docker/Dockerfile -t strixd-test \
-            --load \
-            --build-arg CHANGED_FILES="$changed" \
+            --load --build-arg CHANGED_FILES="$CHANGED_FILES" \
             --cache-from type=gha,scope=strixd-build \
-            --cache-to type=gha,mode=max,scope=strixd-build \
-            .
+            --cache-to type=gha,mode=max,scope=strixd-build .
 
       - name: build and smoke isolated rules verifier
+        if: needs.changes.outputs.image == 'true'
         run: |
           docker buildx build --target rules-verifier -f docker/Dockerfile \
             -t strixd-rules-verifier:ci --load \
@@ -123,6 +141,7 @@ jobs:
           grep -F 'fetch manifest:' verifier-smoke.log
 
       - name: build final image
+        if: needs.changes.outputs.image == 'true'
         run: |
           docker buildx build --target final -f docker/Dockerfile -t strixd:ci \
             --load \
@@ -133,11 +152,13 @@ jobs:
             .
 
       - name: Postfix milter policy integration (isolated, harmless messages)
+        if: needs.changes.outputs.postfix == 'true'
         run: |
           docker build -f contrib/postfix/Dockerfile.integration -t mailstrix-postfix-test contrib/postfix
           timeout 90s docker run --rm --network none mailstrix-postfix-test
 
       - name: trivy image scan (HIGH,CRITICAL)
+        if: needs.changes.outputs.image == 'true'
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy:0.62.1 image \
@@ -148,17 +169,33 @@ jobs:
             strixd:ci
 
       - name: smoke matrix (HTTP contract + every rule/extractor channel)
+        if: needs.changes.outputs.image == 'true'
         run: scripts/smoke.sh strixd:ci
 
   parity-isolation:
     needs: changes
-    if: ${{ needs.changes.outputs.application == 'true' }}
+    permissions:
+      contents: read
+      actions: write  # isolated BuildKit cache export
+    if: ${{ needs.changes.outputs.parity == 'true' }}
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8
+        with:
+          script: |
+            if (!process.env.ACTIONS_RUNTIME_TOKEN || !(process.env.ACTIONS_RESULTS_URL || process.env.ACTIONS_CACHE_URL)) {
+              throw new Error("BuildKit cache runtime is unavailable");
+            }
+            core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+            for (const name of ["ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL", "ACTIONS_CACHE_URL", "ACTIONS_CACHE_SERVICE_V2"]) {
+              if (process.env[name]) core.exportVariable(name, process.env[name]);
+            }
       - name: qualify optional Mailstrix isolation with inert fixtures
+        env:
+          CI_PARITY_CACHE: "1"
         run: |
           bash scripts/qualify-parity-isolation.sh --cleanup-images \
             "$RUNNER_TEMP/parity-isolation"
@@ -180,7 +217,7 @@ jobs:
 
   lint:
     needs: changes
-    if: ${{ needs.changes.outputs.application == 'true' }}
+    if: ${{ needs.changes.outputs.go == 'true' || needs.changes.outputs.scope == 'true' }}
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 15
     steps:
@@ -228,25 +265,18 @@ jobs:
           [ -x "$HOME/go/bin/gosec" ] ||
             go install "github.com/securego/gosec/v2/cmd/gosec@v2.27.1"
       - name: changed-test-scope contract
+        if: needs.changes.outputs.scope == 'true'
         run: bash ci/testscope_test.sh
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l cmd internal)
-          if [ -n "$unformatted" ]; then echo "gofmt needed on:"; echo "$unformatted"; exit 1; fi
-      - name: vet
-        run: go vet ./...
-      - name: staticcheck
-        run: staticcheck ./...
-      - name: govulncheck
-        # binary cached; the vuln DB is fetched fresh at runtime regardless.
-        run: govulncheck ./...
-      - name: gosec
-        run: gosec ./...
+      - name: affected Go analysis
+        env:
+          CHANGED_FILES: ${{ needs.changes.outputs.changed_files }}
+        run: bash scripts/ci-go-checks.sh
 
   # Non-Go static analysis (workflows, shell, Dockerfile, dependency CVEs). Run
   # via pinned upstream images instead of marketplace actions to avoid pulling
   # extra third-party Actions into the supply chain.
   scanners:
+    needs: changes
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 10
     steps:
@@ -254,11 +284,16 @@ jobs:
       # Images pinned to explicit versions (not :latest/:stable) for reproducible,
       # drift-free scans. Bump deliberately.
       - name: actionlint (workflow syntax + embedded shell)
+        if: needs.changes.outputs.workflows == 'true'
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
       - name: shellcheck (rule + packaging maintainer scripts)
+        if: needs.changes.outputs.shell == 'true'
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 \
             scripts/smoke.sh \
+            scripts/ci-plan.sh \
+            scripts/ci-go-checks.sh \
+            ci/testscope_test.sh \
             scripts/qualify-parity-isolation.sh \
             contrib/spamassassin/t/sa-lint.sh \
             docker/fetch-rules.sh \
@@ -271,6 +306,8 @@ jobs:
             .github/runner/isolation-canary.sh \
             packaging/deb/preremove.sh \
             packaging/deb/postinstall.sh \
+            packaging/deb/postinstall-milter.sh \
+            packaging/deb/preremove-milter.sh \
             packaging/deb/maintscript_test.sh \
             packaging/deb/env_keys_test.sh \
             packaging/deb/readme_install_test.sh \
@@ -285,9 +322,11 @@ jobs:
             packaging/deb/dockerignore_collision_test.sh
 
       - name: deb maintainer-script behaviour (upgrade must not disable)
+        if: needs.changes.outputs.maintscript == 'true'
         run: sh packaging/deb/maintscript_test.sh
 
       - name: parity helper behaviour (stdlib controls, no Docker)
+        if: needs.changes.outputs.python == 'true'
         # Keep discovered tests hermetic: no Docker, network, external service,
         # scanner installation, image, or corpus dependency belongs in this step.
         run: |
@@ -295,9 +334,11 @@ jobs:
             -p '*_test.py'
 
       - name: rules publication ordering and isolated verifier failure
+        if: needs.changes.outputs.generate == 'true'
         run: bash docker/generate-rules_test.sh
 
       - name: Prometheus rule behaviour
+        if: needs.changes.outputs.prometheus == 'true'
         run: |
           image='prom/prometheus:v3.14.0@sha256:'
           image+='5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44'
@@ -309,46 +350,60 @@ jobs:
             contrib/deploy/prometheus/mailstrix-alerts_test.yml
 
       - name: SHA-pinned actions consistent across workflows
+        if: needs.changes.outputs.pins == 'true'
         run: |
           sh packaging/deb/workflow_pins_test.sh
           python3 -B packaging/deb/workflow_pins_controls_test.py
 
       - name: parity qualification failure artifacts stay bounded
+        if: needs.changes.outputs.qualification == 'true'
         run: |
           python3 -B packaging/deb/parity_qualification_artifact_test.py
           python3 -B packaging/deb/parity_image_cleanup_test.py
+          python3 -B -m unittest discover -s ci -p 'parity_cache_test.py'
 
       - name: self-hosted runners use disposable builder slots
+        if: needs.changes.outputs.runners == 'true'
         run: sh packaging/deb/runner_isolation_test.sh
 
       - name: documented rule-source build-args reach the build
+        if: needs.changes.outputs.ruleargs == 'true'
         run: sh packaging/deb/rule_source_args_test.sh
 
       - name: mail-profile rule filter stays conservative
+        if: needs.changes.outputs.filter == 'true'
         run: sh packaging/deb/filter_rules_test.sh
 
       - name: deb env sample keys match the code
+        if: needs.changes.outputs.envkeys == 'true'
         run: sh packaging/deb/env_keys_test.sh
 
       - name: README install has no stale pinned versions
+        if: needs.changes.outputs.readme == 'true'
         run: sh packaging/deb/readme_install_test.sh
 
       - name: contrib README relative links resolve
+        if: needs.changes.outputs.links == 'true'
         run: sh packaging/deb/contrib_links_test.sh
 
       - name: smoke matrix is a shared script invoked by ci.yml
+        if: needs.changes.outputs.smoke == 'true'
         run: sh packaging/deb/smoke_shared_test.sh
 
       - name: maintenance benchmark matches the Docker test contract
+        if: needs.changes.outputs.benchmark == 'true'
         run: sh packaging/deb/benchmark_command_test.sh
 
       - name: .dockerignore keeps secrets/logs/binaries out of the build context
+        if: needs.changes.outputs.dockerignore == 'true'
         run: |
           sh packaging/deb/dockerignore_test.sh
           sh packaging/deb/dockerignore_collision_test.sh
       - name: hadolint (Dockerfile; .hadolint.yaml ignores)
+        if: needs.changes.outputs.dockerfiles == 'true'
         run: docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:v2.12.0 hadolint docker/Dockerfile docker/Dockerfile.release
       - name: osv-scanner (go.mod/go.sum dependency CVEs)
+        if: needs.changes.outputs.dependencies == 'true'
         # --no-call-analysis=go: the v1.9.2 image bundles Go 1.23.4, which
         # cannot run govulncheck call-analysis against this go1.26 module
         # (fails "requires go >= 1.26.0"). Dependency-presence scanning still
@@ -356,11 +411,19 @@ jobs:
         run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v1.9.2 --no-call-analysis=go --lockfile=go.mod
 
       - name: zizmor (Actions supply-chain hardening)
+        if: needs.changes.outputs.workflows == 'true'
         run: docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/woodruffw/zizmor:1.6.0 --format plain .github/workflows/
 
+  rspamd:
+    needs: changes
+    if: needs.changes.outputs.rspamd == 'true'
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - name: luacheck (Lua lint for rspamd plugin)
         run: |
-          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -c '
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
             apk add --no-cache luarocks5.4 lua5.4-dev gcc musl-dev >/dev/null 2>&1
             luarocks-5.4 install luacheck >/dev/null 2>&1
             luacheck contrib/rspamd/
@@ -391,9 +454,17 @@ jobs:
             python3 contrib/rspamd/test/cape_startup_test.py
           '
 
+
+  spamassassin:
+    needs: changes
+    if: needs.changes.outputs.spamassassin == 'true'
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - name: spamassassin plugin (perl -c + http/shellout unit tests)
         run: |
-          docker run --rm -v "$PWD:/src" -w /src debian:trixie-slim sh -c '
+          docker run --rm -v "$PWD:/src" -w /src debian:trixie-slim sh -ec '
             apt-get update >/dev/null 2>&1
             apt-get install -y --no-install-recommends spamassassin libhttp-tiny-perl perl >/dev/null 2>&1
             # Syntax-check the plugin against the installed Mail::SpamAssassin.
@@ -401,56 +472,60 @@ jobs:
             # Hermetic unit tests: http mode via a mocked HTTP::Tiny, shellout mode
             # via fake strix-scan scripts. No running strixd needed.
             prove -v -I contrib/spamassassin contrib/spamassassin/t/mailstrix.t
-          '
-
-      - name: spamassassin --lint (real plugin + .pre/.cf load against installed SA)
-        run: |
-          # perl -c above only syntax-checks Mailstrix.pm; it does NOT exercise the
-          # real plugin registration, the loadplugin in strixd.pre, or the rule
-          # syntax / meta deps in strixd.cf. --lint loads all three against the
-          # installed Mail::SpamAssassin and fails on any plugin-load, eval-rule,
-          # or config error. Closes the long-standing "real-host lint" gap.
-          docker run --rm -v "$PWD:/src" -w /src debian:trixie-slim sh -c '
-            apt-get update >/dev/null 2>&1
-            apt-get install -y --no-install-recommends spamassassin libhttp-tiny-perl perl >/dev/null 2>&1
             d=/etc/spamassassin
             install -m644 contrib/spamassassin/Mailstrix.pm "$d/Mailstrix.pm"
-            install -m644 contrib/spamassassin/strixd.pre "$d/strixd.pre"
-            install -m644 contrib/spamassassin/strixd.cf  "$d/strixd.cf"
+            install -m644 contrib/spamassassin/mailstrix.pre "$d/mailstrix.pre"
+            install -m644 contrib/spamassassin/mailstrix.cf "$d/mailstrix.cf"
             spamassassin --lint
           '
+
 
   # NOTE: asan, codeql, fuzz, semgrep, arm64-race are DEEP, slow, or
   # low-per-PR-yield checks — they run MONTHLY (+ on demand) in maintenance.yml,
   # NOT on every PR. The per-PR
-  # gate (docker + lint + scanners) stays fast; release.yml reuses THIS workflow
+  # gate (affected Docker, lint, scanners and integration domains) stays fast; release.yml reuses THIS workflow
   # (workflow_call) so a tagged release re-runs docker+lint+scanners before
   # publishing. asan/codeql/fuzz run on the monthly cadence, not per release.
 
-  # Stable required check: never accept failed/cancelled gates or unexpected
-  # skips. The scanners retain documentation, workflow and packaging contracts.
+  # Stable required check across selectively scheduled jobs. A planner failure,
+  # failed gate, or unexpected skip must not look like a successful narrow run.
   ci-ok:
     if: ${{ always() }}
-    needs: [changes, docker, parity-isolation, lint, scanners]
+    needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin]
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 5
     steps:
-      - name: require meaningful gates
+      - name: require selected gates
         env:
-          APPLICATION: ${{ needs.changes.outputs.application }}
           CHANGES_RESULT: ${{ needs.changes.result }}
-          SCANNERS_RESULT: ${{ needs.scanners.result }}
           DOCKER_RESULT: ${{ needs.docker.result }}
+          SCANNERS_RESULT: ${{ needs.scanners.result }}
           PARITY_RESULT: ${{ needs.parity-isolation.result }}
           LINT_RESULT: ${{ needs.lint.result }}
+          RSPAMD_RESULT: ${{ needs.rspamd.result }}
+          SPAMASSASSIN_RESULT: ${{ needs.spamassassin.result }}
+          PARITY_SELECTED: ${{ needs.changes.outputs.parity }}
+          GO_SELECTED: ${{ needs.changes.outputs.go }}
+          SCOPE_SELECTED: ${{ needs.changes.outputs.scope }}
+          RSPAMD_SELECTED: ${{ needs.changes.outputs.rspamd }}
+          SPAMASSASSIN_SELECTED: ${{ needs.changes.outputs.spamassassin }}
         run: |
           test "$CHANGES_RESULT" = success
+          test "$DOCKER_RESULT" = success
           test "$SCANNERS_RESULT" = success
-          case "$APPLICATION" in
-            true) expected=success ;;
-            false) expected=skipped ;;
+          require_selected() {
+            case "$1" in
+              true) test "$2" = success ;;
+              false) test "$2" = skipped ;;
+              *) return 1 ;;
+            esac
+          }
+          require_selected "$PARITY_SELECTED" "$PARITY_RESULT"
+          case "$GO_SELECTED:$SCOPE_SELECTED" in
+            true:true|true:false|false:true) lint_selected=true ;;
+            false:false) lint_selected=false ;;
             *) exit 1 ;;
           esac
-          for result in "$DOCKER_RESULT" "$PARITY_RESULT" "$LINT_RESULT"; do
-            test "$result" = "$expected"
-          done
+          require_selected "$lint_selected" "$LINT_RESULT"
+          require_selected "$RSPAMD_SELECTED" "$RSPAMD_RESULT"
+          require_selected "$SPAMASSASSIN_SELECTED" "$SPAMASSASSIN_RESULT"

@@ -128,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           # NOTE: package is ./internal/mailstrix (renamed from ./internal/strixd).
-          docker run --rm strixd-test             go test -tags yara_static -bench=. -benchmem -count=6 -timeout=10m             ./internal/mailstrix/ ./internal/extract/             | tee bench-results.txt
+          docker run --rm strixd-test             go test -tags yara_static -run '^$' -bench=. -benchmem -count=6 -timeout=10m             ./internal/mailstrix/ ./internal/extract/             | tee bench-results.txt
 
       - name: regression gate (vs committed baseline)
         run: |
