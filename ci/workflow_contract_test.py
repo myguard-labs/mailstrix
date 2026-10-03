@@ -2,11 +2,11 @@
 
 import itertools
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml'
 APPLICATION_JOBS = ('docker', 'parity-isolation', 'lint')
@@ -71,7 +71,7 @@ class WorkflowContract(unittest.TestCase):
               return "$GIT_STATUS"
             }
             '''
-            result = subprocess.run(  # noqa: S603 - executes the reviewed workflow
+            result = subprocess.run(
                 ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                  fake_git + script(self.jobs['changes'])],
                 env=env, capture_output=True, text=True, check=False,
@@ -93,7 +93,7 @@ class WorkflowContract(unittest.TestCase):
             }
             docker() { printf 'docker-args:%s\\n' "$*"; }
             '''
-            return subprocess.run(  # noqa: S603 - executes the reviewed workflow
+            return subprocess.run(
                 ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                  fake_commands + script(self.jobs['docker'])],
                 env=env, capture_output=True, text=True, check=False,
@@ -180,7 +180,7 @@ class WorkflowContract(unittest.TestCase):
                 accepted = (application in ('true', 'false')
                             and results[:2] == ('success', 'success')
                             and results[2:] == (expected,) * 3)
-                result = subprocess.run(  # noqa: S603 - reviewed workflow script
+                result = subprocess.run(
                     ['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
                      script(self.jobs['ci-ok'])],
                     env=env, capture_output=True, text=True, check=False,
