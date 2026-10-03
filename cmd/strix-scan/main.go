@@ -29,6 +29,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -103,7 +104,7 @@ func run(args []string) int {
 	// message whose dropper sits after the cap into a clean-looking scan — a silent
 	// miss. The server already rejects oversized requests before reading; the client
 	// must not paper over that with a truncated prefix.
-	buf, err := io.ReadAll(io.LimitReader(in, *maxBody+1))
+	buf, err := readAllSized(in, *maxBody+1)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "strix-scan: read:", err)
 		return 2
@@ -195,4 +196,28 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// readAllSized reads r up to limit bytes (limit < 0: no limit). When r is a
+// regular file its size pre-sizes the buffer, so a large attachment is read in
+// one allocation instead of repeated regrowth (PERF-67).
+func readAllSized(r io.Reader, limit int64) ([]byte, error) {
+	var b bytes.Buffer
+	if f, ok := r.(*os.File); ok {
+		if st, err := f.Stat(); err == nil && st.Mode().IsRegular() {
+			hint := st.Size() + 1 // +1 so a read at limit+1 never regrows
+			if limit >= 0 && hint > limit+1 {
+				hint = limit + 1
+			}
+			if hint > 0 && hint <= 1<<30 {
+				b.Grow(int(hint))
+			}
+		}
+	}
+	src := r
+	if limit >= 0 {
+		src = io.LimitReader(r, limit)
+	}
+	_, err := b.ReadFrom(src)
+	return b.Bytes(), err
 }
