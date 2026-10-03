@@ -229,7 +229,7 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 	// EFFORT-4: gated on opts.PDFDeepen — a low effort level scans only the
 	// inflated object streams (above), not the structural-indicator markers.
 	if opts.PDFDeepen {
-		fromPDFIndicators(scan, res, deadline)
+		fromPDFIndicators(scan, lengths, res, deadline)
 	}
 }
 
@@ -250,7 +250,7 @@ var pdfIndicatorNames = [][]byte{
 // escape count is itself an evasion signal (PDF-HEXOBFUSC). The scrub runs only
 // when a '#' or a candidate name actually appears in the raw bytes, so a PDF with
 // none of these pays nothing. Bounded, fail-open, deadline-aware.
-func fromPDFIndicators(scan []byte, res *Result, deadline time.Time) {
+func fromPDFIndicators(scan []byte, lengths map[int]int, res *Result, deadline time.Time) {
 	if expired(deadline) {
 		return
 	}
@@ -270,7 +270,7 @@ func fromPDFIndicators(scan []byte, res *Result, deadline time.Time) {
 		}
 	}
 	if needScrub {
-		buf, hexCount = scrubPDFForNames(scan)
+		buf, hexCount = scrubPDFForNames(scan, lengths)
 	}
 
 	emit := func(marker string) {
@@ -342,12 +342,16 @@ func isPDFNameTerminator(c byte) bool {
 // dictionary structure intact (so /OpenAction in a real dictionary still matches)
 // but stops an attacker fabricating a marker from a name embedded in a string,
 // comment, or binary stream (AUDIT-PDF-LEXER). Single linear pass, fail-open.
-func scrubPDFForNames(scan []byte) ([]byte, int) {
+// lengths is the pdfIndirectLengths map fromPDF already built for scan
+// (PERF-61); nil builds it here.
+func scrubPDFForNames(scan []byte, lengths map[int]int) ([]byte, int) {
 	out := make([]byte, 0, len(scan))
 	count := 0
 	n := len(scan)
 	i := 0
-	lengths := pdfIndirectLengths(scan)
+	if lengths == nil {
+		lengths = pdfIndirectLengths(scan)
+	}
 	for i < n {
 		c := scan[i]
 		switch {

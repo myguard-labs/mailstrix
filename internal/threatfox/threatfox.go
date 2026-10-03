@@ -359,10 +359,13 @@ func (c *Checker) CheckCandidates(cands []urlcand.Candidate, maxURLs int) []Hit 
 		if _, dup := seen[norm]; dup {
 			continue
 		}
-		if seen == nil {
-			seen = make(map[string]struct{})
+		// A single candidate needs no duplicate check (PERF-70).
+		if seen == nil && len(cands) > 1 {
+			seen = make(map[string]struct{}, min(len(cands), budget+1))
 		}
-		seen[norm] = struct{}{}
+		if seen != nil {
+			seen[norm] = struct{}{}
+		}
 		if _, ok := rs.urls[norm]; ok {
 			out = append(out, Hit{URL: norm, Deobf: cand.Deobf})
 		} else if host != "" {
