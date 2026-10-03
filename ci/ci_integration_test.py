@@ -78,7 +78,48 @@ def spamassassin_contract(text):
     assert "prove -v" in block and "spamassassin --lint" in block
 
 
+def cache_runtime_contract(text):
+    for name, build_marker in [
+        ("docker", "--target test"),
+        ("parity-isolation", "bash scripts/qualify-parity-isolation.sh"),
+    ]:
+        block = jobs(text)[name]
+        marker = "uses: actions/github-script@"
+        assert block.count(marker) == 1, "cache runtime must use an allowed action"
+        assert block.index(marker) < block.index(build_marker)
+        assert "core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN)" in block
+        assert "core.exportVariable(name, process.env[name])" in block
+        assert 'throw new Error("BuildKit cache runtime is unavailable")' in block
+        for variable in [
+            "ACTIONS_RUNTIME_TOKEN",
+            "ACTIONS_RESULTS_URL",
+            "ACTIONS_CACHE_URL",
+            "ACTIONS_CACHE_SERVICE_V2",
+        ]:
+            assert f'"{variable}"' in block, f"missing runtime export: {variable}"
+
+
 class CIIntegrationTest(unittest.TestCase):
+    def test_cache_runtime_is_exposed_before_manual_builds(self):
+        cache_runtime_contract(WORKFLOW.read_text())
+
+    def test_missing_or_disallowed_cache_runtime_is_rejected(self):
+        text = WORKFLOW.read_text()
+        for old, new in [
+            ("uses: actions/github-script@", "uses: unapproved/runtime@"),
+            ('"ACTIONS_RUNTIME_TOKEN",', '"OTHER_RUNTIME_TOKEN",'),
+            ("core.exportVariable(name, process.env[name])", "core.info(name)"),
+            (
+                'throw new Error("BuildKit cache runtime is unavailable")',
+                'core.info("missing")',
+            ),
+        ]:
+            with self.subTest(old=old):
+                mutated = text.replace(old, new)
+                self.assertNotEqual(mutated, text)
+                with self.assertRaises(AssertionError):
+                    cache_runtime_contract(mutated)
+
     def test_postfix_local_image_prerequisite(self):
         postfix_contract(WORKFLOW.read_text())
 
