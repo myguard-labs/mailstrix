@@ -91,7 +91,10 @@ jobs:
           # which runs the whole suite.
           changed=""
           if [ "$EVENT_NAME" = pull_request ]; then
-            changed="$(git diff --name-only HEAD^1 HEAD | tr '\n' ' ')"
+            # ci/ is intentionally absent from the deny-by-default Docker build
+            # context, so its host-side contracts cannot identify a package in
+            # the in-image graph. Do not feed those paths to its package mapper.
+            changed="$(git diff --name-only HEAD^1 HEAD -- . ':(exclude)ci/**' | tr '\n' ' ')"
             changed="--changed -- $changed"
           fi
           echo "changed files: ${changed:-<full suite>}"
