@@ -621,7 +621,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_CACHE_DIR` | — (disabled) | writable dir for the live rule bundle; reseeded from `MAILSTRIX_SEED_RULES` when its `compiled.yac` is missing or unreadable |
 | `MAILSTRIX_SEED_RULES` | — | baked read-only `.yac` used to (re)seed `MAILSTRIX_CACHE_DIR` |
 | `MAILSTRIX_CANARY` | `0` | tag every match as log-only canary/shadow output; shipped rspamd/SpamAssassin/Sieve/ICAP integrations observe but do not score/block these hits |
-| `MAILSTRIX_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `:1344`. When set, strixd also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. |
+| `MAILSTRIX_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `:1344`. When set, strixd also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. If the listener cannot bind or stops accepting, `/ready` answers `503`. |
 | `MAILSTRIX_CLAMD_TCP_ADDR` | — (disabled) | Explicit `host:port` |
 | `MAILSTRIX_CLAMD_UNIX_PATH` | — (disabled) | Absolute socket path |
 | `MAILSTRIX_CLAMD_MAX_CONNS` | `64` | Shared Unix/TCP cap, range 1–1024 |
@@ -926,7 +926,7 @@ Refused connections are counted in the `icap_conn_refused_total` metric.
 
 | Method | Support |
 |--------|---------|
-| `OPTIONS` | returns `Methods: REQMOD, RESPMOD`, `Allow: 204`, `Preview: 0`, `ISTag` (from ruleset fingerprint — changes on SIGHUP reload) |
+| `OPTIONS` | returns `Methods: REQMOD, RESPMOD`, `Allow: 204`, `Preview: 0`, `ISTag` (a hash of the full ruleset fingerprint, so it changes on every SIGHUP reload that changes the rules) |
 | `RESPMOD` | scans the encapsulated response body |
 | `REQMOD` | scans the encapsulated request body |
 
@@ -934,11 +934,14 @@ Refused connections are counted in the `icap_conn_refused_total` metric.
 
 | Verdict | ICAP response |
 |---------|--------------|
-| Clean (0 matches) + `Allow: 204` sent by proxy | `204 No Modification` (proxy serves original) |
-| Clean (0 matches), no `Allow: 204` | `200 OK` with echo-back of original |
-| Infected (≥1 match) | `200 OK` with replacement `403 Forbidden` body + `X-Infection-Found` and `X-Violations-Found` headers naming the matched rules |
+| Clean (no actionable match) + `Allow: 204` sent by proxy | `204 No Modification` (proxy serves original) |
+| Clean (no actionable match), no `Allow: 204` | `200 OK` echoing the original headers and body unchanged |
+| Infected (≥1 actionable match) | `200 OK` with a replacement `403 Forbidden` body. `X-Infection-Found` and the body name the **first** actionable rule; `X-Violations-Found` carries the count |
+| Log-only matches only (allowlisted, canary, `MAILSTRIX_SCAN_*` markers) | treated as clean: they never block |
+| No complete verdict (scan error, incomplete or degraded scan) | `500 Server Error`, never `204` clean |
+| No scan slot free in time | `503 Service Unavailable` |
 | Body exceeds `MAILSTRIX_MAX_BODY` | `413 Request Entity Too Large` |
-| Scan engine error | fail-open → `204 No Modification` (mirrors `/scan` fail-open) |
+| Unknown ICAP method | `405 Method Not Allowed`, then the connection is closed |
 
 ### Squid example
 
