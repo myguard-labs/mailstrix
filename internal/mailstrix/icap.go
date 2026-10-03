@@ -372,12 +372,11 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 			if _, werr := io.WriteString(w, icapProtoVersion+" 100 Continue\r\n\r\n"); werr != nil {
 				return werr
 			}
-			remaining := s.cfg.MaxBody - int64(len(buf))
-			if remaining <= 0 {
+			if s.cfg.MaxBody-int64(len(buf)) <= 0 {
 				_, _ = io.WriteString(w, icapProtoVersion+" 413 Request Entity Too Large\r\n\r\n")
 				return errICAPBodyTooLarge
 			}
-			cont, _, contErr := readICAPChunkedBody(br, remaining)
+			full, _, contErr := readICAPChunkedAppend(br, buf, s.cfg.MaxBody)
 			if errors.Is(contErr, errICAPBodyTooLarge) {
 				_, _ = io.WriteString(w, icapProtoVersion+" 413 Request Entity Too Large\r\n\r\n")
 				return contErr
@@ -386,7 +385,7 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 				_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
 				return contErr
 			}
-			buf = append(buf, cont...)
+			buf = full
 		}
 	}
 
@@ -644,7 +643,19 @@ func readICAPChunkHeaderLine(r *bufio.Reader) (string, error) {
 //     preview read, the caller MUST send "ICAP/1.0 100 Continue\r\n\r\n" and
 //     then read a second chunked stream to get the rest of the body.
 func readICAPChunkedBody(r *bufio.Reader, maxBytes int64) ([]byte, bool, error) {
-	var out []byte
+	return readICAPChunkedAppend(r, nil, maxBytes)
+}
+
+// icapChunkReadStep bounds how far the body buffer grows ahead of the bytes
+// actually received (PERF-57). A chunk header is only a claim: growing to the
+// full declared size up front let a client reserve ~MaxBody per connection
+// with one header line and then stall.
+const icapChunkReadStep = 64 << 10
+
+// readICAPChunkedAppend is readICAPChunkedBody appending to out; maxBytes caps
+// the TOTAL length including what out already holds. The preview continuation
+// appends straight onto the preview instead of copying it again (PERF-57).
+func readICAPChunkedAppend(r *bufio.Reader, out []byte, maxBytes int64) ([]byte, bool, error) {
 	for {
 		raw, err := readICAPChunkHeaderLine(r)
 		if err != nil {
@@ -683,11 +694,15 @@ func readICAPChunkedBody(r *bufio.Reader, maxBytes int64) ([]byte, bool, error) 
 		if int64(sizeInt) != size {
 			return nil, false, errICAPBodyTooLarge
 		}
-		old := len(out)
-		out = slices.Grow(out, sizeInt)
-		out = out[:old+sizeInt]
-		if _, err := io.ReadFull(r, out[old:]); err != nil {
-			return nil, false, err
+		for left := sizeInt; left > 0; {
+			step := min(left, icapChunkReadStep)
+			old := len(out)
+			out = slices.Grow(out, step)
+			out = out[:old+step]
+			if _, err := io.ReadFull(r, out[old:]); err != nil {
+				return nil, false, err
+			}
+			left -= step
 		}
 		// Consume trailing CRLF after chunk data (bounded).
 		if _, err := readBoundedLine(r, maxICAPChunkHeaderLine); err != nil {
