@@ -35,14 +35,23 @@ tests:
         alertname: MailstrixRulesCheckOverdue
         exp_alerts: []
 
-  - name: overdue after earlier success
+  - name: healthy daily polling including maximum jitter
     input_series:
       - series: 'mailstrix_rules_update_enabled{instance="i"}'
-        values: '1x40'
+        values: '1x1802'
       - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
-        values: '60x40'
+        values: '60x1802'
     alert_rule_test:
-      - eval_time: 40m
+      - eval_time: 1441m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts: []
+      - eval_time: 1729m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts: []
+      - eval_time: 1801m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts: []
+      - eval_time: 1802m
         alertname: MailstrixRulesCheckOverdue
         exp_alerts:
           - exp_labels:
@@ -52,28 +61,48 @@ tests:
               summary: Automatic rules checks are overdue
               description: >-
                 No successful release check has completed within the configured
-                30-minute alert deadline. Check connectivity and update
+                30-hour alert deadline. Check connectivity and update
+                failures.
+
+  - name: overdue after earlier success
+    input_series:
+      - series: 'mailstrix_rules_update_enabled{instance="i"}'
+        values: '1x1803'
+      - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
+        values: '60x1803'
+    alert_rule_test:
+      - eval_time: 1803m
+        alertname: MailstrixRulesCheckOverdue
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              severity: warning
+            exp_annotations:
+              summary: Automatic rules checks are overdue
+              description: >-
+                No successful release check has completed within the configured
+                30-hour alert deadline. Check connectivity and update
                 failures.
 
   - name: disabled polling
     input_series:
       - series: 'mailstrix_rules_update_enabled{instance="i"}'
-        values: '0x40'
+        values: '0x1803'
       - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
-        values: '60x40'
+        values: '60x1803'
     alert_rule_test:
-      - eval_time: 40m
+      - eval_time: 1803m
         alertname: MailstrixRulesCheckOverdue
         exp_alerts: []
 
   - name: recovered with recent success
     input_series:
       - series: 'mailstrix_rules_update_enabled{instance="i"}'
-        values: '1x40'
+        values: '1x1803'
       - series: 'mailstrix_rules_last_success_timestamp_seconds{instance="i"}'
-        values: '60x39 2400'
+        values: '60x1802 108180'
     alert_rule_test:
-      - eval_time: 39m
+      - eval_time: 1802m
         alertname: MailstrixRulesCheckOverdue
         exp_alerts:
           - exp_labels:
@@ -83,9 +112,9 @@ tests:
               summary: Automatic rules checks are overdue
               description: >-
                 No successful release check has completed within the configured
-                30-minute alert deadline. Check connectivity and update
+                30-hour alert deadline. Check connectivity and update
                 failures.
-      - eval_time: 40m
+      - eval_time: 1803m
         alertname: MailstrixRulesCheckOverdue
         exp_alerts: []
 

@@ -378,9 +378,10 @@ telemetry reads the record; byte integrity is checked during fetch/reload, not
 on every scrape. While a cache transaction is busy, telemetry keeps its last
 observed identity pair without delaying HTTP probes. Custom local rules do not
 inherit an unrelated release manifest from a feed cache directory.
-The bundled Prometheus alerts use a 30-minute update deadline, including after
-an earlier successful check; adjust the `1800`-second threshold when selecting
-a longer polling interval.
+The bundled Prometheus alerts allow 30 hours after an earlier successful check,
+covering the daily polling default plus up to 20% jitter (28.8 hours). Adjust the
+`108000`-second threshold when selecting a longer polling interval. The initial
+check and published-but-not-loaded deadlines remain 30 minutes.
 
 The publisher uploads the bundle first and manifest last, then runs an isolated
 native verifier against the released URLs. During replacement, a mismatched
