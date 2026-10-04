@@ -65,6 +65,8 @@ jobs:
           fetch-depth: 2
       - name: impact planner regression controls
         run: python3 -B -m unittest discover -s ci -p 'ci_*_test.py'
+      - name: required check contract fixtures
+        run: python3 -B ci/workflow_contract_test.py
       - name: plan affected CI domains
         id: plan
         env:
@@ -484,3 +486,46 @@ jobs:
   # gate (affected Docker, lint, scanners and integration domains) stays fast; release.yml reuses THIS workflow
   # (workflow_call) so a tagged release re-runs docker+lint+scanners before
   # publishing. asan/codeql/fuzz run on the monthly cadence, not per release.
+
+  # Stable required check across selectively scheduled jobs. A planner failure,
+  # failed gate, or unexpected skip must not look like a successful narrow run.
+  ci-ok:
+    if: ${{ always() }}
+    needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin]
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 5
+    steps:
+      - name: require selected gates
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          SCANNERS_RESULT: ${{ needs.scanners.result }}
+          PARITY_RESULT: ${{ needs.parity-isolation.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          RSPAMD_RESULT: ${{ needs.rspamd.result }}
+          SPAMASSASSIN_RESULT: ${{ needs.spamassassin.result }}
+          PARITY_SELECTED: ${{ needs.changes.outputs.parity }}
+          GO_SELECTED: ${{ needs.changes.outputs.go }}
+          SCOPE_SELECTED: ${{ needs.changes.outputs.scope }}
+          RSPAMD_SELECTED: ${{ needs.changes.outputs.rspamd }}
+          SPAMASSASSIN_SELECTED: ${{ needs.changes.outputs.spamassassin }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          test "$DOCKER_RESULT" = success
+          test "$SCANNERS_RESULT" = success
+          require_selected() {
+            case "$1" in
+              true) test "$2" = success ;;
+              false) test "$2" = skipped ;;
+              *) return 1 ;;
+            esac
+          }
+          require_selected "$PARITY_SELECTED" "$PARITY_RESULT"
+          case "$GO_SELECTED:$SCOPE_SELECTED" in
+            true:true|true:false|false:true) lint_selected=true ;;
+            false:false) lint_selected=false ;;
+            *) exit 1 ;;
+          esac
+          require_selected "$lint_selected" "$LINT_RESULT"
+          require_selected "$RSPAMD_SELECTED" "$RSPAMD_RESULT"
+          require_selected "$SPAMASSASSIN_SELECTED" "$SPAMASSASSIN_RESULT"

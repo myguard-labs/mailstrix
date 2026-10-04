@@ -69,6 +69,7 @@ RULES = {
         "ci/ci_go_checks_test.py",
         "ci/ci_integration_test.py",
         "ci/parity_cache_test.py",
+        "ci/workflow_contract_test.py",
     ],
     "maintscript": [
         "packaging/deb/preremove.sh",
@@ -258,6 +259,7 @@ def plan(paths, full=False):
                 "ci/ci_impact_test.py",
                 "ci/ci_go_checks_test.py",
                 "ci/ci_integration_test.py",
+                "ci/workflow_contract_test.py",
             ],
         )
         for p in paths

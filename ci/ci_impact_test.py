@@ -103,6 +103,7 @@ class ImpactTests(unittest.TestCase):
             impact.plan([], full=True),
             impact.plan([".github/workflows/ci.yml"]),
             impact.plan(["scripts/ci-impact.py"]),
+            impact.plan(["ci/workflow_contract_test.py"]),
         ]:
             self.assertTrue(
                 all(value for key, value in result.items() if key != "changed_files")
