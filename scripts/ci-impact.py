@@ -136,6 +136,7 @@ RULES = {
 }
 GO_INPUTS = [
     "ci/clamd_cache_test.go",
+    "ci/scanner_budget_test.go",
     "cmd/*",
     "internal/*",
     "third_party/*",

@@ -252,6 +252,8 @@ func TestCAPENativeBudgetExhausted(t *testing.T) {
 				t.Fatalf("mail budget hit not marked incomplete: %v", err)
 			}
 			sc.bigFileThreshold = 0
+			// Leave a whole native second after raw scanning and extraction.
+			sc.scanTimeout = 2 * time.Second
 			requireCAPEUnknown(t, s, body)
 		})
 	}

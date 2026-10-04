@@ -89,6 +89,19 @@ class ImpactTests(unittest.TestCase):
                 for key in unrelated:
                     self.assertFalse(result[key], key)
 
+    def test_scanner_budget_native_go_consumer(self):
+        path = "ci/scanner_budget_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        # A named native test must not turn unrelated new CI files into inputs.
+        for unrelated in ["ci/unmapped_test.go", "ci/scanner_budget_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_milter_maintainer_consumers(self):
         for path in [
             "packaging/deb/postinstall-milter.sh",
