@@ -1184,3 +1184,103 @@ func FuzzClamdStream(f *testing.F) {
 		}
 	})
 }
+
+func TestClamdBusyFollowersBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := NewServer(&Config{MaxConcurrent: 1, MaxInflight: 8, MaxBody: 1024, BackendTimeout: time.Second, ScanTimeout: 8 * time.Second}, &clamdTestEngine{})
+		s.sem <- struct{}{}
+		defer func() { <-s.sem }()
+		type result struct {
+			elapsed time.Duration
+			reply   string
+			err     error
+		}
+		results := make(chan result, 3)
+		start := time.Now()
+		for range 3 {
+			_, conn := clamdPipe(t, s) // service cleanup is registered by clamdPipe; no error is discarded.
+			go func() {
+				reply, err := clamdExchangeResult(conn, clamdWire("same"))
+				results <- result{time.Since(start), reply, err}
+			}()
+		}
+		synctest.Wait()
+		for range 3 {
+			r := <-results
+			t.Logf("reply %q at %s", r.reply, r.elapsed)
+			if r.err != nil {
+				t.Errorf("exchange error: %v", r.err)
+			}
+			if r.reply != "stream: busy ERROR\x00" {
+				t.Errorf("reply=%q, want busy ERROR", r.reply)
+			}
+			if r.elapsed > s.cfg.BackendTimeout {
+				t.Errorf("CPU budget exceeded: %s > %s", r.elapsed, s.cfg.BackendTimeout)
+			}
+		}
+	})
+}
+
+func TestClamdQueueAndScanBudgets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newTestServer(&clamdTestEngine{}, "")
+		s.cfg.BackendTimeout = 5 * time.Second
+		s.cfg.ScanTimeout = 100 * time.Millisecond
+		for range cap(s.sem) {
+			s.sem <- struct{}{}
+		}
+		released := make(chan struct{})
+		go func() {
+			time.Sleep(2300 * time.Millisecond)
+			for range cap(s.sem) {
+				<-s.sem
+			}
+			close(released)
+		}()
+		_, conn := clamdPipe(t, s) // service cleanup is registered by clamdPipe; no error is discarded.
+		got := clamdExchange(t, conn, clamdWire("queued"))
+		<-released
+		if got != "stream: OK\x00" {
+			t.Fatalf("queued request=%q, want OK after permitted queue wait", got)
+		}
+	})
+}
+
+func TestClamdCacheCoalesces(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		e := &clamdTestEngine{call: func([]byte, ScanMeta) ([]Match, error) { <-release; return nil, nil }}
+		s := NewServer(&Config{MaxConcurrent: 1, MaxInflight: 16, MaxBody: 1024}, e) // CacheTTL=0: only a live flight can deduplicate.
+		const clients = 12
+		replies := make(chan string, clients)
+		for range clients {
+			_, conn := clamdPipe(t, s) // service cleanup is registered by clamdPipe; no error is discarded.
+			go func() {
+				reply, err := clamdExchangeResult(conn, clamdWire("concurrent"))
+				if err != nil {
+					reply = err.Error()
+				}
+				replies <- reply
+			}()
+		}
+		synctest.Wait()
+		s.flights.mu.Lock()
+		joined := 0
+		for _, fl := range s.flights.m {
+			joined += fl.joiners
+		}
+		s.flights.mu.Unlock()
+		if joined != clients-1 {
+			t.Errorf("joined followers=%d, want %d", joined, clients-1)
+		}
+		close(release)
+		for range clients {
+			if got := <-replies; got != "stream: OK\x00" {
+				t.Errorf("reply=%q", got)
+			}
+		}
+		if n := e.calls.Load(); n != 1 {
+			t.Fatalf("coalesced INSTREAM engine calls=%d, want 1", n)
+		}
+	})
+}
