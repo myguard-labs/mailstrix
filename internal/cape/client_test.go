@@ -478,7 +478,7 @@ func TestResponseBodyCancellation(t *testing.T) {
 				result, err := c.Submit(ctx, source("x"), 1, marker)
 				assertCode(t, err, tc.code)
 				if len(result.Tasks) != 2 || result.Tasks[0] != owned() || result.Tasks[1] != (TaskRef{ID: 42, Generation: "fixture-v1"}) || !result.UnknownDebt || result.NoBytesSent {
-					t.Fatalf("body timeout lost cleanup identities/uncertainty: %+v", result)
+					t.Fatalf("body cancellation lost cleanup identities/uncertainty: %+v", result)
 				}
 			}
 			if ctx.Err() != context.Canceled {
