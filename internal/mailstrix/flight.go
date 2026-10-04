@@ -31,7 +31,7 @@ type flightGroup struct {
 
 type flight struct {
 	done    chan struct{} // closed when the leader finishes (or aborts)
-	matches []Match
+	outcome scanOutcome
 	joiners int  // followers still waiting on this flight (under flightGroup.mu)
 	shared  bool // ≥1 follower was still waiting when the leader finished (under .mu)
 	aborted bool // leader produced no real verdict (its client went away)
@@ -51,6 +51,21 @@ type flight struct {
 //   - err:     ctx.Err() if THIS caller's context was cancelled while waiting
 //     (the caller treats it as "client gone", not a verdict).
 func (g *flightGroup) Do(ctx context.Context, key string, fn func() (matches []Match, aborted bool)) (matches []Match, shared bool, err error) {
+	outcome, shared, err := g.doScan(ctx, key, func() (scanOutcome, bool) {
+		matches, aborted := fn()
+		return scanOutcome{matches: matches}, aborted
+	})
+	return outcome.matches, shared, err
+}
+
+// scanOutcome keeps scanner errors distinct from transport-specific verdicts.
+// Only its successful matches may enter the persistent verdict cache.
+type scanOutcome struct {
+	matches []Match
+	err     error
+}
+
+func (g *flightGroup) doScan(ctx context.Context, key string, fn func() (scanOutcome, bool)) (outcome scanOutcome, shared bool, err error) {
 	for {
 		g.mu.Lock()
 		if g.m == nil {
@@ -71,18 +86,18 @@ func (g *flightGroup) Do(ctx context.Context, key string, fn func() (matches []M
 				g.mu.Lock()
 				fl.joiners--
 				g.mu.Unlock()
-				return nil, true, ctx.Err()
+				return scanOutcome{}, true, ctx.Err()
 			}
 			// The leader abandoned its scan (its client went away → no real verdict).
 			// Don't accept that poisoned nil; loop to promote ourselves / join the
 			// next leader. Our own ctx still bounds the retry via the select above.
 			if fl.aborted {
 				if ctx.Err() != nil {
-					return nil, true, ctx.Err()
+					return scanOutcome{}, true, ctx.Err()
 				}
 				continue
 			}
-			return fl.matches, true, nil
+			return fl.outcome, true, nil
 		}
 		fl := &flight{done: make(chan struct{})}
 		g.m[key] = fl
@@ -107,13 +122,13 @@ func (g *flightGroup) Do(ctx context.Context, key string, fn func() (matches []M
 				}
 				g.finishLeader(fl, key, aborted)
 			}()
-			matches, aborted = fn()
-			fl.matches = matches
+			outcome, aborted = fn()
+			fl.outcome = outcome
 		}()
 		g.mu.Lock()
 		shared = fl.shared
 		g.mu.Unlock()
-		return matches, shared, nil
+		return outcome, shared, nil
 	}
 }
 

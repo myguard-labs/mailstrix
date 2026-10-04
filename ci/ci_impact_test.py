@@ -39,6 +39,7 @@ class ImpactTests(unittest.TestCase):
 
     def test_named_consumers_and_unrelated_controls(self):
         for path, selected, unrelated in [
+            ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
             ("internal/verdict/verdict.go", ["go", "image", "postfix"], ["rspamd"]),
             ("internal/extract/pdf_test.go", ["go"], ["image", "parity", "postfix"]),
             (

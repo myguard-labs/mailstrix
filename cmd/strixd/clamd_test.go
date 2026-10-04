@@ -24,7 +24,8 @@ type clamdBlockingEngine struct {
 	active  atomic.Bool
 }
 
-func (e *clamdBlockingEngine) RuleCount() int64 { return 1 }
+func (e *clamdBlockingEngine) RuleCount() int64    { return 1 }
+func (e *clamdBlockingEngine) Fingerprint() string { return "test-rules" }
 
 func (e *clamdBlockingEngine) Scan([]byte, mailstrix.ScanMeta) ([]mailstrix.Match, error) {
 	e.active.Store(true)
