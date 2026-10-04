@@ -81,6 +81,7 @@ class ImpactTests(unittest.TestCase):
                 ["rspamd"],
             ),
             ("ci/parity_cache_test.py", ["qualification", "scope"], ["image", "go"]),
+            ("ci/decode_runs_test.go", ["go"], ["image", "parity", "postfix"]),
         ]:
             with self.subTest(path=path):
                 result = impact.plan([path])

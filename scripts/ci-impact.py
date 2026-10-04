@@ -135,6 +135,7 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/decode_runs_test.go",
     "ci/clamd_cache_test.go",
     "ci/scanner_budget_test.go",
     "cmd/*",
