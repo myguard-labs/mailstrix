@@ -1693,6 +1693,95 @@ func decodeUEscRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool
 	return true
 }
 
+// nextScalarRunUntil finds NETBIOS or base32 matches over the entire source.
+// Only the capped base32 candidate contributes to the distinctive-digit gate;
+// digits beyond that prefix must not make an ambiguous prefix decode.
+func nextScalarRunUntil(src []byte, base32Mode bool, expiredNow func() bool) (start, end int, distinctive bool) {
+	start = -1
+	minimum := minNetbiosRun
+	if base32Mode {
+		minimum = minBase32Run
+	}
+	for i := 0; i <= len(src); i++ {
+		if i%4096 == 0 && expiredNow() {
+			return -1, 0, false
+		}
+		inRun := false
+		if i < len(src) {
+			c := src[i]
+			inRun = c >= 'A' && c <= 'P'
+			if base32Mode {
+				inRun = (c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')
+			}
+			if inRun {
+				if start < 0 {
+					start = i
+					distinctive = false
+				}
+				if base32Mode && i-start < maxBase32Encoded && c >= '2' && c <= '7' {
+					distinctive = true
+				}
+				continue
+			}
+		}
+		if start >= 0 && i-start >= minimum {
+			end = i
+			if base32Mode {
+				for end < len(src) && end-i < 6 && src[end] == '=' {
+					if end != i && end%4096 == 0 && expiredNow() {
+						return -1, 0, false
+					}
+					end++
+				}
+			}
+			return start, end, distinctive
+		}
+		start = -1
+	}
+	return -1, 0, false
+}
+
+// nextDecSeqRunUntil preserves the regex's leftmost greedy token sequence.
+// An overlong first number starts at its last three digits. An overlong later
+// number ends an already-long-enough match after its first three digits;
+// otherwise its last three digits become the next possible first number.
+func nextDecSeqRunUntil(src []byte, expiredNow func() bool) (start, end int) {
+	start = -1
+	tokens, digits := 0, 0
+	for i := 0; i <= len(src); i++ {
+		if i%4096 == 0 && expiredNow() {
+			return -1, 0
+		}
+		if i < len(src) && src[i] >= '0' && src[i] <= '9' {
+			if digits == 3 {
+				if tokens >= minDecSeqRun {
+					return start, end
+				}
+				start, tokens = i-2, 1
+			} else {
+				if digits == 0 {
+					tokens++
+				}
+				digits++
+				if start < 0 {
+					start = i
+				}
+			}
+			end = i + 1
+			continue
+		}
+		if i < len(src) && (src[i] == ',' || src[i] == ';') && digits > 0 {
+			digits = 0
+			continue
+		}
+		if tokens >= minDecSeqRun {
+			return start, end
+		}
+		start, tokens, digits = -1, 0, 0
+	}
+	return -1, 0
+}
+
 // decodeDecSeqRuns decodes decimal-separated byte sequences (e.g. "104,116,116,112…").
 // Conservative: requires ALL tokens to be 0..255 and a consistent separator (all ',' or all ';').
 // Returns false on cap hit.
@@ -1702,11 +1791,11 @@ func decodeDecSeqRuns(src []byte, deadline time.Time, emit func([]byte) bool) bo
 		if expired(deadline) {
 			return true
 		}
-		loc := reDecSeq.FindIndex(rest)
-		if loc == nil {
+		start, end := nextDecSeqRunUntil(rest, func() bool { return expired(deadline) })
+		if start < 0 {
 			return true
 		}
-		run := rest[loc[0]:loc[1]]
+		run := rest[start:end]
 		if len(run) > maxDecSeqEncoded {
 			run = run[:maxDecSeqEncoded]
 			// Trim back to the last separator so the clamp never cuts a token in
@@ -1716,46 +1805,42 @@ func decodeDecSeqRuns(src []byte, deadline time.Time, emit func([]byte) bool) bo
 				run = run[:i]
 			}
 		}
-		// Determine the separator from the first separator character.
-		sep := byte(',')
-		for _, c := range run {
-			if c == ',' || c == ';' {
-				sep = c
-				break
-			}
-		}
-		// Split on the separator and validate all tokens.
-		parts := bytes.Split(run, []byte{sep})
-		dec := make([]byte, 0, len(parts))
+		// Parse the capped candidate without a slice/string allocation per token.
+		// Its grammar guarantees 1..3 digit tokens and single separators.
+		dec := make([]byte, 0, len(run)/2+1)
 		valid := true
-		for _, p := range parts {
-			p = bytes.TrimSpace(p)
-			if len(p) == 0 {
-				valid = false
-				break
+		sep := byte(0)
+		n := 0
+		for i := 0; i <= len(run); i++ {
+			if i%4096 == 0 && expired(deadline) {
+				return true
 			}
-			// Reject if any byte is the OTHER separator (mixed separators).
-			otherSep := byte(';')
-			if sep == ';' {
-				otherSep = ','
+			if i < len(run) && run[i] >= '0' && run[i] <= '9' {
+				n = n*10 + int(run[i]-'0')
+				continue
 			}
-			if bytes.IndexByte(p, otherSep) >= 0 {
-				valid = false
-				break
-			}
-			n, err := strconv.Atoi(string(p))
-			if err != nil || n < 0 || n > 255 {
+			if n > 255 {
 				valid = false
 				break
 			}
 			dec = append(dec, byte(n)) // #nosec G115 -- n bounded 0..255 above
+			n = 0
+			if i < len(run) {
+				if sep == 0 {
+					sep = run[i]
+				}
+				if run[i] != sep {
+					valid = false
+					break
+				}
+			}
 		}
 		if valid && len(dec) >= minDecSeqRun {
 			if !emit(dec) {
 				return false
 			}
 		}
-		rest = rest[loc[1]:]
+		rest = rest[end:]
 	}
 	return true
 }
@@ -1771,11 +1856,12 @@ func decodeNetbiosRuns(src []byte, deadline time.Time, emit func([]byte) bool) b
 		if expired(deadline) {
 			return true
 		}
-		loc := reNetbios.FindIndex(rest)
-		if loc == nil {
+		// The discarded result classifies base32 digits; it is not an error.
+		start, end, _ := nextScalarRunUntil(rest, false, func() bool { return expired(deadline) })
+		if start < 0 {
 			return true
 		}
-		run := rest[loc[0]:loc[1]]
+		run := rest[start:end]
 		// Cap to maxNetbiosEncoded; further clamp to even length.
 		if len(run) > maxNetbiosEncoded {
 			run = run[:maxNetbiosEncoded]
@@ -1785,10 +1871,13 @@ func decodeNetbiosRuns(src []byte, deadline time.Time, emit func([]byte) bool) b
 		}
 		dec := make([]byte, len(run)/2)
 		for i := 0; i < len(run); i += 2 {
+			if i%4096 == 0 && expired(deadline) {
+				return true
+			}
 			hi := run[i] - 'A'
 			lo := run[i+1] - 'A'
 			// Both nibbles must be in range [0,15] (chars A-P map to 0-15).
-			// The regex [A-P] already guarantees this, but clamp defensively.
+			// The scalar [A-P] scan already guarantees this, but clamp defensively.
 			if hi > 15 || lo > 15 {
 				dec = nil
 				break
@@ -1796,7 +1885,7 @@ func decodeNetbiosRuns(src []byte, deadline time.Time, emit func([]byte) bool) b
 			dec[i/2] = (hi << 4) | lo
 		}
 		if dec == nil {
-			rest = rest[loc[1]:]
+			rest = rest[end:]
 			continue
 		}
 		// Gate: only emit if decoded result is mostly printable text OR carries
@@ -1807,7 +1896,7 @@ func decodeNetbiosRuns(src []byte, deadline time.Time, emit func([]byte) bool) b
 				return false
 			}
 		}
-		rest = rest[loc[1]:]
+		rest = rest[end:]
 	}
 	return true
 }
@@ -1841,11 +1930,11 @@ func decodeBase32Runs(src []byte, deadline time.Time, emit func([]byte) bool) bo
 		if expired(deadline) {
 			return true
 		}
-		loc := reBase32.FindIndex(rest)
-		if loc == nil {
+		start, end, hasDistinctive := nextScalarRunUntil(rest, true, func() bool { return expired(deadline) })
+		if start < 0 {
 			return true
 		}
-		run := rest[loc[0]:loc[1]]
+		run := rest[start:end]
 		if len(run) > maxBase32Encoded {
 			// Trim to multiple of 8 (base32 groups).
 			n := maxBase32Encoded - (maxBase32Encoded % 8)
@@ -1854,15 +1943,8 @@ func decodeBase32Runs(src []byte, deadline time.Time, emit func([]byte) bool) bo
 		// Require at least one base32-distinctive digit (2-7). Pure [A-Z] runs are
 		// ambiguous (could be base64, NETBIOS, or plain text); runs with 2-7 are
 		// distinctively base32.
-		hasDistinctive := false
-		for _, c := range run {
-			if c >= '2' && c <= '7' {
-				hasDistinctive = true
-				break
-			}
-		}
 		if !hasDistinctive {
-			rest = rest[loc[1]:]
+			rest = rest[end:]
 			continue
 		}
 		dec, ok := tryBase32(run)
@@ -1871,7 +1953,7 @@ func decodeBase32Runs(src []byte, deadline time.Time, emit func([]byte) bool) bo
 				return false
 			}
 		}
-		rest = rest[loc[1]:]
+		rest = rest[end:]
 	}
 	return true
 }
