@@ -30,6 +30,7 @@ RULES = {
         "docker/compile-rules.sh",
         "docker/filter-rules.py",
         "scripts/smoke.sh",
+        "ci/rules_polling_test.sh",
     ],
     "parity": [
         "tools/parity/*",
@@ -109,6 +110,10 @@ RULES = {
     ],
     "filter": ["docker/filter-rules.py", "packaging/deb/filter_rules_test.sh"],
     "envkeys": [
+        "ci/rules_polling_defaults_test.sh",
+        "docker/Dockerfile",
+        "docker/Dockerfile.release",
+        "docker/docker-compose.yml",
         "cmd/*",
         "internal/*",
         "packaging/deb/*.env",
@@ -119,6 +124,7 @@ RULES = {
     "links": ["contrib/*", "README.md", "packaging/deb/contrib_links_test.sh"],
     "smoke": [
         "scripts/smoke.sh",
+        "ci/rules_polling_test.sh",
         ".github/workflows/ci.yml",
         "packaging/deb/smoke_shared_test.sh",
     ],
@@ -139,6 +145,7 @@ GO_INPUTS = [
     "ci/decode_runs_test.go",
     "ci/clamd_cache_test.go",
     "ci/scanner_budget_test.go",
+    "ci/rules_polling_config_test.go",
     "cmd/*",
     "internal/*",
     "third_party/*",

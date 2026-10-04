@@ -294,6 +294,8 @@ jobs:
             scripts/ci-plan.sh \
             scripts/ci-go-checks.sh \
             ci/testscope_test.sh \
+            ci/rules_polling_defaults_test.sh \
+            ci/rules_polling_test.sh \
             scripts/qualify-parity-isolation.sh \
             contrib/spamassassin/t/sa-lint.sh \
             docker/fetch-rules.sh \
@@ -377,7 +379,9 @@ jobs:
 
       - name: deb env sample keys match the code
         if: needs.changes.outputs.envkeys == 'true'
-        run: sh packaging/deb/env_keys_test.sh
+        run: |
+          sh packaging/deb/env_keys_test.sh
+          sh ci/rules_polling_defaults_test.sh
 
       - name: README install has no stale pinned versions
         if: needs.changes.outputs.readme == 'true'
