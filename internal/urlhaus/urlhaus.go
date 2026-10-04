@@ -284,7 +284,9 @@ func parseFeed(r io.Reader) (*ruleset, error) {
 			continue
 		}
 		rs.urls[norm] = struct{}{}
-		if host != "" {
+		// These services host unrelated users' content. A listed URL must
+		// remain an exact match, but its host cannot label every other URL.
+		if host != "" && host != "github.com" && host != "raw.githubusercontent.com" {
 			rs.hosts[host] = struct{}{}
 		}
 	}
