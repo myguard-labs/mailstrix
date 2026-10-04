@@ -135,6 +135,7 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/decode_runs_test.go",
     "cmd/*",
     "internal/*",
     "third_party/*",

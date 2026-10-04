@@ -1385,6 +1385,59 @@ func decodeUTF16(b []byte, bigEndian bool) []byte {
 	return []byte(string(utf16.Decode(units)))
 }
 
+// nextDecodeRun finds the same leftmost maximal run as reBase64/reHex.
+// Keep searching the entire source (including past candidate allocation caps),
+// but check the deadline every 4096 bytes, even inside a single giant run or
+// a match-free suffix. Classify all-hex base64 runs during that same walk: a
+// non-hex suffix beyond maxB64Encoded must still allow its prefix to decode.
+// A negative start means exhausted input or deadline; neither is a global cap.
+func nextDecodeRun(src []byte, hexMode bool, deadline time.Time) (start, end int, hexOnly bool) {
+	start = -1
+	hexOnly = true
+	minimum := minBase64Run
+	if hexMode {
+		minimum = minHexRun
+	}
+	for i := 0; i <= len(src); i++ {
+		if i%4096 == 0 && expired(deadline) {
+			return -1, 0, false
+		}
+		isHex, inRun := false, false
+		if i < len(src) {
+			c := src[i]
+			isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			inRun = isHex
+			if !hexMode {
+				inRun = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+					(c >= '0' && c <= '9') || c == '+' || c == '/'
+			}
+		}
+		if inRun {
+			if start < 0 {
+				start = i
+				hexOnly = true
+			}
+			hexOnly = hexOnly && isHex
+			continue
+		}
+		if start >= 0 && i-start >= minimum {
+			end = i
+			if hexMode {
+				end -= (end - start) % 2
+			} else {
+				// The base64 regex accepts at most two trailing '=' bytes.
+				for end < len(src) && end-i < 2 && src[end] == '=' {
+					end++
+					hexOnly = false
+				}
+			}
+			return start, end, hexOnly
+		}
+		start = -1
+	}
+	return -1, 0, false
+}
+
 // decodeBase64Runs decodes each long base64 run in src. Returns false if a global
 // cap was hit (stop everything).
 func decodeBase64Runs(src []byte, deadline time.Time, emit func([]byte) bool) bool {
@@ -1393,21 +1446,21 @@ func decodeBase64Runs(src []byte, deadline time.Time, emit func([]byte) bool) bo
 		if expired(deadline) {
 			return true
 		}
-		loc := reBase64.FindIndex(rest)
-		if loc == nil {
+		start, end, hexOnly := nextDecodeRun(rest, false, deadline)
+		if start < 0 {
 			return true
 		}
-		run := rest[loc[0]:loc[1]]
+		run := rest[start:end]
 		// An all-hex run is handled by the hex pass; decoding it as base64 too
 		// would emit a bogus blob and burn the blob cap, so skip it here.
-		if !allHex(run) {
+		if !hexOnly {
 			if dec, ok := tryBase64(run); ok {
 				if !emit(dec) {
 					return false
 				}
 			}
 		}
-		rest = rest[loc[1]:]
+		rest = rest[end:]
 	}
 	return true
 }
@@ -1456,13 +1509,15 @@ func decodeHexRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool 
 		if expired(deadline) {
 			return true
 		}
-		loc := reHex.FindIndex(rest)
-		if loc == nil {
+		// Hex mode needs only the bounds; the third result is an alphabet
+		// classification, not an error, and is always true for a hex match.
+		start, end, _ := nextDecodeRun(rest, true, deadline)
+		if start < 0 {
 			return true
 		}
 		// The match is an even number of hex digits by construction; cap the
 		// candidate to an even prefix so a giant run can't allocate past the cap.
-		run := rest[loc[0]:loc[1]]
+		run := rest[start:end]
 		if len(run) > maxHexEncoded {
 			run = run[:maxHexEncoded]
 		}
@@ -1472,7 +1527,7 @@ func decodeHexRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool 
 				return false
 			}
 		}
-		rest = rest[loc[1]:]
+		rest = rest[end:]
 	}
 	return true
 }
