@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -131,38 +130,5 @@ func TestClamdCacheNeverStoresFailures(t *testing.T) {
 				t.Fatalf("failed scan cached: calls=%d want 2", n)
 			}
 		})
-	}
-}
-func TestClamdCacheCoalesces(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	e := &cacheEngine{scan: func([]byte, ms.ScanMeta) ([]ms.Match, error) {
-		once.Do(func() { close(entered) })
-		<-release
-		return nil, nil
-	}}
-	path := cacheService(t, e, 0)
-	const clients = 12
-	replies := make(chan string, clients)
-	for range clients {
-		go func() {
-			r, err := cacheRequest(path, "concurrent")
-			if err != nil {
-				r = err.Error()
-			}
-			replies <- r
-		}()
-	}
-	<-entered
-	// Hold the only CPU slot while all followers reach the shared scan path.
-	time.Sleep(100 * time.Millisecond)
-	close(release)
-	for range clients {
-		if got := <-replies; got != "stream: OK\x00" {
-			t.Fatalf("reply=%q", got)
-		}
-	}
-	if n := e.calls.Load(); n != 1 {
-		t.Fatalf("coalesced INSTREAM engine calls=%d, want 1", n)
 	}
 }

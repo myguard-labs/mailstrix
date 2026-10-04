@@ -637,6 +637,12 @@ var errScanBusy = errors.New("no scan slot within budget")
 // lookupScanOutcome shares raw outcomes across transports. Admission and native
 // worker lifetime remain caller-owned; only the leader acquires the CPU gate.
 func (s *Server) lookupScanOutcome(ctx context.Context, key string, buf []byte, meta ScanMeta) (scanOutcome, string) {
+	return s.lookupScanOutcomeStarted(ctx, key, buf, meta, nil)
+}
+
+// onStarted runs once for this caller when the shared scan acquires its CPU
+// slot. Cache hits and queue failures return directly without starting a scan.
+func (s *Server) lookupScanOutcomeStarted(ctx context.Context, key string, buf []byte, meta ScanMeta, onStarted func()) (scanOutcome, string) {
 	if ctx.Err() != nil {
 		s.metrics.canceled.Add(1)
 		return scanOutcome{err: ctx.Err()}, "canceled"
@@ -646,14 +652,14 @@ func (s *Server) lookupScanOutcome(ctx context.Context, key string, buf []byte, 
 		s.metrics.cacheHit.Add(1)
 		return scanOutcome{matches: m}, "hit"
 	}
-	outcome, shared, ferr := s.flights.doScan(ctx, key, func() (scanOutcome, bool) {
+	outcome, shared, ferr := s.flights.doScan(ctx, key, onStarted, func(started func()) (scanOutcome, bool) {
 		if m, found := s.cache.Get(key); found {
 			return scanOutcome{matches: m}, false
 		}
 		s.metrics.cacheMiss.Add(1)
 		// Abandoned leaders must not give a non-verdict to live followers.
 		if ctx.Err() != nil || !s.acquireOn(ctx, s.sem) {
-			if ctx.Err() == nil {
+			if ctx.Err() == nil && onStarted == nil {
 				s.metrics.busy.Add(1)
 			}
 			return scanOutcome{err: errScanBusy}, true
@@ -664,6 +670,7 @@ func (s *Server) lookupScanOutcome(ctx context.Context, key string, buf []byte, 
 		}
 		scanned, scanErr := func() ([]Match, error) {
 			defer func() { <-s.sem }()
+			started()
 			return s.dispatch(buf, meta)
 		}()
 		if scanErr != nil {

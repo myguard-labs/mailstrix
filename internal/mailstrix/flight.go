@@ -30,6 +30,7 @@ type flightGroup struct {
 }
 
 type flight struct {
+	started chan struct{} // closed after CPU admission, before dispatch
 	done    chan struct{} // closed when the leader finishes (or aborts)
 	outcome scanOutcome
 	joiners int  // followers still waiting on this flight (under flightGroup.mu)
@@ -51,7 +52,7 @@ type flight struct {
 //   - err:     ctx.Err() if THIS caller's context was cancelled while waiting
 //     (the caller treats it as "client gone", not a verdict).
 func (g *flightGroup) Do(ctx context.Context, key string, fn func() (matches []Match, aborted bool)) (matches []Match, shared bool, err error) {
-	outcome, shared, err := g.doScan(ctx, key, func() (scanOutcome, bool) {
+	outcome, shared, err := g.doScan(ctx, key, nil, func(_ func()) (scanOutcome, bool) {
 		matches, aborted := fn()
 		return scanOutcome{matches: matches}, aborted
 	})
@@ -65,7 +66,7 @@ type scanOutcome struct {
 	err     error
 }
 
-func (g *flightGroup) doScan(ctx context.Context, key string, fn func() (scanOutcome, bool)) (outcome scanOutcome, shared bool, err error) {
+func (g *flightGroup) doScan(ctx context.Context, key string, onStarted func(), fn func(started func()) (scanOutcome, bool)) (outcome scanOutcome, shared bool, err error) {
 	for {
 		g.mu.Lock()
 		if g.m == nil {
@@ -80,13 +81,23 @@ func (g *flightGroup) doScan(ctx context.Context, key string, fn func() (scanOut
 			g.mu.Unlock()
 			// Wait bounded by OUR context: a disconnected follower bails at once and
 			// frees its admission slot instead of blocking on the leader's full scan.
-			select {
-			case <-fl.done:
-			case <-ctx.Done():
-				g.mu.Lock()
-				fl.joiners--
-				g.mu.Unlock()
-				return scanOutcome{}, true, ctx.Err()
+			started := fl.started
+		wait:
+			for {
+				select {
+				case <-fl.done:
+					break wait
+				case <-started:
+					if onStarted != nil {
+						onStarted()
+					}
+					started = nil
+				case <-ctx.Done():
+					g.mu.Lock()
+					fl.joiners--
+					g.mu.Unlock()
+					return scanOutcome{}, true, ctx.Err()
+				}
 			}
 			// The leader abandoned its scan (its client went away → no real verdict).
 			// Don't accept that poisoned nil; loop to promote ourselves / join the
@@ -99,7 +110,7 @@ func (g *flightGroup) doScan(ctx context.Context, key string, fn func() (scanOut
 			}
 			return fl.outcome, true, nil
 		}
-		fl := &flight{done: make(chan struct{})}
+		fl := &flight{done: make(chan struct{}), started: make(chan struct{})}
 		g.m[key] = fl
 		g.mu.Unlock()
 
@@ -122,7 +133,12 @@ func (g *flightGroup) doScan(ctx context.Context, key string, fn func() (scanOut
 				}
 				g.finishLeader(fl, key, aborted)
 			}()
-			outcome, aborted = fn()
+			outcome, aborted = fn(func() {
+				close(fl.started)
+				if onStarted != nil {
+					onStarted()
+				}
+			})
 			fl.outcome = outcome
 		}()
 		g.mu.Lock()

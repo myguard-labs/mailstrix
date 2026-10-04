@@ -392,18 +392,36 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 		c.reply(conn, reply, term)
 		return
 	}
+	// Each caller has one CPU queue budget, including coalesced leader retries.
+	var busyOnce sync.Once
+	recordBusy := func() {
+		busyOnce.Do(func() {
+			if c.ctx.Err() == nil {
+				c.s.metrics.busy.Add(1)
+			}
+		})
+	}
+	scanCtx, cancelScan := context.WithCancel(c.ctx)
+	queued := time.NewTimer(c.s.cfg.BackendTimeout)
+	defer queued.Stop()
+	started := make(chan struct{})
 	result := make(chan string, 1)
 	c.wg.Add(1)
 	owned = false // worker now owns the body and admission gate
 	go func() {
 		defer c.wg.Done()
+		defer cancelScan()
 		defer func() { <-c.s.admit }()
 		c.s.metrics.scans.Add(1)
 		meta := ScanMeta{RawKey: streamDedupKey(body),
 			Effort: ResolveEffortLevel(0, false, c.s.autoEnvDefault(true), c.s.cfg.EffortMax)}
 		key := c.s.engine.Fingerprint() + ":" + meta.cacheKey() + ":" + string(meta.RawKey[:])
-		// The discarded string is a cache-status log label; errors live in outcome.
-		outcome, _ := c.s.lookupScanOutcome(c.ctx, key, body, meta)
+		outcome, status := c.s.lookupScanOutcomeStarted(scanCtx, key, body, meta, func() { close(started) })
+		if status == "canceled" {
+			recordBusy()
+			result <- "stream: busy ERROR"
+			return
+		}
 		matches, err := outcome.matches, outcome.err
 		if errors.Is(err, ErrScanIncomplete) && hasActionable(matches) {
 			// A partial scan that still found something is a real detection.
@@ -411,6 +429,7 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 		}
 		if err != nil {
 			if errors.Is(err, errScanBusy) {
+				recordBusy()
 				result <- "stream: busy ERROR"
 				return
 			}
@@ -433,6 +452,27 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 			}
 		}
 	}()
+	// Queue residence does not consume the native scan response budget.
+	select {
+	case reply = <-result:
+		c.reply(conn, reply, term)
+		return
+	case <-started:
+		queued.Stop()
+	case <-queued.C:
+		select {
+		case <-started:
+			// CPU admission won while this handler was waiting to run.
+		default:
+			cancelScan()
+			recordBusy()
+			c.reply(conn, "stream: busy ERROR", term)
+			return
+		}
+	case <-c.forced:
+		cancelScan()
+		return
+	}
 	timer := time.NewTimer(c.s.cfg.ScanTimeout + clamdScanSlack)
 	defer timer.Stop()
 	select {
