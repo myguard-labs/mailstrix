@@ -75,10 +75,10 @@ func fromMIME(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		}
 	}()
 	parts := 0
-	walkMIMEMessage(buf, res, b, depth, deadline, &parts)
+	walkMIMEMessage(buf, res, b, depth, deadline, &parts, true)
 }
 
-func walkMIMEMessage(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int) {
+func walkMIMEMessage(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int, completeAncestor bool) {
 	if depth > maxNestDepth {
 		return
 	}
@@ -86,10 +86,10 @@ func walkMIMEMessage(buf []byte, res *Result, b *archiveBudget, depth int, deadl
 	if err != nil {
 		return
 	}
-	walkMIMEEntity(textproto.MIMEHeader(msg.Header), msg.Body, res, b, depth, deadline, parts)
+	walkMIMEEntity(textproto.MIMEHeader(msg.Header), msg.Body, res, b, depth, deadline, parts, completeAncestor)
 }
 
-func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int) {
+func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int, completeAncestor bool) {
 	if depth > maxNestDepth || *parts >= maxMIMEParts || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
 		return
 	}
@@ -108,47 +108,89 @@ func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *arch
 			if err != nil {
 				return // end of parts, or a malformed boundary: keep what we have
 			}
-			walkMIMEEntity(p.Header, p, res, b, depth+1, deadline, parts)
+			walkMIMEEntity(p.Header, p, res, b, depth+1, deadline, parts, completeAncestor)
 			if *parts >= maxMIMEParts || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
 				return
 			}
 		}
 	}
-	data := decodeMIMEBody(h.Get("Content-Transfer-Encoding"), body)
+	limit := min(maxBytesPerMember, maxTotalArchive-b.total)
+	data, complete, truncated := decodeMIMEBody(h.Get("Content-Transfer-Encoding"), body, limit)
+	if truncated && limit < maxBytesPerMember {
+		// Even a prefix below the extraction floor represents unvisited input.
+		res.capHit("archive-budget")
+	}
+	complete = complete && completeAncestor
+	attachment := isMIMEAttachment(h)
+	admitted := len(data) >= minMemberBytes && len(data) <= maxTotalArchive-b.total
+	if attachment && complete && admitted {
+		res.MIMEAttachments = append(res.MIMEAttachments, data)
+	}
 	if len(data) == 0 {
 		return
 	}
 	*parts++
 	if mediaType == "message/rfc822" {
-		walkMIMEMessage(data, res, b, depth+1, deadline, parts)
+		// Attached message files are not emitted as streams, so charge their
+		// storage here. Descendants continue using the same remaining budget.
+		if attachment && admitted {
+			b.members++
+			b.total += len(data)
+			if b.spent() {
+				// The wrapper leaves descendant input unvisited at this cap.
+				archiveCapHit(res, b)
+			}
+		}
+		walkMIMEMessage(data, res, b, depth+1, deadline, parts, complete)
 		return
 	}
 	emitMIMEPart(data, res, b, depth, deadline)
 }
 
-// decodeMIMEBody undoes the transfer encoding, capped at maxBytesPerMember. A
-// decode error keeps the bytes produced so far, as a mail client would.
-func decodeMIMEBody(cte string, body io.Reader) []byte {
-	var r io.Reader
+// isMIMEAttachment requires explicit, successfully parsed file metadata.
+func isMIMEAttachment(h textproto.MIMEHeader) bool {
+	disposition, params, err := mime.ParseMediaType(h.Get("Content-Disposition"))
+	if err == nil && (disposition == "attachment" || params["filename"] != "") {
+		return true
+	}
+	_, params, err = mime.ParseMediaType(h.Get("Content-Type"))
+	return err == nil && params["name"] != ""
+}
+
+// decodeMIMEBody retains best-effort YARA bytes, but certifies identity only
+// after a successful terminal read. The sentinel distinguishes EOF at the cap
+// from a truncated file, including when the shared budget lowers that cap.
+func decodeMIMEBody(cte string, body io.Reader, limit int) ([]byte, bool, bool) {
+	r := body
+	var filter *base64Filter
+	known := true
 	switch strings.ToLower(strings.TrimSpace(cte)) {
+	case "", "7bit", "8bit", "binary":
 	case "base64":
-		r = base64.NewDecoder(base64.StdEncoding, &base64Filter{r: bufio.NewReader(body)})
+		filter = &base64Filter{r: bufio.NewReader(body)}
+		r = base64.NewDecoder(base64.StdEncoding, filter)
 	case "quoted-printable":
 		r = quotedprintable.NewReader(body)
 	default:
-		r = body
+		known = false
 	}
 	var out bytes.Buffer
-	if _, err := out.ReadFrom(io.LimitReader(r, maxBytesPerMember)); err != nil && out.Len() == 0 {
-		return nil
+	_, err := out.ReadFrom(io.LimitReader(r, int64(limit)+1))
+	complete := known && err == nil && out.Len() <= limit && (filter == nil || !filter.invalid)
+	data := out.Bytes()
+	if len(data) > limit {
+		data = data[:limit]
 	}
-	return out.Bytes()
+	return data, complete, out.Len() > limit
 }
 
 // base64Filter drops bytes outside the base64 alphabet (spaces, tabs, stray
 // punctuation), which the stdlib decoder would reject; CR and LF it already
 // skips.
-type base64Filter struct{ r io.ByteReader }
+type base64Filter struct {
+	r       io.ByteReader
+	invalid bool
+}
 
 func (f *base64Filter) Read(p []byte) (int, error) {
 	n := 0
@@ -160,6 +202,8 @@ func (f *base64Filter) Read(p []byte) (int, error) {
 		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=' {
 			p[n] = c
 			n++
+		} else if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+			f.invalid = true
 		}
 	}
 	return n, nil

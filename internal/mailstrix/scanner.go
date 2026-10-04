@@ -1842,23 +1842,27 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		}
 		s.topMatches.Add(names)
 	}
-	// MalwareBazaar: exact SHA256 match of the whole scanned buffer (the
-	// attachment, as the plugin POSTed it) against known malware samples —
-	// a direct known-bad verdict independent of the YARA rules. Only the raw
-	// buffer is hashed (samples are whole files, not decompressed macros).
-	// EFFORT-4: the external reputation feeds are the most expensive per-scan
-	// cost, so a low effort level sheds them (profile.ReputationFeeds=false) and
-	// the verdict rests on the local rules only. The resolved level is part of the
-	// verdict-cache key, so a cheap-tier (feeds-off) verdict never masks a later
-	// full-tier (feeds-on) one for the same bytes.
+	// MalwareBazaar identifies complete files, never MIME envelopes or derived
+	// streams. Keep both hashing and lookup behind the effort/checker gate.
 	if profile.ReputationFeeds && s.mbazaar != nil {
-		// PERF-34: the cryptographic SHA256 is the MalwareBazaar lookup key and
-		// nothing else needs it, so it is computed HERE — only when the feed is
-		// actually consulted (effort tier kept the feeds AND a checker is wired).
-		// A scan with feeds shed (low effort) or MBazaar disabled never hashes.
-		digest := sha256.Sum256(buf)
-		for _, h := range s.mbazaar.CheckDigest(digest) {
-			out = append(out, Match{Rule: h.Rule(), Tags: []string{"malwarebazaar"}, Meta: map[string]string{"sha256": h.SHA256}})
+		candidates := [][]byte{buf}
+		if res.TopType == extract.TopTypeMIME {
+			candidates = res.MIMEAttachments
+		}
+		seen := make(map[[sha256.Size]byte]struct{})
+		for _, candidate := range candidates {
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
+				incomplete = true
+				break
+			}
+			digest := sha256.Sum256(candidate)
+			if _, duplicate := seen[digest]; duplicate {
+				continue
+			}
+			seen[digest] = struct{}{}
+			for _, h := range s.mbazaar.CheckDigest(digest) {
+				out = append(out, Match{Rule: h.Rule(), Tags: []string{"malwarebazaar"}, Meta: map[string]string{"sha256": h.SHA256}})
+			}
 		}
 	}
 	// Reputation feeds: URLhaus, ThreatFox. URL candidates are extracted
