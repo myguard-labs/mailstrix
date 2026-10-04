@@ -27,6 +27,12 @@ cat >"$test_root/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "$1" = run ]; then
+    if [[ " $* " == *' check-rules '* ]]; then
+        printf 'count %s\n' "$*" >> "$EVENTS"
+        [ "${FAIL_COUNT:-0}" -eq 0 ] || exit 51
+        printf '%s\n' "${COUNT_REPORT-check-rules: OK — 0 rules loaded (fingerprint fixture)}"
+        exit 0
+    fi
     printf 'verify %s\n' "$*" >> "$EVENTS"
     if [ "${SIGNAL_VERIFY:-0}" -eq 1 ]; then
         kill -TERM "$(cat "${EVENTS}.signal-target")"
@@ -425,29 +431,6 @@ assert_success_notification_body() {  # assert_success_notification_body <case> 
     success_notification_body_matches "$expected" || assert_event "$name: success notification body changed"
 }
 
-assert_valid_rules_count() {  # assert_valid_rules_count <input> [normalized-count]
-    local rules="$1" expected="${2:-$1}" actual
-    run_script RULES_COUNT="$rules"
-    [ "$actual" -eq 0 ] || assert_event "valid rules count ${rules} failed"
-    assert_receipt verify success "$expected"
-    jq -e --argjson expected "$expected" '.rules == $expected' "${EVENTS}.manifest" >/dev/null || assert_event "valid rules count ${rules} manifest"
-    # The exact-body compare above owns every count case, including the
-    # zero-count omission: no separate substring branch is needed.
-    assert_success_notification_body "valid rules count ${rules}" "$expected"
-    assert_success_event_order "valid rules count ${rules}" 1
-}
-
-assert_invalid_rules_count_is_build_failure() {  # assert_invalid_rules_count_is_build_failure <count>
-    local rules="$1" actual
-    run_script RULES_COUNT="$rules"
-    [ "$actual" -eq 1 ] || assert_event "invalid rules count ${rules} exit: $actual"
-    assert_receipt build failed
-    grep -F 'ERROR: RULES_COUNT must be a canonical non-negative decimal no greater than 2147483647' "$test_root/log" >/dev/null || assert_event "invalid rules count ${rules} diagnostic"
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 0 ] || assert_event "invalid rules count ${rules} uploaded assets"
-    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 0 ] || assert_event "invalid rules count ${rules} started verifier"
-    assert_notification "invalid-rules-count-${rules}" build failed
-}
-
 assert_startup_failure_is_build_failure() {
     local actual
     run_script FAIL_MKTEMP=1
@@ -626,7 +609,7 @@ assert_fabricated_count_is_rejected() {
     # Explicit export/unset instead of the assignment-prefix form: that form's
     # scoping around a function call differs across bash versions and POSIX mode.
     export MAILSTRIX_TEST_INJECT_RULES_COUNT=42
-    run_script RULES_COUNT=0
+    run_script COUNT_REPORT="check-rules: OK — 0 rules loaded (fingerprint fixture)"
     unset MAILSTRIX_TEST_INJECT_RULES_COUNT
     [ "$actual" -eq 0 ] || assert_event 'fabricated-count fixture run failed'
     grep -Eq 'notify-body .*42 rules' "$EVENTS" || assert_event 'fabricated-count fixture did not inject a count'
@@ -637,14 +620,9 @@ assert_fabricated_count_is_rejected() {
     success_notification_body_matches 42 || assert_event 'fabricated-count fixture body did not match its own expected body'
 }
 
-assert_valid_rules_count 2147483647
-assert_valid_rules_count ' 42 ' 42
-assert_valid_rules_count $'\t\r\n\v\f0\f\v\n\r\t' 0
-assert_valid_rules_count $' \t2147483647\r\n' 2147483647
+# shellcheck source=ci/generate_rules_count_test.sh
+source "$here/../ci/generate_rules_count_test.sh"
 assert_fabricated_count_is_rejected
-for invalid_rules in -1 +1 not-a-number 12oops 12e1 012 2147483648 9223372036854775808 ' ' $'\t\r\n\v\f' '4 2' $'4\t2' $'4\n2' ' 2147483648 ' ' 012 ' ' -1 '; do
-    assert_invalid_rules_count_is_build_failure "$invalid_rules"
-done
 assert_startup_failure_is_build_failure
 assert_repository_path_failure_notifies
 assert_manifest_preparation_failure_is_build_failure

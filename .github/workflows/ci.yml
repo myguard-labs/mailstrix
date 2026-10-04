@@ -301,6 +301,7 @@ jobs:
             docker/compile-rules.sh \
             docker/generate-rules.sh \
             docker/generate-rules_test.sh \
+            ci/generate_rules_count_test.sh \
             docker/pprof-capture.sh \
             docker/profile/run-profile.sh \
             .github/runner/isolation-canary.sh \

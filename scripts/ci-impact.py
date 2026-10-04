@@ -79,6 +79,7 @@ RULES = {
         "packaging/deb/maintscript_test.sh",
     ],
     "generate": [
+        "ci/generate_rules_count_test.sh",
         "docker/generate-rules*",
         "cmd/strixd/*",
         "internal/mailstrix/*",

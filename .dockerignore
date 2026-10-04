@@ -21,6 +21,7 @@
 !ci
 ci/**
 !ci/*_test.go
+!ci/generate_rules_count_test.sh
 !third_party
 !third_party/**
 !tools
