@@ -79,7 +79,7 @@ func TestDecodeRunsReferenceEquivalence(t *testing.T) {
 	}
 	// Long runs must emit once, not once per candidate cap. Classify the
 	// entire base64 run, even when its first non-hex byte lies beyond the cap.
-	for _, n := range []int{maxB64Encoded - 1, maxB64Encoded, maxB64Encoded + 1, maxHexEncoded + 1} {
+	for _, n := range []int{maxB64Encoded - 1, maxB64Encoded, maxB64Encoded + 1, maxHexEncoded + 1, maxHexEncoded + 3} {
 		corpus = append(corpus, []byte(strings.Repeat("a", n)+"G!"+strings.Repeat("aG", 16)), []byte(strings.Repeat("a", n)+"=="))
 	}
 	for i, src := range corpus {
