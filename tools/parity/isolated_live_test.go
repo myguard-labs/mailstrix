@@ -284,6 +284,65 @@ func recordedCLINames(t *testing.T, path string) []string {
 	return names
 }
 
+// waitLiveOwnedVisible waits for each CLI-owned name in an independent Docker
+// name-filter query. The CLI shim records a create request before Docker
+// answers it, so a recorded name alone is not a visibility signal.
+func waitLiveOwnedVisible(d isolatedDocker, names []string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for _, name := range names {
+		for {
+			b, status := d.call(ctx, nil, "ps", "--all", "--quiet", "--filter", "name=^/"+name+"$")
+			if status == "ok" && len(bytes.TrimSpace(b)) != 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("CLI-owned container %s not visible within %s (last status=%s)", name, timeout, status)
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
+	return nil
+}
+
+func TestWaitLiveOwnedVisible(t *testing.T) {
+	names := []string{"mailstrix-isolated-inert-a", "mailstrix-isolated-inert-b"}
+	queries := map[string]int{}
+	d := isolatedDocker{command: func(ctx context.Context, args ...string) *exec.Cmd {
+		var name string
+		for _, owned := range names {
+			if slices.Equal(args, []string{"ps", "--all", "--quiet", "--filter", "name=^/" + owned + "$"}) {
+				name = owned
+				break
+			}
+		}
+		if name == "" {
+			t.Fatalf("unexpected Docker query: %q", args)
+		}
+		queries[name]++
+		if queries[name] == 1 {
+			return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 0")
+		}
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf 'inert-id\\n'")
+	}}
+	if err := waitLiveOwnedVisible(d, names, time.Second); err != nil || queries[names[0]] != 2 || queries[names[1]] != 2 {
+		t.Fatalf("both owned names must survive transient absence: queries=%v err=%v", queries, err)
+	}
+	d.command = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 0")
+	}
+	if err := waitLiveOwnedVisible(d, names[:1], 20*time.Millisecond); err == nil || !strings.Contains(err.Error(), names[0]) || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("missing owned name escaped deadline: %v", err)
+	}
+	d.command = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf 'inert-id\\n'; exit 1")
+	}
+	if err := waitLiveOwnedVisible(d, names[:1], 20*time.Millisecond); err == nil || !strings.Contains(err.Error(), "last status=execution_error") {
+		t.Fatalf("nonempty output from a failed Docker query was accepted: %v", err)
+	}
+}
+
 func TestIsolatedLiveControls(t *testing.T) {
 	d, names := liveIsolatedDocker(t, "PARITY_PROBE_IMAGE")
 	sentinel := filepath.Join(t.TempDir(), "host-sentinel")
@@ -396,7 +455,11 @@ func TestIsolatedLiveCLIAbsenceOracleControl(t *testing.T) {
 	if len(names) != len(m.Samples)+1 {
 		t.Fatalf("lying-cleanup CLI created %d containers, want identity plus %d samples", len(names), len(m.Samples))
 	}
-	err := liveAbsenceError(isolatedDocker{}, names)
+	cliDocker := isolatedDocker{}
+	if err := waitLiveOwnedVisible(cliDocker, names, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	err := liveAbsenceError(cliDocker, names)
 	if err == nil || !strings.Contains(err.Error(), names[len(names)-1]) {
 		t.Fatalf("independent daemon oracle accepted CLI-owned stopped containers: %v", err)
 	}
