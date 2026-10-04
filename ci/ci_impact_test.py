@@ -39,7 +39,16 @@ class ImpactTests(unittest.TestCase):
 
     def test_named_consumers_and_unrelated_controls(self):
         for path, selected, unrelated in [
+            ("ci/rules_polling_defaults_test.sh", ["envkeys", "shell"], ["go", "image"]),
+            ("ci/rules_polling_test.sh", ["image", "shell", "smoke"], ["go", "parity"]),
+            ("docker/docker-compose.yml", ["envkeys"], ["go", "image"]),
+            ("ci/rules_polling_config_test.go", ["go"], ["image", "parity"]),
             ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
+            (
+                "ci/generate_rules_count_test.sh",
+                ["generate", "shell"],
+                ["go", "image", "parity", "postfix"],
+            ),
             ("internal/verdict/verdict.go", ["go", "image", "postfix"], ["rspamd"]),
             ("internal/extract/pdf_test.go", ["go"], ["image", "parity", "postfix"]),
             (

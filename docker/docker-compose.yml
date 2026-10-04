@@ -24,6 +24,8 @@ services:
 
     environment:
       TZ: Europe/Amsterdam
+      # Daily verified rule updates; 0 disables.
+      MAILSTRIX_RULES_POLL_INTERVAL: "86400"
       MAILSTRIX_VERBOSE: "0"               # 1 for per-request access lines
 
       # --- Cache (built for high volume; mail is heavily duplicated) --------
@@ -66,12 +68,15 @@ services:
       - mailstrix_token
       - abuse_ch_key
 
-    # Rules are baked into the image (public curated bundle); no volume.
+    # Baked rules seed the writable cache. This tmpfs loses updates on recreation;
+    # startup polling fetches the current bundle again. Use a persistent writable
+    # volume at /var/cache/mailstrix to retain updates across recreation.
 
     # --- Hardening ---------------------------------------------------------
     read_only: true                    # immutable rootfs (distroless, nonroot)
     tmpfs:
       - /tmp:mode=1777
+      - /var/cache/mailstrix:uid=65532,gid=65532,mode=0755
     cap_drop:
       - ALL
     security_opt:

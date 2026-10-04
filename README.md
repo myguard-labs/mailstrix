@@ -305,11 +305,14 @@ bundle is published by `docker/generate-rules.sh` (run from cron).
 Point `-url` /
 `MAILSTRIX_RULES_URL` at a mirror if not fetching from GitHub.
 
-Daemon polling is opt-in: set `MAILSTRIX_RULES_POLL_INTERVAL=900` (seconds), or
-`serve -rules-poll-interval=15m`. It requires the compiled cache actually loaded
-by the scanner. Custom local `.yar` directories and offline installations keep
-polling disabled (`0`, the default); a cache fallback cannot silently change to
-remote rules. If writable cache setup fails, strixd serves the baked/local
+Docker images, the reference Compose service, and Debian packages enable daemon
+polling daily (`MAILSTRIX_RULES_POLL_INTERVAL=86400` seconds). Set it explicitly
+to `0` to disable polling for offline installations or custom local `.yar`
+directories. Bare binaries and library configuration keep the code default `0`;
+opt in with `MAILSTRIX_RULES_POLL_INTERVAL=900` or
+`serve -rules-poll-interval=15m`. Polling requires the compiled cache actually
+loaded by the scanner; a cache fallback cannot silently change to remote rules.
+If writable cache setup fails, strixd serves the baked/local
 fallback and logs that automatic polling was disabled. Network and cache-lock
 waits share a configurable five-minute default deadline. Native libyara
 validation and reload finish synchronously once entered. There is one check at
@@ -375,9 +378,10 @@ telemetry reads the record; byte integrity is checked during fetch/reload, not
 on every scrape. While a cache transaction is busy, telemetry keeps its last
 observed identity pair without delaying HTTP probes. Custom local rules do not
 inherit an unrelated release manifest from a feed cache directory.
-The bundled Prometheus alerts use a 30-minute update deadline, including after
-an earlier successful check; adjust the `1800`-second threshold when selecting
-a longer polling interval.
+The bundled Prometheus alerts allow 30 hours after an earlier successful check,
+covering the daily polling default plus up to 20% jitter (28.8 hours). Adjust the
+`108000`-second threshold when selecting a longer polling interval. The initial
+check and published-but-not-loaded deadlines remain 30 minutes.
 
 The publisher uploads the bundle first and manifest last, then runs an isolated
 native verifier against the released URLs. During replacement, a mismatched
@@ -586,7 +590,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_RULES_DIR` | `/rules` | dir of `*.yar`/`*.yara` compiled at boot and on SIGHUP |
 | `MAILSTRIX_RULES` | — | a precompiled `.yac` bundle; loaded instead of `RULES_DIR` (faster start) |
 | `MAILSTRIX_RULES_MAX_AGE` | `172800` (48h) | seconds; flag rules `stale` (metric + `/ready` body); explicit `0` disables. Fail-open: never fails readiness |
-| `MAILSTRIX_RULES_POLL_INTERVAL` | `0` (off) | seconds; automatic verified update and reload; enabled intervals must be at least 60 seconds |
+| `MAILSTRIX_RULES_POLL_INTERVAL` | `86400` Docker/deb; `0` code default | seconds; automatic verified update and reload; explicit `0` disables; enabled intervals must be at least 60 seconds |
 | `MAILSTRIX_RULES_FETCH_TIMEOUT` | `300` | seconds; shared deadline for automatic update network and cache-lock waits |
 | `MAILSTRIX_RULES_URL` | GitHub `rules-current` release | public bundle/manifest directory override for daemon polling and `fetch-rules` |
 | `MAILSTRIX_SCAN_TIMEOUT` | `8` (s) | per-request libyara budget (raw + all extracted streams share it) |

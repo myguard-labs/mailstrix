@@ -245,28 +245,31 @@ SOURCES="${WORK}/sources.json"
 LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
 [ -n "$LIBYARA" ] || die "could not determine libyara version"
 
-# Rule count is optional, but when supplied it becomes JSON in both the manifest
-# and terminal receipt. Trim boundary POSIX whitespace, then accept canonical
-# decimal only (zero is `0`, no leading
-# zeroes) and cap it at MaxInt32 so every Go consumer's `int` can decode it.
-# Validate it while this is still a build-stage failure, before any release
-# query, asset upload, or verifier invocation.
-RULES="${RULES_COUNT:-0}"
-RULES="${RULES#"${RULES%%[![:space:]]*}"}"
-RULES="${RULES%"${RULES##*[![:space:]]}"}"
-MAX_RULES=2147483647
-if ! [[ "$RULES" =~ ^(0|[1-9][0-9]*)$ ]] ||
-    [ "${#RULES}" -gt "${#MAX_RULES}" ] ||
-    [ "$RULES" -gt "$MAX_RULES" ]; then
-    die "RULES_COUNT must be a canonical non-negative decimal no greater than ${MAX_RULES}"
-fi
-
-# Build the matching native consumer before publishing; verification runs only
-# after the manifest is live. The image has no production cache or rule sources.
+# Build the matching native consumer, then load the exact exported bundle before
+# publishing. The image has no production cache or rule sources.
 docker buildx build --target rules-verifier --load \
     --iidfile "${WORK}/verifier.iid" \
     -f "${HERE}/docker/Dockerfile" "${HERE}"
 VERIFIER_IMAGE="$(<"${WORK}/verifier.iid")"
+
+# check-rules reports the native scanner's count only after loading succeeds.
+# Mount only the exported file read-only; override the download-only entrypoint
+# and disable networking so local verification cannot fetch a different bundle.
+RULES_REPORT="$(docker run --rm --read-only --network none \
+    --tmpfs /tmp:rw,nosuid,nodev,size=2g \
+    --mount "type=bind,src=${YAC},dst=/compiled.yac,readonly" \
+    --entrypoint /usr/local/bin/strixd "$VERIFIER_IMAGE" \
+    check-rules -rules /compiled.yac -cache-dir '' -seed-rules '')" \
+    || die "could not load exported bundle to determine rule count"
+COUNT_PATTERN='^check-rules: OK — (0|[1-9][0-9]*) rules loaded \(fingerprint [^[:space:]()]+\)$'
+[[ "$RULES_REPORT" =~ $COUNT_PATTERN ]] \
+    || die "native rule verifier returned malformed count output"
+RULES="${BASH_REMATCH[1]}"
+# Both the manifest and receipt must remain decodable by every Go int consumer.
+MAX_RULES=2147483647
+if [ "${#RULES}" -gt "${#MAX_RULES}" ] || [ "$RULES" -gt "$MAX_RULES" ]; then
+    die "native rule count exceeds ${MAX_RULES}"
+fi
 
 # 2) Determine the new monotonic version: previous (from the published manifest)
 #    + 1. Never reuse or decrement.

@@ -46,6 +46,8 @@ wait_healthy() {
   docker logs "$name"; return 1
 }
 
+# Existing isolated-rule and reseed controls disable networking explicitly.
+# Packaged polling defaults are exercised separately in ci/rules_polling_test.sh.
 # start_rule NAME PORT RULEFILE — run the image with ONE isolated rule, cache off.
 start_rule() {
   name=$1; port=$2; rule=$3
@@ -53,7 +55,7 @@ start_rule() {
   mkdir -p "$dir"
   cp "docker/local-rules/$rule" "$dir/"
   _names="$_names $name"
-  docker run -d --name "$name" -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
+  docker run -d -e MAILSTRIX_RULES_POLL_INTERVAL=0 --name "$name" -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
     -v "$PWD/$dir:/r:ro" -p "$port:8079" "$IMG"
   wait_healthy "$name"
 }
@@ -77,7 +79,7 @@ rule EICAR_Test_File : test {
 }
 YAR
   _names="$_names yc"
-  docker run -d --name yc -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
+  docker run -d -e MAILSTRIX_RULES_POLL_INTERVAL=0 --name yc -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
     -v "$PWD/rules:/r:ro" -p 18079:8079 "$IMG"
   wait_healthy yc
 
@@ -366,7 +368,7 @@ smoke_seed_startup() {
   # Default config: no MAILSTRIX_RULES/_DIR overrides, so the image seeds
   # /var/cache/mailstrix from the baked /usr/share/mailstrix seed and serves it.
   _names="$_names ys"
-  docker run -d --name ys -e MAILSTRIX_TOKEN=ci -v yc-cache:/var/cache/mailstrix \
+  docker run -d -e MAILSTRIX_RULES_POLL_INTERVAL=0 --name ys -e MAILSTRIX_TOKEN=ci -v yc-cache:/var/cache/mailstrix \
     -p 18080:8079 "$IMG"
   wait_healthy ys 60
   # Read into a var first: `docker logs … | grep -q` lets grep exit on the
@@ -404,5 +406,6 @@ smoke_userform
 smoke_docprops
 smoke_intent
 smoke_seed_startup
+bash ci/rules_polling_test.sh "$IMG"
 
 printf '\n=== smoke: ALL OK ===\n'

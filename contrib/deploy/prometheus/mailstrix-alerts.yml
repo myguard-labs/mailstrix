@@ -37,20 +37,20 @@ groups:
             Polling is enabled but no release check has succeeded since startup.
             Check connectivity and manifest validation.
 
-      # Keep this threshold above the normal polling interval and adjust it when
-      # deployments intentionally poll less often than every 30 minutes.
+      # Allow the daily polling default plus up to 20% jitter (28.8 hours).
+      # Adjust this 30-hour deadline for deployments with longer intervals.
       - alert: MailstrixRulesCheckOverdue
         expr: |
           mailstrix_rules_update_enabled == 1
             and mailstrix_rules_last_success_timestamp_seconds > 0
-            and time() - mailstrix_rules_last_success_timestamp_seconds > 1800
+            and time() - mailstrix_rules_last_success_timestamp_seconds > 108000
         for: 0m
         labels: {severity: warning}
         annotations:
           summary: "Automatic rules checks are overdue"
           description: >-
             No successful release check has completed within the configured
-            30-minute alert deadline. Check connectivity and update failures.
+            30-hour alert deadline. Check connectivity and update failures.
 
       - alert: MailstrixRulesPublishedNotLoaded
         expr: |

@@ -251,6 +251,7 @@ COPY --from=rules --chown=nonroot:nonroot /var/cache/mailstrix /var/cache/mailst
 ENV MAILSTRIX_SEED_RULES=/usr/share/mailstrix/compiled.yac \
     MAILSTRIX_BIGFILE_RULES=/usr/share/mailstrix/local.yac \
     MAILSTRIX_CACHE_DIR=/var/cache/mailstrix \
+    MAILSTRIX_RULES_POLL_INTERVAL=86400 \
     MAILSTRIX_HOST=0.0.0.0 \
     MAILSTRIX_PORT=8079
 EXPOSE 8079
