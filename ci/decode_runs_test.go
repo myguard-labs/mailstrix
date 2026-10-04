@@ -2,6 +2,7 @@ package ci_test
 
 import (
 	"bytes"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"strings"
@@ -16,7 +17,7 @@ func TestDecodeRunsPublicContract(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
 		encode func([]byte) string
-	}{{"base64", base64.StdEncoding.EncodeToString}, {"hex", hex.EncodeToString}} {
+	}{{"base64", base64.StdEncoding.EncodeToString}, {"hex", hex.EncodeToString}, {"base32", base32.StdEncoding.EncodeToString}, {"base32-raw", base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString}} {
 		t.Run(mode.name, func(t *testing.T) {
 			// A first candidate opens the existing sampled prefilter. The second sits
 			// beyond both candidate caps and the fold scan limit and must still decode.
@@ -55,7 +56,7 @@ func TestDecodeRunsPublicAlignedBudget(t *testing.T) {
 	for _, mode := range []struct {
 		name   string
 		encode func([]byte) string
-	}{{"base64", base64.StdEncoding.EncodeToString}, {"hex", hex.EncodeToString}} {
+	}{{"base64", base64.StdEncoding.EncodeToString}, {"hex", hex.EncodeToString}, {"base32", base32.StdEncoding.EncodeToString}, {"base32-raw", base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString}} {
 		t.Run(mode.name, func(t *testing.T) {
 			result := extract.Extract([]byte(mode.encode(payload)), time.Time{})
 			found := false

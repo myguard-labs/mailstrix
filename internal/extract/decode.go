@@ -1876,20 +1876,46 @@ func decodeBase32Runs(src []byte, deadline time.Time, emit func([]byte) bool) bo
 	return true
 }
 
+var rawBase32Encoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
 // tryBase32 decodes one run with standard base32 encoding, tolerating missing
-// padding (appends '=' to make length a multiple of 8 if needed).
+// padding. Keep the padded attempt first: it also defines which malformed
+// padding and trailing bytes the standard decoder accepts.
 func tryBase32(run []byte) ([]byte, bool) {
-	s := string(run)
-	if dec, err := base32.StdEncoding.DecodeString(s); err == nil {
-		return dec, true
+	// Size for the raw retry too: padded DecodedLen rounds down incomplete
+	// groups and can leave too little room for their decoded tail.
+	dec := make([]byte, rawBase32Encoding.DecodedLen(len(run)))
+	if n, err := base32.StdEncoding.Decode(dec, run); err == nil {
+		return dec[:n], true
 	}
-	// Pad to multiple of 8 and retry.
-	s = strings.TrimRight(s, "=")
-	if rem := len(s) % 8; rem != 0 {
-		s += strings.Repeat("=", 8-rem)
+	run = bytes.TrimRight(run, "=")
+	if bytes.ContainsAny(run, "\r\n") {
+		// The old retry counted newlines when adding padding, before Decode
+		// removed them. Preserve that alignment on this uncommon helper input.
+		padded := make([]byte, (len(run)+7)/8*8)
+		copy(padded, run)
+		for i := len(run); i < len(padded); i++ {
+			padded[i] = '='
+		}
+		dec = make([]byte, base32.StdEncoding.DecodedLen(len(padded)))
+		if n, err := base32.StdEncoding.Decode(dec, padded); err == nil {
+			return dec[:n], true
+		}
+		return nil, false
 	}
-	if dec, err := base32.StdEncoding.DecodeString(s); err == nil {
-		return dec, true
+	// Raw Decode accepts partial groups that the old padded retry rejected.
+	switch len(run) % 8 {
+	case 1, 3, 6:
+		return nil, false
+	}
+	// NoPadding is -1; Decode can interpret 0xff as its padding byte.
+	// The standard padded retry never accepted that non-alphabet byte.
+	if bytes.IndexByte(run, 0xff) >= 0 {
+		return nil, false
+	}
+	dec = dec[:rawBase32Encoding.DecodedLen(len(run))]
+	if n, err := rawBase32Encoding.Decode(dec, run); err == nil {
+		return dec[:n], true
 	}
 	return nil, false
 }
