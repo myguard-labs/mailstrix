@@ -146,6 +146,41 @@ func TestDecodeRunsDeadline(t *testing.T) {
 	}
 }
 
+// Entry is still live; the next checkpoint expires. An entry-only check must
+// fail this oracle even though it correctly handles already-expired deadlines.
+func TestDecodeRunsInFlightExpiry(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		hex  bool
+	}{{"base64", false}, {"hex", true}} {
+		for _, fixture := range []struct {
+			name  string
+			src   []byte
+			start int
+		}{
+			{"long-run", bytes.Repeat([]byte("a"), 8193), 0},
+			{"late-run", []byte(strings.Repeat("!", 8192) + strings.Repeat("a", 32)), 8192},
+			{"no-match", bytes.Repeat([]byte("!"), 8193), -1},
+			{"boundary", bytes.Repeat([]byte("a"), 4096), 0},
+		} {
+			t.Run(mode.name+"/"+fixture.name, func(t *testing.T) {
+				checks := 0
+				start, end, hexOnly := nextDecodeRunUntil(fixture.src, mode.hex, func() bool { checks++; return checks == 2 })
+				if checks != 2 || start != -1 || end != 0 || hexOnly {
+					t.Fatalf("in-flight expiry: checkpoints=%d match=[%d,%d] hex=%v; want two checkpoints and no match", checks, start, end, hexOnly)
+				}
+				checks = 0
+				// The live control needs only the first match position; the
+				// discarded results are bounds/classification, not errors.
+				start, _, _ = nextDecodeRunUntil(fixture.src, mode.hex, func() bool { checks++; return false })
+				if start != fixture.start || checks != len(fixture.src)/4096+1 {
+					t.Fatalf("live scan: start=%d checkpoints=%d; want start=%d checkpoints=%d", start, checks, fixture.start, len(fixture.src)/4096+1)
+				}
+			})
+		}
+	}
+}
+
 func BenchmarkDecodeRunsScalar(b *testing.B) {
 	for _, mode := range []struct {
 		name               string

@@ -1392,6 +1392,12 @@ func decodeUTF16(b []byte, bigEndian bool) []byte {
 // non-hex suffix beyond maxB64Encoded must still allow its prefix to decode.
 // A negative start means exhausted input or deadline; neither is a global cap.
 func nextDecodeRun(src []byte, hexMode bool, deadline time.Time) (start, end int, hexOnly bool) {
+	return nextDecodeRunUntil(src, hexMode, func() bool { return expired(deadline) })
+}
+
+// nextDecodeRunUntil keeps the clock local to each scan so checkpoint expiry
+// can be exercised deterministically without a shared clock or timing sleeps.
+func nextDecodeRunUntil(src []byte, hexMode bool, expiredNow func() bool) (start, end int, hexOnly bool) {
 	start = -1
 	hexOnly = true
 	minimum := minBase64Run
@@ -1399,7 +1405,7 @@ func nextDecodeRun(src []byte, hexMode bool, deadline time.Time) (start, end int
 		minimum = minHexRun
 	}
 	for i := 0; i <= len(src); i++ {
-		if i%4096 == 0 && expired(deadline) {
+		if i%4096 == 0 && expiredNow() {
 			return -1, 0, false
 		}
 		isHex, inRun := false, false
