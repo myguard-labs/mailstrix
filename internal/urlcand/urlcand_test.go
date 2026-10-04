@@ -203,3 +203,20 @@ func TestNormalizeHTTPURLTrailingDotHost(t *testing.T) {
 		t.Errorf("inner dots changed: host %q", host)
 	}
 }
+
+func BenchmarkExtractDefangReuse(b *testing.B) {
+	for _, tc := range []struct{ name, input string }{
+		{"clean", strings.Repeat("ordinary prose ", 1024)},
+		{"raw", "http://raw.example/x"},
+		{"defanged", "hxxp://obf[.]example/x"},
+		{"mixed_large", strings.Repeat("ordinary prose ", 1024) + "http://raw.example/x hxxp://obf[.]example/y"},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			data := []byte(tc.input)
+			b.ReportAllocs()
+			for b.Loop() {
+				urlcand.Extract(data, 64)
+			}
+		})
+	}
+}

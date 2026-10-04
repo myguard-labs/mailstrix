@@ -18,8 +18,14 @@ import (
 )
 
 var (
-	urlRe        = regexp.MustCompile(`(?i)\bhttps?://[^\s"'<>)\]}\x00-\x1f]+`)
-	schemeSep    = []byte("://")
+	urlRe          = regexp.MustCompile(`(?i)\bhttps?://[^\s"'<>)\]}\x00-\x1f]+`)
+	schemeSep      = []byte("://")
+	defangReplacer = strings.NewReplacer(
+		"hxxps", "https", "hXXps", "https", "hxxp", "http", "hXXp", "http",
+		"[.]", ".", "(.)", ".", "{.}", ".",
+		"[dot]", ".", "(dot)", ".", "{dot}", ".", "[DOT]", ".", " dot ", ".",
+		"[:]", ":", "[://]", "://",
+	)
 	defangTokens = [][]byte{
 		[]byte("hxxp"),
 		[]byte("hXXp"),
@@ -92,24 +98,28 @@ func Extract(data []byte, maxURLs int) []Candidate {
 		if _, dup := seen[string(m)]; dup {
 			continue
 		}
-		seen[string(m)] = struct{}{}
+		raw := string(m)
+		seen[raw] = struct{}{}
 		budget--
-		out = append(out, NewCandidate(string(m), false))
+		out = append(out, NewCandidate(raw, false))
 	}
 
 	if budget > 0 && defangPossible {
-		if defanged := defang(data); defanged != "" {
-			for _, m := range urlRe.FindAll([]byte(defanged), scanCap) {
-				if budget <= 0 {
-					break
-				}
-				if _, dup := seen[string(m)]; dup {
-					continue
-				}
-				seen[string(m)] = struct{}{}
-				budget--
-				out = append(out, NewCandidate(string(m), true))
+		// The token gate already proved replacement is needed. Match the string
+		// directly, avoiding a second full-buffer byte copy.
+		defanged := defangReplacer.Replace(string(data))
+		for _, m := range urlRe.FindAllString(defanged, scanCap) {
+			if budget <= 0 {
+				break
 			}
+			if _, dup := seen[m]; dup {
+				continue
+			}
+			// Detach retained candidates from the potentially large buffer.
+			raw := strings.Clone(m)
+			seen[raw] = struct{}{}
+			budget--
+			out = append(out, NewCandidate(raw, true))
 		}
 	}
 
@@ -198,27 +208,4 @@ func hasDefangToken(data []byte) bool {
 		}
 	}
 	return false
-}
-
-// defang rewrites common URL obfuscations malware uses in document code back
-// to a scannable form. Returns "" when nothing changed (so the caller skips a
-// redundant second pass). Cheap and bounded: plain string replacement only.
-func defang(data []byte) string {
-	// Check on the raw bytes BEFORE materialising a string: for the common
-	// no-defang case this avoids a full-buffer copy on the hot path.
-	if !hasDefangToken(data) {
-		return ""
-	}
-	s := string(data)
-	r := strings.NewReplacer(
-		"hxxps", "https", "hXXps", "https", "hxxp", "http", "hXXp", "http",
-		"[.]", ".", "(.)", ".", "{.}", ".",
-		"[dot]", ".", "(dot)", ".", "{dot}", ".", "[DOT]", ".", " dot ", ".",
-		"[:]", ":", "[://]", "://",
-	)
-	out := r.Replace(s)
-	if out == s {
-		return ""
-	}
-	return out
 }
