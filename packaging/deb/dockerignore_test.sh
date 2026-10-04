@@ -111,6 +111,8 @@ check_absent 'tools/private-corpus\.sentinel\.json' 'private tools manifest sent
 check_absent 'tools/parity/private-corpus\.sentinel\.json' 'private parity manifest sentinel'
 check_absent 'tools/parity/testdata/private-corpus\.sentinel\.json' 'private parity testdata sentinel'
 check_absent 'tools/parity/private-corpus-sentinel' 'private parity subtree sentinel'
+check_absent 'ci/ci_impact_test\.py' 'host-only CI Python tests'
+check_absent 'ci/testscope_test\.sh' 'host-only CI shell tests'
 
 # Real files docker/Dockerfile's `build`/`test` stage COPY . . actually needs
 # must still be present, so a deny-by-default .dockerignore can't silently
@@ -128,6 +130,7 @@ check_present 'go\.mod' 'go.mod'
 check_present 'go\.sum' 'go.sum'
 check_present 'cmd' 'cmd/'
 check_present 'internal' 'internal/'
+check_present 'ci/scanner_budget_test\.go' 'native scanner budget regression'
 check_present 'docker/Dockerfile' 'docker/Dockerfile'
 check_present 'docker/fetch-rules\.sh' 'docker/fetch-rules.sh'
 check_present 'scripts/smoke\.sh' 'scripts/smoke.sh'
