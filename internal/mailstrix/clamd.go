@@ -392,33 +392,50 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 		c.reply(conn, reply, term)
 		return
 	}
-	if c.ctx.Err() != nil || !c.s.acquireOn(c.ctx, c.s.sem) {
-		if c.ctx.Err() == nil {
-			c.s.metrics.busy.Add(1)
-		}
-		c.reply(conn, "stream: busy ERROR", term)
-		return
+	// Each caller has one CPU queue budget, including coalesced leader retries.
+	var busyOnce sync.Once
+	recordBusy := func() {
+		busyOnce.Do(func() {
+			if c.ctx.Err() == nil {
+				c.s.metrics.busy.Add(1)
+			}
+		})
 	}
-	if c.ctx.Err() != nil {
-		<-c.s.sem
-		return
-	}
+	scanCtx, cancelScan := context.WithCancel(c.ctx)
+	queued := time.NewTimer(c.s.cfg.BackendTimeout)
+	defer queued.Stop()
+	started := make(chan struct{})
 	result := make(chan string, 1)
 	c.wg.Add(1)
-	owned = false // native worker now owns the body and both gates
+	owned = false // worker now owns the body and admission gate
 	go func() {
 		defer c.wg.Done()
-		defer func() { <-c.s.sem; <-c.s.admit }()
+		defer cancelScan()
+		defer func() { <-c.s.admit }()
 		c.s.metrics.scans.Add(1)
 		meta := ScanMeta{RawKey: streamDedupKey(body),
 			Effort: ResolveEffortLevel(0, false, c.s.autoEnvDefault(true), c.s.cfg.EffortMax)}
-		matches, err := c.s.dispatch(body, meta)
+		key := c.s.engine.Fingerprint() + ":" + meta.cacheKey() + ":" + string(meta.RawKey[:])
+		outcome, status := c.s.lookupScanOutcomeStarted(scanCtx, key, body, meta, func() { close(started) })
+		if status == "canceled" {
+			recordBusy()
+			result <- "stream: busy ERROR"
+			return
+		}
+		matches, err := outcome.matches, outcome.err
 		if errors.Is(err, ErrScanIncomplete) && hasActionable(matches) {
 			// A partial scan that still found something is a real detection.
 			err = nil
 		}
 		if err != nil {
-			c.s.metrics.errors.Add(1)
+			if errors.Is(err, errScanBusy) {
+				recordBusy()
+				result <- "stream: busy ERROR"
+				return
+			}
+			if errors.Is(err, ErrScanIncomplete) {
+				c.s.metrics.errors.Add(1)
+			}
 			c.s.errf("clamd scan failed: %q", err)
 			result <- "stream: scan failed ERROR"
 		} else {
@@ -435,6 +452,27 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 			}
 		}
 	}()
+	// Queue residence does not consume the native scan response budget.
+	select {
+	case reply = <-result:
+		c.reply(conn, reply, term)
+		return
+	case <-started:
+		queued.Stop()
+	case <-queued.C:
+		select {
+		case <-started:
+			// CPU admission won while this handler was waiting to run.
+		default:
+			cancelScan()
+			recordBusy()
+			c.reply(conn, "stream: busy ERROR", term)
+			return
+		}
+	case <-c.forced:
+		cancelScan()
+		return
+	}
 	timer := time.NewTimer(c.s.cfg.ScanTimeout + clamdScanSlack)
 	defer timer.Stop()
 	select {
