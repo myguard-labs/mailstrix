@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -437,7 +438,7 @@ func TestCredentialProviderDeadline(t *testing.T) {
 	}
 }
 
-func TestResponseBodyDeadline(t *testing.T) {
+func TestResponseBodyCancellation(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
@@ -458,8 +459,18 @@ func TestResponseBodyDeadline(t *testing.T) {
 				w.(http.Flusher).Flush()
 				<-r.Context().Done()
 			})
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			// Cancel only after the client has read the complete partial JSON.
+			// A server-side Flush alone does not prove those bytes arrived.
+			c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				response, err := c.transport.RoundTrip(r)
+				if err == nil {
+					response.Body = &cancelAfterRead{ReadCloser: response.Body,
+						remaining: len(`{"data":{"task_ids":[41,42,`), cancel: cancel}
+				}
+				return response, err
+			})
 			if tc.name == "status" {
 				_, err := c.Status(ctx, owned())
 				assertCode(t, err, tc.code)
@@ -467,14 +478,81 @@ func TestResponseBodyDeadline(t *testing.T) {
 				result, err := c.Submit(ctx, source("x"), 1, marker)
 				assertCode(t, err, tc.code)
 				if len(result.Tasks) != 2 || result.Tasks[0] != owned() || result.Tasks[1] != (TaskRef{ID: 42, Generation: "fixture-v1"}) || !result.UnknownDebt || result.NoBytesSent {
-					t.Fatalf("body timeout lost cleanup identities/uncertainty: %+v", result)
+					t.Fatalf("body cancellation lost cleanup identities/uncertainty: %+v", result)
 				}
+			}
+			if ctx.Err() != context.Canceled {
+				t.Fatalf("partial body did not trigger cancellation: %v", ctx.Err())
 			}
 			if calls.Load() != 1 {
 				t.Fatalf("request count = %d, want 1", calls.Load())
 			}
 		})
 	}
+}
+
+// roundTripFunc keeps deadline tests independent of network scheduling.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type cancelAfterRead struct {
+	io.ReadCloser
+	remaining int
+	cancel    context.CancelFunc
+}
+
+func (r *cancelAfterRead) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	r.remaining -= n
+	if r.remaining <= 0 {
+		r.cancel()
+	}
+	return n, err
+}
+
+type deadlineBody struct {
+	io.Reader
+	ctx context.Context
+}
+
+func (b deadlineBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err == io.EOF {
+		<-b.ctx.Done()
+		return n, b.ctx.Err()
+	}
+	return n, err
+}
+
+// Fake time expires the real context deadline only once the body read blocks.
+// Real TLS and partial-response cancellation are covered above.
+func TestResponseBodyDeadline(t *testing.T) {
+	c, _ := fixture(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("deadline unit test reached the network")
+	})
+	synctest.Test(t, func(t *testing.T) {
+		c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			_, err := io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+				Body: io.NopCloser(deadlineBody{Reader: strings.NewReader(`{"data":{"task_ids":[41,42,`), ctx: r.Context()})}, nil
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		result, err := c.Submit(ctx, source("x"), 1, marker)
+		assertCode(t, err, Deadline)
+		if ctx.Err() != context.DeadlineExceeded || time.Since(start) != 200*time.Millisecond {
+			t.Fatalf("body read did not stop at caller deadline: %v after %v", ctx.Err(), time.Since(start))
+		}
+		if len(result.Tasks) != 2 || result.Tasks[0] != owned() || result.Tasks[1] != (TaskRef{ID: 42, Generation: "fixture-v1"}) || !result.UnknownDebt || result.NoBytesSent {
+			t.Fatalf("body deadline lost cleanup identities/uncertainty: %+v", result)
+		}
+	})
 }
 
 type countedSource struct {
@@ -748,23 +826,38 @@ func TestResponseSizeAndDepth(t *testing.T) {
 }
 
 func TestDeadlineAndCloseCancelRequests(t *testing.T) {
-	for _, closeClient := range []bool{false, true} {
-		started := make(chan struct{})
-		c, _ := fixture(t, func(_ http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done() })
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		result := make(chan error, 1)
-		go func() { _, err := c.Status(ctx, owned()); result <- err }()
-		<-started
-		if closeClient {
-			_ = c.Close()
-		}
-		select {
-		case err := <-result:
-			assertCode(t, err, Deadline)
-		case <-time.After(2 * time.Second):
-			t.Fatal("request deadline/Close did not cancel")
-		}
-		cancel()
+	for _, name := range []string{"deadline", "close"} {
+		t.Run(name, func(t *testing.T) {
+			started := make(chan struct{})
+			c, _ := fixture(t, func(_ http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done() })
+			ctx := context.Background()
+			if name == "deadline" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+			}
+			result := make(chan error, 1)
+			go func() { _, err := c.Status(ctx, owned()); result <- err }()
+			if name == "close" {
+				select {
+				case <-started:
+				case err := <-result:
+					t.Fatalf("request returned before Close: %v", err)
+				case <-time.After(2 * time.Second):
+					t.Fatal("request did not reach server before Close")
+				}
+				_ = c.Close()
+			}
+			select {
+			case err := <-result:
+				assertCode(t, err, Deadline)
+			case <-time.After(2 * time.Second):
+				t.Fatal("request deadline/Close did not cancel")
+			}
+			if name == "deadline" && ctx.Err() != context.DeadlineExceeded {
+				t.Fatalf("caller deadline did not expire: %v", ctx.Err())
+			}
+		})
 	}
 }
 
