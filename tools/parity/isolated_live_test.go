@@ -288,9 +288,8 @@ func recordedCLINames(t *testing.T, path string) []string {
 // name-filter query. The CLI shim records a create request before Docker
 // answers it, so a recorded name alone is not a visibility signal.
 func waitLiveOwnedVisible(d isolatedDocker, names []string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	for _, name := range names {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		for {
 			b, status := d.call(ctx, nil, "ps", "--all", "--quiet", "--filter", "name=^/"+name+"$")
 			if status == "ok" && len(bytes.TrimSpace(b)) != 0 {
@@ -298,10 +297,12 @@ func waitLiveOwnedVisible(d isolatedDocker, names []string, timeout time.Duratio
 			}
 			select {
 			case <-ctx.Done():
+				cancel()
 				return fmt.Errorf("CLI-owned container %s not visible within %s (last status=%s)", name, timeout, status)
 			case <-time.After(50 * time.Millisecond):
 			}
 		}
+		cancel()
 	}
 	return nil
 }
@@ -340,6 +341,45 @@ func TestWaitLiveOwnedVisible(t *testing.T) {
 	}
 	if err := waitLiveOwnedVisible(d, names[:1], 20*time.Millisecond); err == nil || !strings.Contains(err.Error(), "last status=execution_error") {
 		t.Fatalf("nonempty output from a failed Docker query was accepted: %v", err)
+	}
+}
+
+func TestWaitLiveOwnedVisiblePerNameDeadline(t *testing.T) {
+	names := []string{"mailstrix-isolated-inert-a", "mailstrix-isolated-inert-b"}
+	const visibleTimeout = 5 * time.Second
+	queries := map[string]int{}
+	contexts := map[string]context.Context{}
+	missingSecond := false
+	d := isolatedDocker{command: func(ctx context.Context, args ...string) *exec.Cmd {
+		for _, name := range names {
+			if slices.Equal(args, []string{"ps", "--all", "--quiet", "--filter", "name=^/" + name + "$"}) {
+				queries[name]++
+				if missingSecond && name == names[1] {
+					return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 0")
+				}
+				contexts[name] = ctx
+				return exec.CommandContext(ctx, "/bin/sh", "-c", "printf 'inert-id\\n'")
+			}
+		}
+		t.Fatalf("unexpected Docker query: %q", args)
+		return nil
+	}}
+	if err := waitLiveOwnedVisible(d, names, visibleTimeout); err != nil {
+		t.Fatalf("each visible name should receive its own deadline: queries=%v err=%v", queries, err)
+	}
+	if queries[names[0]] != 1 || queries[names[1]] != 1 {
+		t.Fatalf("each owned name needs a visibility query: %v", queries)
+	}
+	// isolatedDocker.call wraps each parent with context.WithCancel, so the
+	// command contexts have distinct identities even with one shared deadline.
+	firstDeadline, firstOK := contexts[names[0]].Deadline()
+	secondDeadline, secondOK := contexts[names[1]].Deadline()
+	if !firstOK || !secondOK || firstDeadline.Equal(secondDeadline) {
+		t.Fatalf("each owned name needs a distinct timeout deadline: first=%v second=%v", firstDeadline, secondDeadline)
+	}
+	missingSecond = true
+	if err := waitLiveOwnedVisible(d, names[1:], 20*time.Millisecond); err == nil || !strings.Contains(err.Error(), names[1]) || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("missing second name must fail its own deadline: queries=%v err=%v", queries, err)
 	}
 }
 

@@ -136,6 +136,18 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated], False)
 
+    def test_urlhaus_shared_host_native_go_consumer(self):
+        path = "ci/urlhaus_shared_host_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/urlhaus_shared_host_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_milter_maintainer_consumers(self):
         for path in [
             "packaging/deb/postinstall-milter.sh",

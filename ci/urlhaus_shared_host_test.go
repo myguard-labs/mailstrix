@@ -52,8 +52,12 @@ func TestURLhausURLDerivedSharedHosts(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if metrics := c.Metrics(); metrics.FeedURLs != 4 || metrics.FeedHosts != 2 {
-		t.Fatalf("malformed feed row was not skipped: urls=%d hosts=%d", metrics.FeedURLs, metrics.FeedHosts)
+	metrics := c.Metrics()
+	if metrics.FeedURLs != 4 {
+		t.Fatalf("feed URL count: got %d, want 4", metrics.FeedURLs)
+	}
+	if metrics.FeedHosts != 2 {
+		t.Fatalf("URL-derived host count: got %d, want 2", metrics.FeedHosts)
 	}
 
 	for _, tc := range []struct {
