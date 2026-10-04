@@ -4,6 +4,7 @@ package extract
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -11,6 +12,9 @@ import (
 	"testing"
 	"time"
 )
+
+// NETBIOS matching now needs a regex only as the retained test oracle.
+var reNetbios = regexp.MustCompile(fmt.Sprintf(`[A-P]{%d,}`, minNetbiosRun))
 
 func referenceDecodeDecSeqRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
 	rest := src
@@ -285,5 +289,43 @@ func TestDecodeScalarPaddingCheckpoint(t *testing.T) {
 	start, end, _ := nextScalarRunUntil(src, true, func() bool { checks++; return checks == 2 })
 	if checks != 2 || start != -1 || end != 0 {
 		t.Fatalf("padding expiry: checkpoints=%d match=[%d,%d]; want two checkpoints and no match", checks, start, end)
+	}
+}
+
+// Keep the search live and expire only once conversion has been reached. The
+// second case permits 4096 conversion bytes before cancellation; neither case
+// may publish the partially converted candidate.
+func TestDecodeScalarConversionExpiry(t *testing.T) {
+	for _, mode := range []struct {
+		name      string
+		src, want []byte
+		decode    func([]byte, func() bool, func([]byte) bool) bool
+	}{
+		{"decimal", []byte(strings.Repeat("97,", 2731) + "97"), bytes.Repeat([]byte("a"), 2732), decodeDecSeqRunsUntil},
+		{"netbios", []byte(strings.Repeat("HH", 4097)), bytes.Repeat([]byte("w"), 4097), decodeNetbiosRunsUntil},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			// One outer precheck, then the scanner checks at 0, 4096 and 8192.
+			beforeConversion := 1 + len(mode.src)/4096 + 1
+			for _, conversionCheck := range []int{1, 2} {
+				t.Run(fmt.Sprintf("checkpoint-%d", conversionCheck), func(t *testing.T) {
+					calls, emitted := 0, false
+					expireAt := beforeConversion + conversionCheck
+					ok := mode.decode(mode.src, func() bool { calls++; return calls >= expireAt }, func([]byte) bool { emitted = true; return true })
+					if !ok || emitted || calls != expireAt {
+						t.Fatalf("conversion expiry: checks=%d want=%d emitted=%v completed=%v; want cancellation without partial emission", calls, expireAt, emitted, ok)
+					}
+				})
+			}
+			calls := 0
+			var output [][]byte
+			ok := mode.decode(mode.src, func() bool { calls++; return false }, func(b []byte) bool { output = append(output, b); return true })
+			if !ok || len(output) != 1 || !bytes.Equal(output[0], mode.want) {
+				t.Fatalf("live conversion: completed=%v streams=%d; want complete decoded candidate", ok, len(output))
+			}
+			if calls != beforeConversion+len(mode.src)/4096+1 {
+				t.Fatalf("live conversion: checks=%d; want search and conversion checkpoints", calls)
+			}
+		})
 	}
 }

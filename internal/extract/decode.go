@@ -223,10 +223,6 @@ var (
 	// more comma- or semicolon-separated 1-3 digit groups.
 	reDecSeq = regexp.MustCompile(fmt.Sprintf(`\d{1,3}(?:[;,]\d{1,3}){%d,}`, minDecSeqRun-1))
 
-	// NETBIOS (RFC1001) encoded strings: runs of uppercase A-P chars, min minNetbiosRun (even length required).
-	// Uppercase only — actual NETBIOS encoding always produces A-P; lowercase reduces FP but is non-standard.
-	reNetbios = regexp.MustCompile(fmt.Sprintf(`[A-P]{%d,}`, minNetbiosRun))
-
 	// Base32 encoded strings: standard alphabet [A-Z2-7] with optional padding, min minBase32Run chars.
 	reBase32 = regexp.MustCompile(fmt.Sprintf(`[A-Z2-7]{%d,}={0,6}`, minBase32Run))
 
@@ -1786,12 +1782,17 @@ func nextDecSeqRunUntil(src []byte, expiredNow func() bool) (start, end int) {
 // Conservative: requires ALL tokens to be 0..255 and a consistent separator (all ',' or all ';').
 // Returns false on cap hit.
 func decodeDecSeqRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	return decodeDecSeqRunsUntil(src, func() bool { return expired(deadline) }, emit)
+}
+
+// decodeDecSeqRunsUntil keeps search and conversion on one call-local clock.
+func decodeDecSeqRunsUntil(src []byte, expiredNow func() bool, emit func([]byte) bool) bool {
 	rest := src
 	for len(rest) > 0 {
-		if expired(deadline) {
+		if expiredNow() {
 			return true
 		}
-		start, end := nextDecSeqRunUntil(rest, func() bool { return expired(deadline) })
+		start, end := nextDecSeqRunUntil(rest, expiredNow)
 		if start < 0 {
 			return true
 		}
@@ -1812,7 +1813,7 @@ func decodeDecSeqRuns(src []byte, deadline time.Time, emit func([]byte) bool) bo
 		sep := byte(0)
 		n := 0
 		for i := 0; i <= len(run); i++ {
-			if i%4096 == 0 && expired(deadline) {
+			if i%4096 == 0 && expiredNow() {
 				return true
 			}
 			if i < len(run) && run[i] >= '0' && run[i] <= '9' {
@@ -1851,13 +1852,18 @@ func decodeDecSeqRuns(src []byte, deadline time.Time, emit func([]byte) bool) bo
 // or starts with a known container magic (ZIP/OLE/MZ/PDF), to gate FP from random uppercase text.
 // Returns false on cap hit.
 func decodeNetbiosRuns(src []byte, deadline time.Time, emit func([]byte) bool) bool {
+	return decodeNetbiosRunsUntil(src, func() bool { return expired(deadline) }, emit)
+}
+
+// decodeNetbiosRunsUntil keeps search and conversion on one call-local clock.
+func decodeNetbiosRunsUntil(src []byte, expiredNow func() bool, emit func([]byte) bool) bool {
 	rest := src
 	for len(rest) > 0 {
-		if expired(deadline) {
+		if expiredNow() {
 			return true
 		}
 		// The discarded result classifies base32 digits; it is not an error.
-		start, end, _ := nextScalarRunUntil(rest, false, func() bool { return expired(deadline) })
+		start, end, _ := nextScalarRunUntil(rest, false, expiredNow)
 		if start < 0 {
 			return true
 		}
@@ -1871,7 +1877,7 @@ func decodeNetbiosRuns(src []byte, deadline time.Time, emit func([]byte) bool) b
 		}
 		dec := make([]byte, len(run)/2)
 		for i := 0; i < len(run); i += 2 {
-			if i%4096 == 0 && expired(deadline) {
+			if i%4096 == 0 && expiredNow() {
 				return true
 			}
 			hi := run[i] - 'A'
