@@ -1700,7 +1700,9 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		seen[h] = struct{}{}
 		budget := s.scanTimeout
 		if !deadline.IsZero() {
-			if budget = time.Until(deadline); budget <= 0 {
+			// Native scans need at least one whole second; scanOne would round
+			// a smaller positive budget up past the shared deadline.
+			if budget = time.Until(deadline); budget < time.Second {
 				s.logf("scan budget exhausted; %d streams + %d markers left unscanned",
 					len(res.Streams)-streamsVisited+1, max(len(res.Markers)-markersVisited+1, 0))
 				incomplete = true

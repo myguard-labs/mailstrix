@@ -17,6 +17,10 @@
 !cmd/**
 !internal
 !internal/**
+# Native Go regression tests must exist for testscope's package discovery.
+!ci
+ci/**
+!ci/*_test.go
 !third_party
 !third_party/**
 !tools

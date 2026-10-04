@@ -135,6 +135,7 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/scanner_budget_test.go",
     "cmd/*",
     "internal/*",
     "third_party/*",
