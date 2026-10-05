@@ -400,6 +400,118 @@ class NightlyWorkflowContract(unittest.TestCase):
                 self.assertEqual(output, "")
                 self.assertEqual(calls, "")
 
+    def test_publication_permissions_and_order(self):
+        """Only a completed amd64 build can publish under a write token."""
+        workflow = self.nightly()
+        self.assertEqual(workflow["concurrency"]["cancel-in-progress"], False)
+        self.assertEqual(workflow["concurrency"]["group"],
+                         "nightly-release-${{ github.repository }}")
+        self.assertEqual(workflow["permissions"]["contents"], "read")
+        jobs = workflow["jobs"]
+        self.assertEqual(jobs["publish"]["needs"], ["plan", "gate", "binaries"])
+        self.assertEqual(jobs["publish"]["if"],
+                         "needs.binaries.result == 'success'")
+        self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
+        for name, job in jobs.items():
+            if name != "publish":
+                self.assertNotEqual(job.get("permissions", {}).get("contents"),
+                                    "write")
+        download = next(step for step in jobs["publish"]["steps"]
+                        if step.get("name") == "download amd64 binaries")
+        self.assertEqual(download["uses"],
+                         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093")
+        self.assertEqual(download["with"], {"name": "bin-amd64", "path": "out/"})
+
+    def test_amd64_checksums_cover_exact_assets(self):
+        """All three downloaded binaries must be hashed before publication."""
+        step = next(step for step in self.nightly()["jobs"]["publish"]["steps"]
+                    if step.get("name") == "checksums")
+        with tempfile.TemporaryDirectory(prefix="mailstrix-nightly-assets-") as temp:
+            root = Path(temp)
+            output = root / "out"
+            output.mkdir()
+            names = ("strixd-linux-amd64", "strix-scan-linux-amd64",
+                     "strix-milter-linux-amd64")
+            for name in names:
+                (output / name).write_bytes(name.encode())
+            result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root,
+                                    capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            sums = (output / "SHA256SUMS").read_text(encoding="utf-8")
+            self.assertEqual(
+                [line.split("  ", 1)[1] for line in sums.splitlines()], list(names)
+            )
+            self.assertIn("sha256sum -c SHA256SUMS", step["run"])
+            (output / names[1]).unlink()
+            missing = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root,
+                                     capture_output=True, text=True, check=False)
+            self.assertNotEqual(missing.returncode, 0)
+
+    def publication(self, release):
+        """Run the real publish script against a harmless fake gh CLI."""
+        step = next(step for step in self.nightly()["jobs"]["publish"]["steps"]
+                    if step.get("name") == "publish rolling nightly")
+        with tempfile.TemporaryDirectory(prefix="mailstrix-nightly-publish-") as temp:
+            root = Path(temp)
+            fake_gh = root / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$*" >> "$GH_CALLS"\n'
+                'case "$1 $2" in\n'
+                '  "release view")\n'
+                '    case "$FAKE_RELEASE" in\n'
+                '      existing) echo existing;;\n'
+                '      missing) echo "release not found" >&2; exit 1;;\n'
+                '      denied) echo "HTTP 403" >&2; exit 1;;\n'
+                '    esac;;\n'
+                '  "release delete")\n'
+                '    if [ "$FAKE_RELEASE" = delete_fail ]; then exit 1; fi;;\n'
+                'esac\n',
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            calls = root / "calls"
+            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
+                       GH_CALLS=str(calls), FAKE_RELEASE=release,
+                       GITHUB_REPOSITORY="myguard-labs/mailstrix",
+                       GITHUB_SHA="a" * 40)
+            result = subprocess.run(["bash", "-e", "-c", step["run"]], env=env,
+                                    capture_output=True, text=True, check=False)
+            return result, calls.read_text().splitlines() if calls.exists() else []
+
+    def test_first_publication_is_prerelease_and_never_latest(self):
+        """A missing nightly must be created with SHA target and four assets."""
+        result, calls = self.publication("missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 2, calls)
+        create = calls[-1]
+        create_args = create.split()
+        self.assertIn("release create nightly", create)
+        self.assertIn("--target " + "a" * 40, create)
+        self.assertIn("--prerelease", create_args)
+        self.assertIn("--latest=false", create_args)
+        for asset in ("strixd-linux-amd64", "strix-scan-linux-amd64",
+                      "strix-milter-linux-amd64", "SHA256SUMS"):
+            self.assertIn("out/" + asset, create)
+        self.assertNotIn("arm64", create)
+
+    def test_existing_publication_replaces_release_and_tag(self):
+        """An old tag must be removed before the new SHA is recorded."""
+        result, calls = self.publication("existing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 3, calls)
+        self.assertIn("release view nightly", calls[0])
+        self.assertIn("release delete nightly", calls[1])
+        self.assertIn("--cleanup-tag --yes", calls[1])
+        self.assertIn("release create nightly", calls[2])
+
+    def test_publication_lookup_error_fails_closed(self):
+        """An authorization error must never delete or create a release."""
+        result, calls = self.publication("denied")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HTTP 403", result.stderr)
+        self.assertEqual(len(calls), 1, calls)
+
 
 if __name__ == "__main__":
     unittest.main()
