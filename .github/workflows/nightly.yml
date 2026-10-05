@@ -1,0 +1,133 @@
+# Build fresh nightly binaries from main only when its commit has changed.
+name: nightly
+on:
+  schedule:
+    - cron: "0 9 * * *"  # 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 10
+    outputs:
+      skip: ${{ steps.release.outputs.skip }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: ensure gh CLI
+        run: |
+          command -v gh >/dev/null || {
+            sudo apt-get update
+            sudo apt-get install -y gh
+          }
+      - name: compare nightly target with main
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "nightly requires the main branch" >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "nightly requires a main commit SHA" >&2
+            exit 1
+          fi
+          if target=$(gh release view nightly --repo "$GITHUB_REPOSITORY" \
+            --json targetCommitish --jq '.targetCommitish' 2>&1); then
+            :
+          elif [[ "$target" == "release not found" ]]; then
+            target=""
+          else
+            printf '%s\n' "$target" >&2
+            exit 1
+          fi
+          if [[ "$target" == "$GITHUB_SHA" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=nightly-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+  gate:
+    needs: plan
+    if: needs.plan.outputs.skip == 'false'
+    permissions:
+      contents: read
+      actions: write  # ci.yml's docker job uses the buildx GHA cache
+    uses: ./.github/workflows/ci.yml
+
+  binaries:
+    needs: [plan, gate]
+    if: needs.plan.outputs.skip == 'false' && needs.gate.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      arches: '["amd64"]'
+
+  publish:
+    needs: [plan, gate, binaries]
+    if: needs.binaries.result == 'success'
+    runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: download amd64 binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: bin-amd64
+          path: out/
+
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd out
+          sha256sum strixd-linux-amd64 strix-scan-linux-amd64 \
+            strix-milter-linux-amd64 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      # The self-hosted lxc runner image does not ship the gh CLI.
+      - name: ensure gh CLI
+        run: |
+          command -v gh >/dev/null || {
+            sudo apt-get update
+            sudo apt-get install -y gh
+          }
+
+      - name: publish rolling nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=(
+            out/strixd-linux-amd64
+            out/strix-scan-linux-amd64
+            out/strix-milter-linux-amd64
+            out/SHA256SUMS
+          )
+          # target_commitish is ignored for an existing tag. Remove the old
+          # release and tag so the replacement records this exact main SHA.
+          if current=$(gh release view nightly \
+            --repo "$GITHUB_REPOSITORY" 2>&1); then
+            gh release delete nightly --repo "$GITHUB_REPOSITORY" \
+              --cleanup-tag --yes
+          elif [[ "$current" != "release not found" ]]; then
+            printf '%s\n' "$current" >&2
+            exit 1
+          fi
+          gh release create nightly --repo "$GITHUB_REPOSITORY" \
+            --title "Nightly" \
+            --notes "Nightly build of ${GITHUB_SHA}" \
+            --target "$GITHUB_SHA" \
+            --prerelease --latest=false \
+            "${assets[@]}"
