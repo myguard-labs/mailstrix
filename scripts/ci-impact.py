@@ -151,6 +151,8 @@ GO_INPUTS = [
     "ci/rules_polling_config_test.go",
     "ci/mime_attachment_hash_test.go",
     "ci/rar_password_extract_test.go",
+    "ci/rc4md5_extract_test.go",
+    "ci/testdata/rc4md5-biff.xls",
     "ci/urlhaus_shared_host_test.go",
     "cmd/*",
     "internal/*",
@@ -229,6 +231,10 @@ def plan(paths, full=False):
             }
         ):
             go_paths.add(path)
+            # The binary fixture is read by both the public extraction tests
+            # and the internal reference-producer consistency test.
+            if path == "ci/testdata/rc4md5-biff.xls":
+                go_paths.add("internal/extract/rc4md5_fixture_test.go")
             selected.add("go")
     if not full:
         if not any(

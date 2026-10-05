@@ -245,12 +245,12 @@ func fixtureRC4MD5Workbook(t *testing.T, boundary bool, corruptVerifier bool) []
 
 func TestRC4MD5PublicExtraction(t *testing.T) {
 	for _, tc := range []struct {
-		name, want              string
+		name                    string
 		boundary, wrongVerifier bool
 	}{
-		{"short", "XLM-HIDDEN-MACROSHEET hidden RC4SecretSheet", false, false},
-		{"block-boundary", "XLM-HIDDEN-MACROSHEET hidden RC4SecretSheet", true, false},
-		{"wrong-verifier", "", true, true},
+		{"short", false, false},
+		{"block-boundary", true, false},
+		{"wrong-verifier", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := fixtureRC4MD5Workbook(t, tc.boundary, tc.wrongVerifier)

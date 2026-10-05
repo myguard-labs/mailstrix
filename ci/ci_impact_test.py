@@ -163,6 +163,35 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_rc4md5_go_mapping_negative_control(self):
+        cases = {
+            "ci/rc4md5_extract_test.go": "--changed -- ci/rc4md5_extract_test.go",
+            "ci/testdata/rc4md5-biff.xls": (
+                "--changed -- ci/testdata/rc4md5-biff.xls "
+                "internal/extract/rc4md5_fixture_test.go"
+            ),
+        }
+        for path, changed_files in cases.items():
+            with self.subTest(path=path):
+                result = impact.plan([path])
+                self.assertEqual(
+                    {key for key, value in result.items() if value is True},
+                    {"go", "docker"},
+                )
+                self.assertEqual(result["changed_files"], changed_files)
+
+                # The same named test must fail if this mapping is removed.
+                without_path = [name for name in impact.GO_INPUTS if name != path]
+                with (
+                    mock.patch.object(impact, "GO_INPUTS", without_path),
+                    self.assertRaisesRegex(ValueError, "unmapped changed path"),
+                ):
+                    impact.plan([path])
+
+        for unrelated in ["ci/unmapped_test.go", "ci/testdata/unmapped.xls"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_urlhaus_shared_host_native_go_consumer(self):
         path = "ci/urlhaus_shared_host_test.go"
         result = impact.plan([path])
