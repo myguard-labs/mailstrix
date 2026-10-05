@@ -139,6 +139,18 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_mbazaar_lifecycle_native_go_consumer(self):
+        path = "ci/mbazaar_lifecycle_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/mbazaar_lifecycle_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_mime_attachment_native_go_consumer(self):
         path = "ci/mime_attachment_hash_test.go"
         result = impact.plan([path], False)
