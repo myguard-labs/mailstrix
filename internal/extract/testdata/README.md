@@ -29,27 +29,45 @@
     member with `Encrypted=true, HeaderEncrypted=true`; a wrong password is
     rejected by `NewReader` ("rardecode: incorrect password").
 
-- `fixture-encrypted-files.rar` — RAR5 with two encrypted file bodies and
-  visible headers, copied unchanged from `test/files/rar5-psw.rar` in
-  [markokr/rarfile](https://github.com/markokr/rarfile/tree/d2f7df6fc843dae356fd6b0a85971dc36fd6e757/test/files).
-  The upstream test uses public password `password`; its expected archive
-  description says `nohdr-password`. Both `stest1.txt` and `stest2.txt` expand
-  to 2,048 bytes: the lines `000\n` through `511\n`. SHA-256:
-  `b6840e95152a1c3b5acd736dc34f988509866f04158b67da1b5a29e166a31355`.
-  Copyright (c) 2005-2026 Marko Kreen. Upstream ISC license permits copying
-  with the copyright and permission notice; its notice is:
+- `fixture-encrypted-files.rar` — RAR5 with encrypted file bodies and
+  visible archive flags. Copied unchanged from
+  [SharpCompress](https://github.com/adamhathcock/sharpcompress/blob/2cba09eba4ae400756933807ee5b0aae56bd4fa7/tests/TestArchives/Archives/Rar5.encrypted_filesOnly.rar).
+  Its test uses the public password `test`. The three distinct file members
+  observed with rardecode v2.2.5 are:
 
-  > Permission to use, copy, modify, and/or distribute this software for any
-  > purpose with or without fee is hereby granted, provided that the above
-  > copyright notice and this permission notice appear in all copies.
+  - `exe/test.exe`: 45,056 bytes; SHA-256
+    `8557928804f57ecc340b3bb38b095a3607474ec8deb0076f316fcfe02b562106`.
+  - `jpg/test.jpg`: 40,372 bytes; SHA-256
+    `b251c7501fb0f55dd4a92feabe0a6f5733bc40a02679498155fae9b30138fc53`.
+  - `тест.txt`: 15,498 bytes; SHA-256
+    `4d581d93d369f6e1c9b295ff38d82dabd577f927dfaf0c35818c015c85e322d9`.
 
-  > THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-  > WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-  > MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-  > ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-  > WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-  > ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-  > OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  Archive SHA-256:
+  `e5fb06af812633b246430f029a051cc462d00180a0df455a798644deccdc7d07`.
+  The upstream [MIT license](https://github.com/adamhathcock/sharpcompress/blob/2cba09eba4ae400756933807ee5b0aae56bd4fa7/LICENSE.txt)
+  requires the following complete notice in copies:
+
+  > The MIT License (MIT)
+  >
+  > Copyright (c) 2014  Adam Hathcock
+  >
+  > Permission is hereby granted, free of charge, to any person obtaining a copy
+  > of this software and associated documentation files (the "Software"), to deal
+  > in the Software without restriction, including without limitation the rights
+  > to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  > copies of the Software, and to permit persons to whom the Software is
+  > furnished to do so, subject to the following conditions:
+  >
+  > The above copyright notice and this permission notice shall be included in
+  > all copies or substantial portions of the Software.
+  >
+  > THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  > IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  > FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  > AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+  > THE SOFTWARE.
 
 - `sevenzip-pw.7z` / `sevenzip-pwhe.7z` — synthetic 7z password fixtures built
   in `archivepw_test.go` (see that file for member layout and passwords), not
