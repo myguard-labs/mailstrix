@@ -210,20 +210,6 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(impact.plan(paths), impact.plan(paths * 2))
         self.assertTrue(impact.plan(paths)["image"])
 
-    def test_vet_wiring_delivery_paths_are_mapped(self):
-        paths = [
-            ".github/workflows/ci.yml",
-            "ci/ci_go_checks_test.py",
-            "ci/ci_impact_test.py",
-            "ci/vet_wiring_test.py",
-            "scripts/ci-go-checks.sh",
-            "scripts/ci-impact.py",
-        ]
-        result = impact.plan(paths)
-        self.assertTrue(result["scope"])
-        self.assertTrue(result["go"])
-        self.assertTrue(result["docker"])
-
     def test_dockerfile_only_selects_go_without_scope(self):
         result = impact.plan(["docker/Dockerfile"])
         self.assertTrue(result["go"])

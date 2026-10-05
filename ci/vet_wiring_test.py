@@ -124,8 +124,11 @@ exec "$REAL_GO" "$@"
         step = lint.split("- name: Docker vet wiring contract", 1)[1].split(
             "\n      - ", 1
         )[0]
-        self.assertIn("needs.changes.outputs.scope == 'true' ||", step)
-        self.assertIn("needs.changes.outputs.go == 'true'", step)
+        self.assertIn(
+            "needs.changes.outputs.go == 'true' || needs.changes.outputs.scope == 'true'",
+            lint.split("    steps:", 1)[0],
+        )
+        self.assertNotRegex(step, r"(?m)^\s*if:")
 
 
 if __name__ == "__main__":

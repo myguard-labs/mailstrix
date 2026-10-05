@@ -224,9 +224,6 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - uses: ./.github/actions/go-setup
       - name: Docker vet wiring contract
-        if: >-
-          needs.changes.outputs.scope == 'true' ||
-          needs.changes.outputs.go == 'true'
         run: python3 -B ci/vet_wiring_test.py
       # Analysis tools are pinned to exact versions: `@latest` let a compromised or
       # merely broken upstream release change what CI runs, with no diff and no
