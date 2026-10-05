@@ -29,6 +29,28 @@
     member with `Encrypted=true, HeaderEncrypted=true`; a wrong password is
     rejected by `NewReader` ("rardecode: incorrect password").
 
+- `fixture-encrypted-files.rar` — RAR5 with two encrypted file bodies and
+  visible headers, copied unchanged from `test/files/rar5-psw.rar` in
+  [markokr/rarfile](https://github.com/markokr/rarfile/tree/d2f7df6fc843dae356fd6b0a85971dc36fd6e757/test/files).
+  The upstream test uses public password `password`; its expected archive
+  description says `nohdr-password`. Both `stest1.txt` and `stest2.txt` expand
+  to 2,048 bytes: the lines `000\n` through `511\n`. SHA-256:
+  `b6840e95152a1c3b5acd736dc34f988509866f04158b67da1b5a29e166a31355`.
+  Copyright (c) 2005-2026 Marko Kreen. Upstream ISC license permits copying
+  with the copyright and permission notice; its notice is:
+
+  > Permission to use, copy, modify, and/or distribute this software for any
+  > purpose with or without fee is hereby granted, provided that the above
+  > copyright notice and this permission notice appear in all copies.
+
+  > THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  > WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  > MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  > ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  > WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  > ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  > OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
 - `sevenzip-pw.7z` / `sevenzip-pwhe.7z` — synthetic 7z password fixtures built
   in `archivepw_test.go` (see that file for member layout and passwords), not
   written by any installable 7z tool.
