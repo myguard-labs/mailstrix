@@ -20,6 +20,27 @@ import (
 // "no RAR is ever extracted". Verified against the real fixture: byte 16 is 0x00.
 const rarSolidBitOffset = 16
 
+// The public password path uses a RAR5 fixture with encrypted file bodies but
+// readable archive flags. The older -hp fixture encrypts those flags too and
+// must retain the fail-safe refusal; only the header-visible fixture can enter
+// the existing member decoder without risking the inline solid drain.
+func TestRarSolidGuardEncryptedFixtureContrast(t *testing.T) {
+	visible, err := os.ReadFile("testdata/fixture-encrypted-files.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rarArchiveIsSolid(visible) {
+		t.Fatal("file-encrypted RAR with visible non-solid archive flag was refused")
+	}
+	hidden, err := os.ReadFile("testdata/fixture-encrypted.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rarArchiveIsSolid(hidden) {
+		t.Fatal("header-encrypted RAR bypassed fail-safe solid guard")
+	}
+}
+
 // TestRarArchiveIsSolidReadsTheArchiveFlag is the direct unit test for the A10 parser.
 //
 // It must be asserted at THIS level, not only end-to-end, because flipping the solid bit

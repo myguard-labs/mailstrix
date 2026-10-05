@@ -136,6 +136,18 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated], False)
 
+    def test_encrypted_rar_native_go_consumer(self):
+        path = "ci/rar_password_extract_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/rar_password_extract_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_urlhaus_shared_host_native_go_consumer(self):
         path = "ci/urlhaus_shared_host_test.go"
         result = impact.plan([path])
