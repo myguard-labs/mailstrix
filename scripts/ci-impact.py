@@ -24,6 +24,7 @@ RULES = {
         "go.mod",
         "go.sum",
         "docker/Dockerfile",
+        "docker/bake.ci.hcl",
         ".dockerignore",
         "docker/local-rules/*",
         "docker/fetch-rules.sh",
@@ -60,7 +61,7 @@ RULES = {
     "prometheus": ["contrib/deploy/prometheus/*"],
     "dependencies": ["go.mod", "go.sum", "osv-scanner.toml"],
     "workflows": [".github/*.yml", ".github/*.yaml"],
-    "shell": ["*.sh"],
+    "shell": ["*.sh", "contrib/sieve/strix-scan-wrapper"],
     "dockerfiles": ["*Dockerfile*", ".hadolint.yaml", "ci/ci_release_tag_test.py"],
     "scope": [
         "tools/testscope/*",

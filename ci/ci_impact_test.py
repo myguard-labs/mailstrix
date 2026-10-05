@@ -63,6 +63,7 @@ class ImpactTests(unittest.TestCase):
                 ["rspamd", "postfix"],
             ),
             ("docker/local-rules/mail.yar", ["go", "image", "parity"], ["rspamd"]),
+            ("docker/bake.ci.hcl", ["image", "docker"], ["go", "postfix"]),
             ("contrib/clamd/test_clients.py", ["go"], ["rspamd", "image"]),
             (
                 "contrib/rspamd/mailstrix.lua",
@@ -214,6 +215,26 @@ class ImpactTests(unittest.TestCase):
         result = impact.plan(["docker/Dockerfile"])
         self.assertTrue(result["go"])
         self.assertFalse(result["scope"])
+
+    def test_bake_only_change_selects_images_and_missing_mapping_fails(self):
+        path = "docker/bake.ci.hcl"
+        result = impact.plan([path])
+        self.assertTrue(result["image"])
+        self.assertTrue(result["docker"])
+        self.assertFalse(result["go"])
+        without_bake = [name for name in impact.RULES["image"] if name != path]
+        with (
+            mock.patch.dict(impact.RULES, image=without_bake),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+
+    def test_extensionless_sieve_wrapper_alone_selects_shellcheck(self):
+        path = "contrib/sieve/strix-scan-wrapper"
+        result = impact.plan([path])
+        self.assertTrue(result["shell"])
+        self.assertFalse(result["image"])
+        self.assertFalse(result["go"])
 
     def test_unknown_and_unsafe_fail(self):
         for path in [

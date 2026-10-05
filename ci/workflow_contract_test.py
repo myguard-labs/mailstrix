@@ -3,12 +3,20 @@
 import itertools
 import os
 import subprocess
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
 OPTIONAL = ("PARITY", "LINT", "RSPAMD", "SPAMASSASSIN")
+
+
+def workflow_step(name):
+    workflow = WORKFLOW.read_text()
+    step = workflow.split(f"      - name: {name}\n", 1)[1].split("      - name: ", 1)[0]
+    script = step.split("        run: |\n", 1)[1]
+    return step, textwrap.dedent(script)
 
 
 def required_check():
@@ -46,6 +54,89 @@ def verdict(selected, results, *, changes="success", docker="success", scanners=
 
 
 class RequiredCheck(unittest.TestCase):
+    def test_shellcheck_discovers_tracked_scripts_and_reports_failures(self):
+        step, script = workflow_step("shellcheck (all tracked shell scripts)")
+        self.assertIn("needs.changes.outputs.shell == 'true'", step)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in (
+                "packaging/deb/postinstall-milter.sh",
+                "packaging/deb/preremove-milter.sh",
+                "ci/example_test.sh",
+                "contrib/sieve/strix-scan-wrapper",
+            ):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\nexit 0\n")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            docker = fake_bin / "docker"
+            docker.write_text(
+                "#!/bin/sh\n"
+                "shift 5\n"
+                "for file do\n"
+                "  printf '%s\\n' \"$file\" >> \"$CALLS\"\n"
+                "  test -f \"$file\" || exit 3\n"
+                "done\n"
+                'test "${FAIL_LINT:-0}" = 0\n'
+            )
+            docker.chmod(0o755)
+            calls = root / "calls"
+            env = dict(
+                os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}", CALLS=str(calls)
+            )
+
+            def run(**extra):
+                return subprocess.run(
+                    ["bash", "-e", "-c", script],
+                    cwd=root,
+                    env=dict(env, **extra),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(run().returncode, 0)
+            self.assertEqual(
+                set(calls.read_text().splitlines()),
+                {
+                    "ci/example_test.sh",
+                    "contrib/sieve/strix-scan-wrapper",
+                    "packaging/deb/postinstall-milter.sh",
+                    "packaging/deb/preremove-milter.sh",
+                },
+            )
+            self.assertNotEqual(
+                run(FAIL_LINT="1").returncode, 0, "a lint failure must fail the step"
+            )
+            (root / "ci/example_test.sh").unlink()
+            self.assertNotEqual(
+                run().returncode, 0, "a missing tracked test must fail the step"
+            )
+
+    def test_milter_script_changes_select_behavior_contract(self):
+        workflow = WORKFLOW.read_text()
+        step = workflow.split("      - name: deb maintainer-script behaviour", 1)[
+            1
+        ].split("      - name: ", 1)[0]
+        self.assertIn("needs.changes.outputs.maintscript == 'true'", step)
+        command = step.split("        run: ", 1)[1].strip()
+        self.assertEqual(command, "sh packaging/deb/maintscript_test.sh")
+        with tempfile.TemporaryDirectory() as temp:
+            fake_sh = Path(temp) / "sh"
+            fake_sh.write_text("#!/bin/sh\nexit 7\n")
+            fake_sh.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-e", "-c", command],
+                env=dict(os.environ, PATH=f"{temp}:{os.environ['PATH']}"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 7, "a failing contract must fail CI")
+
     def test_wiring(self):
         job, script = required_check()
         self.assertIn("if: ${{ always() }}", job)
