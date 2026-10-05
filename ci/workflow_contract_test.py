@@ -3,6 +3,7 @@
 import itertools
 import json
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -271,6 +272,133 @@ class BinaryWorkflowContract(unittest.TestCase):
         self.assertEqual(
             tuple(step["uses"] for step in steps if "uses" in step), expected_pins
         )
+
+
+class NightlyWorkflowContract(unittest.TestCase):
+    """Exercise the shipped nightly decision with an isolated gh fixture."""
+
+    def nightly(self):
+        """Load the candidate workflow or a mutated fixture."""
+        return workflow_document("NIGHTLY_WORKFLOW_TEST_PATH", "nightly.yml")
+
+    def decision(self, release, *, ref="refs/heads/main", sha="a" * 40):
+        """Execute the real plan script while a fake gh supplies release state."""
+        plan = self.nightly()["jobs"]["plan"]
+        step = next(step for step in plan["steps"] if step.get("id") == "release")
+        with tempfile.TemporaryDirectory(prefix="mailstrix-nightly-fixture-") as temp:
+            root = Path(temp)
+            fake_gh = root / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$*" > "$GH_CALLS"\n'
+                'case "$FAKE_RELEASE" in\n'
+                '  equal) printf "%s\\n" "$GITHUB_SHA";;\n'
+                '  different) printf "%040d\\n" 0;;\n'
+                '  missing) echo "release not found" >&2; exit 1;;\n'
+                '  denied) echo "HTTP 403" >&2; exit 1;;\n'
+                "esac\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            output = root / "output"
+            calls = root / "calls"
+            env = dict(
+                os.environ,
+                PATH=f"{root}:{os.environ['PATH']}",
+                GITHUB_REF=ref,
+                GITHUB_SHA=sha,
+                GITHUB_REPOSITORY="myguard-labs/mailstrix",
+                GITHUB_OUTPUT=str(output),
+                GH_CALLS=str(calls),
+                FAKE_RELEASE=release,
+            )
+            result = subprocess.run(
+                ["bash", "-e", "-c", step["run"]],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result, output.read_text() if output.exists() else "", (
+                calls.read_text() if calls.exists() else ""
+            )
+
+    def test_schedule_gate_and_amd64_build(self):
+        """Only a fresh main commit may reach the reusable binary workflow."""
+        workflow = self.nightly()
+        self.assertEqual(workflow[True]["schedule"], [{"cron": "0 9 * * *"}])
+        self.assertIn("workflow_dispatch", workflow[True])
+        jobs = workflow["jobs"]
+        self.assertEqual(jobs["plan"]["outputs"]["skip"], "${{ steps.release.outputs.skip }}")
+        self.assertEqual(
+            jobs["plan"]["outputs"]["version"], "${{ steps.release.outputs.version }}"
+        )
+        self.assertEqual(jobs["gate"]["needs"], "plan")
+        self.assertEqual(jobs["gate"]["uses"], "./.github/workflows/ci.yml")
+        self.assertEqual(jobs["gate"]["if"], "needs.plan.outputs.skip == 'false'")
+        self.assertEqual(jobs["binaries"]["needs"], ["plan", "gate"])
+        self.assertEqual(
+            jobs["binaries"]["uses"], "./.github/workflows/build-binaries.yml"
+        )
+        self.assertEqual(
+            jobs["binaries"]["with"],
+            {"version": "${{ needs.plan.outputs.version }}", "arches": '["amd64"]'},
+        )
+        condition = jobs["binaries"]["if"]
+        predicate = re.fullmatch(
+            r"needs\.plan\.outputs\.skip == '([^']+)' && "
+            r"needs\.gate\.result == '([^']+)'",
+            condition,
+        )
+        self.assertIsNotNone(predicate, condition)
+        required_skip, required_gate = predicate.groups()
+        self.assertEqual((required_skip, required_gate), ("false", "success"))
+        for skip, gate, expected in (
+            ("false", "success", True),
+            ("false", "failure", False),
+            ("false", "cancelled", False),
+            ("true", "success", False),
+        ):
+            with self.subTest(skip=skip, gate=gate):
+                self.assertEqual(
+                    skip == required_skip and gate == required_gate, expected
+                )
+
+    def test_equal_nightly_target_skips(self):
+        """An already published main SHA must suppress the gate and build."""
+        result, output, calls = self.decision("equal")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skip=true\n", output)
+        self.assertIn("version=nightly-aaaaaaaaaaaa\n", output)
+        self.assertIn("release view nightly --repo myguard-labs/mailstrix", calls)
+
+    def test_different_nightly_target_builds(self):
+        """A changed main SHA must run the CI gate and amd64 build."""
+        result, output, _ = self.decision("different")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skip=false\n", output)
+
+    def test_missing_nightly_release_builds(self):
+        """The first nightly run must build when no release exists."""
+        result, output, _ = self.decision("missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skip=false\n", output)
+
+    def test_release_lookup_error_fails_closed(self):
+        """An API failure must not be mistaken for an absent release."""
+        result, output, _ = self.decision("denied")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("HTTP 403", result.stderr)
+        self.assertEqual(output, "")
+
+    def test_non_main_and_malformed_sha_fail_closed(self):
+        """The build must never use a branch or malformed commit identity."""
+        for ref, sha in (("refs/heads/dev", "a" * 40), ("refs/heads/main", "bad")):
+            with self.subTest(ref=ref, sha=sha):
+                result, output, calls = self.decision("different", ref=ref, sha=sha)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertEqual(calls, "")
 
 
 if __name__ == "__main__":
