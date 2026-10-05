@@ -90,6 +90,7 @@ class ImpactTests(unittest.TestCase):
                 ["rspamd"],
             ),
             ("ci/parity_cache_test.py", ["qualification", "scope"], ["image", "go"]),
+            ("ci/vet_wiring_test.py", ["scope"], ["image", "go"]),
             ("ci/ci_release_tag_test.py", ["dockerfiles"], ["image", "go", "scope"]),
             ("ci/decode_runs_test.go", ["go"], ["image", "parity", "postfix"]),
         ]:
@@ -209,8 +210,14 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(impact.plan(paths), impact.plan(paths * 2))
         self.assertTrue(impact.plan(paths)["image"])
 
+    def test_dockerfile_only_selects_go_without_scope(self):
+        result = impact.plan(["docker/Dockerfile"])
+        self.assertTrue(result["go"])
+        self.assertFalse(result["scope"])
+
     def test_unknown_and_unsafe_fail(self):
         for path in [
+            "ci/ci_vet_wiring_test.py",
             "new-surface/config.json",
             "../go.mod",
             "/go.mod",

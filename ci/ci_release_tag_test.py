@@ -79,7 +79,11 @@ if target.name == 'SHA256SUMS':
         checksums += checksums.splitlines(keepends=True)[0]
     target.write_text(checksums)
 else:
-    target.write_bytes(target.name.split('-linux-', 1)[0].encode())
+    asset = target.name.split('-linux-', 1)[0]
+    payload = asset.encode()
+    if os.environ.get('CHECKSUM_MODE') == 'asset_corrupt' and asset == 'strixd':
+        payload += b'-corrupt'
+    target.write_bytes(payload)
 """,
         encoding="utf-8",
     )
@@ -307,6 +311,14 @@ class ReleaseTagContract(unittest.TestCase):
                 result, _, binaries = run_commands("1.3.0", checksum_mode=mode)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(binaries, [])
+
+    def test_corrupted_download_is_rejected_before_installation(self):
+        result, urls, binaries = run_commands("1.3.0", checksum_mode="asset_corrupt")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("strixd-linux-arm64: FAILED", result.stdout)
+        self.assertIn("computed checksum did NOT match", result.stderr)
+        self.assertEqual(len(urls), 4)
+        self.assertEqual(binaries, [])
 
     def test_build_version_oci_label(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
