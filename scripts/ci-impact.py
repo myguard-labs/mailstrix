@@ -148,6 +148,7 @@ GO_INPUTS = [
     "ci/scanner_budget_test.go",
     "ci/rules_polling_config_test.go",
     "ci/mime_attachment_hash_test.go",
+    "ci/rar_password_extract_test.go",
     "cmd/*",
     "internal/*",
     "third_party/*",
