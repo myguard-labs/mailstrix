@@ -415,8 +415,7 @@ func (c *ClamdService) stream(conn net.Conn, br *bufio.Reader, term byte) {
 		c.s.metrics.scans.Add(1)
 		meta := ScanMeta{RawKey: streamDedupKey(body),
 			Effort: ResolveEffortLevel(0, false, c.s.autoEnvDefault(true), c.s.cfg.EffortMax)}
-		key := c.s.engine.Fingerprint() + ":" + meta.cacheKey() + ":" + string(meta.RawKey[:])
-		outcome, status := c.s.lookupScanOutcomeStarted(scanCtx, key, body, meta, func() { close(started) })
+		outcome, status, _ := c.s.lookupScanOutcomeStarted(scanCtx, "", body, meta, func() { close(started) })
 		if status == "canceled" {
 			recordBusy()
 			result <- "stream: busy ERROR"

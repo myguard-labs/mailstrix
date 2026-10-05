@@ -70,9 +70,9 @@ type Match struct {
 
 // Scanner compiles a set of YARA rules once and scans message bytes against
 // them. The compiled *yara.Rules is immutable once built, so reloads build a
-// fresh set and swap the pointer atomically — in-flight scans keep using the
-// old set until they finish, new scans pick up the new one. No scan ever holds
-// a lock for its (potentially slow) duration.
+// fresh generation and publish its rules and policy together. A scan pins that
+// immutable generation until its verdict has been cached; native objects remain
+// reachable through the pin. No scan holds a lock for its duration.
 type Scanner struct {
 	cacheDir       string // only set when srcFile is the managed cache bundle
 	loadedManifest atomic.Pointer[RulesManifest]
@@ -119,11 +119,17 @@ type Scanner struct {
 	// and are Destroyed on return rather than reused. See scannerGen.
 	scanners atomic.Pointer[scannerGen]
 
-	mu      sync.Mutex // serializes Reload so two SIGHUPs can't compile at once
-	srcDir  string
-	srcFile string // precompiled bundle; wins over srcDir when set
-	count   atomic.Int64
-	fp      atomic.Pointer[string] // ruleset identity fingerprint (namespace+identifier), changes on reload
+	// Lock order: mu (reload preparation), then generationMu (publication).
+	// Readers hold generationMu only to pin immutable rules/policy and identity.
+	// They never reacquire it during a scan or retain it across cache/native I/O.
+	mu            sync.Mutex
+	generationMu  sync.RWMutex
+	bigContent    string // source + pre-disable policy of the retained big bundle; mu
+	markerContent string // source + pre-disable policy of the retained marker bundle; mu
+	srcDir        string
+	srcFile       string // precompiled bundle; wins over srcDir when set
+	count         atomic.Int64
+	fp            atomic.Pointer[string] // ruleset identity fingerprint (namespace+identifier), changes on reload
 	// contentFP hashes the loaded ruleset SOURCE bytes (main + big-file set), so a
 	// rule body edit that keeps the same namespace+identifier (condition/meta/string
 	// change), or a big-file-set-only edit, still changes the verdict cache key. It
@@ -546,6 +552,10 @@ func (s *Scanner) Reload() error {
 // reloadWithContext exposes the cache-lock deadline to deterministic lifecycle
 // tests while keeping Reload's public timeout fixed.
 func (s *Scanner) reloadWithContext(ctx context.Context) error {
+	return s.reloadWithDenylist(ctx, nil)
+}
+
+func (s *Scanner) reloadWithDenylist(ctx context.Context, deny *map[string]struct{}) error {
 	if s.cacheDir != "" {
 		start := time.Now()
 		unlock, err := lockRules(ctx, s.cacheDir)
@@ -553,15 +563,24 @@ func (s *Scanner) reloadWithContext(ctx context.Context) error {
 			s.reloadAttempts.Add(1)
 			s.reloadFail.Add(1)
 			s.reloadLastMillis.Store(time.Since(start).Milliseconds())
+			if deny != nil {
+				s.mu.Lock()
+				s.publishDenylist(deny)
+				s.mu.Unlock()
+			}
 			return err
 		}
 		defer unlock()
 	}
-	return s.reloadLockedCache()
+	return s.reloadLockedCacheDeny(deny)
 }
 
 // reloadLockedCache requires the managed-cache lock when cacheDir is set.
 func (s *Scanner) reloadLockedCache() error {
+	return s.reloadLockedCacheDeny(nil)
+}
+
+func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -584,6 +603,9 @@ func (s *Scanner) reloadLockedCache() error {
 	}
 	if err != nil {
 		s.reloadFail.Add(1)
+		if denyOverride != nil {
+			s.publishDenylist(denyOverride)
+		}
 		s.logf("ERROR reload failed, keeping previous rules: %v", err)
 		return err
 	}
@@ -594,6 +616,9 @@ func (s *Scanner) reloadLockedCache() error {
 	// disableDeniedRules skips global and private rules to avoid silently suppressing
 	// non-denied rules that reference them in their conditions.
 	deny := func() map[string]struct{} {
+		if denyOverride != nil {
+			return *denyOverride
+		}
 		if p := s.denylist.Load(); p != nil {
 			return *p
 		}
@@ -602,30 +627,25 @@ func (s *Scanner) reloadLockedCache() error {
 	mainDisabled := disableDeniedRules(rules, deny)
 
 	list := rules.GetRules()
-	s.rules.Swap(rules)
-	s.count.Store(int64(len(list)))
 	fp := fingerprint(list)
-	if old := s.fp.Load(); old != nil {
-		s.reloadPrevFP.Store(old)
-	}
-	s.fp.Store(&fp)
-	s.reloadOK.Add(1)
-	s.reloadLastUnix.Store(time.Now().Unix())
-	// Start with filesystem mtime, then prefer a verified publication time.
-	// Future publication timestamps retain the fallback instead of muting age.
-	s.rulesModUnix.Store(rulesetModUnix(s.srcFile, s.srcDir))
+	modUnix := rulesetModUnix(s.srcFile, s.srcDir)
+	var manifest *RulesManifest
 	if s.cacheDir != "" {
 		m := readLocalManifest(filepath.Join(s.cacheDir, manifestName))
-		// An identity is reported only if it describes these exact loaded bytes.
 		if verifyBundle(s.srcFile, m) == nil {
-			s.loadedManifest.Store(&m)
+			manifest = &m
 			if generated, err := time.Parse(time.RFC3339, m.Generated); err == nil && generated.Unix() > 0 && !generated.After(time.Now()) {
-				s.rulesModUnix.Store(generated.Unix())
+				modUnix = generated.Unix()
 			}
-		} else {
-			s.loadedManifest.Store(nil)
 		}
 	}
+	// Record the policy used for native pre-disabling as part of each bundle's
+	// identity. A failed auxiliary load retains BOTH its old rules and identity.
+	dlFP := denylistHash(deny)
+	mainContent := rulesetContentHash(s.srcFile, s.srcDir, "", "") + ":" + dlFP
+	bigRules, markerRules := s.bigRules.Load(), s.markerRules.Load()
+	bigContent, markerContent := s.bigContent, s.markerContent
+
 	// The previous *yara.Rules is intentionally NOT Destroy()ed here: an in-flight
 	// scan may still hold the pointer it loaded before the swap, and freeing the
 	// native rules under it would crash. go-yara registers a runtime finalizer on
@@ -636,12 +656,12 @@ func (s *Scanner) reloadLockedCache() error {
 	if s.srcFile != "" {
 		src = s.srcFile
 	}
-	s.logf("loaded %d YARA rules from %s (fp=%s, deny-disabled=%d)", s.count.Load(), src, fp, mainDisabled)
+	s.logf("loaded %d YARA rules from %s (fp=%s, deny-disabled=%d)", len(list), src, fp, mainDisabled)
 
 	// Big-file (oversized-buffer) ruleset: compiled/loaded the SAME way as the main
 	// set and swapped in atomically so it stays in sync on every reload/SIGHUP. A
-	// failure here must NOT fail the reload — the main set is the trust anchor; the
-	// gate simply falls back to the full ruleset (logged) until the next good load.
+	// failure here must NOT fail the reload — retain the previous big bundle,
+	// or use the full ruleset if no previous big bundle exists.
 	if s.bigSrcFile != "" || s.bigSrcDir != "" {
 		var (
 			big    *yara.Rules
@@ -661,37 +681,47 @@ func (s *Scanner) reloadLockedCache() error {
 			}
 			// PERF-30: pre-disable denied rules before exposing the fresh big-bundle.
 			bigDisabled := disableDeniedRules(big, deny)
-			s.bigRules.Swap(big)
+			bigRules = big
+			bigContent = rulesetContentHash(s.bigSrcFile, s.bigSrcDir, "", "") + ":" + dlFP
 			s.logf("loaded %d big-file YARA rules from %s (oversized-buffer gate, threshold=%dB, deny-disabled=%d)", len(big.GetRules()), bigSrc, s.bigFileThreshold, bigDisabled)
 		}
 	}
 
 	// PERF-18: build the marker-only bundle by recompiling the same source and
 	// disabling all non-marker-tagged rules. A failure here must NOT fail the
-	// reload — the main set is the trust anchor; the marker channel simply falls
-	// back to the full ruleset (same behaviour as before PERF-18) until the next
-	// good load.
+	// reload — retain the previous marker bundle, or use the full ruleset when
+	// there is no previous marker bundle.
 	// PERF-30: pass the deny map so denied marker rules are also pre-disabled;
 	// a denied rule that happens to carry the "marker" tag should still be skipped.
 	if mb, mbErr := buildMarkerBundleFromFiles(s.srcFile, s.srcDir, mainRuleFiles, deny, s.logf); mbErr != nil {
-		s.logf("WARNING: PERF-18 marker bundle build failed, marker channel will use full ruleset: %v", mbErr)
+		s.logf("WARNING: PERF-18 marker bundle build failed, keeping previous (or full ruleset fallback): %v", mbErr)
 	} else if mb != nil {
-		s.markerRules.Swap(mb)
+		markerRules = mb
+		markerContent = mainContent
 	}
 
-	// Fold a content hash of the loaded ruleset SOURCE (main + big-file set) into the
-	// fingerprint. Identity (namespace+identifier) alone cannot see a condition/meta/
-	// string edit that reuses the same rule name, nor a big-file-set-only change, so
-	// without this an edited-but-same-named rule would keep its old verdict-cache key
-	// and serve stale verdicts (especially the shared Redis L2) until TTL. Computed
-	// from source bytes so it is identical across replicas that loaded the same bundle.
-	ch := rulesetContentHash(s.srcFile, s.srcDir, s.bigSrcFile, s.bigSrcDir)
+	// Hash the effective bundles, including retained auxiliaries after a failed
+	// load. Hashing only today's source files would misidentify that fallback.
+	h := sha256.Sum256([]byte(mainContent + "\x00big\x00" + bigContent + "\x00marker\x00" + markerContent))
+	ch := hex.EncodeToString(h[:8])
+	s.generationMu.Lock()
+	if old := s.fp.Load(); old != nil {
+		s.reloadPrevFP.Store(old)
+	}
+	s.rules.Store(rules)
+	s.bigRules.Store(bigRules)
+	s.markerRules.Store(markerRules)
+	s.bigContent, s.markerContent = bigContent, markerContent
+	s.count.Store(int64(len(list)))
+	s.fp.Store(&fp)
 	s.contentFP.Store(&ch)
-
-	// PERF-30 / #251-class: fold the effective denylist into the Fingerprint so
-	// scanners with different deny sets don't share verdict-cache entries.
-	dlFP := denylistHash(deny)
+	s.denylist.Store(&deny)
 	s.denylistFP.Store(&dlFP)
+	s.loadedManifest.Store(manifest)
+	s.rulesModUnix.Store(modUnix)
+	s.generationMu.Unlock()
+	s.reloadOK.Add(1)
+	s.reloadLastUnix.Store(time.Now().Unix())
 
 	// Reset the top-matches counter so counts reflect the current rule set only,
 	// not a mix of old and new rule names that may have been renamed/removed.
@@ -720,6 +750,14 @@ func (s *Scanner) reloadLockedCache() error {
 // including Meta, and Redis L2 survives restarts, so scanners with different
 // allowlist/canary policy must not share cached response metadata.
 func (s *Scanner) Fingerprint() string {
+	s.generationMu.RLock()
+	defer s.generationMu.RUnlock()
+	return s.fingerprintLocked()
+}
+
+// fingerprintLocked requires generationMu; lease operations never call the
+// public locking methods, including when a reload writer is waiting.
+func (s *Scanner) fingerprintLocked() string {
 	fp := ""
 	if p := s.fp.Load(); p != nil {
 		fp = *p
@@ -1436,7 +1474,13 @@ func (v scanVars) define(sc *yara.Scanner) error {
 // for a non-document, or on any extract/sub-scan failure, the raw verdict stands
 // and nothing is lost.
 func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
-	rules := s.rules.Load()
+	lease := s.acquireScanLease()
+	defer lease.release()
+	return lease.scan(buf, meta)
+}
+
+func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGeneration) ([]Match, error) {
+	rules := generation.rules
 	if rules == nil {
 		return nil, fmt.Errorf("no rules loaded")
 	}
@@ -1479,7 +1523,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	// to the full set rather than disarm — logged once so it's visible, never fatal.
 	rawRules := rules
 	if s.bigFileThreshold > 0 && int64(len(buf)) > s.bigFileThreshold {
-		if big := s.bigRules.Load(); big != nil {
+		if big := generation.bigRules; big != nil {
 			rawRules = big
 			s.bigFileScans.Add(1)
 			s.logf("oversized buffer (%dB > %dB threshold): scanning against big-file ruleset instead of full set", len(buf), s.bigFileThreshold)
@@ -1730,7 +1774,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		// always keep the full set. Mirrors the raw gate (nil bigRules → full set).
 		streamRules := rules
 		if !markerChannel && s.bigFileThreshold > 0 && int64(len(stream)) > s.bigFileThreshold {
-			if big := s.bigRules.Load(); big != nil {
+			if big := generation.bigRules; big != nil {
 				streamRules = big
 				s.bigFileStreamScans.Add(1)
 				oversizedRerouted++
@@ -1744,7 +1788,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 		// ruleset when the bundle is not available. filterMarkerChannel remains as
 		// belt-and-suspenders regardless of which ruleset is used.
 		if markerChannel {
-			if mb := s.markerRules.Load(); mb != nil {
+			if mb := generation.markerRules; mb != nil {
 				streamRules = mb
 			}
 		}
@@ -1833,7 +1877,7 @@ func (s *Scanner) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
 	// synthetic feed matches are added, so MALWAREBAZAAR_*/URLHAUS_* are never
 	// affected by the rule denylist. Allowlist tags are applied once, by the
 	// response-tagging pass below, which covers YARA and feed hits alike.
-	out = s.filterDenied(out)
+	out = filterDenied(out, generation.deny)
 	// Record rule names for the top-matches counter (observability via /version).
 	if len(out) > 0 {
 		names := make([]string, len(out))
@@ -2077,7 +2121,10 @@ func degradedReason(matches []Match) string {
 // by applyResponseTags (PERF-62), which every Scan result passes through after
 // this filter. Deny wins if a name is in both lists.
 func (s *Scanner) filterDenied(in []Match) []Match {
-	deny := s.denylist.Load()
+	return filterDenied(in, s.denylist.Load())
+}
+
+func filterDenied(in []Match, deny *map[string]struct{}) []Match {
 	if deny == nil || len(*deny) == 0 || len(in) == 0 {
 		return in
 	}
@@ -2184,14 +2231,26 @@ func (s *Scanner) ReloadDenylist() {
 	if err := sc.Err(); err != nil {
 		s.logf("WARNING: error reading denylist file %s: %v (partial load)", s.denylistFile, err)
 	}
-	s.denylist.Store(&merged)
 	s.logf("denylist reloaded: %d from env + %d from file = %d total", len(s.baseDenylist), added, len(merged))
 	// Re-apply deny set to loaded bundles by triggering a full Reload.
 	// This is safe: Reload compiles fresh bundles (new C objects) and swaps
 	// them atomically, so in-flight scans on the old bundles are unaffected.
-	if err := s.Reload(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := s.reloadWithDenylist(ctx, &merged); err != nil {
 		s.logf("WARNING: Reload after denylist change failed: %v (pre-disable may be stale)", err)
 	}
+}
+
+// publishDenylist preserves the post-filter update on a failed rules reload.
+// The old native bundle identities remain in contentFP, so removing a deny
+// entry cannot masquerade as a successfully re-enabled native rule. Requires mu.
+func (s *Scanner) publishDenylist(deny *map[string]struct{}) {
+	fp := denylistHash(*deny)
+	s.generationMu.Lock()
+	s.denylist.Store(deny)
+	s.denylistFP.Store(&fp)
+	s.generationMu.Unlock()
 }
 
 // Close releases the scanner's background resources: it stops the abuse.ch feed
