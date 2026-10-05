@@ -23,7 +23,7 @@ def test_stage_command():
 
 
 class VetWiringTests(unittest.TestCase):
-    def invoke(self, scope, violation=False, selector_failure=False):
+    def invoke(self, scope, violation=False, selector_failure=False, test_failure=False):
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory)
             (fixture / "go.mod").write_text("module example.com/fixture\n\ngo 1.26\n")
@@ -36,6 +36,11 @@ class VetWiringTests(unittest.TestCase):
                     f'package {name}\nimport "fmt"\n'
                     f'func Check() {{ fmt.Printf("%d", {argument}) }}\n'
                 )
+            test_body = 't.Fatal("selected test failure")' if test_failure else "Check()"
+            (fixture / "affected/fixture_test.go").write_text(
+                'package affected\nimport "testing"\n'
+                f"func TestSelected(t *testing.T) {{ {test_body} }}\n"
+            )
             binary = fixture / "bin"
             binary.mkdir()
             shim = binary / "go"
@@ -77,8 +82,14 @@ exec "$REAL_GO" "$@"
         result, trace = self.invoke("./affected")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vet -tags yara_static ./affected\n", trace)
-        self.assertIn("test -race -tags yara_static ./affected\n", trace)
+        self.assertIn("test -race -p 1 -tags yara_static ./affected\n", trace)
         self.assertNotIn("./unaffected", trace)
+
+    def test_selected_test_failure_is_fatal(self):
+        result, trace = self.invoke("./affected", test_failure=True)
+        self.assertNotEqual(result.returncode, 0, "selected test failure must fail")
+        self.assertIn("selected test failure", result.stdout)
+        self.assertIn("test -race -p 1 -tags yara_static ./affected\n", trace)
 
     def test_affected_vet_violation_is_fatal_before_tests(self):
         result, trace = self.invoke("./affected", violation=True)

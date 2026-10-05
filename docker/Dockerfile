@@ -91,6 +91,8 @@ FROM build AS test
 # CHANGED_FILES narrows tests and vet to changed packages and real consumers.
 # No list preserves full release/maintenance coverage. Explicit unknown inputs
 # fail selection; documentation without a test contract selects no packages.
+# Race-instrumented boundary suites can use several GiB each. Run package
+# processes serially so their peaks fit the 6 GiB CI runner; retain every test.
 ARG CHANGED_FILES=""
 # CHANGED_FILES and pkgs are space-separated lists: word splitting is intended.
 # hadolint ignore=SC2086
@@ -99,7 +101,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
     && echo "go test scope: ${pkgs:-<none, docs-only change>}" \
     && if [ -n "$pkgs" ]; then \
-        go vet -tags yara_static $pkgs && go test -race -tags yara_static $pkgs; \
+        go vet -tags yara_static $pkgs && go test -race -p 1 -tags yara_static $pkgs; \
     fi
 
 # ---- binary export (release artifacts; not part of the runtime image) -------
