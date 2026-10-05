@@ -44,6 +44,17 @@ func capeTLSFixture(t *testing.T) (capeResolver, *http.Client) {
 	}, client
 }
 
+func waitCAPEAcceptSlots(t *testing.T, slots <-chan struct{}, want int, timeout time.Duration, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for len(slots) != want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(slots); got != want {
+		t.Fatalf("%s: slots=%d want=%d", message, got, want)
+	}
+}
+
 func TestCAPEDaemonTLSFactoryMount(t *testing.T) {
 	resolve, client := capeTLSFixture(t)
 	s := newTestServer(&fakeEngine{}, "tok")
@@ -224,6 +235,9 @@ func TestCAPEDaemonTLSConcreteConnAndAcceptLifecycle(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < capeReadHeaderTimeout-2*time.Second {
 		t.Fatalf("TLS handshake timeout elapsed outside lifecycle bound: %v", elapsed)
 	}
+	// The client can observe the socket close before the server releases its
+	// accept slot. Wait for that release before opening another connection.
+	waitCAPEAcceptSlots(t, service.accepts.slots, 0, 5*time.Second, "timed-out TLS handshake retained accept slot")
 
 	response, err := client.Get("https://" + service.listener.Addr().String() + "/v1/cape/jobs")
 	if err != nil {
@@ -246,13 +260,7 @@ func TestCAPEDaemonTLSConcreteConnAndAcceptLifecycle(t *testing.T) {
 		t.Fatal("over-cap connection was held instead of refused")
 	}
 	client.CloseIdleConnections()
-	deadline := time.Now().Add(time.Second)
-	for len(service.accepts.slots) != 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := len(service.accepts.slots); got != 0 {
-		t.Fatalf("closed keep-alive connection retained slot: slots=%d", got)
-	}
+	waitCAPEAcceptSlots(t, service.accepts.slots, 0, time.Second, "closed keep-alive connection retained slot")
 }
 
 func TestCAPEDaemonOperationalFailurePreservesStatic(t *testing.T) {
