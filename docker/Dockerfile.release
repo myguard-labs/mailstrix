@@ -1,45 +1,55 @@
 # strixd — release-binary image (multi-arch, no Go/libyara compile).
 #
 # Unlike docker/Dockerfile (which compiles strixd from source with CGO against a
-# statically-linked libyara), this variant ADDs the per-arch binaries straight
-# from the GitHub v<VERSION> release. That removes the heavy Go+libyara compile
+# statically-linked libyara), this variant downloads per-arch binaries straight
+# from the selected GitHub release tag. That removes the heavy Go+libyara compile
 # from the per-arch path, so a multi-arch buildx bake doesn't QEMU-emulate the
-# slow Go build — it only emulates the (much lighter) native `yarac` rules
-# compile, which is unavoidable because a .yac is architecture-specific.
+# slow Go build. Target-platform setup and native `yarac` rules compilation may
+# still use emulation; a .yac is architecture-specific.
 #
 # Used by the dockerized daily bake (target debian-mailstrix). The source-compile
 # Dockerfile stays the source of truth for CI (release.yml builds the binaries
 # this file then consumes).
 #
-# Requires VERSION to name a published release whose assets include
+# Requires VERSION or RELEASE_TAG to name a published release whose assets include
 # strixd-linux-${TARGETARCH} and strix-scan-linux-${TARGETARCH}; strix-milter-linux-
 # ${TARGETARCH} is shipped too when the release has it.
+# Mutable nightly releases also require RELEASE_CACHEBUST (the nightly build SHA);
+# changing that token invalidates the fetch layer when their assets are replaced.
 
 ARG YARA_VERSION=4.5.2
+ARG VERSION
+ARG RELEASE_TAG
 
-# ---- fetch release binaries (arch-neutral; runs on the build host) ----------
-# This stage does NOT execute target-arch code, so it is not QEMU-emulated. ADD
-# pulls the per-arch asset selected by the build platform's TARGETARCH.
+# ---- fetch release binaries (per target architecture) -----------------------
+# This unqualified FROM runs for the target platform. It downloads assets
+# selected by TARGETARCH without executing the downloaded binaries.
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS fetch
 ARG VERSION
+ARG RELEASE_TAG
 ARG TARGETARCH
-RUN test -n "${VERSION}" || (echo "VERSION build-arg is required (e.g. 1.0.0)" >&2; exit 1)
+RUN test -n "${VERSION}" || test -n "${RELEASE_TAG}" || (echo "VERSION or RELEASE_TAG build-arg is required" >&2; exit 1)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Strip a leading v if the caller passed a tag-style version.
-# Download both binaries + the release SHA256SUMS and verify before trusting the
-# assets (the source-compile Dockerfile builds from trusted source; this variant
-# pulls prebuilt artifacts, so checksum-gate them). SHA256SUMS lists every asset;
-# filter to just the two we fetched and check.
+# Download release binaries and SHA256SUMS, then verify each fetched asset.
+# The source-compile Dockerfile builds from trusted source; this variant pulls
+# prebuilt artifacts. SHA256SUMS lists every release asset;
+# filter to just the assets fetched and check.
 WORKDIR /out
+ARG RELEASE_CACHEBUST
 # strix-milter is optional: releases before it shipped (<= 1.2.0) lack the
 # asset, so it is fetched (and checksum-verified) only when SHA256SUMS lists it.
 # Every fetched binary must have exactly one SHA256SUMS line and pass it.
 # bins is a space-separated list: word splitting is intended.
 # hadolint ignore=SC2086
 RUN VER="${VERSION#v}" \
-    && base="https://github.com/myguard-labs/mailstrix/releases/download/v${VER}" \
+    && tag="${RELEASE_TAG:-v${VER}}" \
+    && if [ "${tag}" = nightly ]; then \
+         test -n "${RELEASE_CACHEBUST}" || (echo "RELEASE_CACHEBUST build-arg is required for nightly" >&2; exit 1); \
+       fi \
+    && base="https://github.com/myguard-labs/mailstrix/releases/download/${tag}" \
     && curl -fsSL "${base}/SHA256SUMS"                      -o SHA256SUMS \
     && curl -fsSL "${base}/strixd-linux-${TARGETARCH}"      -o "strixd-linux-${TARGETARCH}" \
     && curl -fsSL "${base}/strix-scan-linux-${TARGETARCH}" -o "strix-scan-linux-${TARGETARCH}" \
@@ -81,7 +91,7 @@ RUN ./bootstrap.sh \
 # ---- rules ------------------------------------------------------------------
 # Identical to docker/Dockerfile: compile the seed .yac with the exact libyara's
 # yarac (a .yac is version- AND arch-locked to its compiler). This is the one
-# stage that runs target-arch code under a multi-arch bake.
+# stage that compiles YARA rules for the target architecture under a multi-arch bake.
 FROM yara AS rules
 # curl and ca-certificates are inherited from the yara stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -133,6 +143,12 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
 
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
+ARG VERSION
+ARG RELEASE_TAG
+# The label follows RELEASE_TAG or VERSION verbatim. Set BUILD_VERSION explicitly
+# when a caller needs a normalized label (for example, a leading v).
+ARG BUILD_VERSION=${RELEASE_TAG:-${VERSION}}
+LABEL org.opencontainers.image.version="${BUILD_VERSION}"
 # Same three binaries as docker/Dockerfile's final image (strix-milter only
 # when the release carries it), so :latest and :testing behave alike.
 COPY --from=fetch /out/bin/ /usr/local/bin/
