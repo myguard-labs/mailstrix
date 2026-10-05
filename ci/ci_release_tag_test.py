@@ -270,8 +270,8 @@ class ReleaseTagContract(unittest.TestCase):
         fetch = source.split(" AS fetch\n", 1)[1].split("\nFROM ", 1)[0]
         rules = source.split(" AS rules\n", 1)[1].split("\nFROM ", 1)[0]
         self.assertRegex(fetch, r"(?m)^ARG RELEASE_CACHEBUST$")
-        self.assertNotRegex(fetch, r"(?m)^ARG CACHEBUST(?:=|$)")
-        self.assertNotIn("${CACHEBUST}", fetch)
+        self.assertNotRegex(fetch, r"(?im)^[ \t]*ARG[ \t]+CACHEBUST(?=[ \t=]|$)")
+        self.assertNotRegex(fetch, r"\$(?:CACHEBUST\b|\{CACHEBUST(?:[^}]*)\})")
         self.assertRegex(rules, r"(?m)^ARG CACHEBUST=unset$")
         self.assertLess(fetch.index("ARG RELEASE_CACHEBUST"), fetch.index("RUN VER="))
         for token in ("build-sha-a", "build-sha-b"):
