@@ -213,37 +213,26 @@ class ReleaseTagContract(unittest.TestCase):
         self.assertEqual(binaries, list(ASSETS))
 
     def test_nightly_tag_override(self):
-        result, urls, binaries = run_commands(
-            "1.2.0", "nightly", milter=False, release_cachebust="build-sha"
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            urls,
-            [
-                f"{RELEASE_URL}/nightly/SHA256SUMS",
-                f"{RELEASE_URL}/nightly/strixd-linux-arm64",
-                f"{RELEASE_URL}/nightly/strix-scan-linux-arm64",
-            ],
-        )
-        self.assertEqual(binaries, ["strix-scan", "strixd"])
+        for version in ("1.2.0", ""):
+            with self.subTest(version=version):
+                result, urls, binaries = run_commands(
+                    version, "nightly", milter=False, release_cachebust="build-sha"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    urls,
+                    [
+                        f"{RELEASE_URL}/nightly/SHA256SUMS",
+                        f"{RELEASE_URL}/nightly/strixd-linux-arm64",
+                        f"{RELEASE_URL}/nightly/strix-scan-linux-arm64",
+                    ],
+                )
+                self.assertEqual(binaries, ["strix-scan", "strixd"])
 
-    def test_empty_override_falls_back_and_explicit_tag_needs_no_version(self):
+    def test_empty_override_falls_back_to_version(self):
         result, urls, _ = run_commands("1.2.0", "")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(urls[0], f"{RELEASE_URL}/v1.2.0/SHA256SUMS")
-        result, urls, binaries = run_commands(
-            "", "nightly", milter=False, release_cachebust="build-sha"
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            urls,
-            [
-                f"{RELEASE_URL}/nightly/SHA256SUMS",
-                f"{RELEASE_URL}/nightly/strixd-linux-arm64",
-                f"{RELEASE_URL}/nightly/strix-scan-linux-arm64",
-            ],
-        )
-        self.assertEqual(binaries, ["strix-scan", "strixd"])
 
     def test_missing_selection_and_download_error_fail(self):
         result, urls, _ = run_commands("")
