@@ -30,7 +30,8 @@ command -v docker >/dev/null 2>&1 || { echo "SKIP - docker not available"; exit 
 for sentinel in tools/private-corpus.sentinel.json \
     tools/parity/private-corpus.sentinel.json \
     tools/parity/testdata/private-corpus.sentinel.json \
-    tools/parity/private-corpus-sentinel; do
+    tools/parity/private-corpus-sentinel \
+    ci/testdata/private-corpus.sentinel; do
     if [ -e "$root/$sentinel" ] || [ -L "$root/$sentinel" ]; then
         echo "FAIL - private-corpus sentinel path already exists: $sentinel"
         exit 1
@@ -48,6 +49,7 @@ cleanup() {
           "$root/tools/parity/private-corpus.sentinel.json" \
           "$root/tools/parity/testdata/private-corpus.sentinel.json" \
           "$root/tools/parity/private-corpus-sentinel/sample.go" \
+          "$root/ci/testdata/private-corpus.sentinel" \
           "$root/build.log.sentinel" 2>/dev/null || true
     rmdir "$root/secrets-sentinel" 2>/dev/null || true
     rmdir "$root/rules-sentinel" 2>/dev/null || true
@@ -71,6 +73,7 @@ echo "inert" > "$root/tools/private-corpus.sentinel.json"
 echo "inert" > "$root/tools/parity/private-corpus.sentinel.json"
 echo "inert" > "$root/tools/parity/testdata/private-corpus.sentinel.json"
 echo "inert" > "$root/tools/parity/private-corpus-sentinel/sample.go"
+echo "inert" > "$root/ci/testdata/private-corpus.sentinel"
 
 probe_dockerfile="$tmpdir/Dockerfile.probe"
 cat > "$probe_dockerfile" <<'EOF'
@@ -113,6 +116,7 @@ check_absent 'tools/parity/testdata/private-corpus\.sentinel\.json' 'private par
 check_absent 'tools/parity/private-corpus-sentinel' 'private parity subtree sentinel'
 check_absent 'ci/ci_impact_test\.py' 'host-only CI Python tests'
 check_absent 'ci/testscope_test\.sh' 'host-only CI shell tests'
+check_absent 'ci/testdata/private-corpus\.sentinel' 'unlisted CI fixture sentinel'
 
 # Real files docker/Dockerfile's `build`/`test` stage COPY . . actually needs
 # must still be present, so a deny-by-default .dockerignore can't silently
@@ -131,6 +135,7 @@ check_present 'go\.sum' 'go.sum'
 check_present 'cmd' 'cmd/'
 check_present 'internal' 'internal/'
 check_present 'ci/scanner_budget_test\.go' 'native scanner budget regression'
+check_present 'ci/testdata/rc4md5-biff\.xls' 'synthetic RC4MD5 regression fixture'
 check_present 'docker/Dockerfile' 'docker/Dockerfile'
 check_present 'docker/fetch-rules\.sh' 'docker/fetch-rules.sh'
 check_present 'scripts/smoke\.sh' 'scripts/smoke.sh'
