@@ -12,7 +12,8 @@ import (
 )
 
 // ExtractWithOptions does not expose archive member names. Distinct content
-// digests tie each emitted stream to one named member in the fixture manifest.
+// digests identify the expected payload streams while the fixture manifest
+// separately records the upstream member names.
 var encryptedRARMembers = []struct {
 	name   string
 	size   int
