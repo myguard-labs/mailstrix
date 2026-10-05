@@ -2,7 +2,7 @@
   <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="100%"></a>
 </p>
 
-# strixd — YARA malware scanning for rspamd
+# strixd — YARA malware scanning for mail and ICAP
 
 **Mailstrix is the owl that finds malware hiding in your mail.** It takes hostile
 attachments apart — unwrapping OLE2/OOXML, VBA, RTF objects, PDFs, archives and
@@ -16,9 +16,9 @@ Dovecot Sieve, or standalone.
 
 **strixd is a small HTTP service that scans email for malware with
 [YARA](https://virustotal.github.io/yara/).** You hand it a message (or one
-attachment) on `POST /scan`; it runs ~10,000 curated public YARA rules over it
+attachment) on `POST /scan`; it runs compiled YARA rules over it
 and tells you which ones matched. It ships as a ready-to-run Docker image with
-the rules already baked in — see **[Quick start](#quick-start)** below or pull it
+an initial rules bundle — see **[Quick start](#quick-start)** below or pull it
 straight from **[Docker Hub](https://hub.docker.com/r/myguard-labs/mailstrix)**.
 
 **Why YARA, in one paragraph.** YARA is the rule engine malware analysts use to
@@ -49,14 +49,13 @@ compiles those rules — libyara modules and all — and runs them over your mai
 - **clamd streams** — opt-in Unix/TCP listeners in `strixd` accept `INSTREAM`
   from supported clamd clients ([subset, limits and examples](contrib/clamd/)).
 
-```
- ┌───────────────────────┐  POST /scan  ┌──────────────┐    ┌──────────────┐
- │ rspamd (mailstrix.lua) │ ───────────▶ │    strixd    │ ─▶ │   libyara    │
- │ SpamAssassin / Sieve   │ ◀─────────── │ (Go service) │    │compiled rules│
- │ (strix-scan) / ICAP    │   {matches}  └──────────────┘    └──────────────┘
- │ Postfix (strix-milter) │
- └───────────────────────┘
-```
+These integrations use the same strixd scan engine and rules:
+
+| Interface | Clients |
+| --- | --- |
+| HTTP `POST /scan` | Rspamd, SpamAssassin, Sieve, Postfix/Sendmail Milter |
+| ICAP REQMOD/RESPMOD | ICAP-aware proxies |
+| clamd `INSTREAM` | Supported stream clients |
 
 > **Where should YARA scanning live — opinion.** YARA scanning is genuinely
 > CPU-intensive, and the MTA hot path is the most latency-sensitive place to spend
@@ -83,8 +82,10 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
   get back the matched rules as JSON; the rspamd `mailstrix.lua` plugin
   ([`contrib/rspamd/`](contrib/rspamd/)) wires the hits into the spam score, or the `strix-scan`
   client scans at delivery from Dovecot/Sieve ([`contrib/sieve/`](contrib/sieve/)).
-- **Ships ~10k public rules baked in** — YARA-Forge, signature-base, ANY.RUN,
-  Didier Stevens, bartblaze, InQuest, CAPEv2, YARAify; precompiled `.yac`, daily refresh.
+- **Loads a compiled rules bundle** — the image includes a seed; the rolling
+  `rules-current` publication can refresh the active bundle without changing
+  the binary. The source set includes YARA-Forge, signature-base, ANY.RUN,
+  Didier Stevens, bartblaze, InQuest, CAPEv2 and YARAify.
 - **Decompresses Office macros before matching** — MS-OVBA VBA out of
   `.docm`/`.xlsm`/`.doc`/`.xls`, scans the cleartext (sets the `VBA` rule var).
 - **Cracks open containers** — pulls the hidden payload out of: OLE2/OOXML,
@@ -100,7 +101,8 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Resolves Excel 4.0 (XLM) macros** — detects hidden/very-hidden macrosheets
   (OOXML + legacy `.xls` BIFF), reassembles `ptg`-token formula strings
   (BIFF8/`.xlsb`/SLK), and runs a **bounded XLM emulator** (cell eval, `GOTO`,
-  `SET.VALUE`) to resolve obfuscated cell references.
+  `SET.VALUE`) to resolve obfuscated cell references. BIFF8 macrosheets also
+  resolve `SHRFMLA` shared formulas referenced by `ptgExp`, within parser limits.
 - **Triages PDFs** — surfaces `/OpenAction`, `/JS`, `/Launch`, `/EmbeddedFile`,
   `/JBIG2Decode` and hex-name obfuscation as scoreable markers.
 - **Catches macro-less & exploit attacks** — Equation Editor (CVE-2017-11882),
@@ -190,7 +192,7 @@ The daemon package installs a hardened systemd unit (unprivileged `strixd` user,
 
 ## Quick start
 
-The image already bakes ~10k rules, so a token is all you need:
+The image includes a compiled seed bundle, so a token is all you need:
 
 ```sh
 docker run -d --name strixd \
@@ -296,6 +298,14 @@ prebuilt, version-matched bundle into the cache instead:
 strixd fetch-rules -cache-dir /var/cache/mailstrix
 ```
 
+The tagged binary release and the rolling `rules-current` bundle have separate
+dates. The local nightly publisher replaces the rolling bundle's assets; it
+does not rebuild a tagged binary. A binary's release date therefore cannot tell
+you when its loaded rules were generated. Check the `/version` fields
+`rules_manifest.generated` and `rules_update.loaded_version` for the active
+bundle when present. The published and cached versions may differ from the
+successfully loaded one.
+
 It reads a small manifest first and updates only when the published **version**
 is newer; it **refuses** a bundle built against a different **libyara**,
 **verifies the sha256**, and swaps atomically (keeping one `.bak`). On any error
@@ -382,6 +392,10 @@ The bundled Prometheus alerts allow 30 hours after an earlier successful check,
 covering the daily polling default plus up to 20% jitter (28.8 hours). Adjust the
 `108000`-second threshold when selecting a longer polling interval. The initial
 check and published-but-not-loaded deadlines remain 30 minutes.
+These are monitoring thresholds, not a guarantee that new rule updates will be
+available or loaded within a fixed time. A failed publisher, network check or
+reload keeps the last good rules and must be investigated through the receipt,
+`/version` identity and alert metrics.
 
 The publisher uploads the bundle first and manifest last, then runs an isolated
 native verifier against the released URLs. During replacement, a mismatched
@@ -848,24 +862,17 @@ rules), merging and de-duplicating matches:
   the URLhaus lookup; a hit found only after defanging is flagged `_DEOBF`.
 
 Extraction is **best-effort and fail-open**: a non-document, a parse error, an
-encrypted package, or a hostile/poison file (oleparse panics are recovered)
-falls back to a raw-only scan. The whole request shares one `MAILSTRIX_SCAN_TIMEOUT`
+unsupported or non-default-password encrypted package, or a hostile/poison file
+(oleparse panics are recovered) falls back to a raw-only scan. Supported
+default-password documents are decrypted and re-scanned as described above.
+The whole request shares one `MAILSTRIX_SCAN_TIMEOUT`
 across raw + every extracted stream, and zip-bomb/quine caps (per-item, total
 bytes, member/depth counts) bound the work, so one document can't monopolize a
-worker. Encrypted (ECMA-376) OOXML is counted but **not** decrypted.
-
-This covers what Python [oletools](https://github.com/decalage2/oletools) does
-for mail (VBA extraction+decompression, macro/autoexec keyword detection incl. an
-mraptor-style autoexec+write+execute heuristic, OLE/encryption + ObjectPool/Flash
-indicators, RTF exploit + embedded-object carve, the olevba string-fold set
-— `Chr`/`Replace`/`Xor`/`StrReverse`/`Environ` and Dridex string decode —
-single-layer base64/hex, IOC→reputation), in-process and with no Python, while
-adding container formats oletools does not touch (MSI, `.msg`, OneNote, `.lnk`,
-PDF, nested archives) and live URLhaus/MalwareBazaar reputation. The deep tail —
-***multi-stage*** deobfuscation (a payload encoded two-plus layers deep) and
-XLM/Excel-4.0 *emulation* — still belongs to `olevba`, which is why
-[`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) stays as a parallel
-deep-scan scorer.
+Production extraction, bounded multi-stage decoding and XLM evaluation run in
+strixd without Python, oletools or olefy. The optional
+[`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) integration is a
+separate scorer; it is not required for these features. These bounded heuristics
+do not provide full VBA emulation or a guarantee of oletools parity.
 
 ## abuse.ch feeds (optional)
 
@@ -897,13 +904,19 @@ c-icap, traffic proxies, MTA content-filters).
 
 ### Enabling
 
-```bash
-docker run ... -e MAILSTRIX_ICAP_ADDR=:1344 ...
+```sh
+docker run --rm --name mailstrix-icap \
+    -e MAILSTRIX_HOST=127.0.0.1 \
+    -e MAILSTRIX_ICAP_ADDR=:1344 \
+    -p 127.0.0.1:1344:1344 \
+    myguard-labs/mailstrix
 ```
 
 The ICAP listener starts on `:1344` (IANA ICAP port). The HTTP `/scan` server
-continues to run on `MAILSTRIX_PORT` alongside it. Both share the same scan engine,
-verdict cache, and concurrency budget (`MAILSTRIX_MAX_INFLIGHT`).
+continues to run on `MAILSTRIX_PORT` alongside it; this example binds HTTP to
+the container's loopback and publishes only ICAP on the host's loopback. Both
+interfaces share the scan engine, verdict cache, and concurrency budget
+(`MAILSTRIX_MAX_INFLIGHT`).
 
 **No ICAP-level authentication.** Gate the port by firewall/network; only
 trusted proxies should reach it (a startup warning is emitted when enabled,
@@ -977,18 +990,34 @@ When `MAILSTRIX_ICAP_ADDR` is set, three additional counters appear in `/metrics
 - `mailstrix_icap_infected_total` — requests with ≥1 rule match (403 sent)
 - `mailstrix_icap_options_total` — OPTIONS requests served
 
+## clamd stream mode (optional)
+
+strixd also accepts the clamd `INSTREAM` subset on an opt-in Unix socket or TCP
+listener. Set `MAILSTRIX_CLAMD_UNIX_PATH` to an absolute socket path, or set
+`MAILSTRIX_CLAMD_TCP_ADDR` to an explicit `host:port`; both are disabled by
+default. For example, a local client can connect over TCP when strixd starts
+with `MAILSTRIX_CLAMD_TCP_ADDR=127.0.0.1:3310`.
+
+Submit bytes with `clamdscan --stream` or an existing stream-client hook. The
+adapter returns `FOUND` for actionable matches, `OK` for clean or log-only
+results, and `ERROR` when it cannot give a complete verdict. It does not accept
+clamd file-path scans, and it does not turn Mailstrix rules into ClamAV
+signatures. TCP has no protocol authentication or TLS; keep it on a trusted
+network. The [clamd adapter guide](contrib/clamd/README.md) has socket and
+Docker setup, client examples, supported commands and limits.
+
 ## Observability (Grafana + Prometheus)
 
 `/metrics` is Prometheus exposition format (counters + gauges, no auth unless
 `MAILSTRIX_METRICS_AUTH=1`). Ready-to-import artifacts live in
 [`contrib/deploy/`](contrib/deploy/):
 
-- **[`contrib/deploy/grafana/strixd-dashboard.json`](contrib/deploy/grafana/strixd-dashboard.json)**
+- **[`contrib/deploy/grafana/mailstrix-dashboard.json`](contrib/deploy/grafana/mailstrix-dashboard.json)**
   — a dashboard with the request path (scans/matches/errors/busy), cache hit
   ratio, libyara scan channels (raw/stream/marker/bigfile), extraction by
   carrier, rule reloads, ruleset age/staleness, abuse.ch feed lookups/hits, and
   the auto effort level. Import it and pick your Prometheus datasource.
-- **[`contrib/deploy/prometheus/strixd-alerts.yml`](contrib/deploy/prometheus/strixd-alerts.yml)**
+- **[`contrib/deploy/prometheus/mailstrix-alerts.yml`](contrib/deploy/prometheus/mailstrix-alerts.yml)**
   — alert rules: daemon down, zero rules loaded, stale ruleset, reload failing,
   high scan-error / busy rate, feed-refresh failures. Reference it from
   `rule_files:` in `prometheus.yml`.
@@ -1005,7 +1034,7 @@ scrape_configs:
 ## Kubernetes (Helm)
 
 A Helm chart lives at
-[`contrib/deploy/helm/strixd/`](contrib/deploy/helm/strixd/) — a single Deployment
+[`contrib/deploy/helm/mailstrix/`](contrib/deploy/helm/mailstrix/) — a single Deployment
 + ClusterIP Service (internal scan backend, no Ingress by design), mirroring the
 Docker compose security posture (nonroot, read-only rootfs, drop ALL caps,
 RuntimeDefault seccomp). It wires the token + abuse.ch key from a Secret
@@ -1014,11 +1043,15 @@ RuntimeDefault seccomp). It wires the token + abuse.ch key from a Secret
 `ServiceMonitor` (`--set serviceMonitor.enabled=true`) scraping the same
 `/metrics` the dashboard/alerts above consume. Replicas > 1 want
 `redis.url` for a shared verdict cache. See the
-[chart README](contrib/deploy/helm/strixd/README.md) for the values table.
+[chart README](contrib/deploy/helm/mailstrix/README.md) for the values table.
 
 ```sh
-helm install strixd ./contrib/deploy/helm/strixd --set token.value=$(openssl rand -hex 16)
+helm install strixd ./contrib/deploy/helm/mailstrix \
+    --set token.existingSecret=strixd-token
 ```
+
+Create the `strixd-token` Secret with a `token` key first, as described in the
+chart README; the token should not be passed on the command line.
 
 ## Wiring it into rspamd
 
@@ -1054,6 +1087,12 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
 
 The [reproducible detection baseline](tools/parity/README.md) runs generated inert
 fixtures through Mailstrix and reports explicitly labelled indicator results.
+It counts TP, FP, FN and TN per labelled indicator and reports precision as
+`TP / (TP + FP)` only when the denominator is nonzero. A structural marker on
+an inert fixture is a true positive for that marker, not proof of malware
+detection. Missing or incomplete scans are excluded from ratios and fail the
+labelled gate. The report leaves `real_world_precision` null: representative
+corpus precision and accuracy thresholds have not been measured.
 Its optional `run-isolated` command evaluates caller-owned local corpora in
 Docker with immutable image-owned rules and fixed resource limits. The in-process
 `run` remains synthetic-only; cross-tool parity and real-world precision remain
@@ -1093,7 +1132,9 @@ sha256sum -c SHA256SUMS --ignore-missing
 ### Already in
 
 - [x] Out-of-process Go scanner over HTTP (`/scan`); rspamd never blocks on libyara
-- [x] ~10k+ public rules baked in (YARA-Forge, signature-base, ANY.RUN, Didier, bartblaze, InQuest, CAPEv2, YARAify), daily refresh, precompiled `.yac`
+- [x] Compiled public rules from YARA-Forge, signature-base, ANY.RUN, Didier,
+  bartblaze, InQuest, CAPEv2 and YARAify; rolling `rules-current` updates are
+  independent of tagged binary releases
 - [x] libyara modules `pe`/`elf`/`macho`/`dotnet`/`hash`/`math`/`dex` (no magic/cuckoo)
 - [x] `/health`, `/ready`, `/version`, `/metrics` (Prometheus); graceful drain on SIGTERM
 - [x] Verdict cache (LRU+TTL) + request coalescing; optional Redis/Valkey L2 with circuit breaker
@@ -1171,8 +1212,11 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] ~~JAR / APK member unpacking (`META-INF/`-only zip no longer mis-classified as Office)~~ — shipped (see above)
 - [x] MSIX manifest fields: bounded metadata enrichment in existing ZIP walkers
   (see above); payload extraction remains limited to existing archive behavior
+- [x] Windows launcher fields: bounded Internet Shortcut and settings XML
+  enrichment, including nested carriers (see above)
 - [ ] CHM extraction
-- [ ] Shared-formula (`SHRFMLA`) resolution wired into the XLM emulator
+- [x] BIFF8 macrosheet shared-formula (`SHRFMLA`) resolution for `ptgExp`
+  references, bounded by the parser's table and formula-size limits
 - [ ] Sample-gated legacy XLM/BIFF edge cases (CSV-DDE-XLSB `sbt=1`, per-funcid `ptgFunc` arity, BIFF CONTINUE reassembly)
 
 > Disk-image (ISO/UDF/`.dmg`/`.pkg`), Android `.apk`, full VBA emulation
@@ -1184,7 +1228,11 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 - **[mailstrix.com](https://mailstrix.com)** — the project home page (the owl that finds malware hiding in your mail).
 - **[gozer](https://github.com/eilandert/gozer)** — the DCC/Razor/Pyzor sibling backend this mirrors.
-- **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
+- **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — an optional, separate oletools deep-scan scorer.
+- **[Rspamd plugin](contrib/rspamd/)** — score `/scan` matches during SMTP filtering.
+- **[ICAP mode](#icap-mode-optional)** — serve REQMOD and RESPMOD to an ICAP proxy.
+- **[clamd stream adapter](contrib/clamd/README.md)** — accept `INSTREAM` from
+  supported clients.
 - **[SpamAssassin plugin](contrib/spamassassin/)** — scan each message through strixd and score a YARA match.
 - **[Dovecot/Sieve example](contrib/sieve/)** — quarantine a match with the `strix-scan` client.
 - **[Milter for Postfix / Sendmail](#milter-for-postfix--sendmail-strix-milter)** — stamp a verdict header with `strix-milter` and let `milter_header_checks` act on it.
