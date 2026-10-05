@@ -2,7 +2,7 @@
   <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="100%"></a>
 </p>
 
-# strixd — YARA malware scanning for rspamd
+# strixd — YARA malware scanning for mail and ICAP
 
 **Mailstrix is the owl that finds malware hiding in your mail.** It takes hostile
 attachments apart — unwrapping OLE2/OOXML, VBA, RTF objects, PDFs, archives and
@@ -49,14 +49,13 @@ compiles those rules — libyara modules and all — and runs them over your mai
 - **clamd streams** — opt-in Unix/TCP listeners in `strixd` accept `INSTREAM`
   from supported clamd clients ([subset, limits and examples](contrib/clamd/)).
 
-```
- ┌───────────────────────┐  POST /scan  ┌──────────────┐    ┌──────────────┐
- │ rspamd (mailstrix.lua) │ ───────────▶ │    strixd    │ ─▶ │   libyara    │
- │ SpamAssassin / Sieve   │ ◀─────────── │ (Go service) │    │compiled rules│
- │ (strix-scan) / ICAP    │   {matches}  └──────────────┘    └──────────────┘
- │ Postfix (strix-milter) │
- └───────────────────────┘
-```
+These integrations use the same strixd scan engine and rules:
+
+| Interface | Clients |
+| --- | --- |
+| HTTP `POST /scan` | Rspamd, SpamAssassin, Sieve, Postfix/Sendmail Milter |
+| ICAP REQMOD/RESPMOD | ICAP-aware proxies |
+| clamd `INSTREAM` | Supported stream clients |
 
 > **Where should YARA scanning live — opinion.** YARA scanning is genuinely
 > CPU-intensive, and the MTA hot path is the most latency-sensitive place to spend
@@ -891,13 +890,19 @@ c-icap, traffic proxies, MTA content-filters).
 
 ### Enabling
 
-```bash
-docker run ... -e MAILSTRIX_ICAP_ADDR=:1344 ...
+```sh
+docker run --rm --name mailstrix-icap \
+    -e MAILSTRIX_HOST=127.0.0.1 \
+    -e MAILSTRIX_ICAP_ADDR=:1344 \
+    -p 127.0.0.1:1344:1344 \
+    myguard-labs/mailstrix
 ```
 
 The ICAP listener starts on `:1344` (IANA ICAP port). The HTTP `/scan` server
-continues to run on `MAILSTRIX_PORT` alongside it. Both share the same scan engine,
-verdict cache, and concurrency budget (`MAILSTRIX_MAX_INFLIGHT`).
+continues to run on `MAILSTRIX_PORT` alongside it; this example binds HTTP to
+the container's loopback and publishes only ICAP on the host's loopback. Both
+interfaces share the scan engine, verdict cache, and concurrency budget
+(`MAILSTRIX_MAX_INFLIGHT`).
 
 **No ICAP-level authentication.** Gate the port by firewall/network; only
 trusted proxies should reach it (a startup warning is emitted when enabled,
@@ -971,18 +976,34 @@ When `MAILSTRIX_ICAP_ADDR` is set, three additional counters appear in `/metrics
 - `mailstrix_icap_infected_total` — requests with ≥1 rule match (403 sent)
 - `mailstrix_icap_options_total` — OPTIONS requests served
 
+## clamd stream mode (optional)
+
+strixd also accepts the clamd `INSTREAM` subset on an opt-in Unix socket or TCP
+listener. Set `MAILSTRIX_CLAMD_UNIX_PATH` to an absolute socket path, or set
+`MAILSTRIX_CLAMD_TCP_ADDR` to an explicit `host:port`; both are disabled by
+default. For example, a local client can connect over TCP when strixd starts
+with `MAILSTRIX_CLAMD_TCP_ADDR=127.0.0.1:3310`.
+
+Submit bytes with `clamdscan --stream` or an existing stream-client hook. The
+adapter returns `FOUND` for actionable matches, `OK` for clean or log-only
+results, and `ERROR` when it cannot give a complete verdict. It does not accept
+clamd file-path scans, and it does not turn Mailstrix rules into ClamAV
+signatures. TCP has no protocol authentication or TLS; keep it on a trusted
+network. The [clamd adapter guide](contrib/clamd/README.md) has socket and
+Docker setup, client examples, supported commands and limits.
+
 ## Observability (Grafana + Prometheus)
 
 `/metrics` is Prometheus exposition format (counters + gauges, no auth unless
 `MAILSTRIX_METRICS_AUTH=1`). Ready-to-import artifacts live in
 [`contrib/deploy/`](contrib/deploy/):
 
-- **[`contrib/deploy/grafana/strixd-dashboard.json`](contrib/deploy/grafana/strixd-dashboard.json)**
+- **[`contrib/deploy/grafana/mailstrix-dashboard.json`](contrib/deploy/grafana/mailstrix-dashboard.json)**
   — a dashboard with the request path (scans/matches/errors/busy), cache hit
   ratio, libyara scan channels (raw/stream/marker/bigfile), extraction by
   carrier, rule reloads, ruleset age/staleness, abuse.ch feed lookups/hits, and
   the auto effort level. Import it and pick your Prometheus datasource.
-- **[`contrib/deploy/prometheus/strixd-alerts.yml`](contrib/deploy/prometheus/strixd-alerts.yml)**
+- **[`contrib/deploy/prometheus/mailstrix-alerts.yml`](contrib/deploy/prometheus/mailstrix-alerts.yml)**
   — alert rules: daemon down, zero rules loaded, stale ruleset, reload failing,
   high scan-error / busy rate, feed-refresh failures. Reference it from
   `rule_files:` in `prometheus.yml`.
@@ -999,7 +1020,7 @@ scrape_configs:
 ## Kubernetes (Helm)
 
 A Helm chart lives at
-[`contrib/deploy/helm/strixd/`](contrib/deploy/helm/strixd/) — a single Deployment
+[`contrib/deploy/helm/mailstrix/`](contrib/deploy/helm/mailstrix/) — a single Deployment
 + ClusterIP Service (internal scan backend, no Ingress by design), mirroring the
 Docker compose security posture (nonroot, read-only rootfs, drop ALL caps,
 RuntimeDefault seccomp). It wires the token + abuse.ch key from a Secret
@@ -1008,11 +1029,15 @@ RuntimeDefault seccomp). It wires the token + abuse.ch key from a Secret
 `ServiceMonitor` (`--set serviceMonitor.enabled=true`) scraping the same
 `/metrics` the dashboard/alerts above consume. Replicas > 1 want
 `redis.url` for a shared verdict cache. See the
-[chart README](contrib/deploy/helm/strixd/README.md) for the values table.
+[chart README](contrib/deploy/helm/mailstrix/README.md) for the values table.
 
 ```sh
-helm install strixd ./contrib/deploy/helm/strixd --set token.value=$(openssl rand -hex 16)
+helm install strixd ./contrib/deploy/helm/mailstrix \
+    --set token.existingSecret=strixd-token
 ```
+
+Create the `strixd-token` Secret with a `token` key first, as described in the
+chart README; the token should not be passed on the command line.
 
 ## Wiring it into rspamd
 
@@ -1182,6 +1207,10 @@ sha256sum -c SHA256SUMS --ignore-missing
 - **[mailstrix.com](https://mailstrix.com)** — the project home page (the owl that finds malware hiding in your mail).
 - **[gozer](https://github.com/eilandert/gozer)** — the DCC/Razor/Pyzor sibling backend this mirrors.
 - **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — an optional, separate oletools deep-scan scorer.
+- **[Rspamd plugin](contrib/rspamd/)** — score `/scan` matches during SMTP filtering.
+- **[ICAP mode](#icap-mode-optional)** — serve REQMOD and RESPMOD to an ICAP proxy.
+- **[clamd stream adapter](contrib/clamd/README.md)** — accept `INSTREAM` from
+  supported clients.
 - **[SpamAssassin plugin](contrib/spamassassin/)** — scan each message through strixd and score a YARA match.
 - **[Dovecot/Sieve example](contrib/sieve/)** — quarantine a match with the `strix-scan` client.
 - **[Milter for Postfix / Sendmail](#milter-for-postfix--sendmail-strix-milter)** — stamp a verdict header with `strix-milter` and let `milter_header_checks` act on it.
