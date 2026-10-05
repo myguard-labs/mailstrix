@@ -14,6 +14,8 @@
 # Requires VERSION or RELEASE_TAG to name a published release whose assets include
 # strixd-linux-${TARGETARCH} and strix-scan-linux-${TARGETARCH}; strix-milter-linux-
 # ${TARGETARCH} is shipped too when the release has it.
+# Mutable nightly releases also require CACHEBUST (the nightly build SHA) so
+# replacing their assets invalidates the fetch layer.
 
 ARG YARA_VERSION=4.5.2
 ARG VERSION
@@ -36,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pulls prebuilt artifacts, so checksum-gate them). SHA256SUMS lists every asset;
 # filter to just the assets fetched and check.
 WORKDIR /out
+ARG CACHEBUST
 # strix-milter is optional: releases before it shipped (<= 1.2.0) lack the
 # asset, so it is fetched (and checksum-verified) only when SHA256SUMS lists it.
 # Every fetched binary must have exactly one SHA256SUMS line and pass it.
@@ -43,6 +46,9 @@ WORKDIR /out
 # hadolint ignore=SC2086
 RUN VER="${VERSION#v}" \
     && tag="${RELEASE_TAG:-v${VER}}" \
+    && if [ "${tag}" = nightly ]; then \
+         test -n "${CACHEBUST}" || (echo "CACHEBUST build-arg is required for nightly" >&2; exit 1); \
+       fi \
     && base="https://github.com/myguard-labs/mailstrix/releases/download/${tag}" \
     && curl -fsSL "${base}/SHA256SUMS"                      -o SHA256SUMS \
     && curl -fsSL "${base}/strixd-linux-${TARGETARCH}"      -o "strixd-linux-${TARGETARCH}" \
@@ -139,7 +145,9 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
 ARG VERSION
 ARG RELEASE_TAG
-ARG BUILD_VERSION=${RELEASE_TAG:-v${VERSION#v}}
+# The label follows RELEASE_TAG or VERSION verbatim. Set BUILD_VERSION explicitly
+# when a caller needs a normalized label (for example, a leading v).
+ARG BUILD_VERSION=${RELEASE_TAG:-${VERSION}}
 LABEL org.opencontainers.image.version="${BUILD_VERSION}"
 # Same three binaries as docker/Dockerfile's final image (strix-milter only
 # when the release carries it), so :latest and :testing behave alike.
