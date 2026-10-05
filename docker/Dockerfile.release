@@ -1,11 +1,11 @@
-# strixd — release-binary image (multi-arch, no Go/libyara compile).
+# strixd — release-binary image (multi-arch, no per-arch Go binary build).
 #
 # Unlike docker/Dockerfile (which compiles strixd from source with CGO against a
 # statically-linked libyara), this variant downloads per-arch binaries straight
-# from the selected GitHub release tag. That removes the heavy Go+libyara compile
-# from the per-arch path, so a multi-arch buildx bake doesn't QEMU-emulate the
-# slow Go build. Target-platform setup and native `yarac` rules compilation may
-# still use emulation; a .yac is architecture-specific.
+# from the selected GitHub release tag, skipping the per-arch Go binary build.
+# The unqualified yara stage still runs bootstrap/configure/make for each target
+# platform to build a matching `yarac`; the rules stage then compiles an
+# architecture-specific .yac. Multi-arch buildx may emulate those stages.
 #
 # Used by the dockerized daily bake (target debian-mailstrix). The source-compile
 # Dockerfile stays the source of truth for CI (release.yml builds the binaries
