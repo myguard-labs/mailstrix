@@ -149,6 +149,7 @@ GO_INPUTS = [
     "ci/rules_polling_config_test.go",
     "ci/mime_attachment_hash_test.go",
     "ci/rar_password_extract_test.go",
+    "ci/urlhaus_shared_host_test.go",
     "cmd/*",
     "internal/*",
     "third_party/*",

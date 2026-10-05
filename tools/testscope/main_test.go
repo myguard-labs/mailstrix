@@ -21,6 +21,22 @@ func testGraph() []pkg {
 	}
 }
 
+func TestRarFixtureSelectsPublicCIConsumer(t *testing.T) {
+	got, err := selectChangedPackages(
+		[]string{"internal/extract/testdata/fixture-encrypted-files.rar"},
+		append(testGraph(), pkg{ImportPath: "example.com/m/ci", Dir: "/r/ci"}),
+		"/r",
+	)
+	want := []string{
+		"example.com/m/ci",
+		"example.com/m/internal/extract",
+		"example.com/m/internal/mailstrix",
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, %v; want %v", got, err, want)
+	}
+}
+
 func sel(files ...string) string {
 	return strings.Join(selectPackages(files, testGraph(), "/r"), " ")
 }
