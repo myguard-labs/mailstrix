@@ -33,9 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Strip a leading v if the caller passed a tag-style version.
-# Download the release binaries (and optional milter) plus SHA256SUMS before trusting the
-# assets (the source-compile Dockerfile builds from trusted source; this variant
-# pulls prebuilt artifacts, so checksum-gate them). SHA256SUMS lists every asset;
+# Download release binaries and SHA256SUMS, then verify each fetched asset.
+# The source-compile Dockerfile builds from trusted source; this variant pulls
+# prebuilt artifacts. SHA256SUMS lists every release asset;
 # filter to just the assets fetched and check.
 WORKDIR /out
 ARG RELEASE_CACHEBUST
