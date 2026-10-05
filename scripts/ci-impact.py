@@ -61,7 +61,7 @@ RULES = {
     "dependencies": ["go.mod", "go.sum", "osv-scanner.toml"],
     "workflows": [".github/*.yml", ".github/*.yaml"],
     "shell": ["*.sh"],
-    "dockerfiles": ["*Dockerfile*", ".hadolint.yaml"],
+    "dockerfiles": ["*Dockerfile*", ".hadolint.yaml", "ci/ci_release_tag_test.py"],
     "scope": [
         "tools/testscope/*",
         "ci/testscope_test.sh",

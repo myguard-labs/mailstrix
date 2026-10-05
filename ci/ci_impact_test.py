@@ -90,6 +90,7 @@ class ImpactTests(unittest.TestCase):
                 ["rspamd"],
             ),
             ("ci/parity_cache_test.py", ["qualification", "scope"], ["image", "go"]),
+            ("ci/ci_release_tag_test.py", ["dockerfiles"], ["image", "go", "scope"]),
             ("ci/decode_runs_test.go", ["go"], ["image", "parity", "postfix"]),
         ]:
             with self.subTest(path=path):
@@ -108,6 +109,18 @@ class ImpactTests(unittest.TestCase):
         )
         self.assertEqual(result["changed_files"], "--changed -- " + path)
         for unrelated in ["ci/unmapped_test.go", "ci/decode_scalar_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
+    def test_release_tag_contract_is_a_named_dockerfile_consumer(self):
+        path = "ci/ci_release_tag_test.py"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"dockerfiles"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- ")
+        for unrelated in ["ci/unmapped_test.py", "ci/release_tag_test.py"]:
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
