@@ -1,4 +1,4 @@
-"""Exercise the release image's asset URL selection without building an image."""
+"""Exercise release asset selection and scratch Docker frontend label builds."""
 
 import os
 import re
@@ -93,7 +93,8 @@ def run_commands(
     arch="arm64",
     milter=True,
     fail_download=False,
-    cachebust=None,
+    release_cachebust=None,
+    rules_cachebust=None,
     trace=False,
     checksum_mode="",
 ):
@@ -118,10 +119,14 @@ def run_commands(
             env.pop("RELEASE_TAG", None)
         else:
             env["RELEASE_TAG"] = release_tag
-        if cachebust is None:
+        if release_cachebust is None:
+            env.pop("RELEASE_CACHEBUST", None)
+        else:
+            env["RELEASE_CACHEBUST"] = release_cachebust
+        if rules_cachebust is None:
             env.pop("CACHEBUST", None)
         else:
-            env["CACHEBUST"] = cachebust
+            env["CACHEBUST"] = rules_cachebust
         result = subprocess.run(
             ["sh", "-exc" if trace else "-ec", command],
             cwd=root,
@@ -205,7 +210,7 @@ class ReleaseTagContract(unittest.TestCase):
 
     def test_nightly_tag_override(self):
         result, urls, binaries = run_commands(
-            "1.2.0", "nightly", milter=False, cachebust="build-sha"
+            "1.2.0", "nightly", milter=False, release_cachebust="build-sha"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -223,7 +228,7 @@ class ReleaseTagContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(urls[0], f"{RELEASE_URL}/v1.2.0/SHA256SUMS")
         result, urls, binaries = run_commands(
-            "", "nightly", milter=False, cachebust="build-sha"
+            "", "nightly", milter=False, release_cachebust="build-sha"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -245,29 +250,51 @@ class ReleaseTagContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(urls), 1)
 
-    def test_nightly_requires_nonempty_cachebust_before_download(self):
-        for cachebust in (None, ""):
-            with self.subTest(cachebust=cachebust):
-                result, urls, _ = run_commands("1.2.0", "nightly", cachebust=cachebust)
+    def test_nightly_requires_nonempty_release_cachebust_before_download(self):
+        for release_cachebust in (None, ""):
+            with self.subTest(release_cachebust=release_cachebust):
+                result, urls, _ = run_commands(
+                    "1.2.0",
+                    "nightly",
+                    release_cachebust=release_cachebust,
+                    rules_cachebust="daily-date",
+                )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "CACHEBUST build-arg is required for nightly", result.stderr
+                    "RELEASE_CACHEBUST build-arg is required for nightly", result.stderr
                 )
                 self.assertEqual(urls, [])
 
-    def test_nightly_cachebust_is_consumed_by_fetch_run(self):
+    def test_fetch_and_rules_cache_tokens_are_separate(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
         fetch = source.split(" AS fetch\n", 1)[1].split("\nFROM ", 1)[0]
-        self.assertRegex(fetch, r"(?m)^ARG CACHEBUST$")
-        self.assertLess(fetch.index("ARG CACHEBUST"), fetch.index("RUN VER="))
+        rules = source.split(" AS rules\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertRegex(fetch, r"(?m)^ARG RELEASE_CACHEBUST$")
+        self.assertNotRegex(fetch, r"(?m)^ARG CACHEBUST(?:=|$)")
+        self.assertNotIn("${CACHEBUST}", fetch)
+        self.assertRegex(rules, r"(?m)^ARG CACHEBUST=unset$")
+        self.assertLess(fetch.index("ARG RELEASE_CACHEBUST"), fetch.index("RUN VER="))
         for token in ("build-sha-a", "build-sha-b"):
             with self.subTest(token=token):
                 result, urls, _ = run_commands(
-                    "", "nightly", cachebust=token, trace=True
+                    "",
+                    "nightly",
+                    release_cachebust=token,
+                    rules_cachebust="daily-date",
+                    trace=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"+ test -n {token}", result.stderr)
                 self.assertEqual(urls[0], f"{RELEASE_URL}/nightly/SHA256SUMS")
+
+        stable, urls, _ = run_commands(
+            "1.2.0",
+            rules_cachebust="daily-date",
+            trace=True,
+        )
+        self.assertEqual(stable.returncode, 0, stable.stderr)
+        self.assertNotIn("daily-date", stable.stderr)
+        self.assertEqual(urls[0], f"{RELEASE_URL}/v1.2.0/SHA256SUMS")
 
     def test_stable_release_override_needs_no_cachebust(self):
         result, urls, _ = run_commands("1.2.0", "v2.0.0")
