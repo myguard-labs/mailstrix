@@ -6,7 +6,9 @@ import (
 	"crypto/rc4" //#nosec G503 -- test fixture for the legacy Office RC4 protocol
 	"encoding/binary"
 	"fmt"
+	"os"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -58,6 +60,55 @@ func fixtureRefRC4MD5Encrypt(t *testing.T, plain []byte, password string, salt [
 			t.Fatal(err)
 		}
 		c.XORKeyStream(out[start:end], plain[start:end])
+	}
+	return out
+}
+
+// fixtureRefRC4MD5EncryptBIFF applies the MS-XLS record rules with the #384
+// reference KDF. It deliberately does not call any production decrypt helper.
+func fixtureRefRC4MD5EncryptBIFF(t *testing.T, plain []byte, password string, salt []byte) []byte {
+	t.Helper()
+	clear := make([]bool, len(plain))
+	for off := 0; off+4 <= len(plain); {
+		typ := binary.LittleEndian.Uint16(plain[off:])
+		size := int(binary.LittleEndian.Uint16(plain[off+2:]))
+		if off+4+size > len(plain) {
+			t.Fatal("fixture BIFF record exceeds Workbook")
+		}
+		for i := off; i < off+4; i++ {
+			clear[i] = true
+		}
+		bodyClear := 0
+		switch typ {
+		case 0x0809, 0x002F: // BOF, FILEPASS
+			bodyClear = size
+		case 0x0085: // BoundSheet8.lbPlyPos
+			if size >= 4 {
+				bodyClear = 4
+			}
+		}
+		for i := off + 4; i < off+4+bodyClear; i++ {
+			clear[i] = true
+		}
+		off += 4 + size
+	}
+	out := bytes.Clone(plain)
+	var c *rc4.Cipher
+	var scratch [1]byte
+	for i := range out {
+		if i%1024 == 0 {
+			var err error
+			// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- protocol-mandated BIFF fixture encryption
+			c, err = rc4.NewCipher(fixtureRefRC4MD5Key(password, salt, uint32(i/1024))) //#nosec G405 -- encrypt public legacy Office fixture
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if clear[i] {
+			c.XORKeyStream(scratch[:], []byte{0})
+		} else {
+			c.XORKeyStream(out[i:i+1], plain[i:i+1])
+		}
 	}
 	return out
 }
@@ -146,5 +197,102 @@ func TestRC4MD5VerifyPWFixture(t *testing.T) {
 	}
 	if rc4MD5VerifyPW("wrong-password", salt, enc[:16], enc[16:]) {
 		t.Fatal("wrong RC4-MD5 verifier password accepted")
+	}
+}
+
+// fixtureRC4MD5Workbook uses the independent #384 encryptor for both the
+// FILEPASS verifier and post-FILEPASS BIFF records. The sheet name exists only
+// inside ciphertext; public Extract must open OLE, verify, decrypt, then scan.
+func fixtureRC4MD5Workbook(t *testing.T, boundary bool, corruptVerifier bool) []byte {
+	t.Helper()
+	password := velvetPassword
+	salt := []byte("0123456789abcdef")
+	verifier := []byte("16-byte fixture?")
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5 -- legacy Office verifier fixture
+	hash := md5.Sum(verifier) //#nosec G401 -- legacy Office verifier fixture
+	verification := fixtureRefRC4MD5Encrypt(t, append(bytes.Clone(verifier), hash[:]...), password, salt)
+	if corruptVerifier {
+		verification[16] ^= 0x80
+	}
+	filepass := make([]byte, 6+48)
+	binary.LittleEndian.PutUint16(filepass, 1)
+	binary.LittleEndian.PutUint16(filepass[2:], 1)
+	binary.LittleEndian.PutUint16(filepass[4:], 1)
+	copy(filepass[6:], salt)
+	copy(filepass[22:], verification)
+
+	workbook := append(biffBOF(), biffRecord(0x002F, filepass)...)
+	if boundary {
+		// BOF + FILEPASS use 70 bytes. This record ends exactly at the
+		// 1024-byte workbook-stream rekey boundary.
+		workbook = append(workbook, biffRecord(0x003C, make([]byte, 950))...)
+	}
+	const sheet = "RC4SecretSheet"
+	bound := append([]byte{0x12, 0x34, 0x56, 0x78, 1, 1, byte(len(sheet)), 0}, sheet...)
+	workbook = append(workbook, biffRecord(0x0085, bound)...)
+	if boundary {
+		// Align the minimal CFB builder's regular-FAT zero padding to a
+		// complete four-byte BIFF header after the final EOF.
+		workbook = append(workbook, biffRecord(0x003C, []byte{0, 0})...)
+	}
+	workbook = append(workbook, biffRecord(0x000A, nil)...)
+	encrypted := fixtureRefRC4MD5EncryptBIFF(t, workbook, password, salt)
+	if bytes.Contains(encrypted, []byte(sheet)) {
+		t.Fatal("fixture leaked plaintext sheet name")
+	}
+	return fixtureCFB(t, []cfbEntry{{name: "Workbook", mse: 2, data: encrypted}})
+}
+
+func TestRC4MD5PublicExtraction(t *testing.T) {
+	for _, tc := range []struct {
+		name, want              string
+		boundary, wrongVerifier bool
+	}{
+		{"short", "XLM-HIDDEN-MACROSHEET hidden RC4SecretSheet", false, false},
+		{"block-boundary", "XLM-HIDDEN-MACROSHEET hidden RC4SecretSheet", true, false},
+		{"wrong-verifier", "", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := fixtureRC4MD5Workbook(t, tc.boundary, tc.wrongVerifier)
+			res := Extract(fixture, time.Time{})
+			if !res.IsDoc || !res.Encrypted || res.Panicked {
+				t.Fatalf("public extraction flags: IsDoc=%t Encrypted=%t Panicked=%t", res.IsDoc, res.Encrypted, res.Panicked)
+			}
+			decrypted := bytes.Contains(bytes.Join(res.Markers, nil), []byte("DEFAULTPW-DECRYPTED"))
+			if decrypted != !tc.wrongVerifier {
+				t.Fatalf("DEFAULTPW-DECRYPTED=%t, wrongVerifier=%t", decrypted, tc.wrongVerifier)
+			}
+			found := false
+			for _, stream := range res.Streams {
+				found = found || bytes.Equal(stream, []byte("XLM-HIDDEN-MACROSHEET hidden RC4SecretSheet"))
+			}
+			if found != !tc.wrongVerifier {
+				t.Fatalf("decrypted plaintext marker found=%t, wrongVerifier=%t", found, tc.wrongVerifier)
+			}
+		})
+	}
+}
+
+func TestRC4MD5CommittedFixtureMatchesReference(t *testing.T) {
+	want := fixtureRC4MD5Workbook(t, true, false)
+	got, err := os.ReadFile("../../ci/testdata/rc4md5-biff.xls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("committed RC4-MD5 OLE fixture differs from independent reference producer")
+	}
+}
+
+func TestRC4MD5BIFFCapKeepsPrefix(t *testing.T) {
+	const sheet = "CapSheet"
+	salt := []byte("0123456789abcdef")
+	bound := append([]byte{0, 0, 0, 0, 1, 1, byte(len(sheet)), 0}, sheet...)
+	plain := biffRecord(0x0085, bound)
+	encrypted := fixtureRefRC4MD5EncryptBIFF(t, plain, velvetPassword, salt)
+	workbook := append(encrypted, make([]byte, maxDefaultPWOut+4-len(encrypted))...)
+	got := rc4MD5DecryptBIFF(velvetPassword, salt, workbook)
+	if len(got) != maxDefaultPWOut || !bytes.Equal(got[:len(plain)], plain) {
+		t.Fatalf("BIFF cap lost known plaintext prefix: output=%d, want=%d", len(got), maxDefaultPWOut)
 	}
 }
