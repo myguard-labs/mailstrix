@@ -100,7 +100,8 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Resolves Excel 4.0 (XLM) macros** — detects hidden/very-hidden macrosheets
   (OOXML + legacy `.xls` BIFF), reassembles `ptg`-token formula strings
   (BIFF8/`.xlsb`/SLK), and runs a **bounded XLM emulator** (cell eval, `GOTO`,
-  `SET.VALUE`) to resolve obfuscated cell references.
+  `SET.VALUE`) to resolve obfuscated cell references. BIFF8 macrosheets also
+  resolve `SHRFMLA` shared formulas referenced by `ptgExp`, within parser limits.
 - **Triages PDFs** — surfaces `/OpenAction`, `/JS`, `/Launch`, `/EmbeddedFile`,
   `/JBIG2Decode` and hex-name obfuscation as scoreable markers.
 - **Catches macro-less & exploit attacks** — Equation Editor (CVE-2017-11882),
@@ -848,24 +849,17 @@ rules), merging and de-duplicating matches:
   the URLhaus lookup; a hit found only after defanging is flagged `_DEOBF`.
 
 Extraction is **best-effort and fail-open**: a non-document, a parse error, an
-encrypted package, or a hostile/poison file (oleparse panics are recovered)
-falls back to a raw-only scan. The whole request shares one `MAILSTRIX_SCAN_TIMEOUT`
+unsupported or non-default-password encrypted package, or a hostile/poison file
+(oleparse panics are recovered) falls back to a raw-only scan. Supported
+default-password documents are decrypted and re-scanned as described above.
+The whole request shares one `MAILSTRIX_SCAN_TIMEOUT`
 across raw + every extracted stream, and zip-bomb/quine caps (per-item, total
 bytes, member/depth counts) bound the work, so one document can't monopolize a
-worker. Encrypted (ECMA-376) OOXML is counted but **not** decrypted.
-
-This covers what Python [oletools](https://github.com/decalage2/oletools) does
-for mail (VBA extraction+decompression, macro/autoexec keyword detection incl. an
-mraptor-style autoexec+write+execute heuristic, OLE/encryption + ObjectPool/Flash
-indicators, RTF exploit + embedded-object carve, the olevba string-fold set
-— `Chr`/`Replace`/`Xor`/`StrReverse`/`Environ` and Dridex string decode —
-single-layer base64/hex, IOC→reputation), in-process and with no Python, while
-adding container formats oletools does not touch (MSI, `.msg`, OneNote, `.lnk`,
-PDF, nested archives) and live URLhaus/MalwareBazaar reputation. The deep tail —
-***multi-stage*** deobfuscation (a payload encoded two-plus layers deep) and
-XLM/Excel-4.0 *emulation* — still belongs to `olevba`, which is why
-[`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) stays as a parallel
-deep-scan scorer.
+Production extraction, bounded multi-stage decoding and XLM evaluation run in
+strixd without Python, oletools or olefy. The optional
+[`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) integration is a
+separate scorer; it is not required for these features. These bounded heuristics
+do not provide full VBA emulation or a guarantee of oletools parity.
 
 ## abuse.ch feeds (optional)
 
@@ -1171,8 +1165,11 @@ sha256sum -c SHA256SUMS --ignore-missing
 - [x] ~~JAR / APK member unpacking (`META-INF/`-only zip no longer mis-classified as Office)~~ — shipped (see above)
 - [x] MSIX manifest fields: bounded metadata enrichment in existing ZIP walkers
   (see above); payload extraction remains limited to existing archive behavior
+- [x] Windows launcher fields: bounded Internet Shortcut and settings XML
+  enrichment, including nested carriers (see above)
 - [ ] CHM extraction
-- [ ] Shared-formula (`SHRFMLA`) resolution wired into the XLM emulator
+- [x] BIFF8 macrosheet shared-formula (`SHRFMLA`) resolution for `ptgExp`
+  references, bounded by the parser's table and formula-size limits
 - [ ] Sample-gated legacy XLM/BIFF edge cases (CSV-DDE-XLSB `sbt=1`, per-funcid `ptgFunc` arity, BIFF CONTINUE reassembly)
 
 > Disk-image (ISO/UDF/`.dmg`/`.pkg`), Android `.apk`, full VBA emulation
@@ -1184,7 +1181,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 - **[mailstrix.com](https://mailstrix.com)** — the project home page (the owl that finds malware hiding in your mail).
 - **[gozer](https://github.com/eilandert/gozer)** — the DCC/Razor/Pyzor sibling backend this mirrors.
-- **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — the parallel oletools deep-scan scorer.
+- **[rspamd-olefy](https://github.com/eilandert/rspamd-olefy)** — an optional, separate oletools deep-scan scorer.
 - **[SpamAssassin plugin](contrib/spamassassin/)** — scan each message through strixd and score a YARA match.
 - **[Dovecot/Sieve example](contrib/sieve/)** — quarantine a match with the `strix-scan` client.
 - **[Milter for Postfix / Sendmail](#milter-for-postfix--sendmail-strix-milter)** — stamp a verdict header with `strix-milter` and let `milter_header_checks` act on it.
