@@ -80,7 +80,8 @@ func fixtureRefRC4MD5EncryptBIFF(t *testing.T, plain []byte, password string, sa
 		}
 		bodyClear := 0
 		switch typ {
-		case 0x0809, 0x002F: // BOF, FILEPASS
+		case 0x0809, 0x002F, // BOF, FILEPASS
+			0x0194, 0x01A7, 0x00E1, 0x0196, 0x0138: // UsrExcl, FileLock, InterfaceHdr, RRDInfo, RRDHead
 			bodyClear = size
 		case 0x0085: // BoundSheet8.lbPlyPos
 			if size >= 4 {
@@ -230,6 +231,9 @@ func fixtureRC4MD5Workbook(t *testing.T, boundary bool, corruptVerifier bool) []
 	const sheet = "RC4SecretSheet"
 	bound := append([]byte{0x12, 0x34, 0x56, 0x78, 1, 1, byte(len(sheet)), 0}, sheet...)
 	workbook = append(workbook, biffRecord(0x0085, bound)...)
+	for _, typ := range []uint16{0x0194, 0x01A7, 0x00E1, 0x0196, 0x0138} {
+		workbook = append(workbook, biffRecord(typ, []byte{byte(typ), byte(typ >> 8), 0x31, 0x5a})...)
+	}
 	if boundary {
 		// Align the minimal CFB builder's regular-FAT zero padding to a
 		// complete four-byte BIFF header after the final EOF.
@@ -281,6 +285,23 @@ func TestRC4MD5CommittedFixtureMatchesReference(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatal("committed RC4-MD5 OLE fixture differs from independent reference producer")
+	}
+}
+
+func TestRC4MD5ClearBodyRecords(t *testing.T) {
+	const password = "VelvetSweatshop"
+	salt := []byte("0123456789abcdef")
+	for _, typ := range []uint16{0x0194, 0x01A7, 0x00E1, 0x0196, 0x0138} {
+		t.Run(fmt.Sprintf("record-%04x", typ), func(t *testing.T) {
+			plain := append(biffBOF(), biffRecord(typ, []byte{byte(typ), byte(typ >> 8), 0x31, 0x5a})...)
+			ciphertext := fixtureRefRC4MD5EncryptBIFF(t, plain, password, salt)
+			if !bytes.Equal(ciphertext, plain) {
+				t.Fatal("clear-body fixture unexpectedly encrypted record bytes")
+			}
+			if got := rc4MD5DecryptBIFF(password, salt, ciphertext); !bytes.Equal(got, plain) {
+				t.Fatalf("clear BIFF record body was decrypted: type=%04x want=% x got=% x", typ, plain, got)
+			}
+		})
 	}
 }
 
