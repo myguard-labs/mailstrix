@@ -24,7 +24,7 @@ while IFS= read -r directory; do
 		exit 1
 	fi
 done <<<"$directories"
-go vet "${package_args[@]}"
+# Vet runs once in the Docker test stage with the production yara_static tag.
 staticcheck "${package_args[@]}"
 govulncheck "${package_args[@]}"
 mapfile -t gosec_directories <<<"$directories"

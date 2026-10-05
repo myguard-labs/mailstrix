@@ -58,7 +58,7 @@ if [[ $name == go && $1 == list ]]; then printf '%s\\n' "$FIXTURE"; fi
         )
         for name in ["staticcheck", "govulncheck"]:
             self.assertIn(f"{name} <example/extract> <example/server>", trace)
-        self.assertIn("go <vet> <example/extract> <example/server>", trace)
+        self.assertNotIn("go <vet>", trace)
         gosec_line = next(
             line for line in trace.splitlines() if line.startswith("gosec ")
         )
