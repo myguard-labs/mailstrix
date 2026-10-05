@@ -16,9 +16,9 @@ Dovecot Sieve, or standalone.
 
 **strixd is a small HTTP service that scans email for malware with
 [YARA](https://virustotal.github.io/yara/).** You hand it a message (or one
-attachment) on `POST /scan`; it runs ~10,000 curated public YARA rules over it
+attachment) on `POST /scan`; it runs compiled YARA rules over it
 and tells you which ones matched. It ships as a ready-to-run Docker image with
-the rules already baked in — see **[Quick start](#quick-start)** below or pull it
+an initial rules bundle — see **[Quick start](#quick-start)** below or pull it
 straight from **[Docker Hub](https://hub.docker.com/r/myguard-labs/mailstrix)**.
 
 **Why YARA, in one paragraph.** YARA is the rule engine malware analysts use to
@@ -82,8 +82,10 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
   get back the matched rules as JSON; the rspamd `mailstrix.lua` plugin
   ([`contrib/rspamd/`](contrib/rspamd/)) wires the hits into the spam score, or the `strix-scan`
   client scans at delivery from Dovecot/Sieve ([`contrib/sieve/`](contrib/sieve/)).
-- **Ships ~10k public rules baked in** — YARA-Forge, signature-base, ANY.RUN,
-  Didier Stevens, bartblaze, InQuest, CAPEv2, YARAify; precompiled `.yac`, daily refresh.
+- **Loads a compiled rules bundle** — the image includes a seed; the rolling
+  `rules-current` publication can refresh the active bundle without changing
+  the binary. The source set includes YARA-Forge, signature-base, ANY.RUN,
+  Didier Stevens, bartblaze, InQuest, CAPEv2 and YARAify.
 - **Decompresses Office macros before matching** — MS-OVBA VBA out of
   `.docm`/`.xlsm`/`.doc`/`.xls`, scans the cleartext (sets the `VBA` rule var).
 - **Cracks open containers** — pulls the hidden payload out of: OLE2/OOXML,
@@ -190,7 +192,7 @@ The daemon package installs a hardened systemd unit (unprivileged `strixd` user,
 
 ## Quick start
 
-The image already bakes ~10k rules, so a token is all you need:
+The image includes a compiled seed bundle, so a token is all you need:
 
 ```sh
 docker run -d --name strixd \
@@ -296,6 +298,14 @@ prebuilt, version-matched bundle into the cache instead:
 strixd fetch-rules -cache-dir /var/cache/mailstrix
 ```
 
+The tagged binary release and the rolling `rules-current` bundle have separate
+dates. The local nightly publisher replaces the rolling bundle's assets; it
+does not rebuild a tagged binary. A binary's release date therefore cannot tell
+you when its loaded rules were generated. Check the `/version` fields
+`rules_manifest.generated` and `rules_update.loaded_version` for the active
+bundle when present. The published and cached versions may differ from the
+successfully loaded one.
+
 It reads a small manifest first and updates only when the published **version**
 is newer; it **refuses** a bundle built against a different **libyara**,
 **verifies the sha256**, and swaps atomically (keeping one `.bak`). On any error
@@ -382,6 +392,10 @@ The bundled Prometheus alerts allow 30 hours after an earlier successful check,
 covering the daily polling default plus up to 20% jitter (28.8 hours). Adjust the
 `108000`-second threshold when selecting a longer polling interval. The initial
 check and published-but-not-loaded deadlines remain 30 minutes.
+These are monitoring thresholds, not a guarantee that new rule updates will be
+available or loaded within a fixed time. A failed publisher, network check or
+reload keeps the last good rules and must be investigated through the receipt,
+`/version` identity and alert metrics.
 
 The publisher uploads the bundle first and manifest last, then runs an isolated
 native verifier against the released URLs. During replacement, a mismatched
@@ -1073,6 +1087,12 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
 
 The [reproducible detection baseline](tools/parity/README.md) runs generated inert
 fixtures through Mailstrix and reports explicitly labelled indicator results.
+It counts TP, FP, FN and TN per labelled indicator and reports precision as
+`TP / (TP + FP)` only when the denominator is nonzero. A structural marker on
+an inert fixture is a true positive for that marker, not proof of malware
+detection. Missing or incomplete scans are excluded from ratios and fail the
+labelled gate. The report leaves `real_world_precision` null: representative
+corpus precision and accuracy thresholds have not been measured.
 Its optional `run-isolated` command evaluates caller-owned local corpora in
 Docker with immutable image-owned rules and fixed resource limits. The in-process
 `run` remains synthetic-only; cross-tool parity and real-world precision remain
@@ -1112,7 +1132,9 @@ sha256sum -c SHA256SUMS --ignore-missing
 ### Already in
 
 - [x] Out-of-process Go scanner over HTTP (`/scan`); rspamd never blocks on libyara
-- [x] ~10k+ public rules baked in (YARA-Forge, signature-base, ANY.RUN, Didier, bartblaze, InQuest, CAPEv2, YARAify), daily refresh, precompiled `.yac`
+- [x] Compiled public rules from YARA-Forge, signature-base, ANY.RUN, Didier,
+  bartblaze, InQuest, CAPEv2 and YARAify; rolling `rules-current` updates are
+  independent of tagged binary releases
 - [x] libyara modules `pe`/`elf`/`macho`/`dotnet`/`hash`/`math`/`dex` (no magic/cuckoo)
 - [x] `/health`, `/ready`, `/version`, `/metrics` (Prometheus); graceful drain on SIGTERM
 - [x] Verdict cache (LRU+TTL) + request coalescing; optional Redis/Valkey L2 with circuit breaker
