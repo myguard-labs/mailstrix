@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,30 +38,6 @@ func serveBundle(t *testing.T, n int) *httptest.Server {
 	}))
 	t.Cleanup(s.Close)
 	return s
-}
-
-// captureStderr redirects os.Stderr for the duration of fn and returns what was
-// written. The pipe is drained concurrently so a large write cannot block fn.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	done := make(chan string, 1)
-	go func() {
-		b, err := io.ReadAll(r)
-		if err != nil {
-			b = append(b, "read error: "+err.Error()...)
-		}
-		done <- string(b)
-	}()
-	defer func() { os.Stderr = orig }()
-	fn()
-	_ = w.Close()
-	return <-done
 }
 
 func TestFetchRulesCLIRefusesEmptyBundleUnlessAllowed(t *testing.T) {
