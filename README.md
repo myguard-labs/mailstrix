@@ -319,12 +319,14 @@ Point `-url` /
 URLs without a host are always refused, and a redirect from `https` to `http` is
 refused even with the opt-in.
 
-A bundle is refused (current rules kept, error logged, counted in
-`count_drop_refusals` of the rules-update state) when the rules actually loaded
-from the verified download number zero, or fall below 50% of the installed
-bundle's rule count (exactly 50% is accepted; a first install is refused only at
-zero). The manifest `rules` field is never trusted for this. To deliberately ship
-a much smaller ruleset, set `MAILSTRIX_RULES_ALLOW_COUNT_DROP=1` (default off) or
+A bundle is refused when the rules actually loaded from the verified download
+number zero, or fall below 50% of the installed bundle's rule count (exactly 50%
+is accepted; a first install is refused only at zero). The manifest `rules`
+field is never trusted for this. On a refusal, a daemon poll keeps the current
+rules, logs the error and counts it in `count_drop_refusals` of the rules-update
+state, while `strixd fetch-rules` keeps the current rules, prints the error and
+exits 2. To deliberately ship a much smaller ruleset, set
+`MAILSTRIX_RULES_ALLOW_COUNT_DROP=1` (default off) or
 pass `strixd fetch-rules -allow-count-drop`.
 
 Docker images, the reference Compose service, and Debian packages enable daemon
