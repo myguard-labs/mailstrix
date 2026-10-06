@@ -94,17 +94,26 @@ func assertEncryptedRAROnly(t *testing.T, got extract.Result) {
 func TestEncryptedRARPublicExtraction(t *testing.T) {
 	buf := encryptedRARFixture(t)
 	got := extract.ExtractWithOptions(buf, rarOptions(time.Time{}, "wrong-password", "test"))
+	assertRARMembers(t, got)
 	if got.TopType != extract.TopTypeArchive || !got.IsArchive || !got.DecryptedArchive || got.Failed || got.Panicked {
 		t.Fatalf("RAR extraction flags: top=%q archive=%v decrypted=%v failed=%v panicked=%v", got.TopType, got.IsArchive, got.DecryptedArchive, got.Failed, got.Panicked)
 	}
-	assertRARMembers(t, got)
 }
 
 func TestEncryptedRARPublicRejectionControls(t *testing.T) {
 	buf := encryptedRARFixture(t)
 	t.Run("feature-off", func(t *testing.T) {
-		got := extract.ExtractWithOptions(buf, extract.FullOptions(time.Time{}))
+		// Keep the correct password present so this isolates the opt-in gate.
+		opts := extract.FullOptions(time.Time{})
+		opts.PWCandidates = []string{"test"}
+		got := extract.ExtractWithOptions(buf, opts)
 		assertEncryptedRAROnly(t, got)
+	})
+	t.Run("compiled-default", func(t *testing.T) {
+		assertEncryptedRAROnly(t, extract.Extract(buf, time.Time{}))
+	})
+	t.Run("no-candidates", func(t *testing.T) {
+		assertEncryptedRAROnly(t, extract.ExtractWithOptions(buf, rarOptions(time.Time{})))
 	})
 	t.Run("wrong-password", func(t *testing.T) {
 		got := extract.ExtractWithOptions(buf, rarOptions(time.Time{}, "wrong-password"))
