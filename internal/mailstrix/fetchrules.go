@@ -79,7 +79,7 @@ type FetchResult struct {
 // it, even with allowHTTP, and are capped at maxRulesRedirects hops. hc is never
 // modified: its CheckRedirect still runs after these checks on a private copy.
 func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool) (FetchResult, error) {
-	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, allowHTTP, 0, nil)
+	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, allowHTTP, 0, 0, nil)
 }
 
 // maxRulesRedirects bounds the redirect chain of one rules request (a GitHub
@@ -141,9 +141,10 @@ func rulesClient(hc *http.Client, allowHTTP bool) *http.Client {
 // On a reported failure the cache pair and pre-existing backup are restored;
 // rollback errors are explicit.
 // Individual renames are atomic, but this is not a two-file power-loss journal.
-// reload must leave the active scanner unchanged on error and must not reacquire
+// liveCount is the rule count of the running scanner (0 when none); it floors
+// the count-drop baseline. reload must leave the active scanner unchanged on error and must not reacquire
 // the cache lock. It runs only after both cache files have been installed.
-func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool, minimumVersion int, reload func() error) (FetchResult, error) {
+func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool, minimumVersion int, liveCount int, reload func() error) (FetchResult, error) {
 	res := FetchResult{}
 	if err := checkRulesURL(baseURL, allowHTTP); err != nil {
 		return res, err
@@ -202,7 +203,8 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	// own checksum yet fail yara.LoadRules. Load-validate the temp bundle BEFORE the
 	// swap so a bad download never replaces the working cache — the deferred
 	// os.Remove(tmp) discards it and the old cache (+ .bak) stays live.
-	if err := rulesBundleLoadable(tmp); err != nil {
+	newCount, err := rulesBundleCount(tmp)
+	if err != nil {
 		return res, fmt.Errorf("downloaded bundle does not load (keeping current cache): %w", err)
 	}
 
@@ -216,6 +218,15 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	if remote.Version <= local.Version {
 		res.Reason = "up to date after concurrent update"
 		return res, nil
+	}
+	// Refuse an empty or sharply shrunken ruleset (counted from the loaded bundle,
+	// not the manifest) before touching the cache; current rules stay installed.
+	curCount, err := currentRuleCount(ctx, cachePath, liveCount)
+	if err != nil {
+		return res, err
+	}
+	if err := checkRuleCountDrop(ctx, curCount, newCount); err != nil {
+		return res, err
 	}
 	// Prepare both rollback copies before changing either public filename.
 	rollbackDir, err := os.MkdirTemp(cacheDir, ".rules-rollback-")

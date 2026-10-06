@@ -28,6 +28,7 @@ func cmdFetchRules(args []string) int {
 	cacheDir := fs.String("cache-dir", firstNonEmpty(cfg.CacheDir, "/var/cache/mailstrix"), "cache dir for the live bundle (MAILSTRIX_CACHE_DIR)")
 	allowHTTP := fs.Bool("allow-http", cfg.RulesAllowHTTP, "permit a plain-http -url; https-to-http redirects stay refused (MAILSTRIX_RULES_ALLOW_HTTP)")
 	timeout := fs.Duration("timeout", 60*time.Second, "overall HTTP timeout")
+	allowDrop := fs.Bool("allow-count-drop", cfg.AllowRulesCountDrop, "install a bundle with zero rules or under half the current rule count (MAILSTRIX_RULES_ALLOW_COUNT_DROP)")
 	verifyOnly := fs.Bool("verify-only", false, "verify into a fresh temporary cache and remove it; never touch the configured cache")
 	expectedVersion := fs.Int("expected-version", 0, "with -verify-only, require this published version")
 	if err := fs.Parse(args); err != nil {
@@ -66,6 +67,9 @@ func cmdFetchRules(args []string) int {
 		},
 	}
 
+	if *allowDrop {
+		ctx = mailstrix.WithAllowRuleCountDrop(ctx)
+	}
 	res, err := mailstrix.FetchRules(ctx, *url, *cacheDir, libyaraVersion, hc, *allowHTTP)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)

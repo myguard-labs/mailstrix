@@ -319,6 +319,16 @@ Point `-url` /
 URLs without a host are always refused, and a redirect from `https` to `http` is
 refused even with the opt-in.
 
+A bundle is refused when the rules actually loaded from the verified download
+number zero, or fall below 50% of the installed bundle's rule count (exactly 50%
+is accepted; a first install is refused only at zero). The manifest `rules`
+field is never trusted for this. On a refusal, a daemon poll keeps the current
+rules, logs the error and counts it in `count_drop_refusals` of the rules-update
+state, while `strixd fetch-rules` keeps the current rules, prints the error and
+exits 2. To deliberately ship a much smaller ruleset, set
+`MAILSTRIX_RULES_ALLOW_COUNT_DROP=1` (default off) or
+pass `strixd fetch-rules -allow-count-drop`.
+
 Docker images, the reference Compose service, and Debian packages enable daemon
 polling daily (`MAILSTRIX_RULES_POLL_INTERVAL=86400` seconds). Set it explicitly
 to `0` to disable polling for offline installations or custom local `.yar`
@@ -608,6 +618,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_RULES_DIR` | `/rules` | dir of `*.yar`/`*.yara` compiled at boot and on SIGHUP |
 | `MAILSTRIX_RULES` | — | a precompiled `.yac` bundle; loaded instead of `RULES_DIR` (faster start) |
 | `MAILSTRIX_RULES_MAX_AGE` | `172800` (48h) | seconds; flag rules `stale` (metric + `/ready` body); explicit `0` disables. Fail-open: never fails readiness |
+| `MAILSTRIX_RULES_ALLOW_COUNT_DROP` | off | `1`/`true`: install a verified rules bundle with zero rules or under 50% of the current rule count (refused by default) |
 | `MAILSTRIX_RULES_POLL_INTERVAL` | `86400` Docker/deb; `0` code default | seconds; automatic verified update and reload; explicit `0` disables; enabled intervals must be at least 60 seconds |
 | `MAILSTRIX_RULES_FETCH_TIMEOUT` | `300` | seconds; shared deadline for automatic update network and cache-lock waits |
 | `MAILSTRIX_RULES_URL` | GitHub `rules-current` release | public bundle/manifest directory override for daemon polling and `fetch-rules` |
