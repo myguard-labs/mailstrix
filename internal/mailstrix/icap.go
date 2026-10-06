@@ -68,6 +68,14 @@ func (s *Server) ListenAndServeICAP(ctx context.Context) error {
 // ShutdownICAP closes the ICAP listener and waits for in-flight connections to
 // drain until ctx expires.
 func (s *Server) ShutdownICAP(ctx context.Context) {
+	// Mark stopping under icapMu before closing the listener and before Wait.
+	// Before the close: a connection Accept already returned is refused by
+	// icapTrack instead of slipping in between Close and the flag. Before Wait:
+	// every Add happens under the same mutex while not stopping, so none can
+	// race the Wait below.
+	s.icapMu.Lock()
+	s.icapStopping = true
+	s.icapMu.Unlock()
 	if p := s.icapLn.Load(); p != nil {
 		_ = (*p).Close() // #nosec G104 -- intentional shutdown; close error is not actionable here
 	}
@@ -93,12 +101,29 @@ func (s *Server) acceptICAP(conn net.Conn) {
 		s.refuseICAP(conn)
 		return
 	}
-	s.icapWg.Add(1)
+	if !s.icapTrack() {
+		<-s.icapConns
+		_ = conn.Close() // #nosec G104 -- shutting down; close error is not actionable
+		return
+	}
 	go func() {
 		defer s.icapWg.Done()
 		defer func() { <-s.icapConns }()
 		s.serveICAPConn(conn)
 	}()
+}
+
+// icapTrack registers one connection goroutine with icapWg unless shutdown has
+// begun. The caller must call icapWg.Done when it returns true, and must close
+// the connection itself when it returns false.
+func (s *Server) icapTrack() bool {
+	s.icapMu.Lock()
+	defer s.icapMu.Unlock()
+	if s.icapStopping {
+		return false
+	}
+	s.icapWg.Add(1)
+	return true
 }
 
 // refuseICAP answers a 503 and closes conn, off the accept goroutine.
@@ -122,7 +147,11 @@ func (s *Server) refuseICAP(conn net.Conn) {
 	// Tracked by icapWg like a served connection, so ShutdownICAP does not report
 	// "drained" while refusal goroutines still hold open fds mid-write. The write
 	// deadline bounds the wait, so this cannot hang the drain.
-	s.icapWg.Add(1)
+	if !s.icapTrack() {
+		<-s.icapRefuse
+		_ = conn.Close() // #nosec G104 -- shutting down; close error is not actionable
+		return
+	}
 	go func() {
 		defer s.icapWg.Done()
 		defer func() { <-s.icapRefuse }()

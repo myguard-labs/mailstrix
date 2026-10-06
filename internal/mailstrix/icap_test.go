@@ -1328,3 +1328,173 @@ func TestICAPBindFailureFailsReady(t *testing.T) {
 		t.Fatalf("/ready = %d after ICAP bind failure, want 503", code)
 	}
 }
+
+// icapShutdownStarted blocks until ShutdownICAP has marked the server stopping.
+func icapShutdownStarted(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s.icapMu.Lock()
+		stopping := s.icapStopping
+		s.icapMu.Unlock()
+		if stopping {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("ShutdownICAP never marked the server stopping")
+}
+
+// TestICAPShutdownRefusesLateAccept: once ShutdownICAP has begun, a connection
+// accepted afterwards is closed unserved, its slot is released, and shutdown
+// stays blocked on the already-admitted connection until that one drains.
+func TestICAPShutdownRefusesLateAccept(t *testing.T) {
+	cfg := &Config{ICAPAddr: "127.0.0.1:0", MaxConcurrent: 2, ICAPMaxConns: 4}
+	s := NewServer(cfg, &fakeEngine{count: 1})
+
+	// Admitted before shutdown: serveICAPConn blocks in Peek on the pipe.
+	admittedSrv, admittedCli := net.Pipe()
+	defer admittedCli.Close()
+	s.acceptICAP(admittedSrv)
+
+	shutDone := make(chan struct{})
+	go func() {
+		s.ShutdownICAP(context.Background())
+		close(shutDone)
+	}()
+	icapShutdownStarted(t, s)
+
+	// Barrier: shutdown is in progress and must be waiting on the admitted conn.
+	select {
+	case <-shutDone:
+		t.Fatal("ShutdownICAP returned while an admitted connection was still serving")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Late accept: refused (closed), never served, slot not consumed.
+	lateSrv, lateCli := net.Pipe()
+	defer lateCli.Close()
+	s.acceptICAP(lateSrv)
+	_ = lateCli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := lateCli.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("late conn: want closed (EOF), got %v", err)
+	}
+	if got := len(s.icapConns); got != 1 {
+		t.Fatalf("icapConns held = %d, want 1 (only the admitted conn)", got)
+	}
+
+	// Late refusal path (cap full -> refuseICAP) is also not tracked after stop.
+	for len(s.icapConns) < cap(s.icapConns) {
+		s.icapConns <- struct{}{}
+	}
+	capSrv, capCli := net.Pipe()
+	defer capCli.Close()
+	s.acceptICAP(capSrv)
+	_ = capCli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := capCli.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("late over-cap conn: want closed (EOF), got %v", err)
+	}
+
+	select {
+	case <-shutDone:
+		t.Fatal("ShutdownICAP returned before the admitted connection drained")
+	default:
+	}
+	_ = admittedCli.Close()
+	select {
+	case <-shutDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ShutdownICAP did not return after the admitted connection drained")
+	}
+}
+
+// closeHookListener runs onClose synchronously inside Close, so a test can act
+// at the exact point ShutdownICAP closes the listener.
+type closeHookListener struct {
+	net.Listener
+	onClose func()
+}
+
+func (l *closeHookListener) Close() error {
+	l.onClose()
+	return l.Listener.Close()
+}
+
+// TestICAPShutdownRefusesConnAcceptedAtListenerClose (AUD-07a-r1): a connection
+// Accept already returned, handed to acceptICAP while ShutdownICAP is closing the
+// listener, is refused unserved; the stopping flag must already be set by then.
+func TestICAPShutdownRefusesConnAcceptedAtListenerClose(t *testing.T) {
+	cfg := &Config{ICAPAddr: "127.0.0.1:0", MaxConcurrent: 2, ICAPMaxConns: 4}
+	s := NewServer(cfg, &fakeEngine{count: 1})
+
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Obtained before ShutdownICAP, as if Accept had just returned it.
+	srv, cli := net.Pipe()
+	defer func() { _ = cli.Close() }()
+	hooked := false
+	var ln net.Listener = &closeHookListener{Listener: inner, onClose: func() {
+		hooked = true
+		s.acceptICAP(srv)
+	}}
+	s.icapLn.Store(&ln)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.ShutdownICAP(ctx)
+	if !hooked {
+		t.Fatal("ShutdownICAP did not close the listener")
+	}
+
+	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := cli.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("conn accepted at listener close: want refused (EOF), got %v", err)
+	}
+	if got := len(s.icapConns); got != 0 {
+		t.Fatalf("icapConns held = %d, want 0 (refused conn released its slot)", got)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("ShutdownICAP waited on a connection admitted after shutdown began")
+	}
+}
+
+// TestICAPShutdownServesPreShutdownConn: positive control, a connection admitted
+// before shutdown is still served to completion and drained.
+func TestICAPShutdownServesPreShutdownConn(t *testing.T) {
+	cfg := &Config{ICAPAddr: "127.0.0.1:0", MaxConcurrent: 2, ICAPMaxConns: 4}
+	s := NewServer(cfg, &fakeEngine{count: 1, fp: "testfp"})
+
+	srv, cli := net.Pipe()
+	defer cli.Close()
+	s.acceptICAP(srv)
+
+	shutDone := make(chan struct{})
+	go func() {
+		s.ShutdownICAP(context.Background())
+		close(shutDone)
+	}()
+	icapShutdownStarted(t, s)
+
+	_ = cli.SetDeadline(time.Now().Add(3 * time.Second))
+	go func() { _, _ = io.WriteString(cli, "OPTIONS icap://x/scan ICAP/1.0\r\nHost: x\r\n\r\n") }()
+	line, err := bufio.NewReader(cli).ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "ICAP/1.0 200") {
+		t.Fatalf("pre-shutdown conn not served: line=%q err=%v", line, err)
+	}
+	select {
+	case <-shutDone:
+		t.Fatal("ShutdownICAP returned before the served connection closed")
+	default:
+	}
+	_ = cli.Close()
+	select {
+	case <-shutDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ShutdownICAP did not drain the served connection")
+	}
+	if got := len(s.icapConns); got != 0 {
+		t.Fatalf("icapConns held after drain = %d, want 0", got)
+	}
+}

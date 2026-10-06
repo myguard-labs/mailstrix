@@ -108,6 +108,8 @@ type Server struct {
 
 	icapLn        atomic.Pointer[net.Listener]
 	icapDown      atomic.Bool // ICAP listener failed to bind or stopped accepting -> /ready 503s (COR-15)
+	icapMu        sync.Mutex  // guards icapStopping and every icapWg.Add against Wait
+	icapStopping  bool        // set by ShutdownICAP; no new connection is admitted after
 	icapWg        sync.WaitGroup
 	icapConns     chan struct{} // live-connection cap, taken at accept() (pre-admission)
 	icapRefuse    chan struct{} // bounds concurrent 503-refusal goroutines
