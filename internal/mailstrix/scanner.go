@@ -2,6 +2,7 @@ package mailstrix
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -687,13 +688,13 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 		}
 	}
 
-	// PERF-18: build the marker-only bundle by recompiling the same source and
-	// disabling all non-marker-tagged rules. A failure here must NOT fail the
+	// PERF-69: clone the freshly prepared main bundle before publication and
+	// disable all non-marker-tagged rules. A failure here must NOT fail the
 	// reload — retain the previous marker bundle, or use the full ruleset when
 	// there is no previous marker bundle.
 	// PERF-30: pass the deny map so denied marker rules are also pre-disabled;
 	// a denied rule that happens to carry the "marker" tag should still be skipped.
-	if mb, mbErr := buildMarkerBundleFromFiles(s.srcFile, s.srcDir, mainRuleFiles, deny, s.logf); mbErr != nil {
+	if mb, mbErr := cloneMarkerBundle(rules, deny, s.logf); mbErr != nil {
 		s.logf("WARNING: PERF-18 marker bundle build failed, keeping previous (or full ruleset fallback): %v", mbErr)
 	} else if mb != nil {
 		markerRules = mb
@@ -1029,7 +1030,8 @@ func validatedRuleFiles(dir string, logf func(string, ...any)) ([]string, error)
 	return valid, nil
 }
 
-func compileRuleFiles(dir string, files []string, logf func(string, ...any)) (*yara.Rules, error) {
+// Kept replaceable alongside validateRuleFile for production reload call-count tests.
+var compileRuleFiles = func(dir string, files []string, logf func(string, ...any)) (*yara.Rules, error) {
 	c, err := yara.NewCompiler()
 	if err != nil {
 		return nil, fmt.Errorf("new compiler: %w", err)
@@ -1108,6 +1110,30 @@ func buildMarkerBundleFromFiles(srcFile, srcDir string, validatedFiles []string,
 	if err != nil {
 		return nil, fmt.Errorf("marker bundle compile: %w", err)
 	}
+	disableNonMarkerRules(bundle, deny, logf)
+	return bundle, nil
+}
+
+// serializeRules permits error-path tests without corrupting a native Rules object.
+var serializeRules = (*yara.Rules).Write
+
+// cloneMarkerBundle serializes only the fresh, unpublished main set. ReadRules
+// owns an independent native allocation; never copy Rules or prune the main set.
+// Serialization preserves pre-disabled rules, including those from a .yac file.
+func cloneMarkerBundle(rules *yara.Rules, deny map[string]struct{}, logf func(string, ...any)) (*yara.Rules, error) {
+	var buf bytes.Buffer
+	if err := serializeRules(rules, &buf); err != nil {
+		return nil, fmt.Errorf("marker bundle serialize: %w", err)
+	}
+	bundle, err := yara.ReadRules(&buf)
+	if err != nil {
+		return nil, fmt.Errorf("marker bundle read: %w", err)
+	}
+	disableNonMarkerRules(bundle, deny, logf)
+	return bundle, nil
+}
+
+func disableNonMarkerRules(bundle *yara.Rules, deny map[string]struct{}, logf func(string, ...any)) {
 	// Disable every rule that is NOT tagged "marker" so the bundle only fires
 	// on marker-tagged rules. Enable/Disable operate on this C object only;
 	// the main rules set is unaffected.
@@ -1125,7 +1151,6 @@ func buildMarkerBundleFromFiles(srcFile, srcDir string, validatedFiles []string,
 	mbDisabled := disableDeniedRules(bundle, deny)
 	logf("PERF-18: marker bundle built: %d rules disabled, %d marker rules active; %d pre-disabled by denylist",
 		disabled, total-disabled, mbDisabled)
-	return bundle, nil
 }
 
 var validateRuleFile = fileCompiles

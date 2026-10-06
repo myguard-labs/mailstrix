@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	yara "github.com/hillu/go-yara/v4"
 )
 
 // A cache barrier stops the real handler AFTER it forms its key. Reload and
@@ -311,12 +314,7 @@ func TestGenerationCoalescingCancellation(t *testing.T) {
 func TestGenerationAuxiliaryFailureIdentity(t *testing.T) {
 	dir := writeRules(t, "rule Main { condition: false } rule Marker : marker { condition: true }")
 	bigDir := writeRules(t, "rule Big { condition: true }")
-	armed := false
-	s, err := NewScanner(&Config{RulesDir: dir, BigFileRules: bigDir, BigFileThreshold: 1}, func(format string, _ ...any) {
-		if armed && strings.HasPrefix(format, "loaded %d YARA rules from") {
-			generationWrite(t, dir, "malformed marker source")
-		}
-	})
+	s, err := NewScanner(&Config{RulesDir: dir, BigFileRules: bigDir, BigFileThreshold: 1}, func(string, ...any) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +323,11 @@ func TestGenerationAuxiliaryFailureIdentity(t *testing.T) {
 	oldBigID, oldMarkerID := s.bigContent, s.markerContent
 	generationWrite(t, dir, "rule NewMain { condition: true } rule NewMarker : marker { condition: true }")
 	generationWrite(t, bigDir, "malformed big source")
-	armed = true
+	// Marker preparation no longer rereads the source. Fail native serialization
+	// to exercise the same retained-auxiliary identity contract.
+	original := serializeRules
+	serializeRules = func(*yara.Rules, io.Writer) error { return fmt.Errorf("injected marker serialization failure") }
+	t.Cleanup(func() { serializeRules = original })
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
