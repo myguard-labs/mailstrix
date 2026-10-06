@@ -115,6 +115,25 @@ type config struct {
 	maxBody  int64
 	maxConns int
 	logClean bool
+	// drain bounds how long a SIGINT/SIGTERM waits for in-flight milter sessions
+	// to finish. Not a flag: run() derives it from -timeout (see drainGrace), and
+	// serve() applies the same derivation when it is unset.
+	drain time.Duration
+}
+
+// drainGrace is added to -timeout to form the shutdown drain bound. A message
+// whose body has reached us finishes its scan within -timeout (the scan is
+// hard-deadlined to it), so timeout+grace lets every in-flight verdict reach
+// the MTA plus the round trip that ends the session. A session still open after
+// that is an MTA holding an idle connection or a stuck peer; we log it and exit.
+const drainGrace = 5 * time.Second
+
+// drainTimeout is the bound serve() waits for in-flight sessions on shutdown.
+func drainTimeout(cfg config) time.Duration {
+	if cfg.drain > 0 {
+		return cfg.drain
+	}
+	return cfg.timeout + drainGrace
 }
 
 func run(args []string) int {
@@ -166,7 +185,7 @@ func run(args []string) int {
 		return 2
 	}
 
-	cfg := config{url: *url, listen: *listen, token: tok, timeout: *timeout, maxBody: *maxBody, maxConns: *maxConns, logClean: *logClean}
+	cfg := config{url: *url, listen: *listen, token: tok, timeout: *timeout, maxBody: *maxBody, maxConns: *maxConns, logClean: *logClean, drain: *timeout + drainGrace}
 	return serve(ln, cfg, log.New(os.Stderr, "strix-milter: ", log.LstdFlags))
 }
 
@@ -183,11 +202,35 @@ const milterProtocol = milter.OptNoConnect | milter.OptNoHelo | milter.OptNoMail
 // serve runs the milter server on ln until SIGINT/SIGTERM. It always returns 0
 // on a clean shutdown: an MTA restarting us must not see a spurious failure.
 func serve(ln net.Listener, cfg config, lg *log.Logger) int {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	return serveUntil(ln, cfg, lg, sigCh)
+}
+
+// serveUntil is serve() with the shutdown signal injected, so a test can drive
+// the drain without signalling the whole test process.
+//
+// Shutdown stops accepting, then DRAINS: every accepted milter session is given
+// up to drainTimeout(cfg) to finish. Returning straight away (what this did
+// before) dropped in-flight sessions mid-message, and with the usual
+// milter_default_action=accept the MTA then delivered that mail UNSCANNED.
+//
+// It never calls milter.Server.Close: in go-milter v0.4.1 Serve appends to and
+// reads the server's listener list and closed flag with no lock while Close
+// writes them, so closing from this goroutine is a data race. We close our own
+// listener instead; Serve then returns net.ErrClosed, which is a clean stop.
+//
+// Exit codes: 0 on a signal, whether or not the drain finished in time (a
+// failed drain is logged with the number of sessions still open; an MTA or
+// systemd restart must not see a spurious failure), 0 when the listener was
+// closed under us, and 1 when Serve failed for any other reason.
+func serveUntil(ln net.Listener, cfg config, lg *log.Logger, stop <-chan os.Signal) int {
 	client := verdict.NewClient(cfg.url, cfg.token, "strix-milter/"+version, cfg.timeout)
 
-	ln = serverListener(ln, cfg)
+	tl := trackListener(serverListener(ln, cfg))
 	if hook := serveListenerHook; hook != nil {
-		hook(ln) // test seam: observe the listener serve() ACTUALLY serves
+		hook(tl) // test seam: observe the listener serve() ACTUALLY serves
 	}
 
 	srv := &milter.Server{
@@ -199,26 +242,30 @@ func serve(ln net.Listener, cfg config, lg *log.Logger) int {
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ln) }()
+	go func() { errCh <- srv.Serve(tl) }()
 
 	lg.Printf("listening on %s, scanning via %s (timeout %s, max-body %d, max-conns %d)",
-		cfg.listen, cfg.url, cfg.timeout, cfg.maxBody, effectiveCap(ln))
+		cfg.listen, cfg.url, cfg.timeout, cfg.maxBody, effectiveCap(tl))
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
+	code := 0
 	select {
-	case sig := <-sigCh:
+	case sig := <-stop:
 		lg.Printf("received %s, shutting down", sig)
-		_ = srv.Close()
-		return 0
+		_ = tl.Close()
+		<-errCh // Accept now fails, so Serve returns promptly; no accept is in flight after this
 	case err := <-errCh:
-		if err != nil && !errors.Is(err, milter.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+		_ = tl.Close() // stop accepting even though Serve has already returned
+		if err != nil && !errors.Is(err, net.ErrClosed) {
 			lg.Printf("serve: %v", err)
-			return 1
+			code = 1
 		}
-		return 0
 	}
+
+	bound := drainTimeout(cfg)
+	if open := tl.drain(bound); open > 0 {
+		lg.Printf("drain timed out after %s with %d milter session(s) still open; exiting anyway (the MTA applies its milter default action to them)", bound, open)
+	}
+	return code
 }
 
 // strixMilter is one message's filter state. go-milter constructs a fresh one
@@ -639,22 +686,47 @@ func serverListener(ln net.Listener, cfg config) net.Listener {
 // A connection over the cap is not refused; the accept simply waits for a slot,
 // which the MTA sees as ordinary backpressure.
 func limitListener(ln net.Listener, n int) net.Listener {
-	return &limitedListener{Listener: ln, sem: make(chan struct{}, n)}
+	return &limitedListener{Listener: ln, sem: make(chan struct{}, n), done: make(chan struct{})}
 }
 
 type limitedListener struct {
 	net.Listener
-	sem chan struct{}
+	sem       chan struct{}
+	done      chan struct{} // closed by Close; unblocks an Accept waiting for a slot
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (l *limitedListener) Accept() (net.Conn, error) {
-	l.sem <- struct{}{} // take a slot (blocks at the cap)
+	// Take a slot (blocks at the cap), but give up once the listener is closed:
+	// at capacity the inner Accept is never reached, so closing the inner
+	// listener alone would leave this blocked forever and wedge shutdown.
+	select {
+	case <-l.done:
+		return nil, net.ErrClosed
+	default:
+	}
+	select {
+	case l.sem <- struct{}{}:
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
 	c, err := l.Listener.Accept()
 	if err != nil {
 		<-l.sem // hand the slot back; nothing was accepted
 		return nil, err
 	}
 	return &limitedConn{Conn: c, release: l.releaseOnce()}, nil
+}
+
+// Close closes the inner listener and releases any Accept waiting for a slot.
+// It is idempotent: go-milter's Serve closes its listener on the way out as well.
+func (l *limitedListener) Close() error {
+	l.closeOnce.Do(func() {
+		close(l.done)
+		l.closeErr = l.Listener.Close()
+	})
+	return l.closeErr
 }
 
 // releaseOnce returns a func that frees exactly one slot, however many times it
@@ -681,10 +753,104 @@ func (c *limitedConn) Close() error {
 // capped reports 0 ("unlimited") even if -max-conns was set — which is the signal
 // that the wrap went missing.
 func effectiveCap(ln net.Listener) int {
-	if l, ok := ln.(*limitedListener); ok {
+	switch l := ln.(type) {
+	case *limitedListener:
 		return cap(l.sem)
+	case *trackedListener:
+		return effectiveCap(l.Listener)
 	}
 	return 0
+}
+
+// trackListener counts the milter sessions accepted on ln so shutdown can wait
+// for them. go-milter closes a session's conn when the session ends (its
+// HandleMilterCommands defers conn.Close), so "conn closed" is "session over".
+//
+// The count and the stopping flag share one mutex, and a session is only
+// counted under it while not stopping. That is what keeps an Accept that races
+// Close from adding a session after the drain has decided there are none (the
+// sync.WaitGroup Add-after-Wait race).
+func trackListener(ln net.Listener) *trackedListener {
+	return &trackedListener{Listener: ln, idle: make(chan struct{})}
+}
+
+type trackedListener struct {
+	net.Listener
+	mu       sync.Mutex
+	open     int
+	stopping bool
+	idle     chan struct{} // closed once stopping and open == 0
+	idled    bool
+}
+
+func (l *trackedListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	if l.stopping {
+		l.mu.Unlock()
+		// Accepted in the instant Close ran: nothing will serve it, so refuse it
+		// now rather than leave the MTA waiting on a session no one reads.
+		_ = c.Close()
+		return nil, net.ErrClosed
+	}
+	l.open++
+	l.mu.Unlock()
+	return &trackedConn{Conn: c, l: l}, nil
+}
+
+// Close stops accepting. It is idempotent.
+func (l *trackedListener) Close() error {
+	l.mu.Lock()
+	l.stopping = true
+	l.signalIdleLocked()
+	l.mu.Unlock()
+	return l.Listener.Close()
+}
+
+// signalIdleLocked closes idle once the listener is stopping with no open
+// session. Caller holds l.mu.
+func (l *trackedListener) signalIdleLocked() {
+	if l.stopping && l.open == 0 && !l.idled {
+		l.idled = true
+		close(l.idle)
+	}
+}
+
+func (l *trackedListener) done() {
+	l.mu.Lock()
+	l.open--
+	l.signalIdleLocked()
+	l.mu.Unlock()
+}
+
+// drain waits up to d for every accepted session to end, and returns how many
+// were still open when it gave up (0 on a clean drain). Call it after Close.
+func (l *trackedListener) drain(d time.Duration) int {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-l.idle:
+		return 0
+	case <-t.C:
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.open
+}
+
+type trackedConn struct {
+	net.Conn
+	l    *trackedListener
+	once sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.l.done)
+	return err
 }
 
 // truncateASCII shortens an already-ASCII string to at most n bytes. Used for a

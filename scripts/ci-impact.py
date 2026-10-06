@@ -121,6 +121,7 @@ RULES = {
         "packaging/deb/*.env",
         "packaging/deb/*.service",
         "packaging/deb/env_keys_test.sh",
+        "packaging/deb/stop_timeout_test.sh",
     ],
     "readme": ["README.md", "packaging/deb/readme_install_test.sh"],
     "links": ["contrib/*", "README.md", "packaging/deb/contrib_links_test.sh"],
