@@ -76,6 +76,10 @@ type Config struct {
 	RulesPollInterval time.Duration // MAILSTRIX_RULES_POLL_INTERVAL (seconds; 0 = off)
 	RulesFetchTimeout time.Duration // MAILSTRIX_RULES_FETCH_TIMEOUT (seconds; default 5m)
 	RulesURL          string        // MAILSTRIX_RULES_URL; public rolling release or operator mirror
+	// RulesAllowHTTP permits a plain-http RulesURL (an internal mirror without
+	// TLS). Off by default: rule fetches require https, and a redirect from https
+	// to http is refused even when this is set.
+	RulesAllowHTTP bool // MAILSTRIX_RULES_ALLOW_HTTP (default false)
 
 	// ScanTimeout bounds a single libyara scan so a pathological rule/input
 	// cannot stall a worker (YARA's own internal timeout, seconds).
@@ -229,6 +233,7 @@ func LoadConfig() *Config {
 		RulesPollInterval: envDurInvalid("MAILSTRIX_RULES_POLL_INTERVAL", 0),
 		RulesFetchTimeout: envDur("MAILSTRIX_RULES_FETCH_TIMEOUT", 5*60),
 		RulesURL:          envStr("MAILSTRIX_RULES_URL", DefaultRulesURL),
+		RulesAllowHTTP:    envBool("MAILSTRIX_RULES_ALLOW_HTTP"),
 		ScanTimeout:       envDur("MAILSTRIX_SCAN_TIMEOUT", 8),
 		BigFileThreshold:  envInt64("MAILSTRIX_BIGFILE_THRESHOLD", 6*1024*1024),
 		BigFileRules:      strings.TrimSpace(os.Getenv("MAILSTRIX_BIGFILE_RULES")),

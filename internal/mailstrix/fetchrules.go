@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,8 +72,68 @@ type FetchResult struct {
 //  5. Back up the live bundle, replace both cache files under the cache lock,
 //     and restore the cache pair and pre-existing backup on a reported install
 //     or daemon reload failure.
-func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client) (FetchResult, error) {
-	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, 0, nil)
+//
+// baseURL must be https. Plain http is accepted only when allowHTTP is set
+// (MAILSTRIX_RULES_ALLOW_HTTP); any other scheme or a missing host is refused
+// before any request. Redirects must never leave https once the chain has used
+// it, even with allowHTTP, and are capped at maxRulesRedirects hops. hc is never
+// modified: its CheckRedirect still runs after these checks on a private copy.
+func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool) (FetchResult, error) {
+	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, allowHTTP, 0, nil)
+}
+
+// maxRulesRedirects bounds the redirect chain of one rules request (a GitHub
+// release asset legitimately makes one hop to its object store).
+const maxRulesRedirects = 10
+
+// checkRulesURL accepts an absolute https URL with a host, or an http one only
+// when allowHTTP is set. Every other scheme is refused regardless of allowHTTP.
+func checkRulesURL(raw string, allowHTTP bool) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("rules URL is malformed: %w", err)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if !allowHTTP {
+			return fmt.Errorf("rules URL must use https (set MAILSTRIX_RULES_ALLOW_HTTP=1 to permit plain http)")
+		}
+	default:
+		return fmt.Errorf("rules URL scheme %q is not allowed; use https", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("rules URL has no host")
+	}
+	return nil
+}
+
+// rulesClient returns a copy of hc whose redirect policy refuses any hop that
+// fails checkRulesURL, any https-to-http downgrade, and chains longer than
+// maxRulesRedirects, then defers to hc's own CheckRedirect.
+func rulesClient(hc *http.Client, allowHTTP bool) *http.Client {
+	c := *hc
+	next := hc.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRulesRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRulesRedirects)
+		}
+		if req.URL.Scheme != "https" {
+			for _, prev := range via {
+				if prev.URL.Scheme == "https" {
+					return fmt.Errorf("refusing redirect from https to %s", req.URL.Scheme)
+				}
+			}
+		}
+		if err := checkRulesURL(req.URL.String(), allowHTTP); err != nil {
+			return fmt.Errorf("refusing redirect: %w", err)
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		return nil
+	}
+	return &c
 }
 
 // fetchRules stages without the cache lock, then rechecks the monotonic version
@@ -82,12 +143,16 @@ func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 // Individual renames are atomic, but this is not a two-file power-loss journal.
 // reload must leave the active scanner unchanged on error and must not reacquire
 // the cache lock. It runs only after both cache files have been installed.
-func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, minimumVersion int, reload func() error) (FetchResult, error) {
+func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool, minimumVersion int, reload func() error) (FetchResult, error) {
+	res := FetchResult{}
+	if err := checkRulesURL(baseURL, allowHTTP); err != nil {
+		return res, err
+	}
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
+	hc = rulesClient(hc, allowHTTP)
 	base := strings.TrimRight(baseURL, "/")
-	res := FetchResult{}
 
 	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
 		return res, fmt.Errorf("cache dir: %w", err)

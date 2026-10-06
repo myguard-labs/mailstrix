@@ -3,14 +3,20 @@ package mailstrix
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const testRulesManifestGenerated = "2026-06-18T00:00:00Z"
@@ -37,6 +43,10 @@ func rulesServer(t *testing.T, yac []byte, ver int, libyara, badSum string) *htt
 
 func rulesServerWithGenerated(t *testing.T, yac []byte, ver int, libyara, badSum, generated string) *httptest.Server {
 	t.Helper()
+	return httptest.NewServer(rulesHandler(yac, ver, libyara, badSum, generated))
+}
+
+func rulesHandler(yac []byte, ver int, libyara, badSum, generated string) *http.ServeMux {
 	sum := sha256.Sum256(yac)
 	checksum := "sha256:" + hex.EncodeToString(sum[:])
 	if badSum != "" {
@@ -50,7 +60,7 @@ func rulesServerWithGenerated(t *testing.T, yac []byte, ver int, libyara, badSum
 	mux := http.NewServeMux()
 	mux.HandleFunc("/"+manifestName, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mb) })
 	mux.HandleFunc("/"+cachedRulesName, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(yac) })
-	return httptest.NewServer(mux)
+	return mux
 }
 
 // compiledYacBytes returns the bytes of a real compiled .yac, so a served bundle
@@ -88,7 +98,7 @@ func TestFetchRulesUpdates(t *testing.T) {
 	srv := rulesServer(t, newYac, 5, "4.5.2", "")
 	defer srv.Close()
 
-	res, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client())
+	res, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +126,7 @@ func TestFetchRulesSkipsWhenUpToDate(t *testing.T) {
 	srv := rulesServer(t, []byte("WOULD-BE-NEW"), 7, "4.5.2", "") // same version
 	defer srv.Close()
 
-	res, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client())
+	res, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +145,7 @@ func TestFetchRulesRefusesLibyaraSkew(t *testing.T) {
 	srv := rulesServer(t, []byte("NEW"), 2, "4.6.0", "") // newer but different libyara
 	defer srv.Close()
 
-	_, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client())
+	_, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), true)
 	if err == nil {
 		t.Fatal("expected refusal on libyara skew")
 	}
@@ -151,7 +161,7 @@ func TestFetchRulesRejectsBadChecksum(t *testing.T) {
 	srv := rulesServer(t, []byte("NEW-CORRUPT"), 2, "4.5.2", "sha256:"+fmt.Sprintf("%064d", 0))
 	defer srv.Close()
 
-	_, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client())
+	_, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), true)
 	if err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
@@ -167,7 +177,7 @@ func TestFetchRulesKeepsBackup(t *testing.T) {
 	srv := rulesServer(t, compiledYacBytes(t, "rule N { condition: true }"), 2, "4.5.2", "")
 	defer srv.Close()
 
-	if _, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client()); err != nil {
+	if _, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), true); err != nil {
 		t.Fatal(err)
 	}
 	bak, err := os.ReadFile(filepath.Join(cacheDir, cachedRulesName+backupSuffix))
@@ -186,7 +196,7 @@ func TestFetchRulesEmptyLibyaraSkipsSkewCheck(t *testing.T) {
 	srv := rulesServer(t, compiledYacBytes(t, "rule N { condition: true }"), 1, "9.9.9", "")
 	defer srv.Close()
 
-	res, err := FetchRules(context.Background(), srv.URL, cacheDir, "", srv.Client())
+	res, err := FetchRules(context.Background(), srv.URL, cacheDir, "", srv.Client(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +217,7 @@ func TestFetchRulesRejectsUnloadableBundle(t *testing.T) {
 	srv := rulesServer(t, []byte("NOT-A-REAL-YAC-BUNDLE-ZZZZ"), 2, "4.5.2", "")
 	defer srv.Close()
 
-	_, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client())
+	_, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), true)
 	if err == nil {
 		t.Fatal("expected an error for an unloadable downloaded bundle")
 	}
@@ -279,5 +289,254 @@ func TestLoadSources(t *testing.T) {
 func TestLoadSourcesMissing(t *testing.T) {
 	if got := LoadSources(t.TempDir()); got != nil {
 		t.Fatalf("expected nil for missing sources.json, got %v", got)
+	}
+}
+
+// countingHandler counts every request before delegating to h.
+func countingHandler(n *atomic.Int64, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		h.ServeHTTP(w, r)
+	})
+}
+
+// redirectHandler sends every request to target+path (same path, new origin).
+func redirectHandler(n *atomic.Int64, target func() string) http.Handler {
+	return countingHandler(n, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target()+r.URL.Path, http.StatusFound)
+	}))
+}
+
+// countingTransport counts round trips so URL refusals can prove no request left.
+type countingTransport struct{ n atomic.Int64 }
+
+func (c *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return nil, fmt.Errorf("unexpected request")
+}
+
+func newRulesYac(t *testing.T) []byte {
+	t.Helper()
+	return compiledYacBytes(t, "rule Transport { condition: true }")
+}
+
+func TestFetchRulesHTTPSBase(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewTLSServer(countingHandler(&hits, rulesHandler(newRulesYac(t), 2, "4.5.2", "", testRulesManifestGenerated)))
+	defer srv.Close()
+	hc := srv.Client()
+	res, err := FetchRules(context.Background(), srv.URL, t.TempDir(), "4.5.2", hc, false)
+	if err != nil || !res.Updated || res.NewVersion != 2 {
+		t.Fatalf("https base: res=%+v err=%v", res, err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("hits=%d, want manifest+bundle", hits.Load())
+	}
+	if hc.CheckRedirect != nil {
+		t.Fatal("caller client was mutated")
+	}
+}
+
+// A release asset redirects to another https origin (GitHub to object store).
+func TestFetchRulesFollowsHTTPSRedirect(t *testing.T) {
+	var storeHits, frontHits, vetoes atomic.Int64
+	store := httptest.NewTLSServer(countingHandler(&storeHits, rulesHandler(newRulesYac(t), 3, "4.5.2", "", testRulesManifestGenerated)))
+	defer store.Close()
+	front := httptest.NewTLSServer(redirectHandler(&frontHits, func() string { return store.URL }))
+	defer front.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(store.Certificate())
+	pool.AddCert(front.Certificate())
+	hc := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			vetoes.Add(1)
+			return nil
+		},
+	}
+	res, err := FetchRules(context.Background(), front.URL+"/", t.TempDir(), "4.5.2", hc, false)
+	if err != nil || !res.Updated || res.NewVersion != 3 {
+		t.Fatalf("https->https redirect: res=%+v err=%v", res, err)
+	}
+	if frontHits.Load() != 2 || storeHits.Load() != 2 {
+		t.Fatalf("front=%d store=%d, want 2 each", frontHits.Load(), storeHits.Load())
+	}
+	// The caller's own policy still runs (composed, not replaced).
+	if vetoes.Load() != 2 {
+		t.Fatalf("caller CheckRedirect calls=%d, want 2", vetoes.Load())
+	}
+}
+
+func TestFetchRulesComposesCallerRedirectVeto(t *testing.T) {
+	var hits atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(redirectHandler(&hits, func() string { return srv.URL + "/next" }))
+	defer srv.Close()
+	hc := srv.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return fmt.Errorf("caller veto") }
+	_, err := FetchRules(context.Background(), srv.URL, t.TempDir(), "4.5.2", hc, false)
+	if err == nil || !strings.Contains(err.Error(), "caller veto") {
+		t.Fatalf("caller CheckRedirect not honoured: %v", err)
+	}
+}
+
+func TestFetchRulesPlainHTTPRequiresOptIn(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(countingHandler(&hits, rulesHandler(newRulesYac(t), 2, "4.5.2", "", testRulesManifestGenerated)))
+	defer srv.Close()
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	_, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), false)
+	if err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("plain http accepted without opt-in: %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("refused URL still made %d requests", hits.Load())
+	}
+	if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+		t.Fatalf("refused URL touched the cache dir: %v", statErr)
+	}
+	res, err := FetchRules(context.Background(), srv.URL, cacheDir, "4.5.2", srv.Client(), true)
+	if err != nil || !res.Updated {
+		t.Fatalf("opt-in plain http: res=%+v err=%v", res, err)
+	}
+}
+
+func TestFetchRulesRefusesHTTPSDowngradeRedirect(t *testing.T) {
+	for _, allowHTTP := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allowHTTP=%v", allowHTTP), func(t *testing.T) {
+			var plainHits, frontHits atomic.Int64
+			plain := httptest.NewServer(countingHandler(&plainHits, rulesHandler(newRulesYac(t), 2, "4.5.2", "", testRulesManifestGenerated)))
+			defer plain.Close()
+			front := httptest.NewTLSServer(redirectHandler(&frontHits, func() string { return plain.URL }))
+			defer front.Close()
+			res, err := FetchRules(context.Background(), front.URL, t.TempDir(), "4.5.2", front.Client(), allowHTTP)
+			if err == nil || res.Updated || !strings.Contains(err.Error(), "from https to http") {
+				t.Fatalf("downgrade redirect accepted: res=%+v err=%v", res, err)
+			}
+			if frontHits.Load() != 1 || plainHits.Load() != 0 {
+				t.Fatalf("front=%d plain=%d, want 1 and 0", frontHits.Load(), plainHits.Load())
+			}
+		})
+	}
+}
+
+// With the opt-in, an http origin may redirect within http or up to https.
+func TestFetchRulesOptInHTTPRedirectToHTTP(t *testing.T) {
+	var hits, frontHits atomic.Int64
+	plain := httptest.NewServer(countingHandler(&hits, rulesHandler(newRulesYac(t), 2, "4.5.2", "", testRulesManifestGenerated)))
+	defer plain.Close()
+	front := httptest.NewServer(redirectHandler(&frontHits, func() string { return plain.URL }))
+	defer front.Close()
+	if res, err := FetchRules(context.Background(), front.URL, t.TempDir(), "4.5.2", front.Client(), true); err != nil || !res.Updated {
+		t.Fatalf("opt-in http->http: res=%+v err=%v", res, err)
+	}
+}
+
+func TestFetchRulesRefusesMalformedURLs(t *testing.T) {
+	for _, raw := range []string{
+		"", "garbage", "ftp://example.com/rules", "file:///etc/passwd",
+		"gopher://example.com", "https://", "https:///rules", "https://:443/rules",
+		"http://", "//example.com/rules", "://example.com", "https://exa mple.com",
+		"https://[::1", "HTTPS://", "javascript:alert(1)",
+	} {
+		for _, allowHTTP := range []bool{false, true} {
+			rt := &countingTransport{}
+			cacheDir := filepath.Join(t.TempDir(), "cache")
+			_, err := FetchRules(context.Background(), raw, cacheDir, "4.5.2", &http.Client{Transport: rt}, allowHTTP)
+			if err == nil {
+				t.Fatalf("%q (allowHTTP=%v) accepted", raw, allowHTTP)
+			}
+			if rt.n.Load() != 0 {
+				t.Fatalf("%q made %d requests", raw, rt.n.Load())
+			}
+			if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+				t.Fatalf("%q touched the cache dir", raw)
+			}
+		}
+	}
+}
+
+func TestCheckRulesURL(t *testing.T) {
+	for _, tc := range []struct {
+		raw       string
+		allowHTTP bool
+		ok        bool
+	}{
+		{"https://example.com/dir", false, true},
+		{"HTTPS://example.com/dir", false, true},
+		{"https://127.0.0.1:8443", false, true},
+		{"http://mirror.lan/rules", false, false},
+		{"http://mirror.lan/rules", true, true},
+		{"HTTP://mirror.lan/rules", false, false},
+		{"ftp://mirror.lan/rules", true, false},
+		{"https://", true, false},
+		{"garbage", true, false},
+	} {
+		if err := checkRulesURL(tc.raw, tc.allowHTTP); (err == nil) != tc.ok {
+			t.Errorf("checkRulesURL(%q, %v) = %v, want ok=%v", tc.raw, tc.allowHTTP, err, tc.ok)
+		}
+	}
+}
+
+// Redirects to a non-http scheme are refused by the guard itself.
+func TestRulesClientRefusesRedirectToOtherScheme(t *testing.T) {
+	hc := rulesClient(&http.Client{}, true)
+	via := []*http.Request{httptest.NewRequest(http.MethodGet, "http://mirror.lan/a", nil)}
+	for _, target := range []string{"ftp://mirror.lan/a", "file:///etc/passwd"} {
+		req := httptest.NewRequest(http.MethodGet, "http://placeholder/", nil)
+		u, err := url.Parse(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.URL = u
+		if err := hc.CheckRedirect(req, via); err == nil {
+			t.Fatalf("redirect to %s accepted", target)
+		}
+	}
+}
+
+// The hop cap holds for a client with no CheckRedirect of its own (the
+// serve-time updater): nine redirects succeed, ten are refused.
+func TestFetchRulesRedirectHopCap(t *testing.T) {
+	yac := newRulesYac(t)
+	for _, tc := range []struct {
+		hops int
+		ok   bool
+	}{{maxRulesRedirects - 1, true}, {maxRulesRedirects, false}, {1000, false}} {
+		t.Run(fmt.Sprint(tc.hops), func(t *testing.T) {
+			var hits atomic.Int64
+			final := rulesHandler(yac, 2, "4.5.2", "", testRulesManifestGenerated)
+			srv := httptest.NewTLSServer(countingHandler(&hits, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var n int
+				if _, err := fmt.Sscanf(r.URL.Query().Get("n"), "%d", &n); err != nil {
+					n = 0
+				}
+				if n < tc.hops {
+					http.Redirect(w, r, fmt.Sprintf("%s?n=%d", r.URL.Path, n+1), http.StatusFound)
+					return
+				}
+				final.ServeHTTP(w, r)
+			})))
+			defer srv.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			hc := srv.Client()
+			res, err := FetchRules(ctx, srv.URL, t.TempDir(), "4.5.2", hc, false)
+			if tc.ok {
+				if err != nil || !res.Updated {
+					t.Fatalf("%d hops: res=%+v err=%v", tc.hops, res, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "stopped after 10 redirects") {
+				t.Fatalf("%d hops not capped: %v", tc.hops, err)
+			}
+			if hits.Load() != maxRulesRedirects {
+				t.Fatalf("hits=%d, want %d", hits.Load(), maxRulesRedirects)
+			}
+			if hc.CheckRedirect != nil {
+				t.Fatal("caller client was mutated")
+			}
+		})
 	}
 }

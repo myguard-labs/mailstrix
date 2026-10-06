@@ -192,3 +192,20 @@ func TestTokenDisableSentinels(t *testing.T) {
 		t.Errorf("sanitize kept disable sentinel: %q", c.Token)
 	}
 }
+
+func TestRulesAllowHTTPEnv(t *testing.T) {
+	const key = "MAILSTRIX_RULES_ALLOW_HTTP"
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	if LoadConfig().RulesAllowHTTP {
+		t.Fatal("plain http allowed by default")
+	}
+	for value, want := range map[string]bool{"1": true, "true": true, " YES ": true, "on": true, "0": false, "": false, "no": false, "https": false} {
+		t.Setenv(key, value)
+		if got := LoadConfig().RulesAllowHTTP; got != want {
+			t.Errorf("%s=%q: RulesAllowHTTP=%v, want %v", key, value, got, want)
+		}
+	}
+}

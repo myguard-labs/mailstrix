@@ -135,7 +135,7 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 	if loaded := u.scanner.loadedManifest.Load(); loaded != nil {
 		minimumVersion = loaded.Version
 	}
-	res, err := fetchRules(ctx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, minimumVersion, reload)
+	res, err := fetchRules(ctx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, u.cfg.RulesAllowHTTP, minimumVersion, reload)
 	observedCached, observedLoaded := res.NewVersion, 0
 	if res.Updated {
 		// fetchRules returns only after the same locked transaction installed and

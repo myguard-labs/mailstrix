@@ -53,7 +53,7 @@ func testUpdaterServerWithSeedGenerated(t *testing.T, url, generated string) (*R
 	t.Helper()
 	dir := t.TempDir()
 	seedVerifiedWithGenerated(t, dir, 1, "rule Old { condition: true }", generated)
-	cfg := &Config{CacheDir: dir, RulesPath: filepath.Join(dir, cachedRulesName), RulesPollInterval: time.Minute, RulesURL: url, ScanTimeout: time.Second}
+	cfg := &Config{CacheDir: dir, RulesPath: filepath.Join(dir, cachedRulesName), RulesPollInterval: time.Minute, RulesURL: url, RulesAllowHTTP: true, ScanTimeout: time.Second}
 	cfg.Finalize()
 	s, err := NewScanner(cfg, func(string, ...any) {})
 	if err != nil {
@@ -356,7 +356,7 @@ func TestRulesUpdaterReconcilesExternalFetch(t *testing.T) {
 	source := rulesServer(t, compiledYacBytes(t, "rule External { condition: true }"), 3, "4.5.2", "")
 	defer source.Close()
 	u := testUpdater(t, source.URL)
-	if _, err := FetchRules(context.Background(), source.URL, u.cfg.CacheDir, "4.5.2", source.Client()); err != nil {
+	if _, err := FetchRules(context.Background(), source.URL, u.cfg.CacheDir, "4.5.2", source.Client(), true); err != nil {
 		t.Fatal(err)
 	}
 	if s := u.Snapshot(); s.CachedVersion != 3 || s.LoadedVersion != 1 {
@@ -649,4 +649,53 @@ func TestCustomRulesDoNotInheritCachedReleaseIdentity(t *testing.T) {
 	if strings.Contains(response.Body.String(), `"rules_manifest"`) {
 		t.Fatalf("unrelated cache manifest describes custom rules: %s", response.Body.String())
 	}
+}
+
+// The serve-time updater shares fetchRules' transport policy: https works with
+// the updater's own client, plain http needs the opt-in, and a downgrade
+// redirect is refused even with it.
+func TestRulesUpdaterHTTPSOnly(t *testing.T) {
+	yac := compiledYacBytes(t, "rule Secure { condition: true }")
+	t.Run("https", func(t *testing.T) {
+		source := httptest.NewTLSServer(rulesHandler(yac, 2, "4.5.2", "", testRulesManifestGenerated))
+		defer source.Close()
+		u, _ := testUpdaterServer(t, source.URL)
+		u.cfg.RulesAllowHTTP = false
+		u.client = source.Client()
+		if err := u.Poll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if s := u.Snapshot(); s.LoadedVersion != 2 {
+			t.Fatalf("state=%+v", s)
+		}
+	})
+	t.Run("plain http without opt-in", func(t *testing.T) {
+		var hits atomic.Int64
+		source := httptest.NewServer(countingHandler(&hits, rulesHandler(yac, 2, "4.5.2", "", testRulesManifestGenerated)))
+		defer source.Close()
+		u, _ := testUpdaterServer(t, source.URL)
+		u.cfg.RulesAllowHTTP = false
+		if err := u.Poll(context.Background()); err == nil || !strings.Contains(err.Error(), "must use https") {
+			t.Fatalf("plain http polled without opt-in: %v", err)
+		}
+		if s := u.Snapshot(); hits.Load() != 0 || s.Failures != 1 || s.LoadedVersion != 1 {
+			t.Fatalf("hits=%d state=%+v", hits.Load(), s)
+		}
+	})
+	t.Run("downgrade redirect with opt-in", func(t *testing.T) {
+		var plainHits, frontHits atomic.Int64
+		plain := httptest.NewServer(countingHandler(&plainHits, rulesHandler(yac, 2, "4.5.2", "", testRulesManifestGenerated)))
+		defer plain.Close()
+		front := httptest.NewTLSServer(redirectHandler(&frontHits, func() string { return plain.URL }))
+		defer front.Close()
+		u, _ := testUpdaterServer(t, front.URL)
+		u.cfg.RulesAllowHTTP = true
+		u.client = front.Client()
+		if err := u.Poll(context.Background()); err == nil || !strings.Contains(err.Error(), "from https to http") {
+			t.Fatalf("downgrade redirect followed: %v", err)
+		}
+		if frontHits.Load() != 1 || plainHits.Load() != 0 || u.client.CheckRedirect != nil {
+			t.Fatalf("front=%d plain=%d client mutated=%v", frontHits.Load(), plainHits.Load(), u.client.CheckRedirect != nil)
+		}
+	})
 }
