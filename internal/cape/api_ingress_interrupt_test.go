@@ -120,7 +120,10 @@ func TestAPIIngressInterruptUnsupportedWriterFallsBack(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("fallback close did not end ingress")
 	}
-	if w.Code == http.StatusAccepted {
-		t.Fatalf("stalled ingress admitted: %d", w.Code)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stalled ingress not rejected as Deadline: got %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(w.Body.String(), `"error":"unavailable"`) {
+		t.Fatalf("Deadline rejection body lacks unavailable code: %q", w.Body.String())
 	}
 }
