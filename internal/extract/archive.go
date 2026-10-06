@@ -163,7 +163,10 @@ func isOfficeClassPart(n string) bool {
 // the shared archive budget/depth/deadline and the per-member size cap, exactly
 // like fromArchive.
 func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
-	if b == nil || depth > maxNestDepth || b.spent() || expired(deadline) {
+	if b == nil {
+		return
+	}
+	if b.spent() || expired(deadline) {
 		return
 	}
 	zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
@@ -175,7 +178,16 @@ func fromOfficeZipCarriers(buf []byte, res *Result, b *archiveBudget, depth int,
 
 // fromOfficeZipCarriersZip is fromOfficeZipCarriers over an open reader.
 func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, depth int, deadline time.Time) {
-	if b == nil || depth > maxNestDepth || b.spent() || expired(deadline) {
+	if b == nil {
+		return
+	}
+	if depth > maxNestDepth {
+		if len(zr.File) > 0 {
+			res.stopHit("depth") // AUD-05: members are left unwalked
+		}
+		return
+	}
+	if b.spent() || expired(deadline) {
 		return
 	}
 	for i, f := range zr.File {
@@ -191,7 +203,13 @@ func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, dep
 			continue
 		}
 		if f.UncompressedSize64 > maxBytesPerBin {
-			continue // zip-bomb guard, mirrors the .bin cap
+			// Zip-bomb guard, mirrors the .bin cap. Only an oversize member that
+			// would have been walked (carrier magic) is an unexamined skip; an
+			// oversize non-carrier sibling is ignored by design, like a small one.
+			if zipEntryIsCarrier(f) {
+				res.stopHit("member-size") // AUD-01: oversize carrier member skipped
+			}
+			continue
 		}
 		data := readZipEntry(f)
 		if len(data) == 0 {
@@ -220,6 +238,19 @@ func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, dep
 		res.Streams = append(res.Streams, data)
 		extractChild(data, res, b, depth+1, deadline)
 	}
+}
+
+// zipEntryIsCarrier peeks at the head of a (possibly oversize) zip entry and
+// reports whether it carries a nested-carrier magic. The read is capped, so an
+// oversize member is never inflated.
+func zipEntryIsCarrier(f *zip.File) bool {
+	rc, err := f.Open()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rc.Close() }()
+	head, _ := io.ReadAll(io.LimitReader(rc, 4096))
+	return isNestedCarrier(head)
 }
 
 // isNestedCarrier reports whether data begins with the magic of a container yarad
@@ -264,7 +295,18 @@ func isArchive(buf []byte) bool {
 // true if buf was a recognised archive (whether or not any member was emitted).
 // depth is the current nesting level (0 at the top); b is the shared budget.
 func fromArchive(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) bool {
-	if depth > maxArchiveDepth || b.spent() || expired(deadline) {
+	if depth > maxArchiveDepth {
+		// Record only when a real archive is left unopened; a zip must parse.
+		if bytes.HasPrefix(buf, zipMagic) {
+			if _, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf))); err == nil {
+				res.stopHit("depth") // AUD-05
+			}
+		} else if isArchive(buf) {
+			res.stopHit("depth") // AUD-05
+		}
+		return false
+	}
+	if b.spent() || expired(deadline) {
 		return false
 	}
 	switch {
@@ -326,6 +368,27 @@ func emitMember(data []byte, res *Result, b *archiveBudget, depth int, deadline 
 // avoids regrow churn while a lying header can force at most maxPreallocHint of
 // speculative allocation.
 func readMember(rc io.Reader, declared uint64) []byte {
+	data, _ := readMemberTrunc(rc, declared)
+	return data
+}
+
+// readMemberRes is readMember plus AUD-04: when the stream holds more than
+// maxBytesPerMember the first maxBytesPerMember bytes are still returned and a
+// "member-size" cap hit is recorded. The truncation probe runs only when the
+// read itself ended without error; on a read error (understated zip size bounded
+// by archive/zip, corrupt gzip) the partial bytes are kept (COR-06) and no hit
+// is recorded here. Remaining sites are tracked by AUD-04c.
+func readMemberRes(rc io.Reader, declared uint64, res *Result) []byte {
+	data, truncated := readMemberTrunc(rc, declared)
+	if truncated {
+		res.stopHit("member-size")
+	}
+	return data
+}
+
+// readMemberTrunc reads at most maxBytesPerMember bytes, then probes ONE more
+// byte (stack buffer, no extra allocation) to learn whether input was left.
+func readMemberTrunc(rc io.Reader, declared uint64) ([]byte, bool) {
 	var buf bytes.Buffer
 	if h := preallocHint(declared, maxBytesPerMember); h > 0 {
 		buf.Grow(h)
@@ -334,10 +397,25 @@ func readMember(rc io.Reader, declared uint64) []byte {
 	// the bytes produced so far, as unzip/gunzip deliver them: dropping the whole
 	// member let a one-byte corruption hide its payload from the scan (COR-06).
 	// An error with zero output stays nil.
-	if _, err := buf.ReadFrom(io.LimitReader(rc, maxBytesPerMember)); err != nil && buf.Len() == 0 {
-		return nil
+	_, err := buf.ReadFrom(io.LimitReader(rc, maxBytesPerMember))
+	if err != nil && buf.Len() == 0 {
+		return nil, false
 	}
-	return buf.Bytes()
+	truncated := false
+	if err == nil && buf.Len() == maxBytesPerMember {
+		var probe [1]byte
+		for i := 0; i < 8; i++ { // tolerate a reader that returns (0, nil)
+			n, perr := rc.Read(probe[:])
+			if n > 0 {
+				truncated = true
+				break
+			}
+			if perr != nil {
+				break
+			}
+		}
+	}
+	return buf.Bytes(), truncated
 }
 
 // unpackZip walks a zip's entries and emits each file member. This is the
@@ -367,7 +445,7 @@ func fromZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline time
 	}
 	if !top && !isOfficeZipReader(zr) {
 		// Nested plain archive: the macro path never ran here before.
-		if !zipMemberWalkOK(buf, b, depth, deadline) {
+		if !zipMemberWalkOK(buf, res, b, depth, deadline) {
 			return
 		}
 		unpackZipReader(zr, buf, res, b, depth, deadline)
@@ -377,7 +455,7 @@ func fromZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline time
 		fromOfficeZipCarriersZip(zr, res, b, depth, deadline)
 		return
 	}
-	if !zipMemberWalkOK(buf, b, depth, deadline) {
+	if !zipMemberWalkOK(buf, res, b, depth, deadline) {
 		return
 	}
 	unpackZipReader(zr, buf, res, b, depth, deadline)
@@ -385,8 +463,15 @@ func fromZip(buf []byte, res *Result, b *archiveBudget, depth int, deadline time
 
 // zipMemberWalkOK is fromArchive's gate for the zip branch: depth, budget and
 // deadline, plus the local-file signature it dispatches on.
-func zipMemberWalkOK(buf []byte, b *archiveBudget, depth int, deadline time.Time) bool {
-	return depth <= maxArchiveDepth && !b.spent() && !expired(deadline) && bytes.HasPrefix(buf, zipMagic)
+func zipMemberWalkOK(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) bool {
+	if !bytes.HasPrefix(buf, zipMagic) {
+		return false
+	}
+	if depth > maxArchiveDepth {
+		res.stopHit("depth") // AUD-05: same stop as fromArchive's depth gate (zr already parsed)
+		return false
+	}
+	return !b.spent() && !expired(deadline)
 }
 
 // unpackZipReader is unpackZip over an already-open reader; buf is kept for
@@ -442,13 +527,14 @@ func unpackZipReader(zr *zip.Reader, buf []byte, res *Result, b *archiveBudget, 
 			continue
 		}
 		if f.UncompressedSize64 > maxBytesPerMember {
-			continue // implausibly large member (zip-bomb guard)
+			res.stopHit("member-size") // AUD-01
+			continue                   // implausibly large member (zip-bomb guard)
 		}
 		rc, err := f.Open()
 		if err != nil {
 			continue
 		}
-		data := readMember(rc, f.UncompressedSize64)
+		data := readMemberRes(rc, f.UncompressedSize64, res)
 		_ = rc.Close()
 		emitZipMember(f.Name, data, res, b, depth, deadline)
 	}
@@ -464,7 +550,7 @@ func unpackGzip(buf []byte, res *Result, b *archiveBudget, depth int, deadline t
 	}
 	defer gr.Close()
 	res.IsArchive = true
-	data := readMember(gr, 0) // gzip stream exposes no reliable uncompressed size
+	data := readMemberRes(gr, 0, res) // gzip stream exposes no reliable uncompressed size
 	if len(data) == 0 {
 		return
 	}
@@ -494,13 +580,14 @@ func unpackTar(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 			continue
 		}
 		if h.Size > maxBytesPerMember {
+			res.stopHit("member-size") // AUD-01
 			continue
 		}
 		var decl uint64
 		if h.Size > 0 {
 			decl = uint64(h.Size)
 		}
-		data := readMember(tr, decl)
+		data := readMemberRes(tr, decl, res)
 		emitMember(data, res, b, depth, deadline)
 	}
 }
@@ -595,6 +682,7 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 			continue
 		}
 		if f.UncompressedSize > maxBytesPerMember {
+			res.stopHit("member-size") // AUD-01
 			continue
 		}
 		// Attempt the plaintext read first. ok=false means Open/Read failed — for a

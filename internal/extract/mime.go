@@ -79,18 +79,29 @@ func fromMIME(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 }
 
 func walkMIMEMessage(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int, completeAncestor bool) {
-	if depth > maxNestDepth {
-		return
-	}
 	msg, err := mail.ReadMessage(bytes.NewReader(buf))
 	if err != nil {
+		return
+	}
+	if depth > maxNestDepth {
+		res.stopHit("mime-depth") // AUD-02: a parsed message is left unwalked
 		return
 	}
 	walkMIMEEntity(textproto.MIMEHeader(msg.Header), msg.Body, res, b, depth, deadline, parts, completeAncestor)
 }
 
 func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int, completeAncestor bool) {
-	if depth > maxNestDepth || *parts >= maxMIMEParts || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+	switch {
+	case depth > maxNestDepth:
+		res.stopHit("mime-depth") // AUD-02: this entity is left unwalked
+		return
+	case *parts >= maxMIMEParts:
+		res.stopHit("mime-parts") // AUD-02: an entity past the part cap exists
+		return
+	case b.spent() || len(res.Streams) >= maxStreams:
+		archiveCapHit(res, b)
+		return
+	case expired(deadline):
 		return
 	}
 	mediaType, params, err := mime.ParseMediaType(h.Get("Content-Type"))
@@ -108,17 +119,35 @@ func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *arch
 			if err != nil {
 				return // end of parts, or a malformed boundary: keep what we have
 			}
+			if *parts >= maxMIMEParts {
+				res.stopHit("mime-parts") // AUD-02: a further part exists
+				return
+			}
 			walkMIMEEntity(p.Header, p, res, b, depth+1, deadline, parts, completeAncestor)
-			if *parts >= maxMIMEParts || b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+			if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
+				// Record only when a further part really exists and the stop
+				// is a cap, not the deadline.
+				if !expired(deadline) {
+					if _, err := mr.NextRawPart(); err == nil {
+						if *parts >= maxMIMEParts {
+							res.stopHit("mime-parts")
+						}
+						archiveCapHit(res, b)
+					}
+				}
 				return
 			}
 		}
 	}
 	limit := min(maxBytesPerMember, maxTotalArchive-b.total)
 	data, complete, truncated := decodeMIMEBody(h.Get("Content-Transfer-Encoding"), body, limit)
-	if truncated && limit < maxBytesPerMember {
+	if truncated {
 		// Even a prefix below the extraction floor represents unvisited input.
-		res.capHit("archive-budget")
+		if limit < maxBytesPerMember {
+			res.stopHit("archive-budget")
+		} else {
+			res.stopHit("member-size") // AUD-04: per-member cap truncated the part
+		}
 	}
 	complete = complete && completeAncestor
 	attachment := isMIMEAttachment(h)

@@ -364,8 +364,9 @@ type Result struct {
 	VBAStreams [][]byte
 
 	// CapHits names each extraction cap that stopped the walk while input was
-	// left (COR-07b): "streams", "archive-budget", "zip-entries", "rtf-objects"
-	// or "pdf-streams", each at most once, in first-hit order. finalizeStreams
+	// left (COR-07b): "streams", "archive-budget", "zip-entries", "rtf-objects",
+	// "pdf-streams", "member-size", "depth", "mime-depth" or "mime-parts", each
+	// at most once, in first-hit order. finalizeStreams
 	// emits one EXTRACT-CAP-HIT marker per kind, and the scanner treats any
 	// hit as an incomplete scan, so a capped walk is never cached as clean.
 	CapHits []string
@@ -375,6 +376,9 @@ type Result struct {
 	// DecodeIterations caps as a top-level one. nil => FullOptions (top-level
 	// Extract / tests that build Result directly).
 	childOpts *Options
+	// probe marks depthDefaultContent's scratch Result: extractChild returns at
+	// once so a depth probe never walks carved children.
+	probe bool
 }
 
 // Extract is the back-compat full-depth entry point: it runs every extractor at
@@ -1052,6 +1056,9 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 			break // cumulative work cap hit; stop before the next parse
 		}
 		if f.UncompressedSize64 > maxBytesPerBin {
+			if officeZip { // a plain archive's .bin is member-walked, so nothing is dropped there
+				res.stopHit("member-size") // AUD-01: oversize .bin left unparsed
+			}
 			continue // skip an implausibly large "macro" container (zip bomb guard)
 		}
 		bin := readZipEntry(f)
@@ -1630,6 +1637,17 @@ func (r *Result) capHit(kind string) {
 		}
 	}
 	r.CapHits = append(r.CapHits, kind)
+}
+
+// stopHit records that a cap or depth limit left real input unvisited. It is
+// the one entry point for every silent stop (AUD-05a): nil-safe so a caller
+// without a Result cannot panic, and a no-op repeat per kind like capHit.
+// Callers must invoke it only when input was actually skipped, never for an
+// empty buffer, a non-container, or a deadline expiry.
+func (r *Result) stopHit(kind string) {
+	if r != nil {
+		r.capHit(kind)
+	}
 }
 
 // archiveCapHit records which shared cap (stream count or archive budget)

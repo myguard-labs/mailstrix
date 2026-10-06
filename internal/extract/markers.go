@@ -56,6 +56,10 @@ var pureMarkerLiterals = map[string]struct{}{
 	capHitMarkerPrefix + "zip-entries":    {}, // extract.go finalizeStreams
 	capHitMarkerPrefix + "rtf-objects":    {}, // extract.go finalizeStreams
 	capHitMarkerPrefix + "pdf-streams":    {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "member-size":    {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "depth":          {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "mime-depth":     {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + "mime-parts":     {}, // extract.go finalizeStreams
 }
 
 // msdDeepDecodePrefix is the PURE marker emitted by the static-decode pass; the
