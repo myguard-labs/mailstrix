@@ -45,6 +45,17 @@ func NewAPIHandler(cfg APIConfig) (*APIHandler, error) {
 	return &APIHandler{cfg: cfg}, nil
 }
 
+// interruptibleBody lets the ingress watchdog end a stalled request-body read:
+// net/http's Body.Close blocks behind an in-flight Read, so the watchdog first
+// moves the connection read deadline into the past. An unsupported writer
+// leaves the plain Close behaviour in place.
+type interruptibleBody struct {
+	io.ReadCloser
+	rc *http.ResponseController
+}
+
+func (b interruptibleBody) InterruptRead() { _ = b.rc.SetReadDeadline(time.Now()) }
+
 // ServeHTTP handles CAPE job admission and lookup requests.
 func (h *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -134,7 +145,7 @@ func (h *APIHandler) submit(w http.ResponseWriter, r *http.Request, tenant strin
 		apiError(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	admission, err := h.cfg.Store.EnqueueClassified(r.Context(), EnqueueRequest{Tenant: tenant, Generation: profile.Generation, SubmissionPolicy: profile.SubmissionPolicy, ResultPolicy: profile.ResultPolicy}, r.Body,
+	admission, err := h.cfg.Store.EnqueueClassified(r.Context(), EnqueueRequest{Tenant: tenant, Generation: profile.Generation, SubmissionPolicy: profile.SubmissionPolicy, ResultPolicy: profile.ResultPolicy}, interruptibleBody{ReadCloser: r.Body, rc: http.NewResponseController(w)},
 		func(ctx context.Context, body io.Reader) (string, error) {
 			static, err := h.cfg.StaticScan(ctx, tenant, body)
 			if err != nil {

@@ -20,6 +20,12 @@ func (s *Store) Enqueue(ctx context.Context, request EnqueueRequest, body io.Rea
 	return s.enqueue(ctx, request, body, nil)
 }
 
+// readInterrupter is optionally implemented by an ingress body whose Close
+// cannot unblock a stalled Read. InterruptRead must be safe concurrently with
+// Read and must make a blocked Read return promptly; the store calls it only
+// when the ingress watchdog cancels, before Close.
+type readInterrupter interface{ InterruptRead() }
+
 // IngressClassifier is trusted, concurrency-safe local scanning/policy code.
 // The reader exposes exactly the immutable staged attachment, is valid only
 // during this call and must not be retained. Honor context cancellation; quota
@@ -72,7 +78,15 @@ func (s *Store) enqueue(ctx context.Context, request EnqueueRequest, body io.Rea
 	s.mu.Unlock()
 	defer func() { cancel(); s.mu.Lock(); delete(s.active, j.ID); s.mu.Unlock(); s.writers.Done() }()
 	s.crash("staging_committed")
-	size, digest, err := s.writeIngress(live, j, body, closeBody)
+	cancelBody := func() {
+		// A net/http request body's Close blocks behind a stalled Read, so a
+		// reader that can be interrupted is interrupted first.
+		if i, ok := body.(readInterrupter); ok {
+			i.InterruptRead()
+		}
+		closeBody()
+	}
+	size, digest, err := s.writeIngress(live, j, body, cancelBody)
 	// writeIngress joins its deadline watcher before any cleanup or publication.
 	closeBody()
 	currentStatic := request.StaticVerdict
