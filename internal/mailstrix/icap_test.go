@@ -1319,7 +1319,7 @@ func TestICAPBindFailureFailsReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer busy.Close()
+	defer func() { _ = busy.Close() }()
 	s.cfg.ICAPAddr = busy.Addr().String()
 	if err := s.ListenAndServeICAP(context.Background()); err == nil {
 		t.Fatal("bind to a taken port succeeded")
@@ -1354,7 +1354,7 @@ func TestICAPShutdownRefusesLateAccept(t *testing.T) {
 
 	// Admitted before shutdown: serveICAPConn blocks in Peek on the pipe.
 	admittedSrv, admittedCli := net.Pipe()
-	defer admittedCli.Close()
+	defer func() { _ = admittedCli.Close() }()
 	s.acceptICAP(admittedSrv)
 
 	shutDone := make(chan struct{})
@@ -1373,7 +1373,7 @@ func TestICAPShutdownRefusesLateAccept(t *testing.T) {
 
 	// Late accept: refused (closed), never served, slot not consumed.
 	lateSrv, lateCli := net.Pipe()
-	defer lateCli.Close()
+	defer func() { _ = lateCli.Close() }()
 	s.acceptICAP(lateSrv)
 	_ = lateCli.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := lateCli.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
@@ -1388,7 +1388,7 @@ func TestICAPShutdownRefusesLateAccept(t *testing.T) {
 		s.icapConns <- struct{}{}
 	}
 	capSrv, capCli := net.Pipe()
-	defer capCli.Close()
+	defer func() { _ = capCli.Close() }()
 	s.acceptICAP(capSrv)
 	_ = capCli.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := capCli.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
@@ -1467,7 +1467,7 @@ func TestICAPShutdownServesPreShutdownConn(t *testing.T) {
 	s := NewServer(cfg, &fakeEngine{count: 1, fp: "testfp"})
 
 	srv, cli := net.Pipe()
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 	s.acceptICAP(srv)
 
 	shutDone := make(chan struct{})
@@ -1496,5 +1496,63 @@ func TestICAPShutdownServesPreShutdownConn(t *testing.T) {
 	}
 	if got := len(s.icapConns); got != 0 {
 		t.Fatalf("icapConns held after drain = %d, want 0", got)
+	}
+}
+
+// TestICAPCtxCancelMarksStoppingAndRefusesLateAccept (AUD-07b): when
+// ListenAndServeICAP stops because ctx was cancelled, the server is marked
+// stopping exactly like ShutdownICAP, so a connection accepted afterwards is
+// refused unserved and never tracked.
+func TestICAPCtxCancelMarksStoppingAndRefusesLateAccept(t *testing.T) {
+	cfg := &Config{ICAPAddr: "127.0.0.1:0", MaxConcurrent: 2, ICAPMaxConns: 4}
+	s := NewServer(cfg, &fakeEngine{count: 1})
+
+	// Positive control: before any stop, a connection is admitted and held.
+	okSrv, okCli := net.Pipe()
+	defer func() { _ = okCli.Close() }()
+	s.acceptICAP(okSrv)
+	if got := len(s.icapConns); got != 1 {
+		t.Fatalf("control: icapConns held = %d, want 1 (admitted)", got)
+	}
+	_ = okCli.Close()
+	s.icapWg.Wait()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled: the serve loop must stop on the cancel path
+	done := make(chan error, 1)
+	go func() { done <- s.ListenAndServeICAP(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ListenAndServeICAP on cancel = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ListenAndServeICAP did not return after ctx cancel")
+	}
+
+	s.icapMu.Lock()
+	stopping := s.icapStopping
+	s.icapMu.Unlock()
+	if !stopping {
+		t.Fatal("ctx cancel did not mark the ICAP server stopping")
+	}
+
+	lateSrv, lateCli := net.Pipe()
+	defer func() { _ = lateCli.Close() }()
+	s.acceptICAP(lateSrv)
+	_ = lateCli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := lateCli.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("late conn after cancel: want refused (EOF), got %v", err)
+	}
+	if got := len(s.icapConns); got != 0 {
+		t.Fatalf("icapConns held = %d, want 0 (refused conn released its slot)", got)
+	}
+
+	// Boundary: ShutdownICAP after a cancel still returns.
+	sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer scancel()
+	s.ShutdownICAP(sctx)
+	if sctx.Err() != nil {
+		t.Fatal("ShutdownICAP after cancel did not return promptly")
 	}
 }
