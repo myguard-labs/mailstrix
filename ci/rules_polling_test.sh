@@ -12,13 +12,15 @@ for mode in default disabled; do
 		override=(-e MAILSTRIX_RULES_POLL_INTERVAL=0)
 	fi
 	# No external service is contacted: a refused loopback connection proves the
-	# startup attempt while retaining the baked rules. Match Compose hardening.
+	# startup attempt while retaining the baked rules. Plain http needs the
+	# explicit MAILSTRIX_RULES_ALLOW_HTTP opt-in. Match Compose hardening.
 	docker run -d --name "$name" --read-only --cap-drop ALL \
 		--security-opt no-new-privileges:true \
 		--tmpfs /tmp:mode=1777 \
 		--tmpfs /var/cache/mailstrix:uid=65532,gid=65532,mode=0755 \
 		-p 127.0.0.1::8079 -e MAILSTRIX_TOKEN=ci \
 		-e MAILSTRIX_RULES_URL=http://127.0.0.1:1 \
+		-e MAILSTRIX_RULES_ALLOW_HTTP=1 \
 		"${override[@]}" "$image" >/dev/null
 	port=$(docker port "$name" 8079/tcp)
 	state=''
