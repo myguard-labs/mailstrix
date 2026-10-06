@@ -230,6 +230,18 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_extract_cap_stops_go_consumer(self):
+        path = "ci/extract_cap_stops_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/extract_cap_stops_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_rc4md5_go_mapping_negative_control(self):
         cases = {
             "ci/rc4md5_extract_test.go": "--changed -- ci/rc4md5_extract_test.go",
