@@ -110,7 +110,7 @@ func TestSoakBase64Bomb(t *testing.T) {
 	assertDecodeInvariants(t, *res)
 }
 
-// TestSoakQuineCycle exercises the MSD-2 fnv64 dedup + depth cap via a source
+// TestSoakQuineCycle exercises the MSD-2 content dedup + depth cap via a source
 // that drives the dedup path: two identical long base64 runs in the buffer, plus
 // a nested layer, to ensure the second copy is recognised as already-emitted and
 // skipped. Asserts termination (the test not hanging is the assertion) and

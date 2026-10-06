@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 // Static multi-layer deobfuscation. Malware authors hide a payload (a URL, a
@@ -733,15 +735,17 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 	// (e.g. two VBA streams with the same body). Processing duplicates is pure
 	// wasted CPU: the BFS would emit the same decoded blobs twice, and the scanner
 	// deduplicates the output anyway. We collapse them here — first occurrence wins,
-	// order preserved — so each distinct content is decoded exactly once.
+	// order preserved — so each distinct content is decoded exactly once. A source
+	// is a duplicate only when its bytes equal an earlier one (AUD-03): a hash
+	// collision alone never drops a distinct source.
 	// Fast path: skip the map entirely when there is at most one source.
 	if len(sources) > 1 {
-		seen := make(map[uint64]struct{}, len(sources))
+		seen := blobSet{first: make(map[uint64][]byte, len(sources))}
 		dst := sources[:0]
 		for _, s := range sources {
-			k := fnv64(s)
-			if _, dup := seen[k]; !dup {
-				seen[k] = struct{}{}
+			k := dedupHash(s)
+			if !seen.has(k, s) {
+				seen.add(k, s)
 				dst = append(dst, s)
 			}
 		}
@@ -837,9 +841,9 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 		iters    int
 		maxLayer int
 		// seen is allocated lazily on the first accepted blob for this source.
-		// A nil map is safe to query (returns zero, false); it is initialised on
-		// first write inside emit so sources that decode nothing never allocate it.
-		seen map[uint64]struct{}
+		// A nil set is safe to query; it is initialised on first add inside emit
+		// so sources that decode nothing never allocate it.
+		seen blobSet
 	}
 	states := make([]srcState, len(sources))
 
@@ -894,10 +898,11 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 				b = b[:maxBytesPerDecodedBlob]
 			}
 			// MSD-2: per-source-tree dedup (preserves old per-tree semantics).
-			// st.seen is nil until the first accepted blob — a nil map read is
-			// safe (returns zero, false); allocate lazily on first write below.
-			h := fnv64(b)
-			if _, dup := st.seen[h]; dup {
+			// st.seen is empty until the first accepted blob; add allocates
+			// lazily. Hashed once; a hit counts as a duplicate only when the
+			// bytes match (AUD-03).
+			h := dedupHash(b)
+			if st.seen.has(h, b) {
 				return true
 			}
 			if st.blobs >= maxDecodedBlobs || len(res.Streams) >= maxStreams || st.cum+len(b) > maxCumulativeDecoded {
@@ -905,10 +910,7 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 			}
 			res.Streams = append(res.Streams, b)
 			curChildren = append(curChildren, b)
-			if st.seen == nil {
-				st.seen = make(map[uint64]struct{})
-			}
-			st.seen[h] = struct{}{}
+			st.seen.add(h, b)
 			st.blobs++
 			st.cum += len(b)
 			total++
@@ -987,24 +989,20 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 	}
 	queue := []item{{src, 0}}
 
-	// MSD-2: fnv64 content-dedup of EMITTED blobs. A decode cycle (A→B→A) or a
+	// MSD-2: content-dedup of EMITTED blobs. A decode cycle (A→B→A) or a
 	// fan-out where several layers converge on the same blob would otherwise emit +
 	// re-decode identical bytes at every reappearance — wasting iters/CPU (the
 	// duplicate STREAM is later dropped by the scanner's SHA256 dedup, but the
 	// decode work is not). Recording a blob only AFTER it is accepted, and querying
 	// before re-enqueue, makes the walk O(distinct emitted blobs) and breaks cycles
-	// structurally. fnv64 is non-cryptographic; a collision merely skips one
-	// re-decode (never drops a stream, since seen() gates enqueue, not emit), and is
-	// astronomically unlikely on the bounded blob count.
+	// structurally. The 64-bit hash only selects a bucket; a blob is a duplicate
+	// only when its bytes equal a stored blob (AUD-03), so a hash collision can
+	// never suppress a distinct stream. Each blob is hashed once (AUD-P1a).
 	//
 	// The set holds ONLY successfully-emitted blobs — NOT the source (a decoded blob
 	// byte-identical to the source must still reach YARA) and NOT budget-rejected
 	// blobs (whose clamped-prefix hash must not suppress a later, different blob).
-	seen := make(map[uint64]struct{})
-	alreadyEmitted := func(b []byte) bool {
-		_, ok := seen[fnv64(b)]
-		return ok
-	}
+	var seen blobSet
 
 	var blobs, cum, iters int
 	// children collects the blobs emitted while decoding the CURRENT item, so we
@@ -1028,7 +1026,8 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 		// encoded runs, or a fan-out convergence). Hash the CLAMPED bytes — that is
 		// what is stored. A skip is not a budget failure (return true), so decoding
 		// continues past the duplicate.
-		if alreadyEmitted(b) {
+		h := dedupHash(b)
+		if seen.has(h, b) {
 			return true
 		}
 		if blobs >= maxDecodedBlobs || len(res.Streams) >= maxStreams || cum+len(b) > maxCumulativeDecoded {
@@ -1036,7 +1035,7 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 		}
 		res.Streams = append(res.Streams, b)
 		children = append(children, b)
-		seen[fnv64(b)] = struct{}{} // record only accepted blobs
+		seen.add(h, b) // record only accepted blobs
 		blobs++
 		cum += len(b)
 		if curLayer > maxLayer {
@@ -1082,7 +1081,7 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 		// deepest decoded item is at depth maxDecodeDepth-1.
 		if cur.depth+1 < maxDepth {
 			// `children` are exactly the blobs emit() ACCEPTED this pass, so each is
-			// already distinct (emit's markSeen dropped duplicates). Re-enqueue the
+			// already distinct (emit's dedup dropped duplicates). Re-enqueue the
 			// still-encoded ones one layer deeper; the dedup at emit time means a
 			// blob seen at a shallower depth never reappears here (cycle-break).
 			for _, c := range children {
@@ -1108,20 +1107,51 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 	return blobs
 }
 
-// fnv64 is the 64-bit FNV-1a hash of b, inlined (no hasher allocation) for the
-// MSD-2 worklist dedup hot path. Used only to detect re-decode of identical
-// bytes; a collision merely skips one decode, never produces a wrong stream.
-func fnv64(b []byte) uint64 {
-	const (
-		offset = 14695981039346656037
-		prime  = 1099511628211
-	)
-	h := uint64(offset)
-	for _, c := range b {
-		h ^= uint64(c)
-		h *= prime
+// blobSet is the MSD-2/PERF-39 content-dedup set. The 64-bit hash only picks a
+// slot; membership is confirmed with bytes.Equal against the stored bytes, so
+// two distinct blobs that collide are both kept (AUD-03). The first blob per
+// hash is stored inline (no per-entry allocation); a genuine collision goes to
+// overflow, which stays empty in practice and is bounded by the decode budgets
+// (maxDecodedBlobs, maxStreams) under adversarial input. Stored slices alias
+// bytes the caller already retains (res.Streams or sources); nothing is copied.
+// The zero value is an empty set; the map is allocated on first add.
+type blobSet struct {
+	first    map[uint64][]byte
+	overflow []hashedBlob
+}
+
+type hashedBlob struct {
+	h uint64
+	b []byte
+}
+
+// has reports whether b (with hash h) is already in the set.
+func (s *blobSet) has(h uint64, b []byte) bool {
+	x, ok := s.first[h]
+	if !ok {
+		return false // overflow only holds hashes already present in first
 	}
-	return h
+	if bytes.Equal(x, b) {
+		return true
+	}
+	for _, o := range s.overflow {
+		if o.h == h && bytes.Equal(o.b, b) {
+			return true
+		}
+	}
+	return false
+}
+
+// add records b under hash h. The caller checks has first; add does not dedup.
+func (s *blobSet) add(h uint64, b []byte) {
+	if s.first == nil {
+		s.first = make(map[uint64][]byte)
+	}
+	if _, ok := s.first[h]; ok {
+		s.overflow = append(s.overflow, hashedBlob{h, b})
+		return
+	}
+	s.first[h] = b
 }
 
 // prefilterMarkers are the cheap structural substrings the decode chain /
@@ -2034,3 +2064,7 @@ func emitReversed(src []byte, emit func([]byte) bool) bool {
 	}
 	return emit(rev)
 }
+
+// dedupHash is the content-dedup hash. A package variable only so tests can
+// force collisions and count calls; production always uses xxhash.
+var dedupHash = xxhash.Sum64
