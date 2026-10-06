@@ -148,6 +148,7 @@ GO_INPUTS = [
     "ci/decode_scalar_test.go",
     "ci/clamd_cache_test.go",
     "ci/scanner_budget_test.go",
+    "ci/reload_generation_test.go",
     "ci/rules_polling_config_test.go",
     "ci/mime_attachment_hash_test.go",
     "ci/mbazaar_lifecycle_test.go",

@@ -583,8 +583,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// cold-start is equivalent and safe (L2/Redis keys are also per-Fingerprint so
 	// no cross-version collision).
 	meta.RawKey = streamDedupKey(buf)
-	key := s.engine.Fingerprint() + ":" + meta.cacheKey() + ":" + string(meta.RawKey[:])
-	matches, cacheStatus := s.lookupOrScan(ctx, key, buf, meta)
+	matches, cacheStatus, _ := s.lookupOrScan(ctx, "", buf, meta)
 
 	if len(matches) > 0 {
 		s.metrics.matches.Add(1)
@@ -618,31 +617,39 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 // in-flight identical scan, or a fresh scan whose result is cached. At high
 // volume the cache + coalescing collapse a bulk campaign's N identical messages
 // into a single scan. Returns the matches and a cache-status label for logs.
-func (s *Server) lookupOrScan(ctx context.Context, key string, buf []byte, meta ScanMeta) ([]Match, string) {
-	outcome, status := s.lookupScanOutcome(ctx, key, buf, meta)
+func (s *Server) lookupOrScan(ctx context.Context, partition string, buf []byte, meta ScanMeta) ([]Match, string, string) {
+	outcome, status, fp := s.lookupScanOutcomeStarted(ctx, partition, buf, meta, nil)
 	if status == "canceled" {
-		return nil, status
+		return nil, status, fp
 	}
 	if errors.Is(outcome.err, errScanBusy) {
-		return []Match{scanDegradedMatch(degradedBusy)}, status
+		return []Match{scanDegradedMatch(degradedBusy)}, status, fp
 	}
 	if outcome.err != nil && !errors.Is(outcome.err, ErrScanIncomplete) {
-		return []Match{scanDegradedMatch(degradedError)}, status
+		return []Match{scanDegradedMatch(degradedError)}, status, fp
 	}
-	return outcome.matches, status
+	return outcome.matches, status, fp
 }
 
 var errScanBusy = errors.New("no scan slot within budget")
 
-// lookupScanOutcome shares raw outcomes across transports. Admission and native
-// worker lifetime remain caller-owned; only the leader acquires the CPU gate.
-func (s *Server) lookupScanOutcome(ctx context.Context, key string, buf []byte, meta ScanMeta) (scanOutcome, string) {
-	return s.lookupScanOutcomeStarted(ctx, key, buf, meta, nil)
+// lookupScanOutcomeStarted owns the generation through cache lookup, coalescing,
+// native dispatch and cache publication. clamd calls it inside its native worker
+// so a client disconnect cannot end ownership early. The returned fingerprint
+// identifies the same verdict when ICAP constructs its response ISTag.
+// onStarted runs once when the shared scan acquires its CPU slot.
+func (s *Server) lookupScanOutcomeStarted(ctx context.Context, partition string, buf []byte, meta ScanMeta, onStarted func()) (scanOutcome, string, string) {
+	lease := leaseScanEngine(s.engine)
+	defer lease.release()
+	if partition == "" {
+		partition = meta.cacheKey()
+	}
+	key := lease.fingerprint + ":" + partition + ":" + string(meta.RawKey[:])
+	outcome, status := s.lookupScanOutcomeLease(ctx, lease, key, buf, meta, onStarted)
+	return outcome, status, lease.fingerprint
 }
 
-// onStarted runs once for this caller when the shared scan acquires its CPU
-// slot. Cache hits and queue failures return directly without starting a scan.
-func (s *Server) lookupScanOutcomeStarted(ctx context.Context, key string, buf []byte, meta ScanMeta, onStarted func()) (scanOutcome, string) {
+func (s *Server) lookupScanOutcomeLease(ctx context.Context, lease scanLease, key string, buf []byte, meta ScanMeta, onStarted func()) (scanOutcome, string) {
 	if ctx.Err() != nil {
 		s.metrics.canceled.Add(1)
 		return scanOutcome{err: ctx.Err()}, "canceled"
@@ -671,7 +678,7 @@ func (s *Server) lookupScanOutcomeStarted(ctx context.Context, key string, buf [
 		scanned, scanErr := func() ([]Match, error) {
 			defer func() { <-s.sem }()
 			started()
-			return s.dispatch(buf, meta)
+			return s.dispatchLease(lease, buf, meta)
 		}()
 		if scanErr != nil {
 			if !errors.Is(scanErr, ErrScanIncomplete) {
@@ -698,14 +705,20 @@ func (s *Server) lookupScanOutcomeStarted(ctx context.Context, key string, buf [
 // it logs and returns a non-nil error. Returning an error (not (nil,nil)) is
 // deliberate: HTTP/ICAP consumers fail open without caching the error, while
 // clamd returns ERROR. A panic therefore never becomes a cached clean verdict.
-func (s *Server) dispatch(buf []byte, meta ScanMeta) (matches []Match, err error) {
+func (s *Server) dispatch(buf []byte, meta ScanMeta) ([]Match, error) {
+	lease := leaseScanEngine(s.engine)
+	defer lease.release()
+	return s.dispatchLease(lease, buf, meta)
+}
+
+func (s *Server) dispatchLease(lease scanLease, buf []byte, meta ScanMeta) (matches []Match, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			s.errf("scan panic: %v", rec)
 			matches, err = nil, fmt.Errorf("scan panic: %v", rec)
 		}
 	}()
-	return s.engine.Scan(buf, meta)
+	return lease.scan(buf, meta)
 }
 
 // acquireOn takes a slot from sem within BackendTimeout, returning early (false)

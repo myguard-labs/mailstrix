@@ -414,10 +414,8 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	defer func() { <-s.admit }()
 
 	t0 := time.Now()
-	fp := s.engine.Fingerprint()
 	icapMeta := ScanMeta{RawKey: streamDedupKey(buf)}
-	key := fp + ":icap:" + string(icapMeta.RawKey[:])
-	matches, cacheStatus := s.lookupOrScan(ctx, key, buf, icapMeta)
+	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap", buf, icapMeta)
 	if cacheStatus == "canceled" {
 		// A follower that stopped waiting on its leader has no verdict: answer
 		// 503 so the client retries or applies its own policy, never 204 clean.
