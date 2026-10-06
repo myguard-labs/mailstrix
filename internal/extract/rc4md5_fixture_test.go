@@ -20,7 +20,7 @@ import (
 // DocumentRC4._makekey, which the production code labels MS-OFFCRYPTO §2.3.7.3:
 // MD5(utf16le(password))[0:5] || salt repeated 16 times, MD5 again, take [0:5]
 // || blockLE32, MD5 again, take [0:16]. The production rc4MD5MakeKey/
-// rc4MD5Decrypt are never called to build ciphertext, so a KDF or decrypt drift
+// rc4MD5DecryptBIFF are never called to build ciphertext, so a KDF or decrypt drift
 // fails the round-trip. (The packet's "0x30..0x3B zeroing" note belongs to the
 // separate XOR-obfuscation transform; production rc4MD5MakeKey has no such
 // zeroing and this fixture encodes the observed behavior.)
@@ -122,11 +122,49 @@ func fixturePatternBytes(n int) []byte {
 	return out
 }
 
+// fixtureRawRC4MD5Decrypt retains the historical raw-block transform solely to
+// exercise the production KDF against the independent #384 reference encryptor.
+// Production Workbook decryption uses rc4MD5DecryptBIFF and 1024-byte blocks.
+// Each 512-byte block is decrypted with a fresh RC4 key (block counter starts at 0).
+// Output is capped at maxDefaultPWOut.
+func fixtureRawRC4MD5Decrypt(password string, salt, ciphertext []byte) []byte {
+	const blockSize = 512
+	out := make([]byte, 0, len(ciphertext))
+	for blk := 0; ; blk++ {
+		if len(out) >= maxDefaultPWOut {
+			break
+		}
+		start := blk * blockSize
+		if start >= len(ciphertext) {
+			break
+		}
+		end := start + blockSize
+		if end > len(ciphertext) {
+			end = len(ciphertext)
+		}
+		chunk := ciphertext[start:end]
+		key := rc4MD5MakeKey(password, salt, uint32(blk)) //#nosec G115 -- blk bounded by ciphertext length
+		// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
+		c, err := rc4.NewCipher(key) //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
+		if err != nil {
+			break
+		}
+		plain := make([]byte, len(chunk))
+		c.XORKeyStream(plain, chunk)
+		remaining := maxDefaultPWOut - len(out)
+		if len(plain) > remaining {
+			plain = plain[:remaining]
+		}
+		out = append(out, plain...)
+	}
+	return out
+}
+
 func fixtureRefRC4MD5RoundTrip(t *testing.T, name, password string, salt, plain []byte) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		enc := fixtureRefRC4MD5Encrypt(t, plain, password, salt)
-		got := rc4MD5Decrypt(password, salt, enc)
+		got := fixtureRawRC4MD5Decrypt(password, salt, enc)
 		if !bytes.Equal(got, plain) {
 			t.Fatalf("RC4-MD5 decrypted bytes differ from known plaintext: want % x\n got % x", plain, got)
 		}
@@ -143,7 +181,7 @@ func TestRC4MD5DecryptFixture_BlockSpanning(t *testing.T) {
 	for _, size := range []int{128, 512, 513, 1500, 4096} {
 		t.Run(fmt.Sprintf("plain-%d-bytes", size), func(t *testing.T) {
 			plain := fixturePatternBytes(size)
-			got := rc4MD5Decrypt(password, salt, fixtureRefRC4MD5Encrypt(t, plain, password, salt))
+			got := fixtureRawRC4MD5Decrypt(password, salt, fixtureRefRC4MD5Encrypt(t, plain, password, salt))
 			if !bytes.Equal(got, plain) {
 				t.Fatalf("RC4-MD5 decrypted bytes differ from known plaintext: want % x\n got % x", plain, got)
 			}
@@ -151,8 +189,8 @@ func TestRC4MD5DecryptFixture_BlockSpanning(t *testing.T) {
 	}
 }
 
-// TestRC4MD5DecryptFixture_BoundaryAndMalformed asserts the OBSERVED production
-// behavior of rc4MD5Decrypt for degenerate inputs: it decrypts with any salt
+// TestRC4MD5DecryptFixture_BoundaryAndMalformed preserves historical raw-block
+// KDF controls through the test-only transform: it decrypts with any salt
 // length (including empty) and any password (including empty); a ciphertext
 // length that is not a multiple of 512 decrypts the partial final block under
 // the block-indexed key; empty ciphertext yields empty output.
@@ -161,14 +199,14 @@ func TestRC4MD5DecryptFixture_BoundaryAndMalformed(t *testing.T) {
 	salt := []byte("0123456789abcdef")
 
 	t.Run("empty-ciphertext", func(t *testing.T) {
-		if got := rc4MD5Decrypt(password, salt, nil); len(got) != 0 {
+		if got := fixtureRawRC4MD5Decrypt(password, salt, nil); len(got) != 0 {
 			t.Fatalf("empty ciphertext produced %d output bytes", len(got))
 		}
 	})
 
 	t.Run("ciphertext-not-multiple-of-512", func(t *testing.T) {
 		plain := fixturePatternBytes(100)
-		got := rc4MD5Decrypt(password, salt, fixtureRefRC4MD5Encrypt(t, plain, password, salt))
+		got := fixtureRawRC4MD5Decrypt(password, salt, fixtureRefRC4MD5Encrypt(t, plain, password, salt))
 		if !bytes.Equal(got, plain) {
 			t.Fatalf("partial final block decrypted to % x", got)
 		}
