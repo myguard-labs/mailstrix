@@ -190,7 +190,7 @@ func TestDecodePerStreamBudget(t *testing.T) {
 
 // TestDecodeMSD2DedupsRepeatedBlob (MSD-2): when the same encoded run appears
 // twice in one source, the recursive walk decodes it ONCE — fan-out convergence
-// is collapsed by the fnv64 worklist dedup, so the decoded blob count does not
+// is collapsed by the content dedup, so the decoded blob count does not
 // double. (The scanner SHA-dedups emitted streams anyway; MSD-2 saves the
 // redundant DECODE work that would otherwise re-run at every reappearance.)
 func TestDecodeMSD2DedupsRepeatedBlob(t *testing.T) {
@@ -229,21 +229,6 @@ func TestDecodeReversedEqualsSourceStillEmitted(t *testing.T) {
 	res := Extract(buf, time.Time{})
 	if !streamsContain(res, "cmd.exe") {
 		t.Errorf("reversed-equals-source blob was swallowed by dedup seeding; streams=%v", res.Streams)
-	}
-}
-
-// TestFNV64 sanity-checks the inlined hash: deterministic, and distinct inputs
-// (incl. empty) hash distinctly here.
-func TestFNV64(t *testing.T) {
-	abc := fnv64([]byte("abc"))
-	if abc != fnv64([]byte("abc")) {
-		t.Error("fnv64 not deterministic")
-	}
-	if fnv64([]byte("abc")) == fnv64([]byte("abd")) {
-		t.Error("fnv64 collided on a 1-byte difference")
-	}
-	if fnv64(nil) == fnv64([]byte("x")) {
-		t.Error("fnv64(empty) == fnv64(\"x\")")
 	}
 }
 
@@ -692,5 +677,184 @@ func TestFoldVBAVarReplaceNoBehaviorChange(t *testing.T) {
 	foldVBAVarReplace(buf, time.Time{}, func([]byte) bool { emitted++; return true })
 	if emitted != 0 {
 		t.Fatalf("foldVBAVarReplace emitted %d streams on plain-text input", emitted)
+	}
+}
+
+// forceDedupCollision makes every dedup hash identical for the duration of the
+// test, so each distinct blob collides with the first one recorded. A real
+// 64-bit collision cannot practically be embedded in a fixture; the seam lets
+// the test prove that a collision alone never suppresses distinct content.
+func forceDedupCollision(t *testing.T) {
+	t.Helper()
+	orig := dedupHash
+	dedupHash = func([]byte) uint64 { return 0x5eed }
+	t.Cleanup(func() { dedupHash = orig })
+}
+
+// countDedupHash wraps the real dedup hash and counts its invocations.
+func countDedupHash(t *testing.T) *int {
+	t.Helper()
+	orig := dedupHash
+	calls := new(int)
+	dedupHash = func(b []byte) uint64 {
+		*calls++
+		return orig(b)
+	}
+	t.Cleanup(func() { dedupHash = orig })
+	return calls
+}
+
+func b64Run(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+const (
+	auDecoyPayload  = "AUD03-DECOY-BLOB-EMITTED-FIRST"
+	auHiddenPayload = "AUD03-HIDDEN-PAYLOAD-MUST-SURVIVE"
+)
+
+// TestDedupCollisionSourceTreeKeepsDistinctBlobs (AUD-03): in decodeSourceTree
+// a decoy blob whose hash collides with a later, different payload must not
+// suppress that payload.
+func TestDedupCollisionSourceTreeKeepsDistinctBlobs(t *testing.T) {
+	forceDedupCollision(t)
+	res := &Result{}
+	n := decodeSourceTree([]byte(b64Run(auDecoyPayload)+" "+b64Run(auHiddenPayload)), res, FullOptions(time.Time{}))
+	for _, p := range []string{auDecoyPayload, auHiddenPayload} {
+		if streamsContainExactlyN(res, p) != 1 {
+			t.Errorf("decodeSourceTree: payload %q present %d times, want 1 (hash collision dropped a distinct blob); blobs=%d",
+				p, streamsContainExactlyN(res, p), n)
+		}
+	}
+}
+
+// TestDedupCollisionGlobalBFSKeepsDistinctBlobs (AUD-03): the per-source-tree
+// dedup inside fromEncoded's global BFS must not drop a colliding distinct blob.
+// A single source (buf only) bypasses the source-dedup site, isolating this one.
+func TestDedupCollisionGlobalBFSKeepsDistinctBlobs(t *testing.T) {
+	forceDedupCollision(t)
+	res := &Result{}
+	fromEncoded([]byte(b64Run(auDecoyPayload)+" "+b64Run(auHiddenPayload)), res, FullOptions(time.Time{}))
+	for _, p := range []string{auDecoyPayload, auHiddenPayload} {
+		if streamsContainExactlyN(res, p) != 1 {
+			t.Errorf("global BFS: payload %q present %d times, want 1 (hash collision dropped a distinct blob)",
+				p, streamsContainExactlyN(res, p))
+		}
+	}
+}
+
+// TestDedupCollisionKeepsDistinctSources (AUD-03): the PERF-39 source dedup
+// must keep two distinct sources whose hashes collide, so both are decoded.
+func TestDedupCollisionKeepsDistinctSources(t *testing.T) {
+	forceDedupCollision(t)
+	res := &Result{Streams: [][]byte{[]byte(b64Run(auDecoyPayload)), []byte(b64Run(auHiddenPayload))}}
+	fromEncoded(nil, res, FullOptions(time.Time{}))
+	for _, p := range []string{auDecoyPayload, auHiddenPayload} {
+		if !streamsContain(*res, p) {
+			t.Errorf("source dedup: payload %q never decoded (colliding source dropped); streams=%d", p, len(res.Streams))
+		}
+	}
+}
+
+// TestDedupCollisionStillCollapsesIdentical (boundary): forcing every hash to
+// collide must not disable dedup of byte-identical content — repeated blobs and
+// repeated sources still collapse, and a nested repeat still terminates.
+func TestDedupCollisionStillCollapsesIdentical(t *testing.T) {
+	forceDedupCollision(t)
+	inner := "AUD03-NESTED-REPEAT-PAYLOAD"
+	outer := b64Run(b64Run(inner))
+
+	tree := &Result{}
+	decodeSourceTree([]byte(outer+" "+outer), tree, FullOptions(time.Time{}))
+	if got := streamsContainExactlyN(tree, inner); got != 1 {
+		t.Errorf("decodeSourceTree: identical nested blob emitted %d times, want 1", got)
+	}
+
+	bfs := &Result{}
+	fromEncoded([]byte(outer+" "+outer), bfs, FullOptions(time.Time{}))
+	if got := streamsContainExactlyN(bfs, inner); got != 1 {
+		t.Errorf("global BFS: identical nested blob emitted %d times, want 1", got)
+	}
+
+	srcs := &Result{Streams: [][]byte{[]byte(outer), []byte(outer)}}
+	fromEncoded(nil, srcs, FullOptions(time.Time{}))
+	if got := streamsContainExactlyN(srcs, inner); got != 1 {
+		t.Errorf("source dedup: identical sources decoded %d times, want 1", got)
+	}
+}
+
+// TestDedupBucketSemantics covers the collision-bucket helper directly:
+// positive (identical bytes found), negative (distinct bytes under the same hash
+// not found), boundary (empty slice vs nil, and a prefix of a stored blob).
+func TestDedupBucketSemantics(t *testing.T) {
+	var s blobSet
+	if s.has(1, []byte("abc")) {
+		t.Fatal("zero-value set reported a member")
+	}
+	s.add(1, []byte("abc"))
+	if !s.has(1, []byte("abc")) {
+		t.Error("identical bytes under the same hash not found")
+	}
+	if s.has(1, []byte("abd")) {
+		t.Error("distinct bytes under a colliding hash treated as duplicate")
+	}
+	if s.has(1, []byte("ab")) {
+		t.Error("prefix of a stored blob treated as duplicate")
+	}
+	if s.has(2, []byte("abc")) {
+		t.Error("identical bytes under a different hash found (wrong bucket)")
+	}
+	s.add(1, []byte("abd"))
+	if !s.has(1, []byte("abc")) || !s.has(1, []byte("abd")) {
+		t.Error("bucket lost an entry after a second colliding add")
+	}
+	s.add(2, []byte("xyz"))
+	if s.has(2, []byte("abd")) {
+		t.Error("overflow entry stored under another hash matched")
+	}
+	s.add(3, nil)
+	if !s.has(3, []byte{}) {
+		t.Error("empty slice not equal to stored nil")
+	}
+}
+
+// TestDedupHashOncePerAcceptedBlob (AUD-P1a): with only distinct blobs (no
+// duplicates, no budget rejections) the dedup hash runs exactly once per
+// accepted blob — not once for the lookup and again for the insert.
+func TestDedupHashOncePerAcceptedBlob(t *testing.T) {
+	src := []byte(b64Run(auDecoyPayload) + " " + b64Run(auHiddenPayload))
+
+	calls := countDedupHash(t)
+	tree := &Result{}
+	accepted := decodeSourceTree(src, tree, FullOptions(time.Time{}))
+	if accepted < 2 || *calls != accepted {
+		t.Errorf("decodeSourceTree: %d hash calls for %d accepted blobs, want equal (>=2)", *calls, accepted)
+	}
+
+	*calls = 0
+	bfs := &Result{}
+	fromEncoded(src, bfs, FullOptions(time.Time{}))
+	if bfs.DecodedStreams < 2 || *calls != bfs.DecodedStreams {
+		t.Errorf("global BFS: %d hash calls for %d accepted blobs, want equal (>=2)", *calls, bfs.DecodedStreams)
+	}
+}
+
+// BenchmarkDecodeDedupHotPath (AUD-P1a) exercises the emit-time dedup with a
+// mix of distinct and repeated multi-KiB blobs across several sources, so the
+// per-blob hash/compare cost dominates over regex scanning.
+func BenchmarkDecodeDedupHotPath(b *testing.B) {
+	var sb strings.Builder
+	for i := 0; i < 24; i++ {
+		run := b64Run(strings.Repeat(string(rune('A'+i)), 4096) + "-DEDUP-BENCH")
+		sb.WriteString(run)
+		sb.WriteByte(' ')
+		sb.WriteString(run) // repeated run: the dedup-hit path
+		sb.WriteByte(' ')
+	}
+	src := []byte(sb.String())
+	b.SetBytes(int64(len(src)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res := &Result{Streams: [][]byte{src, src[:len(src)/2]}}
+		fromEncoded(src, res, FullOptions(benchDeadline()))
 	}
 }
