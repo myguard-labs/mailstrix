@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,19 +41,53 @@ func serveBundle(t *testing.T, n int) *httptest.Server {
 	return s
 }
 
+// captureStderr redirects os.Stderr for the duration of fn and returns what was
+// written. The pipe is drained concurrently so a large write cannot block fn.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		b, err := io.ReadAll(r)
+		if err != nil {
+			b = append(b, "read error: "+err.Error()...)
+		}
+		done <- string(b)
+	}()
+	defer func() { os.Stderr = orig }()
+	fn()
+	_ = w.Close()
+	return <-done
+}
+
 func TestFetchRulesCLIRefusesEmptyBundleUnlessAllowed(t *testing.T) {
 	source := serveBundle(t, 0)
 	cache := t.TempDir()
 	t.Setenv("MAILSTRIX_CACHE_DIR", cache)
 	t.Setenv("MAILSTRIX_RULES_ALLOW_COUNT_DROP", "")
-	if code := cmdFetchRules([]string{"-allow-http", "-url", source.URL}); code != 2 {
+	var code int
+	stderr := captureStderr(t, func() { code = cmdFetchRules([]string{"-allow-http", "-url", source.URL}) })
+	if code != 2 {
 		t.Fatalf("empty bundle accepted, exit=%d", code)
+	}
+	if !strings.Contains(stderr, "rule count drop") {
+		t.Fatalf("stderr %q does not report the rule count drop refusal", stderr)
 	}
 	if _, err := os.Stat(filepath.Join(cache, "compiled.yac")); err == nil {
 		t.Fatal("empty bundle installed despite refusal")
 	}
 	if code := cmdFetchRules([]string{"-allow-http", "-url", source.URL, "-allow-count-drop"}); code != 0 {
 		t.Fatalf("flag opt-in exit=%d, want 0", code)
+	}
+	// Exit 0 is also returned when nothing was installed (!res.Updated), so
+	// prove the opt-in run actually wrote the bundle.
+	if _, err := os.Stat(filepath.Join(cache, "compiled.yac")); err != nil {
+		t.Fatalf("opt-in run did not install the bundle: %v", err)
 	}
 }
 

@@ -37,9 +37,8 @@ func rulesBundleCount(path string) (int, error) {
 	if r == nil {
 		return 0, nil
 	}
-	n := len(r.GetRules())
-	r.Destroy()
-	return n, nil
+	defer r.Destroy()
+	return len(r.GetRules()), nil
 }
 
 // checkRuleCountDrop decides whether a bundle with newCount rules may replace one
@@ -69,6 +68,11 @@ func checkRuleCountDrop(ctx context.Context, curCount, newCount int) error {
 // a live scanner with rules (liveCount > 0): that count is an authoritative
 // baseline, so the guard still applies against it and a corrupt cache can heal.
 // An absent file is a genuine first install: baseline is liveCount (normally 0).
+//
+// Caveat: a standalone `strixd fetch-rules` can install a smaller (but still
+// permitted) bundle without reloading a running daemon, so the daemon's live
+// count keeps flooring the baseline (max(liveCount, n)) and may refuse a later
+// poll update until SIGHUP or a restart reloads the smaller bundle.
 func currentRuleCount(ctx context.Context, cachePath string, liveCount int) (int, error) {
 	cur := max(liveCount, 0)
 	_, statErr := os.Stat(cachePath)

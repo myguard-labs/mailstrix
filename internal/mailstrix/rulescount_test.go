@@ -230,9 +230,29 @@ func TestAllowRulesCountDropEnv(t *testing.T) {
 func captureStdLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	prev := log.Writer()
 	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 	return &buf
+}
+
+// TestCaptureStdLogRestoresPreviousWriter: the helper must hand back the writer
+// that was installed before it ran, not unconditionally os.Stderr.
+func TestCaptureStdLogRestoresPreviousWriter(t *testing.T) {
+	var sentinel bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&sentinel)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	t.Run("capture", func(t *testing.T) {
+		buf := captureStdLog(t)
+		log.Print("inside")
+		if !strings.Contains(buf.String(), "inside") {
+			t.Fatalf("capture buffer missed the line: %q", buf.String())
+		}
+	})
+	if log.Writer() != &sentinel {
+		t.Fatalf("log writer = %v, want the pre-existing writer restored", log.Writer())
+	}
 }
 
 func TestFetchRulesMissingManifestLargeBundleRefusesTinyDownload(t *testing.T) {
