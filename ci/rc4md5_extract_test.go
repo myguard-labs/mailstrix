@@ -2,6 +2,8 @@ package ci_test
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -92,5 +94,31 @@ func TestRC4MD5PublicOLEMalformedTailKeepsSheet(t *testing.T) {
 	got := extract.Extract(fixture, time.Time{})
 	if !hasExactExtractStream(got.Markers, "DEFAULTPW-DECRYPTED") || !hasExactExtractStream(got.Streams, "XLM-HIDDEN-MACROSHEET hidden RC4SecretSheet") {
 		t.Fatalf("malformed BIFF tail hid a decrypted sheet: streams=%q markers=%q", got.Streams, got.Markers)
+	}
+}
+
+// FILEPASS lengths exercise the public parser before verifier/decrypt dispatch.
+// The intact fixture in TestRC4MD5PublicOLEExtraction is the positive control.
+func TestRC4MD5PublicOLEFilepassLengths(t *testing.T) {
+	for _, size := range []uint16{0, 1, 5, 53, 65535} {
+		t.Run(fmt.Sprintf("body-%d", size), func(t *testing.T) {
+			fixture := rc4MD5BIFFFixture(t)
+			const filepassOffset = 3*512 + 12
+			binary.LittleEndian.PutUint16(fixture[filepassOffset+2:], size)
+			got := extract.Extract(fixture, time.Time{})
+			if !got.IsDoc || got.Panicked {
+				t.Fatalf("malformed FILEPASS flags: doc=%v panicked=%v", got.IsDoc, got.Panicked)
+			}
+			if hasExactExtractStream(got.Markers, "DEFAULTPW-DECRYPTED") || hasExactExtractStream(got.Streams, "XLM-HIDDEN-MACROSHEET hidden RC4SecretSheet") {
+				t.Fatalf("malformed FILEPASS emitted decrypted plaintext: streams=%q markers=%q", got.Streams, got.Markers)
+			}
+		})
+	}
+}
+
+func TestRC4MD5PublicOLEExpiredDeadline(t *testing.T) {
+	got := extract.Extract(rc4MD5BIFFFixture(t), time.Now().Add(-time.Second))
+	if got.Panicked || len(got.Streams) != 0 || hasExactExtractStream(got.Markers, "DEFAULTPW-DECRYPTED") {
+		t.Fatalf("expired OLE deadline emitted content: streams=%q markers=%q panicked=%v", got.Streams, got.Markers, got.Panicked)
 	}
 }

@@ -361,42 +361,6 @@ func rc4MD5VerifyPW(password string, salt, encVerifier, encVerifierHash []byte) 
 	return string(actual[:]) == string(verifierHash)
 }
 
-// rc4MD5Decrypt decrypts the raw BIFF8 workbook stream encrypted with RC4 v1.1.
-// Each 512-byte block is decrypted with a fresh RC4 key (block counter starts at 0).
-// Output is capped at maxDefaultPWOut.
-func rc4MD5Decrypt(password string, salt, ciphertext []byte) []byte {
-	const blockSize = 512
-	out := make([]byte, 0, len(ciphertext))
-	for blk := 0; ; blk++ {
-		if len(out) >= maxDefaultPWOut {
-			break
-		}
-		start := blk * blockSize
-		if start >= len(ciphertext) {
-			break
-		}
-		end := start + blockSize
-		if end > len(ciphertext) {
-			end = len(ciphertext)
-		}
-		chunk := ciphertext[start:end]
-		key := rc4MD5MakeKey(password, salt, uint32(blk)) //#nosec G115 -- blk bounded by ciphertext length
-		// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- protocol-mandated by MS-OFFCRYPTO; decrypts attacker files, never protects our data
-		c, err := rc4.NewCipher(key) //#nosec G405 -- RC4 required by MS-OFFCRYPTO BIFF8 protocol; protocol-mandated interop
-		if err != nil {
-			break
-		}
-		plain := make([]byte, len(chunk))
-		c.XORKeyStream(plain, chunk)
-		remaining := maxDefaultPWOut - len(out)
-		if len(plain) > remaining {
-			plain = plain[:remaining]
-		}
-		out = append(out, plain...)
-	}
-	return out
-}
-
 // rc4MD5DecryptBIFF decrypts a complete BIFF Workbook stream. BIFF record
 // headers, selected record bodies, and BoundSheet8.lbPlyPos stay clear, but
 // still consume RC4 keystream. Keys change at absolute 1024-byte stream
