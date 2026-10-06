@@ -161,6 +161,21 @@ class ImpactTests(unittest.TestCase):
             impact.plan([path])
         self.assertEqual(impact.plan([path]), result)
 
+    def test_marker_reload_native_go_consumer(self):
+        path = "ci/marker_reload_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/marker_reload_test.py"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+
     def test_mbazaar_lifecycle_native_go_consumer(self):
         path = "ci/mbazaar_lifecycle_test.go"
         result = impact.plan([path])
