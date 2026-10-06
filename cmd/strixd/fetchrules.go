@@ -26,6 +26,7 @@ func cmdFetchRules(args []string) int {
 	fs := flag.NewFlagSet("fetch-rules", flag.ContinueOnError)
 	url := fs.String("url", firstNonEmpty(cfg.RulesURL, mailstrix.DefaultRulesURL), "base URL holding compiled.yac + its manifest (MAILSTRIX_RULES_URL)")
 	cacheDir := fs.String("cache-dir", firstNonEmpty(cfg.CacheDir, "/var/cache/mailstrix"), "cache dir for the live bundle (MAILSTRIX_CACHE_DIR)")
+	allowHTTP := fs.Bool("allow-http", cfg.RulesAllowHTTP, "permit a plain-http -url; https-to-http redirects stay refused (MAILSTRIX_RULES_ALLOW_HTTP)")
 	timeout := fs.Duration("timeout", 60*time.Second, "overall HTTP timeout")
 	verifyOnly := fs.Bool("verify-only", false, "verify into a fresh temporary cache and remove it; never touch the configured cache")
 	expectedVersion := fs.Int("expected-version", 0, "with -verify-only, require this published version")
@@ -49,10 +50,12 @@ func cmdFetchRules(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	// Redirects ARE followed (a GitHub release-asset URL legitimately 30x's to the
-	// object store, so a blanket reject would break the default URL), but the chain
-	// is bounded. These requests carry NO auth/secret header — the bundle is a
-	// public asset — so there is nothing for a redirect to leak; the only guard
-	// needed is a hop cap against a redirect loop.
+	// object store, so a blanket reject would break the default URL). These
+	// requests carry no auth/secret header, but the bundle and manifest are the
+	// rules we load, so their transport matters: mailstrix.FetchRules requires an
+	// https URL (http only with -allow-http), refuses any https-to-http redirect
+	// even then, and caps the chain at 10 hops on its own copy of this client.
+	// This local hop cap is kept and runs after those checks.
 	hc := &http.Client{
 		Timeout: *timeout,
 		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
@@ -63,7 +66,7 @@ func cmdFetchRules(args []string) int {
 		},
 	}
 
-	res, err := mailstrix.FetchRules(ctx, *url, *cacheDir, libyaraVersion, hc)
+	res, err := mailstrix.FetchRules(ctx, *url, *cacheDir, libyaraVersion, hc, *allowHTTP)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
 		return 2

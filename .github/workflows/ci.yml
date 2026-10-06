@@ -145,7 +145,7 @@ jobs:
           status=0
           docker run --rm --read-only --network none \
             --tmpfs /tmp:rw,nosuid,nodev,size=2g strixd-rules-verifier:ci \
-            -url http://127.0.0.1:1 -timeout 1s > verifier-smoke.log 2>&1 \
+            -url http://127.0.0.1:1 -allow-http -timeout 1s > verifier-smoke.log 2>&1 \
             || status=$?
           test "$status" -eq 2
           # Contract check: fetchRules wraps manifest transport errors with

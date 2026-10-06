@@ -275,6 +275,7 @@ func cmdServe(args []string) (exitCode int) {
 	fs.DurationVar(&cfg.RulesPollInterval, "rules-poll-interval", cfg.RulesPollInterval, "automatic rules check interval; 0 disables networking")
 	fs.DurationVar(&cfg.RulesFetchTimeout, "rules-fetch-timeout", cfg.RulesFetchTimeout, "automatic rules network and cache-lock deadline")
 	fs.StringVar(&cfg.RulesURL, "rules-url", cfg.RulesURL, "public rules release directory or mirror")
+	fs.BoolVar(&cfg.RulesAllowHTTP, "rules-allow-http", cfg.RulesAllowHTTP, "permit a plain-http rules URL; https-to-http redirects stay refused (MAILSTRIX_RULES_ALLOW_HTTP)")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "per-request logging (MAILSTRIX_VERBOSE)")
 	fs.BoolVar(&cfg.LogStdout, "log-stdout", cfg.LogStdout, "info/access logs to stdout; errors stay stderr (MAILSTRIX_LOG_STDOUT)")
 	if err := fs.Parse(args); err != nil {

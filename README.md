@@ -313,7 +313,11 @@ the current bundle is retained; rollback errors explicitly require cache recover
 Then SIGHUP (or restart) strixd to load it, or enable daemon polling below. The
 bundle is published by `docker/generate-rules.sh` (run from cron).
 Point `-url` /
-`MAILSTRIX_RULES_URL` at a mirror if not fetching from GitHub.
+`MAILSTRIX_RULES_URL` at a mirror if not fetching from GitHub. The URL must be
+`https`; a plain-`http` mirror needs an explicit opt-in (`-allow-http`,
+`serve -rules-allow-http`, or `MAILSTRIX_RULES_ALLOW_HTTP=1`). Other schemes and
+URLs without a host are always refused, and a redirect from `https` to `http` is
+refused even with the opt-in.
 
 Docker images, the reference Compose service, and Debian packages enable daemon
 polling daily (`MAILSTRIX_RULES_POLL_INTERVAL=86400` seconds). Set it explicitly
@@ -607,6 +611,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_RULES_POLL_INTERVAL` | `86400` Docker/deb; `0` code default | seconds; automatic verified update and reload; explicit `0` disables; enabled intervals must be at least 60 seconds |
 | `MAILSTRIX_RULES_FETCH_TIMEOUT` | `300` | seconds; shared deadline for automatic update network and cache-lock waits |
 | `MAILSTRIX_RULES_URL` | GitHub `rules-current` release | public bundle/manifest directory override for daemon polling and `fetch-rules` |
+| `MAILSTRIX_RULES_ALLOW_HTTP` | off | permit a plain-`http` `MAILSTRIX_RULES_URL`; `https` is required otherwise, and `https`-to-`http` redirects are always refused |
 | `MAILSTRIX_SCAN_TIMEOUT` | `8` (s) | per-request libyara budget (raw + all extracted streams share it) |
 | `MAILSTRIX_BACKEND_TIMEOUT` | `1` (s) | how long to wait for an admission / scan slot |
 | `MAILSTRIX_MAX_CONCURRENT` | `auto` (CPU count) | max concurrent libyara scans (CPU gate) |

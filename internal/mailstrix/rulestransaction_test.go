@@ -56,7 +56,7 @@ func TestFetchRulesDelayedDownloadCannotReplaceNewerInstall(t *testing.T) {
 	}
 	finished := make(chan outcome, 1)
 	go func() {
-		r, err := FetchRules(ctx, oldSource.URL, dir, "4.5.2", oldSource.Client())
+		r, err := FetchRules(ctx, oldSource.URL, dir, "4.5.2", oldSource.Client(), true)
 		finished <- outcome{r, err}
 	}()
 	select {
@@ -65,7 +65,7 @@ func TestFetchRulesDelayedDownloadCannotReplaceNewerInstall(t *testing.T) {
 		t.Fatal("v2 download never entered")
 	}
 	// An independent caller must install v3 while v2 is still downloading.
-	if r, err := FetchRules(ctx, newSource.URL, dir, "4.5.2", newSource.Client()); err != nil || !r.Updated || r.NewVersion != 3 {
+	if r, err := FetchRules(ctx, newSource.URL, dir, "4.5.2", newSource.Client(), true); err != nil || !r.Updated || r.NewVersion != 3 {
 		t.Fatalf("v3 could not install during the older download: %+v %v", r, err)
 	}
 	unblock()

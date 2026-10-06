@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	yara "github.com/hillu/go-yara/v4"
@@ -56,10 +57,10 @@ func TestVerifyRulesFreshCacheReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("MAILSTRIX_CACHE_DIR", production)
-	if code := cmdFetchRules([]string{"-verify-only", "-expected-version", "7", "-url", source.URL}); code != 0 {
+	if code := cmdFetchRules([]string{"-verify-only", "-allow-http", "-expected-version", "7", "-url", source.URL}); code != 0 {
 		t.Fatalf("verification exit=%d", code)
 	}
-	if code := cmdFetchRules([]string{"-verify-only", "-expected-version", "8", "-url", source.URL}); code != 2 {
+	if code := cmdFetchRules([]string{"-verify-only", "-allow-http", "-expected-version", "8", "-url", source.URL}); code != 2 {
 		t.Fatalf("wrong version accepted, exit=%d", code)
 	}
 	got, err := os.ReadFile(sentinel)
@@ -69,5 +70,38 @@ func TestVerifyRulesFreshCacheReceipt(t *testing.T) {
 	entries, err := os.ReadDir(production)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("verification wrote into production cache: %v %v", entries, err)
+	}
+}
+
+// fetch-rules refuses a plain-http URL before any request unless the operator
+// opts in through MAILSTRIX_RULES_ALLOW_HTTP or -allow-http; the flag wins.
+func TestFetchRulesCLIPlainHTTPOptIn(t *testing.T) {
+	var hits atomic.Int64
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.NotFound(w, nil)
+	}))
+	defer source.Close()
+	t.Setenv("MAILSTRIX_CACHE_DIR", t.TempDir())
+	for _, tc := range []struct {
+		env  string
+		args []string
+		hit  bool
+	}{
+		{"", nil, false},
+		{"0", nil, false},
+		{"1", []string{"-allow-http=false"}, false},
+		{"", []string{"-allow-http"}, true},
+		{"1", nil, true},
+	} {
+		t.Setenv("MAILSTRIX_RULES_ALLOW_HTTP", tc.env)
+		before := hits.Load()
+		args := append([]string{"-verify-only", "-url", source.URL}, tc.args...)
+		if code := cmdFetchRules(args); code != 2 {
+			t.Fatalf("env=%q args=%v: exit=%d, want 2 (404 or refusal)", tc.env, tc.args, code)
+		}
+		if got := hits.Load() > before; got != tc.hit {
+			t.Fatalf("env=%q args=%v: request made=%v, want %v", tc.env, tc.args, got, tc.hit)
+		}
 	}
 }
