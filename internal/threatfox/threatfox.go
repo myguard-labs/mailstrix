@@ -98,7 +98,11 @@ type Checker struct {
 	lookups     atomic.Uint64
 	hits        atomic.Uint64
 
+	// Close cancels fetches, then joins the loop through done; the loop owns
+	// publication and persistence until it closes done.
 	stop     chan struct{}
+	done     chan struct{}
+	cancel   context.CancelFunc
 	stopOnce sync.Once
 }
 
@@ -115,10 +119,13 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	if refresh < minRefresh {
 		refresh = minRefresh
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Checker{
 		key:     key,
 		refresh: refresh,
 		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+		cancel:  cancel,
 		client:  newFeedHTTPClient(fetchTimeout),
 		logf:    logf,
 	}
@@ -127,7 +134,7 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	}
 	c.rs.Store(&ruleset{urls: map[string]struct{}{}, domains: map[string]struct{}{}})
 	c.warmStart()
-	go c.refreshLoop()
+	go c.refreshLoop(ctx)
 	return c
 }
 
@@ -157,8 +164,12 @@ func (c *Checker) warmStart() {
 	c.logf("threatfox warm-start from cache: %d urls / %d domains", len(rs.urls), len(rs.domains))
 }
 
-func (c *Checker) refreshLoop() {
-	if err := c.refreshOnce(); err != nil {
+func (c *Checker) refreshLoop(ctx context.Context) {
+	defer close(c.done)
+	if err := c.refreshOnce(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		c.failures.Add(1)
 		c.logf("threatfox initial feed fetch failed: %v", err)
 	}
@@ -169,7 +180,10 @@ func (c *Checker) refreshLoop() {
 		case <-c.stop:
 			return
 		case <-t.C:
-			if err := c.refreshOnce(); err != nil {
+			if err := c.refreshOnce(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				c.failures.Add(1)
 				c.logf("threatfox feed refresh failed (keeping previous set): %v", err)
 			}
@@ -177,16 +191,21 @@ func (c *Checker) refreshLoop() {
 	}
 }
 
-// Close stops the background refresher. Safe on nil and multiple calls.
+// Close cancels the background refresher and waits for its publication and
+// cache writes to finish. Safe on nil and multiple calls.
 func (c *Checker) Close() {
 	if c == nil {
 		return
 	}
-	c.stopOnce.Do(func() { close(c.stop) })
+	c.stopOnce.Do(func() {
+		c.cancel()
+		close(c.stop)
+	})
+	<-c.done
 }
 
-func (c *Checker) refreshOnce() error {
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+func (c *Checker) refreshOnce(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {

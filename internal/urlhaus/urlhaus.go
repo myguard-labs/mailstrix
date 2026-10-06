@@ -100,7 +100,11 @@ type Checker struct {
 	lookups     atomic.Uint64
 	hits        atomic.Uint64
 
+	// Close cancels fetches, then joins the loop through done; the loop owns
+	// publication and persistence until it closes done.
 	stop     chan struct{} // closed by Close to end refreshLoop
+	done     chan struct{} // closed when refreshLoop has exited
+	cancel   context.CancelFunc
 	stopOnce sync.Once
 }
 
@@ -120,10 +124,13 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	if refresh < minRefresh {
 		refresh = minRefresh
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Checker{
 		key:     key,
 		refresh: refresh,
 		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+		cancel:  cancel,
 		client:  newFeedHTTPClient(fetchTimeout),
 		logf:    logf,
 	}
@@ -132,7 +139,7 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	}
 	c.rs.Store(&ruleset{urls: map[string]struct{}{}, hosts: map[string]struct{}{}})
 	c.warmStart()
-	go c.refreshLoop()
+	go c.refreshLoop(ctx)
 	return c
 }
 
@@ -164,10 +171,14 @@ func (c *Checker) warmStart() {
 	c.logf("urlhaus warm-start from cache: %d urls / %d hosts", len(rs.urls), len(rs.hosts))
 }
 
-func (c *Checker) refreshLoop() {
+func (c *Checker) refreshLoop(ctx context.Context) {
+	defer close(c.done)
 	// Immediate first fetch, then on the interval. A failure keeps the (empty or
 	// previous) set; lookups just miss until a refresh succeeds.
-	if err := c.refreshOnce(); err != nil {
+	if err := c.refreshOnce(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		c.failures.Add(1)
 		c.logf("urlhaus initial feed fetch failed: %v", err)
 	}
@@ -178,7 +189,10 @@ func (c *Checker) refreshLoop() {
 		case <-c.stop:
 			return
 		case <-t.C:
-			if err := c.refreshOnce(); err != nil {
+			if err := c.refreshOnce(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				c.failures.Add(1)
 				c.logf("urlhaus feed refresh failed (keeping previous set): %v", err)
 			}
@@ -186,18 +200,23 @@ func (c *Checker) refreshLoop() {
 	}
 }
 
-// Close stops the background refresher. Safe to call more than once and on a
+// Close cancels the background refresher and waits for its publication and
+// cache writes to finish. Safe to call more than once and on a
 // nil *Checker (the disabled-feature case), so shutdown code can call it
 // unconditionally.
 func (c *Checker) Close() {
 	if c == nil {
 		return
 	}
-	c.stopOnce.Do(func() { close(c.stop) })
+	c.stopOnce.Do(func() {
+		c.cancel()
+		close(c.stop)
+	})
+	<-c.done
 }
 
-func (c *Checker) refreshOnce() error {
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+func (c *Checker) refreshOnce(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
