@@ -1408,6 +1408,58 @@ func TestICAPShutdownRefusesLateAccept(t *testing.T) {
 	}
 }
 
+// closeHookListener runs onClose synchronously inside Close, so a test can act
+// at the exact point ShutdownICAP closes the listener.
+type closeHookListener struct {
+	net.Listener
+	onClose func()
+}
+
+func (l *closeHookListener) Close() error {
+	l.onClose()
+	return l.Listener.Close()
+}
+
+// TestICAPShutdownRefusesConnAcceptedAtListenerClose (AUD-07a-r1): a connection
+// Accept already returned, handed to acceptICAP while ShutdownICAP is closing the
+// listener, is refused unserved; the stopping flag must already be set by then.
+func TestICAPShutdownRefusesConnAcceptedAtListenerClose(t *testing.T) {
+	cfg := &Config{ICAPAddr: "127.0.0.1:0", MaxConcurrent: 2, ICAPMaxConns: 4}
+	s := NewServer(cfg, &fakeEngine{count: 1})
+
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Obtained before ShutdownICAP, as if Accept had just returned it.
+	srv, cli := net.Pipe()
+	defer func() { _ = cli.Close() }()
+	hooked := false
+	var ln net.Listener = &closeHookListener{Listener: inner, onClose: func() {
+		hooked = true
+		s.acceptICAP(srv)
+	}}
+	s.icapLn.Store(&ln)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.ShutdownICAP(ctx)
+	if !hooked {
+		t.Fatal("ShutdownICAP did not close the listener")
+	}
+
+	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := cli.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("conn accepted at listener close: want refused (EOF), got %v", err)
+	}
+	if got := len(s.icapConns); got != 0 {
+		t.Fatalf("icapConns held = %d, want 0 (refused conn released its slot)", got)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("ShutdownICAP waited on a connection admitted after shutdown began")
+	}
+}
+
 // TestICAPShutdownServesPreShutdownConn: positive control, a connection admitted
 // before shutdown is still served to completion and drained.
 func TestICAPShutdownServesPreShutdownConn(t *testing.T) {

@@ -68,15 +68,18 @@ func (s *Server) ListenAndServeICAP(ctx context.Context) error {
 // ShutdownICAP closes the ICAP listener and waits for in-flight connections to
 // drain until ctx expires.
 func (s *Server) ShutdownICAP(ctx context.Context) {
+	// Mark stopping under icapMu before closing the listener and before Wait.
+	// Before the close: a connection Accept already returned is refused by
+	// icapTrack instead of slipping in between Close and the flag. Before Wait:
+	// every Add happens under the same mutex while not stopping, so none can
+	// race the Wait below.
+	s.icapMu.Lock()
+	s.icapStopping = true
+	s.icapMu.Unlock()
 	if p := s.icapLn.Load(); p != nil {
 		_ = (*p).Close() // #nosec G104 -- intentional shutdown; close error is not actionable here
 	}
 	done := make(chan struct{})
-	// Mark stopping under icapMu before Wait: every Add happens under the same
-	// mutex while not stopping, so none can race the Wait below.
-	s.icapMu.Lock()
-	s.icapStopping = true
-	s.icapMu.Unlock()
 	go func() { s.icapWg.Wait(); close(done) }()
 	select {
 	case <-done:
