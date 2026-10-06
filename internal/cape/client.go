@@ -375,10 +375,11 @@ func (c *Client) do(req *http.Request, limit int64) ([]byte, error) {
 	if !encodingValid {
 		return body, &Error{Code: Protocol}
 	}
+	// ReadAll hides a terminal EOF, including one reached after cancellation.
+	if req.Context().Err() != nil {
+		return body, &Error{Code: Deadline}
+	}
 	if readErr != nil {
-		if req.Context().Err() != nil {
-			return body, &Error{Code: Deadline}
-		}
 		return body, &Error{Code: Transport}
 	}
 	return body, nil

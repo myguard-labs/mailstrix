@@ -23,6 +23,10 @@ ci/**
 !ci/*_test.go
 !ci/generate_rules_count_test.sh
 !ci/rules_polling_test.sh
+# Synthetic RC4MD5 fixture read by ci/rc4md5_extract_test.go.
+!ci/testdata
+ci/testdata/**
+!ci/testdata/rc4md5-biff.xls
 !third_party
 !third_party/**
 !tools

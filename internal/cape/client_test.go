@@ -516,6 +516,152 @@ type deadlineBody struct {
 	ctx context.Context
 }
 
+// Return bytes and a clean EOF together, even when the context ends during Read.
+// io.ReadAll discards that EOF, so cancellation cannot depend on its error.
+type contextEOFBody struct {
+	*strings.Reader
+	atEOF func()
+}
+
+func (b contextEOFBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if b.Len() == 0 {
+		b.atEOF()
+		return n, io.EOF
+	}
+	return n, err
+}
+
+func TestResponseBodyEOF(t *testing.T) {
+	for _, ending := range []string{"active", "canceled", "deadline"} {
+		for _, tc := range []struct {
+			name, body, encoding string
+			status               int
+			code                 Code
+		}{
+			{"partial", `{"data":{"task_ids":[41,42,`, "", http.StatusOK, ""},
+			{"complete", success, "identity", http.StatusOK, ""},
+			{"empty", "", "", http.StatusOK, ""},
+			{"unauthorized", success, "", http.StatusUnauthorized, Unauthorized},
+			{"throttled", success, "", http.StatusTooManyRequests, Throttled},
+			{"encoding", success, "gzip", http.StatusOK, Protocol},
+			{"oversize", strings.Repeat("x", 257), "", http.StatusOK, TooLarge},
+			{"oversize-unauthorized", strings.Repeat("x", 257), "gzip", http.StatusUnauthorized, Unauthorized},
+			{"oversize-encoding", strings.Repeat("x", 257), "gzip", http.StatusOK, Protocol},
+		} {
+			t.Run(ending+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					var reachedEOF bool
+					body := contextEOFBody{Reader: strings.NewReader(tc.body), atEOF: func() {
+						reachedEOF = true
+						switch ending {
+						case "canceled":
+							cancel()
+						case "deadline":
+							<-ctx.Done()
+						}
+					}}
+					c := &Client{http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+						header := make(http.Header)
+						if tc.encoding != "" {
+							header.Set("Content-Encoding", tc.encoding)
+						}
+						header.Set("Retry-After", "90")
+						return &http.Response{StatusCode: tc.status, Header: header, Body: io.NopCloser(body)}, nil
+					})}}
+					req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://fixture.invalid/", nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, err := c.do(req, 256)
+					if !reachedEOF || (ending == "active" && ctx.Err() != nil) ||
+						(ending == "canceled" && ctx.Err() != context.Canceled) ||
+						(ending == "deadline" && ctx.Err() != context.DeadlineExceeded) {
+						t.Fatalf("EOF/context witness: reached=%t context=%v", reachedEOF, ctx.Err())
+					}
+					want := tc.code
+					if want == "" && ending != "active" {
+						want = Deadline
+					}
+					if want != "" {
+						assertCode(t, err, want)
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					if string(got) != tc.body[:min(len(tc.body), 256)] {
+						t.Fatalf("response bytes changed: %q", got)
+					}
+					var throttle *Error
+					if want == Throttled && (!errors.As(err, &throttle) || throttle.RetryAfter != 90*time.Second) {
+						t.Fatalf("throttle hint changed: %v", err)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestSubmissionEOFOwnership(t *testing.T) {
+	for _, ending := range []string{"active", "canceled", "deadline"} {
+		for _, complete := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/complete=%t", ending, complete), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					c, err := New(Config{Origin: "https://localhost:443", AllowedDestination: netip.MustParseAddrPort("127.0.0.1:443"),
+						Generation: "fixture-v1", Machine: "one-vm", CredentialReference: "fixture-account"},
+						credentialFunc(func(context.Context, string) (string, error) { return "synthetic-test-token", nil }))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() { _ = c.Close() }()
+					payload := `{"data":{"task_ids":[41,42,`
+					if complete {
+						payload = success
+					}
+					c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						if _, err := io.Copy(io.Discard, r.Body); err != nil {
+							return nil, err
+						}
+						_ = r.Body.Close()
+						body := contextEOFBody{Reader: strings.NewReader(payload), atEOF: func() {
+							switch ending {
+							case "canceled":
+								cancel()
+							case "deadline":
+								<-ctx.Done()
+							}
+						}}
+						return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(body)}, nil
+					})
+					src := &countedSource{reader: strings.NewReader("x"), closed: make(chan struct{})}
+					result, err := c.Submit(ctx, src, 1, marker)
+					succeeded := complete && ending == "active"
+					switch {
+					case ending != "active":
+						assertCode(t, err, Deadline)
+					case !complete:
+						assertCode(t, err, Protocol)
+					case err != nil:
+						t.Fatal(err)
+					}
+					wantIDs := 2
+					if complete {
+						wantIDs = 1
+					}
+					if len(result.Tasks) != wantIDs || result.Tasks[0] != owned() ||
+						(!complete && result.Tasks[1] != (TaskRef{ID: 42, Generation: "fixture-v1"})) ||
+						result.NoBytesSent || result.UnknownDebt == succeeded || src.closes.Load() != 1 {
+						t.Fatalf("EOF changed cleanup ownership: result=%+v closes=%d", result, src.closes.Load())
+					}
+				})
+			})
+		}
+	}
+}
+
 func (b deadlineBody) Read(p []byte) (int, error) {
 	n, err := b.Reader.Read(p)
 	if err == io.EOF {

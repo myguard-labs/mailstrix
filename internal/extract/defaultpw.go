@@ -397,6 +397,67 @@ func rc4MD5Decrypt(password string, salt, ciphertext []byte) []byte {
 	return out
 }
 
+// rc4MD5DecryptBIFF decrypts a complete BIFF Workbook stream. BIFF record
+// headers, selected record bodies, and BoundSheet8.lbPlyPos stay clear, but
+// still consume RC4 keystream. Keys change at absolute 1024-byte stream
+// boundaries, including the clear BOF and FILEPASS bytes before encrypted data.
+func rc4MD5DecryptBIFF(password string, salt, workbook []byte) []byte {
+	const blockSize = 1024
+	if len(workbook) > maxDefaultPWOut {
+		workbook = workbook[:maxDefaultPWOut]
+	}
+	out := make([]byte, len(workbook))
+	var stream *rc4.Cipher
+	var zero [blockSize]byte
+	pos := 0
+	crypt := func(n int, clear bool) bool {
+		for n > 0 {
+			if pos%blockSize == 0 {
+				key := rc4MD5MakeKey(password, salt, uint32(pos/blockSize)) //#nosec G115 -- pos is capped at maxDefaultPWOut
+				var err error
+				// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-rc4 -- legacy BIFF8 decryption requires RC4
+				stream, err = rc4.NewCipher(key) //#nosec G405 -- legacy BIFF8 decryption requires RC4
+				if err != nil {
+					return false
+				}
+			}
+			step := min(n, blockSize-pos%blockSize)
+			if clear {
+				// MS-XLS §2.2.10: clear bytes consume an equal count of zero
+				// bytes from the cipher, while the original bytes are retained.
+				stream.XORKeyStream(out[pos:pos+step], zero[:step])
+				copy(out[pos:pos+step], workbook[pos:pos+step])
+			} else {
+				stream.XORKeyStream(out[pos:pos+step], workbook[pos:pos+step])
+			}
+			pos += step
+			n -= step
+		}
+		return true
+	}
+	for pos+4 <= len(workbook) {
+		recType := binary.LittleEndian.Uint16(workbook[pos:])
+		recLen := int(binary.LittleEndian.Uint16(workbook[pos+2:]))
+		if pos+4+recLen > len(workbook) {
+			break // Keep complete records before a truncated or oversized tail.
+		}
+		if !crypt(4, true) {
+			return nil
+		}
+		clear := isClearTextBIFF8Record(recType)
+		if recType == 0x0085 && recLen >= 4 && !clear {
+			if !crypt(4, true) {
+				return nil
+			}
+			recLen -= 4
+		}
+		if !crypt(recLen, clear) {
+			return nil
+		}
+	}
+	return out[:pos]
+}
+
 // ---------------------------------------------------------------------------
 // B2 — BIFF8 RC4 CryptoAPI (SHA1-based key derivation, MS-OFFCRYPTO §2.3.6)
 // ---------------------------------------------------------------------------
@@ -954,7 +1015,7 @@ func fromDefaultPWRC4(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 					if !rc4MD5VerifyPW(pw, salt, encVerifier, encVerifierHash) {
 						continue
 					}
-					plain := rc4MD5Decrypt(pw, salt, encData)
+					plain := rc4MD5DecryptBIFF(pw, salt, wb)
 					if len(plain) == 0 {
 						return
 					}
