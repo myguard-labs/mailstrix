@@ -144,6 +144,7 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/cape_response_test.go",
     "ci/decode_runs_test.go",
     "ci/decode_scalar_test.go",
     "ci/clamd_cache_test.go",
