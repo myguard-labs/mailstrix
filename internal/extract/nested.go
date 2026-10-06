@@ -35,7 +35,21 @@ const maxNestDepth = maxArchiveDepth
 // fail-open like the rest of the package (Extract's recover still covers a panic
 // from any sub-parser).
 func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
-	if b == nil || len(data) == 0 || depth > maxNestDepth || expired(deadline) {
+	if b == nil || len(data) == 0 {
+		return
+	}
+	if res.probe {
+		// depthDefaultContent's scratch Result: the emitter already appended the
+		// carved stream; do not walk the child (no recursion, no nested probe).
+		return
+	}
+	if depth > maxNestDepth {
+		if isDepthCarrier(data) || depthDefaultContent(data, res, depth, deadline) {
+			res.stopHit("depth") // AUD-05: a real carrier is left unwalked
+		}
+		return
+	}
+	if expired(deadline) {
 		return
 	}
 	if b.spent() || len(res.Streams) >= maxStreams {
@@ -114,4 +128,32 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		fromBatchDropper(data, res, b, depth, deadline)
 		fromLauncherFields(data, res, deadline)
 	}
+}
+
+// depthDefaultContent reports whether the default-branch extractors (encoded
+// script, CSV DDE, HTML smuggling, batch dropper, launcher fields) would have
+// extracted anything from data had the depth limit not stopped them. It runs
+// them into a throwaway probe Result. The probe flag makes extractChild return
+// at once for any carved child (the emitter's own stream is still appended), so
+// the probe never recurses or re-probes; plain text that matches no extractor
+// reports false and records no hit.
+func depthDefaultContent(data []byte, res *Result, depth int, deadline time.Time) bool {
+	if batchWouldCarve(data) {
+		return true
+	}
+	scratch := &Result{childOpts: res.childOpts, probe: true}
+	scratchB := &archiveBudget{}
+	fromEncodedScript(data, scratch, deadline)
+	fromCSVDDE(data, scratch, deadline)
+	fromHTMLSmuggling(data, scratch, scratchB, depth, deadline)
+	fromLauncherFields(data, scratch, deadline)
+	return len(scratch.Streams) > 0
+}
+
+// isDepthCarrier reports whether data matches a carrier magic extractChild
+// would dispatch on, i.e. whether a depth stop leaves real content unwalked.
+func isDepthCarrier(data []byte) bool {
+	return len(data) >= minMemberBytes && (bytes.HasPrefix(data, zipMagic) || isArchive(data) ||
+		bytes.HasPrefix(data, oleMagic) || isPDF(data) || isRTF(data) || isLNK(data) ||
+		isOneNote(data) || isTNEF(data) || isSLK(data) || isSpreadsheetML(data))
 }

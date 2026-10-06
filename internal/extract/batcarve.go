@@ -49,52 +49,51 @@ const maxBatchAccum = maxBytesPerMember
 // buffer and emits each reconstructed payload through the shared budget so the
 // existing script / decode / YARA pipeline reaches the plaintext content.
 func fromBatchDropper(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
-	if b == nil || len(buf) == 0 || depth > maxNestDepth || b.spent() || expired(deadline) {
+	if b == nil || len(buf) == 0 {
+		return
+	}
+	if depth > maxNestDepth {
+		if batchWouldCarve(buf) {
+			res.stopHit("depth") // AUD-05: a batch dropper is left uncarved
+		}
+		return
+	}
+	if b.spent() || expired(deadline) {
 		return
 	}
 
-	// ── Cheap prefilter (alloc-free) ──────────────────────────────────────────
-	// Only proceed if the buffer looks batch-ish. We require EITHER:
-	//   (a) "@echo off" (case-insensitive), OR
-	//   (b) at least two redirect-echo patterns (>>" followed by " echo, or >")
-	// This keeps the cost near-zero on arbitrary non-batch text buffers.
-	echoOff := []byte("@echo off")
-	redirectQ := []byte(`>"`)
-	appendQ := []byte(`>>"`)
+	for _, data := range carveBatchFiles(buf) {
+		if expired(deadline) {
+			break // deadline has its own incompleteness path
+		}
+		if b.spent() || len(res.Streams) >= maxStreams {
+			if len(data) >= minMemberBytes {
+				archiveCapHit(res, b) // a carved file is left unemitted
+			}
+			break
+		}
+		emitMember(data, res, b, depth, deadline)
+	}
+}
 
-	hasBatch := asciiContainsFold(buf, echoOff)
-	if !hasBatch {
-		// Count redirect-echo occurrences; bail if fewer than 2.
-		n := 0
-		rest := buf
-		for len(rest) > 0 {
-			i := bytes.Index(rest, appendQ)
-			j := bytes.Index(rest, redirectQ)
-			// Pick whichever comes first.
-			pick := -1
-			if i >= 0 && (j < 0 || i <= j) {
-				pick = i
-			} else if j >= 0 {
-				pick = j
-			}
-			if pick < 0 {
-				break
-			}
-			n++
-			if n >= 2 {
-				hasBatch = true
-				break
-			}
-			// Advance past the full matched token: 3 bytes for `>>"`, else 2 for `>"`.
-			adv := 2
-			if bytes.HasPrefix(rest[pick:], appendQ) {
-				adv = 3
-			}
-			rest = rest[pick+adv:]
+// batchWouldCarve reports whether the carver would emit at least one payload
+// from buf. It is pure (no recursion, no Result), so the cheap looksLikeBatch
+// prefilter alone ("@echo off") never counts as unvisited content.
+func batchWouldCarve(buf []byte) bool {
+	for _, data := range carveBatchFiles(buf) {
+		if len(data) >= minMemberBytes {
+			return true
 		}
 	}
-	if !hasBatch {
-		return
+	return false
+}
+
+// carveBatchFiles parses echo-redirect blocks and returns each reconstructed
+// file, clamped to maxBytesPerMember. Memory is bounded by maxBatchAccum and
+// maxBatchBlocks.
+func carveBatchFiles(buf []byte) [][]byte {
+	if !looksLikeBatch(buf) {
+		return nil
 	}
 
 	// ── Parse echo-redirect blocks ────────────────────────────────────────────
@@ -228,21 +227,18 @@ func fromBatchDropper(buf []byte, res *Result, b *archiveBudget, depth int, dead
 		}
 	}
 
-	// ── Emit each reconstructed file through the shared budget ────────────────
+	var out [][]byte
 	for i := range files {
-		if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
-			break
-		}
 		if len(files[i].lines) == 0 {
 			continue
 		}
 		data := bytes.Join(files[i].lines, []byte("\r\n"))
-		// Clamp to per-member cap.
 		if len(data) > maxBytesPerMember {
 			data = data[:maxBytesPerMember]
 		}
-		emitMember(data, res, b, depth, deadline)
+		out = append(out, data)
 	}
+	return out
 }
 
 // parseRedirectLine parses the part of a redirect line AFTER the leading > or >>
@@ -342,4 +338,50 @@ func caretUnescape(src []byte) []byte {
 		}
 	}
 	return out
+}
+
+// looksLikeBatch is the alloc-free prefilter shared by the carve and the depth
+// stop.
+func looksLikeBatch(buf []byte) bool {
+	// ── Cheap prefilter (alloc-free) ──────────────────────────────────────────
+	// Only proceed if the buffer looks batch-ish. We require EITHER:
+	//   (a) "@echo off" (case-insensitive), OR
+	//   (b) at least two redirect-echo patterns (>>" followed by " echo, or >")
+	// This keeps the cost near-zero on arbitrary non-batch text buffers.
+	echoOff := []byte("@echo off")
+	redirectQ := []byte(`>"`)
+	appendQ := []byte(`>>"`)
+
+	hasBatch := asciiContainsFold(buf, echoOff)
+	if !hasBatch {
+		// Count redirect-echo occurrences; bail if fewer than 2.
+		n := 0
+		rest := buf
+		for len(rest) > 0 {
+			i := bytes.Index(rest, appendQ)
+			j := bytes.Index(rest, redirectQ)
+			// Pick whichever comes first.
+			pick := -1
+			if i >= 0 && (j < 0 || i <= j) {
+				pick = i
+			} else if j >= 0 {
+				pick = j
+			}
+			if pick < 0 {
+				break
+			}
+			n++
+			if n >= 2 {
+				hasBatch = true
+				break
+			}
+			// Advance past the full matched token: 3 bytes for `>>"`, else 2 for `>"`.
+			adv := 2
+			if bytes.HasPrefix(rest[pick:], appendQ) {
+				adv = 3
+			}
+			rest = rest[pick+adv:]
+		}
+	}
+	return hasBatch
 }
