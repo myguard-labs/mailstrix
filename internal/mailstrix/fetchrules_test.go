@@ -1,6 +1,7 @@
 package mailstrix
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -173,7 +174,9 @@ func TestFetchRulesRejectsBadChecksum(t *testing.T) {
 
 func TestFetchRulesKeepsBackup(t *testing.T) {
 	cacheDir := t.TempDir()
-	seedLocal(t, cacheDir, 1, []byte("OLD-BUNDLE"))
+	// A real (countable) bundle: an unreadable one now fails closed (AUD-06d-r1).
+	old := compiledYacBytes(t, "rule O { condition: true }")
+	seedLocal(t, cacheDir, 1, old)
 	srv := rulesServer(t, compiledYacBytes(t, "rule N { condition: true }"), 2, "4.5.2", "")
 	defer srv.Close()
 
@@ -184,7 +187,7 @@ func TestFetchRulesKeepsBackup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backup not kept: %v", err)
 	}
-	if string(bak) != "OLD-BUNDLE" {
+	if !bytes.Equal(bak, old) {
 		t.Errorf("backup = %q, want the previous bundle", bak)
 	}
 }

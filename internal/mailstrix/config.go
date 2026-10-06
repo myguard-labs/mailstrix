@@ -81,6 +81,10 @@ type Config struct {
 	// to http is refused even when this is set.
 	RulesAllowHTTP bool // MAILSTRIX_RULES_ALLOW_HTTP (default false)
 
+	// AllowRulesCountDrop (MAILSTRIX_RULES_ALLOW_COUNT_DROP, default off) installs
+	// a verified bundle whose rule count is zero or below half the current set.
+	AllowRulesCountDrop bool
+
 	// ScanTimeout bounds a single libyara scan so a pathological rule/input
 	// cannot stall a worker (YARA's own internal timeout, seconds).
 	ScanTimeout time.Duration // MAILSTRIX_SCAN_TIMEOUT (default 8s)
@@ -273,6 +277,7 @@ func LoadConfig() *Config {
 		// disabled by config error.
 		EffortAuto: strings.EqualFold(strings.TrimSpace(os.Getenv("MAILSTRIX_EFFORT")), "auto"),
 	}
+	c.AllowRulesCountDrop = envBool("MAILSTRIX_RULES_ALLOW_COUNT_DROP")
 	c.sanitize()
 	return c
 }

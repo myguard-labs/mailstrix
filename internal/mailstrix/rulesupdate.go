@@ -2,6 +2,7 @@ package mailstrix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- poll-interval jitter only, not security-relevant randomness
 	"math/rand/v2"
@@ -23,6 +24,10 @@ type RulesUpdateState struct {
 	LastFailure      int64  `json:"last_failure_unix"`
 	Failures         uint64 `json:"failures"`
 	ReloadFailures   uint64 `json:"reload_failures"`
+	// CountDropRefusals counts verified bundles refused for an empty or sharply
+	// smaller rule count; LastRefusal holds the latest reason.
+	CountDropRefusals uint64 `json:"count_drop_refusals"`
+	LastRefusal       string `json:"last_refusal,omitempty"`
 }
 
 // RulesUpdater owns one serial polling loop. Idle -> checking -> installed and
@@ -135,7 +140,11 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 	if loaded := u.scanner.loadedManifest.Load(); loaded != nil {
 		minimumVersion = loaded.Version
 	}
-	res, err := fetchRules(ctx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, u.cfg.RulesAllowHTTP, minimumVersion, reload)
+	fetchCtx := ctx
+	if u.cfg.AllowRulesCountDrop {
+		fetchCtx = WithAllowRuleCountDrop(ctx)
+	}
+	res, err := fetchRules(fetchCtx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, u.cfg.RulesAllowHTTP, minimumVersion, int(u.scanner.RuleCount()), reload)
 	observedCached, observedLoaded := res.NewVersion, 0
 	if res.Updated {
 		// fetchRules returns only after the same locked transaction installed and
@@ -176,6 +185,10 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 	if err != nil {
 		u.state.LastFailure = time.Now().Unix()
 		u.state.Failures++
+		if errors.Is(err, ErrRuleCountDrop) {
+			u.state.CountDropRefusals++
+			u.state.LastRefusal = err.Error()
+		}
 		if reloadFailed {
 			u.state.ReloadFailures++
 		}
