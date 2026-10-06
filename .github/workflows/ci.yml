@@ -375,6 +375,7 @@ jobs:
         if: needs.changes.outputs.envkeys == 'true'
         run: |
           sh packaging/deb/env_keys_test.sh
+          sh packaging/deb/stop_timeout_test.sh
           sh ci/rules_polling_defaults_test.sh
 
       - name: README install has no stale pinned versions

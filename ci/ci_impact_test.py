@@ -42,6 +42,7 @@ class ImpactTests(unittest.TestCase):
             ("ci/rules_polling_defaults_test.sh", ["envkeys", "shell"], ["go", "image"]),
             ("ci/rules_polling_test.sh", ["image", "shell", "smoke"], ["go", "parity"]),
             ("docker/docker-compose.yml", ["envkeys"], ["go", "image"]),
+            ("packaging/deb/stop_timeout_test.sh", ["envkeys", "shell"], ["go", "image"]),
             ("ci/rules_polling_config_test.go", ["go"], ["image", "parity"]),
             ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
             (

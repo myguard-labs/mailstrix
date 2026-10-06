@@ -13,6 +13,14 @@ ExecStart=/usr/bin/strix-milter $MAILSTRIX_MILTER_ARGS
 Restart=on-failure
 RestartSec=5
 
+# On SIGTERM the milter drains in-flight sessions for up to -timeout + 5s (default
+# -timeout 20s, so 25s). TimeoutStopSec must stay above that or systemd SIGKILLs
+# mid-verdict. 60s covers a -timeout of up to 55s. -timeout comes from
+# MAILSTRIX_MILTER_ARGS, which a unit cannot compute from; a larger -timeout needs a
+# drop-in raising this (see strix-milter.env). packaging/deb/stop_timeout_test.sh
+# keeps this value and that note in step.
+TimeoutStopSec=60
+
 # A unix-socket listener lives here (and the MTA's group needs to reach it).
 RuntimeDirectory=strix-milter
 RuntimeDirectoryMode=0750
