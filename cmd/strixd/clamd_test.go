@@ -63,7 +63,7 @@ func TestClamdDrainNativeOwnership(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 				t.Fatal(err)
 			}
@@ -106,7 +106,7 @@ func TestClamdDrainNativeOwnership(t *testing.T) {
 			}
 			// The deferred exit path must reuse the prior result, not spend a
 			// second drain budget or clear the failure before scanner.Close.
-			if got := drain.shutdown(context.Background()); got != err {
+			if got := drain.shutdown(context.Background()); got != err { //nolint:errorlint // identity: the memoised drain result must be the same error value
 				t.Fatalf("drain result changed: %v -> %v", err, got)
 			}
 		})
@@ -148,7 +148,7 @@ func TestClamdShutdownConcurrentHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}

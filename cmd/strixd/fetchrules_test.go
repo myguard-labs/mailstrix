@@ -33,7 +33,7 @@ func TestVerifyRulesFreshCacheReceipt(t *testing.T) {
 	if err := r.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestVerifyRulesFreshCacheReceipt(t *testing.T) {
 	if code := cmdFetchRules([]string{"-verify-only", "-allow-http", "-expected-version", "8", "-url", source.URL}); code != 2 {
 		t.Fatalf("wrong version accepted, exit=%d", code)
 	}
-	got, err := os.ReadFile(sentinel)
+	got, err := os.ReadFile(filepath.Clean(sentinel))
 	if err != nil || string(got) != "production cache" {
 		t.Fatalf("production cache mutated: %q %v", got, err)
 	}

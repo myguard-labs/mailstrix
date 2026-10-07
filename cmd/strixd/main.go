@@ -107,7 +107,7 @@ func main() {
 // printUsage lists the subcommands. Per-subcommand flags are shown by passing
 // -h to that subcommand (each uses a flag.FlagSet).
 func printUsage(w *os.File) {
-	fmt.Fprint(w, `strixd — YARA scanning backend for rspamd
+	_, _ = fmt.Fprint(w, `strixd — YARA scanning backend for rspamd
 
 usage: strixd <command> [flags]
 
@@ -183,7 +183,7 @@ func cmdHealth() int {
 		fmt.Fprintln(os.Stderr, "health:", err)
 		return 1
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing to recover
 	if resp.StatusCode != http.StatusOK {
 		fmt.Fprintln(os.Stderr, "health: status", resp.StatusCode)
 		return 1
@@ -415,7 +415,7 @@ func cmdServe(args []string) (exitCode int) {
 
 	select {
 	case err := <-srvErr:
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("[mailstrix] server error: %v", err)
 			return 1
 		}
