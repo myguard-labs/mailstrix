@@ -5,8 +5,15 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -14,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nwaples/rardecode/v2"
 
 	"github.com/myguard-labs/mailstrix/internal/extract"
 	"github.com/myguard-labs/mailstrix/internal/mailstrix"
@@ -438,6 +447,315 @@ func TestCapStopHeaderEncrypted7zMemberSize(t *testing.T) {
 		res := capHdrEnc7z(t, "hdrenc-oversize.7z", "wrong")
 		if capHasHit(res, "member-size") {
 			t.Fatalf("uncracked archive recorded member-size: %v", res.CapHits)
+		}
+	})
+}
+
+// ---- RAR5 in-memory builder (AUD-04c3 / AUD-04c4) ----------------------------
+//
+// No rar CLI is available, so the tests assemble RAR5 archives by hand following
+// rardecode v2.2.5 archive50.go (the parser the extractor uses). Members are
+// STORED (compression method 0). The builder is verified against rardecode in
+// TestCapRarBuilderSanity before any cap assertion relies on it.
+
+type capRarMember struct {
+	name        string
+	data        []byte // bytes stored in the data area (already padded when encrypted)
+	declared    uint64 // value of the unpacked-size field
+	unknownSize bool   // set the "unpacked size unknown" file flag
+	password    string // non-empty: AES-256-CBC file encryption record
+	plainLen    int    // encrypted only: real length before zero padding
+}
+
+func capVint(v uint64) []byte {
+	var out []byte
+	for v >= 0x80 {
+		out = append(out, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(out, byte(v))
+}
+
+// capRarBlock frames a RAR5 block: CRC32 over (size vint + header body), the
+// size vint, then the body.
+func capRarBlock(body []byte) []byte {
+	sized := append(capVint(uint64(len(body))), body...)
+	return append(binary.LittleEndian.AppendUint32(nil, crc32.ChecksumIEEE(sized)), sized...)
+}
+
+// capRarKeys mirrors rardecode calcKeys50: PBKDF2-HMAC-SHA256 split into the
+// block key (0), hash key (1) and the 12-byte password check value (2).
+func capRarKeys(pass, salt []byte, kdfExp int) (key, check []byte) {
+	count := 1 << uint(kdfExp)
+	prf := hmac.New(sha256.New, pass)
+	prf.Write(salt)
+	prf.Write([]byte{0, 0, 0, 1})
+	t := prf.Sum(nil)
+	u := append([]byte(nil), t...)
+	count--
+	var keys [3][]byte
+	for i, iter := range []int{count, 16, 16} {
+		for ; iter > 0; iter-- {
+			prf.Reset()
+			prf.Write(u)
+			u = prf.Sum(u[:0])
+			for j := range u {
+				t[j] ^= u[j]
+			}
+		}
+		keys[i] = append([]byte(nil), t...)
+	}
+	pw := keys[2]
+	for i, v := range pw[8:] {
+		pw[i&7] ^= v
+	}
+	pw = pw[:8]
+	sum := sha256.Sum256(pw)
+	return keys[0], append(append([]byte(nil), pw...), sum[:4]...)
+}
+
+// capRarEncrypt zero-pads plain to the AES block size and encrypts it, returning
+// the ciphertext and the file-encryption extra record (type 1) for it.
+func capRarEncrypt(t *testing.T, password string, plain []byte) ([]byte, []byte) {
+	t.Helper()
+	salt := bytes.Repeat([]byte{0x5a}, 16)
+	iv := bytes.Repeat([]byte{0xa5}, 16)
+	key, check := capRarKeys([]byte(password), salt, 0)
+	padded := append([]byte(nil), plain...)
+	if r := len(padded) % 16; r != 0 || len(padded) == 0 {
+		padded = append(padded, make([]byte, 16-r)...)
+	}
+	blk, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher.NewCBCEncrypter(blk, iv).CryptBlocks(padded, padded)
+	rec := append(capVint(1), capVint(0)...) // record type 1, encryption version 0
+	rec = append(rec, capVint(1)...)         // flags: password check present
+	rec = append(rec, 0)                     // kdf count exponent
+	rec = append(rec, salt...)
+	rec = append(rec, iv...)
+	rec = append(rec, check...)
+	return padded, append(capVint(uint64(len(rec))), rec...)
+}
+
+func capRar5(t *testing.T, members ...capRarMember) []byte {
+	t.Helper()
+	out := []byte("Rar!\x1a\x07\x01\x00")
+	out = append(out, capRarBlock(append(append(capVint(1), capVint(0)...), capVint(0)...))...) // main header
+	for _, m := range members {
+		data := m.data
+		var extra []byte
+		if m.password != "" {
+			data, extra = capRarEncrypt(t, m.password, m.data[:m.plainLen])
+		}
+		hflags := uint64(0x0002) // has data
+		if len(extra) > 0 {
+			hflags |= 0x0001
+		}
+		body := capVint(2)
+		body = append(body, capVint(hflags)...)
+		if len(extra) > 0 {
+			body = append(body, capVint(uint64(len(extra)))...)
+		}
+		body = append(body, capVint(uint64(len(data)))...)
+		var fflags uint64
+		if m.unknownSize {
+			fflags = 0x0008
+		}
+		body = append(body, capVint(fflags)...)
+		body = append(body, capVint(m.declared)...)
+		body = append(body, capVint(0)...) // attributes
+		body = append(body, capVint(0)...) // compression: stored, version 0
+		body = append(body, capVint(1)...) // host OS: unix
+		body = append(body, capVint(uint64(len(m.name)))...)
+		body = append(body, m.name...)
+		body = append(body, extra...)
+		out = append(out, capRarBlock(body)...)
+		out = append(out, data...)
+	}
+	end := append(capVint(5), capVint(0)...)
+	end = append(end, capVint(0)...)
+	return append(out, capRarBlock(end)...)
+}
+
+func capRarExtract(buf []byte, cands ...string) extract.Result {
+	opts := extract.FullOptions(time.Time{})
+	opts.ArchivePWEnabled = len(cands) > 0
+	opts.PWCandidates = cands
+	return extract.ExtractWithOptions(buf, opts)
+}
+
+// capUnknown is the unpacked-size field of an "unknown size" member: all ones,
+// which rardecode reads back as UnPackedSize == -1.
+const capUnknown = ^uint64(0)
+
+func TestCapRarBuilderSanity(t *testing.T) {
+	payload := []byte("hello-rar5-builder")
+	t.Run("declared-size", func(t *testing.T) {
+		rr, err := rardecode.NewReader(bytes.NewReader(capRar5(t,
+			capRarMember{name: "a.txt", data: payload, declared: uint64(len(payload))})))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := rr.Next()
+		if err != nil || h.Name != "a.txt" || h.UnPackedSize != int64(len(payload)) || h.UnKnownSize {
+			t.Fatalf("hdr=%+v err=%v", h, err)
+		}
+		got, err := io.ReadAll(rr)
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Fatalf("got=%q err=%v", got, err)
+		}
+		if _, err := rr.Next(); !errors.Is(err, io.EOF) {
+			t.Fatalf("second Next err=%v, want EOF", err)
+		}
+	})
+	t.Run("unknown-size", func(t *testing.T) {
+		rr, err := rardecode.NewReader(bytes.NewReader(capRar5(t,
+			capRarMember{name: "u.bin", data: payload, declared: capUnknown, unknownSize: true})))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := rr.Next()
+		if err != nil || !h.UnKnownSize || h.UnPackedSize != -1 {
+			t.Fatalf("hdr=%+v err=%v", h, err)
+		}
+		got, err := io.ReadAll(rr)
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Fatalf("got=%q err=%v", got, err)
+		}
+	})
+	t.Run("encrypted", func(t *testing.T) {
+		buf := capRar5(t, capRarMember{name: "e.txt", data: payload, plainLen: len(payload),
+			declared: uint64(len(payload)), password: "secret"})
+		rr, err := rardecode.NewReader(bytes.NewReader(buf), rardecode.Password("secret"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := rr.Next()
+		if err != nil || !h.Encrypted {
+			t.Fatalf("hdr=%+v err=%v", h, err)
+		}
+		got, err := io.ReadAll(rr)
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Fatalf("got=%q err=%v", got, err)
+		}
+		bad, err := rardecode.NewReader(bytes.NewReader(buf), rardecode.Password("wrong"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bad.Next(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadAll(bad); err == nil {
+			t.Fatal("wrong password read cleanly; check value not honoured")
+		}
+	})
+}
+
+// capRarUnknownBody returns n bytes of filler with the whole marker at index markAt.
+func capRarUnknownBody(n, markAt int) []byte {
+	const mark = "CAPMARK"
+	if markAt < 0 || markAt+len(mark) > n {
+		panic(fmt.Sprintf("capRarUnknownBody: marker at %d does not fit in %d bytes", markAt, n))
+	}
+	b := capFill(n)
+	copy(b[markAt:], mark)
+	return b
+}
+
+func TestCapStopRarUnknownSizeMember(t *testing.T) {
+	t.Run("plain-over-cap-records-member-size", func(t *testing.T) {
+		body := capRarUnknownBody(capMember+1, capMember-6) // marker straddles the cap: its last byte is the first past it
+		res := capRarExtract(capRar5(t, capRarMember{name: "u.bin", data: body, declared: capUnknown, unknownSize: true}))
+		if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+			t.Fatalf("CapHits=%v, want exactly [member-size]", res.CapHits)
+		}
+	})
+	t.Run("plain-at-cap-no-hit", func(t *testing.T) {
+		body := capRarUnknownBody(capMember, capMember-7) // marker is the last in-cap bytes
+		res := capRarExtract(capRar5(t, capRarMember{name: "u.bin", data: body, declared: capUnknown, unknownSize: true}))
+		if capHasHit(res, "member-size") {
+			t.Fatalf("at-cap member recorded member-size: %v", res.CapHits)
+		}
+		if len(res.Streams) == 0 {
+			t.Fatal("in-cap member not extracted")
+		}
+	})
+	t.Run("cracked-encrypted-over-cap-records-member-size", func(t *testing.T) {
+		// The small first member is what the cracker validates the password on; the
+		// unknown-size member after it is read through the cracked fresh reader.
+		small := []byte("hello-in-cap")
+		body := capRarUnknownBody(capMember+1, capMember-6)
+		res := capRarExtract(capRar5(t,
+			capRarMember{name: "a.txt", data: small, plainLen: len(small), declared: uint64(len(small)), password: "test"},
+			capRarMember{name: "u.bin", data: body, plainLen: len(body), declared: capUnknown, unknownSize: true, password: "test"},
+		), "wrong", "test")
+		if !res.DecryptedArchive {
+			t.Fatalf("archive not decrypted (cracker failed?): %+v", res.CapHits)
+		}
+		if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+			t.Fatalf("CapHits=%v, want exactly [member-size]", res.CapHits)
+		}
+	})
+}
+
+func TestCapStopRarOversizeSkip(t *testing.T) {
+	// The declared size lies about the data area on purpose: both skip branches
+	// decide from the header alone and never read the body.
+	stub := []byte("stub-bytes")
+	t.Run("plain-declared-over-cap", func(t *testing.T) {
+		res := capRarExtract(capRar5(t, capRarMember{name: "big.bin", data: stub, declared: capMember + 1}))
+		if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+			t.Fatalf("CapHits=%v, want exactly [member-size]", res.CapHits)
+		}
+	})
+	t.Run("plain-declared-at-cap-no-hit", func(t *testing.T) {
+		res := capRarExtract(capRar5(t, capRarMember{name: "ok.bin", data: stub, declared: capMember}))
+		if capHasHit(res, "member-size") {
+			t.Fatalf("declared==cap recorded member-size: %v", res.CapHits)
+		}
+	})
+	t.Run("plain-oversize-with-password-candidates-not-double-recorded", func(t *testing.T) {
+		// A plaintext oversize member is also met by the cracked re-walk when a
+		// sibling is encrypted; the `if cracked { continue }` guard precedes the
+		// skip, so the hit is recorded once (CapHits is a deduplicated set).
+		small := []byte("hello-in-cap")
+		res := capRarExtract(capRar5(t,
+			capRarMember{name: "big.bin", data: stub, declared: capMember + 1},
+			capRarMember{name: "a.txt", data: small, plainLen: len(small), declared: uint64(len(small)), password: "test"},
+		), "test")
+		n := 0
+		for _, k := range res.CapHits {
+			if k == "member-size" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("member-size recorded %d times: %v", n, res.CapHits)
+		}
+	})
+	t.Run("cracked-encrypted-declared-over-cap", func(t *testing.T) {
+		small := []byte("hello-in-cap")
+		res := capRarExtract(capRar5(t,
+			capRarMember{name: "a.txt", data: small, plainLen: len(small), declared: uint64(len(small)), password: "test"},
+			capRarMember{name: "big.bin", data: stub, plainLen: len(stub), declared: capMember + 1, password: "test"},
+		), "wrong", "test")
+		if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+			t.Fatalf("CapHits=%v, want exactly [member-size]", res.CapHits)
+		}
+		if !res.DecryptedArchive {
+			t.Fatal("in-cap encrypted sibling not decrypted: cracker did not unlock the archive")
+		}
+	})
+	t.Run("cracked-encrypted-declared-at-cap-no-hit", func(t *testing.T) {
+		small := []byte("hello-in-cap")
+		res := capRarExtract(capRar5(t,
+			capRarMember{name: "a.txt", data: small, plainLen: len(small), declared: uint64(len(small)), password: "test"},
+			capRarMember{name: "ok.bin", data: stub, plainLen: len(stub), declared: capMember, password: "test"},
+		), "test")
+		if capHasHit(res, "member-size") {
+			t.Fatalf("declared==cap recorded member-size: %v", res.CapHits)
 		}
 	})
 }
