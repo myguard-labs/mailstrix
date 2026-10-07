@@ -246,6 +246,10 @@ func TestTokenNextDeduplicatedAgainstPrimary(t *testing.T) {
 	if count != 1 {
 		t.Errorf("primary token appears %d times, want 1 (no duplicate)", count)
 	}
+	// Verify the tokens slice itself has exactly one member (no padding stored).
+	if len(c.tokens) != 1 {
+		t.Errorf("c.tokens len=%d, got %v, want 1 token [primary]", len(c.tokens), c.tokens)
+	}
 }
 
 // TestPaddedSentinelStillDisabled verifies that a padded sentinel like " none "
