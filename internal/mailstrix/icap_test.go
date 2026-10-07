@@ -1003,6 +1003,94 @@ func TestReadBoundedLineBoundary(t *testing.T) {
 	}
 }
 
+type errAfterReader struct {
+	data string
+	err  error
+}
+
+func (e *errAfterReader) Read(p []byte) (int, error) {
+	if e.data == "" {
+		return 0, e.err
+	}
+	n := copy(p, e.data)
+	e.data = e.data[n:]
+	return n, nil
+}
+
+// TestReadBoundedLineTable covers CRLF/LF, limit boundaries, small-buffer
+// fragment accumulation and read errors (AUD-N3).
+func TestReadBoundedLineTable(t *testing.T) {
+	boom := errors.New("boom")
+	const big = 10000
+	tests := []struct {
+		name    string
+		in      string
+		bufSize int // 0 = default
+		limit   int
+		want    string
+		wantErr error
+	}{
+		{"crlf", "abc\r\n", 0, 10, "abc", nil},
+		{"lf", "abc\n", 0, 10, "abc", nil},
+		{"empty line lf", "\n", 0, 10, "", nil},
+		{"empty line crlf", "\r\n", 0, 10, "", nil},
+		{"multiple trailing cr stripped", "abc\r\r\n", 0, 10, "abc", nil},
+		{"cr in middle preserved", "a\rb\r\n", 0, 10, "a\rb", nil},
+		{"exactly limit lf", strings.Repeat("A", 8) + "\n", 0, 8, strings.Repeat("A", 8), nil},
+		{"limit+1 lf", strings.Repeat("A", 9) + "\n", 0, 8, "", errICAPLineTooLong},
+		{"cr counts toward limit ok", strings.Repeat("A", 6) + "\r\n", 0, 7, strings.Repeat("A", 6), nil},
+		{"cr counts toward limit over", strings.Repeat("A", 7) + "\r\n", 0, 7, "", errICAPLineTooLong},
+		{"exactly limit small buf", strings.Repeat("A", 40) + "\n", 16, 40, strings.Repeat("A", 40), nil},
+		{"limit+1 small buf", strings.Repeat("A", 41) + "\n", 16, 40, "", errICAPLineTooLong},
+		{"exactly limit buf multiple", strings.Repeat("A", 32) + "\n", 16, 32, strings.Repeat("A", 32), nil},
+		{"limit+1 buf multiple", strings.Repeat("A", 33) + "\n", 16, 32, "", errICAPLineTooLong},
+		{"long line beyond default buffer", strings.Repeat("B", big) + "\r\n", 0, big + 100, strings.Repeat("B", big), nil},
+		{"long line beyond default buffer too long", strings.Repeat("B", big) + "\n", 0, big - 1, "", errICAPLineTooLong},
+		{"long unterminated is too long not EOF", strings.Repeat("C", 100), 16, 50, "", errICAPLineTooLong},
+		{"eof mid-line", "abc", 0, 10, "", io.EOF},
+		{"eof mid-line small buf", strings.Repeat("A", 30), 16, 100, "", io.EOF},
+		{"eof empty", "", 0, 10, "", io.EOF},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var br *bufio.Reader
+			if tc.bufSize > 0 {
+				br = bufio.NewReaderSize(strings.NewReader(tc.in), tc.bufSize)
+			} else {
+				br = bufio.NewReader(strings.NewReader(tc.in))
+			}
+			got, err := readBoundedLine(br, tc.limit)
+			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("line = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("non-EOF error unchanged", func(t *testing.T) {
+		br := bufio.NewReader(&errAfterReader{data: "abc", err: boom})
+		got, err := readBoundedLine(br, 10)
+		if err != boom || got != "" {
+			t.Errorf("got (%q, %v), want (\"\", boom)", got, err)
+		}
+	})
+
+	t.Run("sequential lines", func(t *testing.T) {
+		br := bufio.NewReaderSize(strings.NewReader("one\r\n"+strings.Repeat("x", 40)+"\ntwo\n\r\nlast"), 16)
+		for i, want := range []string{"one", strings.Repeat("x", 40), "two", ""} {
+			got, err := readBoundedLine(br, 64)
+			if err != nil || got != want {
+				t.Fatalf("line %d: got (%q, %v), want %q", i, got, err, want)
+			}
+		}
+		if _, err := readBoundedLine(br, 64); !errors.Is(err, io.EOF) {
+			t.Errorf("trailing partial: err = %v, want io.EOF", err)
+		}
+	})
+}
+
 // TestICAPOptionsAdvertisesConnCap: Max-Connections must advertise the cap that
 // actually causes a 503, so proxies size their pools against the real limit.
 func TestICAPOptionsAdvertisesConnCap(t *testing.T) {

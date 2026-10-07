@@ -698,22 +698,41 @@ func readBoundedMIMEHeader(br *bufio.Reader) (textproto.MIMEHeader, error) {
 	}
 }
 
-// readBoundedLine reads one '\n'-terminated line, discarding a trailing '\r',
-// capped at cap bytes. Returns errICAPLineTooLong if no '\n' arrives within cap.
+// readBoundedLine reads one '\n'-terminated line, discarding trailing '\r'
+// characters, and allows at most limit bytes (a '\r' counts) before the '\n'.
+// A line of exactly limit bytes is accepted; limit+1 yields errICAPLineTooLong.
+//
+// It uses ReadSlice and accumulates bufio.ErrBufferFull fragments, so the
+// buffered data never exceeds limit plus one bufio buffer.
+//
+// On errICAPLineTooLong the previous byte-wise reader had consumed exactly
+// limit+1 bytes; this version consumes everything ReadSlice returned in the
+// fragment that crossed the limit (up to one bufio buffer, and through the
+// '\n' if it was in that fragment). Every caller treats that error as fatal and
+// the connection is closed (handleICAPRequest's error ends the serve loop), so
+// the unread remainder is never parsed. Read errors are returned unchanged.
 func readBoundedLine(r *bufio.Reader, limit int) (string, error) {
-	var sb strings.Builder
+	var acc []byte
 	for {
-		b, err := r.ReadByte()
-		if err != nil {
-			return "", err
+		frag, err := r.ReadSlice('\n')
+		content := len(acc) + len(frag)
+		if err == nil {
+			content-- // the '\n' does not count toward the limit
 		}
-		if b == '\n' {
-			return strings.TrimRight(sb.String(), "\r"), nil
-		}
-		if sb.Len() >= limit {
+		if content > limit {
 			return "", errICAPLineTooLong
 		}
-		sb.WriteByte(b)
+		if err == nil {
+			if acc == nil {
+				return strings.TrimRight(string(frag[:len(frag)-1]), "\r"), nil
+			}
+			acc = append(acc, frag[:len(frag)-1]...)
+			return strings.TrimRight(string(acc), "\r"), nil
+		}
+		if err != bufio.ErrBufferFull {
+			return "", err
+		}
+		acc = append(acc, frag...)
 	}
 }
 
