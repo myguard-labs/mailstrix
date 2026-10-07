@@ -322,7 +322,7 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 
 func (s *Server) handleICAPOptions(w io.Writer) error {
 	s.metrics.icapOptions.Add(1)
-	fp := s.engine.Fingerprint()
+	fp := s.icapFingerprint()
 	istag := icapISTag(fp)
 	var sb strings.Builder
 	sb.WriteString(icapProtoVersion + " 200 OK\r\n")
