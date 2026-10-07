@@ -209,6 +209,15 @@ type Config struct {
 	// drains. A request-level X-MAILSTRIX-Effort header still overrides auto.
 
 	Version string // build version string, set by main (not from env); for /version
+
+	// inflightAuto / icapConnsAuto record, by SOURCE, that LoadConfig saw
+	// MAILSTRIX_MAX_INFLIGHT / MAILSTRIX_ICAP_MAX_CONNS unset or 0/auto. While set,
+	// sanitize re-derives the field from the final MaxConcurrent / MaxInflight, so
+	// a CLI overlay (-max-concurrent) followed by Finalize stays consistent. They
+	// are never inferred from the value, so an explicit setting that happens to
+	// equal the derived one is kept. Zero-value Configs leave both false.
+	inflightAuto  bool
+	icapConnsAuto bool
 }
 
 // LoadConfig reads the environment into a Config, applying documented defaults,
@@ -278,6 +287,8 @@ func LoadConfig() *Config {
 		EffortAuto: strings.EqualFold(strings.TrimSpace(os.Getenv("MAILSTRIX_EFFORT")), "auto"),
 	}
 	c.AllowRulesCountDrop = envBool("MAILSTRIX_RULES_ALLOW_COUNT_DROP")
+	c.inflightAuto = c.MaxInflight == 0
+	c.icapConnsAuto = c.ICAPMaxConns == 0
 	c.sanitize()
 	return c
 }
@@ -336,7 +347,11 @@ func (c *Config) sanitize() {
 	// The admission gate bounds in-flight buffers and must be at least the scan
 	// concurrency (otherwise scan slots could never all be used). Default to 2×
 	// so a slow body read or slow Redis L2 lookup can't starve scan slots.
-	if c.MaxInflight < c.MaxConcurrent {
+	switch {
+	case c.inflightAuto:
+		// auto (by source): (re)derive from the final MaxConcurrent
+		c.MaxInflight = c.MaxConcurrent * 2
+	case c.MaxInflight < c.MaxConcurrent:
 		c.MaxInflight = c.MaxConcurrent * 2
 	}
 	// Live ICAP connections are capped separately from the admission gate: a
@@ -349,7 +364,7 @@ func (c *Config) sanitize() {
 	// below 1 is nonsense and warns like every other clamp. Auto allows generous
 	// headroom over MaxInflight: most live conns are idle keep-alives.
 	switch {
-	case c.ICAPMaxConns == 0:
+	case c.icapConnsAuto || c.ICAPMaxConns == 0:
 		c.ICAPMaxConns = c.MaxInflight * 8
 	case c.ICAPMaxConns < 1:
 		c.ICAPMaxConns = clamp("MAILSTRIX_ICAP_MAX_CONNS", c.ICAPMaxConns, c.MaxInflight*8)
