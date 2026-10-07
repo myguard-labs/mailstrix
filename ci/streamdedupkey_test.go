@@ -68,6 +68,9 @@ func TestExtractVersionXXH3KeyToken(t *testing.T) {
 	}
 }
 
+// dedupKeySink keeps the benchmarked call from being optimized away.
+var dedupKeySink [16]byte
+
 func BenchmarkStreamDedupKey(b *testing.B) {
 	for _, c := range []struct {
 		name string
@@ -77,7 +80,7 @@ func BenchmarkStreamDedupKey(b *testing.B) {
 		b.Run(c.name, func(b *testing.B) {
 			b.SetBytes(int64(c.n))
 			for i := 0; i < b.N; i++ {
-				_ = ms.StreamDedupKey(buf)
+				dedupKeySink = ms.StreamDedupKey(buf)
 			}
 		})
 	}
