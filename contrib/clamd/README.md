@@ -133,7 +133,11 @@ unprefixed legacy commands and commands beyond 64 framed bytes are rejected.
 | Chunk size exceeded | `stream: chunk size limit exceeded ERROR` |
 | Queue budget exhausted | `stream: busy ERROR` |
 | Scan response deadline | `stream: scan timed out ERROR` |
-| Unsupported command | `UNKNOWN COMMAND` |
+| Unsupported command, or first byte not `z`/`n` | `UNKNOWN COMMAND` |
+| Connection closed or read failed before a full command | `COMMAND READ ERROR` |
+| Command over the framing limit, or control/non-ASCII byte | `COMMAND PARSE ERROR` |
+| Stream ended before the zero-length terminator chunk | `stream: truncated stream ERROR` |
+| Reply payload over 255 bytes (fallback) | `stream: internal error ERROR` |
 
 The `VERSIONCOMMANDS` reply is exactly
 `Mailstrix <version> COMMANDS: PING VERSION VERSIONCOMMANDS INSTREAM`.

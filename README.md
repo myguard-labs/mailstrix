@@ -974,7 +974,7 @@ Refused connections are counted in the `icap_conn_refused_total` metric.
 | No complete verdict (scan error, incomplete or degraded scan) | `500 Server Error`, never `204` clean |
 | No scan slot free in time | `503 Service Unavailable` |
 | Body exceeds `MAILSTRIX_MAX_BODY` | `413 Request Entity Too Large` |
-| Unknown ICAP method | `405 Method Not Allowed`, then the connection is closed |
+| Unknown ICAP method | `501 Method Not Implemented`, then the connection is closed |
 
 ### Squid example
 
