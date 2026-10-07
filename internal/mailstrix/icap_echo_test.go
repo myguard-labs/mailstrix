@@ -56,7 +56,7 @@ func TestICAPCleanAllow204Unchanged(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1, fp: "fp"}, "")
 	addr := startTestICAPServer(t, s)
 	resp := doICAP(t, addr, icapRESPMODRequest(addr, "<html>x</html>", true))
-	if !strings.HasPrefix(resp, "ICAP/1.0 204 No Modification\r\n\r\n") || strings.Contains(resp, "<html>") {
+	if !strings.HasPrefix(resp, "ICAP/1.0 204 No Modification\r\nISTag: "+icapISTag("fp")+"\r\n\r\n") || strings.Contains(resp, "<html>") {
 		t.Fatalf("want bare 204, got:\n%q", resp)
 	}
 }
