@@ -115,7 +115,9 @@ type Scanner struct {
 	// Destroy a fresh Scanner each time. Keyed to the active *yara.Rules: when
 	// Reload swaps the rules, pooled scanners bound to the old rules are stale
 	// and are Destroyed on return rather than reused. See scannerGen.
-	scanners atomic.Pointer[scannerGen]
+	// bigScanners is the same pool for bigRules (AUD-P3).
+	scanners    atomic.Pointer[scannerGen]
+	bigScanners atomic.Pointer[scannerGen]
 
 	// Lock order: mu (reload preparation), then generationMu (publication).
 	// Readers hold generationMu only to pin immutable rules/policy and identity.
@@ -247,14 +249,16 @@ func (s *Scanner) loadedRulesManifest() (RulesManifest, bool) {
 // idle scanner becomes stale. We use an explicit mutex-guarded free-list (NOT a
 // sync.Pool) precisely so a generation can be DRAINED — sync.Pool drops its
 // contents to the GC without any finalizer, which would leak the C-allocated
-// scanners on every reload. getScanner installs a fresh generation when the
-// rules change and destroys the retired generation's idle scanners; putScanner
-// returns a scanner to its generation only if that generation is still live,
-// else destroys it.
+// scanners on every reload. The main and big-file rules each own a pool slot
+// (AUD-P3), so mixed traffic does not rebuild the pool on every switch.
+// getScanner installs a fresh generation in a slot when that slot's rules
+// change and retires the old one; a retired generation refuses returns, so
+// putScanner destroys a scanner whose generation is no longer live.
 type scannerGen struct {
-	rules *yara.Rules
-	mu    sync.Mutex
-	free  []*yara.Scanner
+	rules   *yara.Rules
+	mu      sync.Mutex
+	free    []*yara.Scanner
+	retired bool // set (under mu) once the generation leaves its slot or was never installed
 }
 
 // maxPooledScanners caps idle scanners kept per generation. Concurrency is
@@ -275,54 +279,75 @@ func (g *scannerGen) get() *yara.Scanner {
 	return nil
 }
 
-// put returns a scanner to the free-list, or reports false if the list is full
-// (caller destroys it).
+// put returns a scanner to the free-list, or reports false if the generation is
+// retired or the list is full (caller destroys it).
 func (g *scannerGen) put(sc *yara.Scanner) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if len(g.free) >= maxPooledScanners {
+	if g.retired || len(g.free) >= maxPooledScanners {
 		return false
 	}
 	g.free = append(g.free, sc)
 	return true
 }
 
-// drain removes and returns all idle scanners so the caller can Destroy them
-// when the generation is retired.
-func (g *scannerGen) drain() []*yara.Scanner {
+// retire marks the generation dead and destroys its idle scanners. Holding mu
+// across the flag and the drain means no put can slip a scanner in afterwards.
+func (g *scannerGen) retire() {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	out := g.free
 	g.free = nil
-	return out
+	g.retired = true
+	g.mu.Unlock()
+	for _, sc := range out {
+		sc.Destroy()
+	}
+}
+
+// retireStale removes and retires slot's generation when it no longer serves
+// cur (Reload replaced or unset those rules).
+func retireStale(slot *atomic.Pointer[scannerGen], cur *yara.Rules) {
+	if g := slot.Load(); g != nil && g.rules != cur && slot.CompareAndSwap(g, nil) {
+		g.retire()
+	}
 }
 
 // getScanner returns a yara.Scanner bound to rules, reusing a pooled one when
 // possible. The caller MUST hand it back via putScanner. gen is returned so
-// putScanner can verify the scanner still belongs to the live generation.
+// putScanner can verify the scanner still belongs to a live generation.
 func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, error) {
-	gen := s.scanners.Load()
-	if gen == nil || gen.rules != rules {
-		// First use, or rules changed under us (post-Reload): retire the old
-		// generation (destroy its idle scanners so the C memory is freed, not
-		// leaked) and install a fresh one for the current rules. A benign race
-		// where two goroutines both install just means one extra empty gen.
-		// PERF-64: only install a generation for the CURRENT (main or big-file) rules. During a
-		// reload, a scan still holding the previous rules would otherwise replace
-		// the new generation and destroy its idle scanners, flip-flopping the pool
-		// until in-flight old-rules scans drain. Such a scan gets a one-off
-		// generation instead; putScanner destroys its scanner on return because
-		// that generation is never the live one.
-		old := gen
-		gen = &scannerGen{rules: rules}
-		if rules != s.rules.Load() && rules != s.bigRules.Load() {
-			old = nil
-		} else {
-			s.scanners.Store(gen)
-		}
-		if old != nil {
-			for _, sc := range old.drain() {
-				sc.Destroy()
+	main, big := s.rules.Load(), s.bigRules.Load()
+	// Retire whichever slot Reload left behind so its idle C scanners are freed
+	// on the next pooled scan of either set, not only of the same set.
+	retireStale(&s.scanners, main)
+	retireStale(&s.bigScanners, big)
+	var slot *atomic.Pointer[scannerGen]
+	switch rules {
+	case main:
+		slot = &s.scanners
+	case big:
+		slot = &s.bigScanners
+	}
+	var gen *scannerGen
+	if slot == nil {
+		// PERF-64: only the CURRENT main or big-file rules get a pooled
+		// generation. A scan still holding rules a reload replaced would
+		// otherwise install a pool for them and evict the live one. It gets a
+		// one-off, already-retired generation; putScanner destroys its scanner.
+		gen = &scannerGen{rules: rules, retired: true}
+	} else {
+		for gen == nil {
+			cur := slot.Load()
+			if cur != nil && cur.rules == rules {
+				gen = cur
+				break
+			}
+			fresh := &scannerGen{rules: rules}
+			if slot.CompareAndSwap(cur, fresh) {
+				if cur != nil {
+					cur.retire()
+				}
+				gen = fresh
 			}
 		}
 	}
@@ -337,13 +362,14 @@ func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, err
 }
 
 // putScanner returns sc to its generation's free-list, or Destroys it if the
-// generation is no longer current (a Reload happened) or the list is full, so a
-// scanner bound to stale rules is never reused and idle scanners stay bounded.
+// generation is retired (a Reload happened, or it was a one-off) or the list is
+// full, so a scanner bound to stale rules is never reused and idle scanners
+// stay bounded.
 func (s *Scanner) putScanner(sc *yara.Scanner, gen *scannerGen) {
 	if sc == nil || gen == nil {
 		return
 	}
-	if s.scanners.Load() == gen && gen.put(sc) {
+	if gen.put(sc) {
 		return
 	}
 	sc.Destroy()
