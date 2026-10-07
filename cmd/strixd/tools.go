@@ -91,7 +91,7 @@ func cmdExtract(args []string) int {
 		var f *os.File
 		// #nosec G304 -- extract intentionally reads an operator-supplied path
 		if f, err = os.Open(path); err == nil {
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 			buf, err = readExtractInput(f, *maxBody)
 		}
 	}
