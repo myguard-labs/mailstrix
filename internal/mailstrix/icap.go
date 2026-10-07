@@ -43,6 +43,9 @@ func (s *Server) ListenAndServeICAP(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+		// Same ordering as ShutdownICAP: stopping before the listener closes, so
+		// a connection Accept already returned is refused by icapTrack.
+		s.beginICAPStop()
 		_ = ln.Close() // #nosec G104 -- intentional shutdown; close error is not actionable here
 	}()
 
@@ -65,17 +68,21 @@ func (s *Server) ListenAndServeICAP(ctx context.Context) error {
 	}
 }
 
-// ShutdownICAP closes the ICAP listener and waits for in-flight connections to
-// drain until ctx expires.
-func (s *Server) ShutdownICAP(ctx context.Context) {
-	// Mark stopping under icapMu before closing the listener and before Wait.
-	// Before the close: a connection Accept already returned is refused by
-	// icapTrack instead of slipping in between Close and the flag. Before Wait:
-	// every Add happens under the same mutex while not stopping, so none can
-	// race the Wait below.
+// beginICAPStop marks the ICAP server stopping under icapMu. Call it before
+// closing the listener and before icapWg.Wait. Before the close: a connection
+// Accept already returned is refused by icapTrack instead of slipping in between
+// Close and the flag. Before Wait: every Add happens under the same mutex while
+// not stopping, so none can race the Wait. Idempotent.
+func (s *Server) beginICAPStop() {
 	s.icapMu.Lock()
 	s.icapStopping = true
 	s.icapMu.Unlock()
+}
+
+// ShutdownICAP closes the ICAP listener and waits for in-flight connections to
+// drain until ctx expires.
+func (s *Server) ShutdownICAP(ctx context.Context) {
+	s.beginICAPStop()
 	if p := s.icapLn.Load(); p != nil {
 		_ = (*p).Close() // #nosec G104 -- intentional shutdown; close error is not actionable here
 	}

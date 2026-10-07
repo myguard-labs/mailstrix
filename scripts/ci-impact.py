@@ -156,6 +156,8 @@ GO_INPUTS = [
     "ci/rules_polling_config_test.go",
     "ci/mime_attachment_hash_test.go",
     "ci/mbazaar_lifecycle_test.go",
+    "ci/threatfox_lifecycle_test.go",
+    "ci/urlhaus_lifecycle_test.go",
     "ci/rar_password_extract_test.go",
     "ci/rc4md5_extract_test.go",
     "ci/testdata/rc4md5-biff.xls",

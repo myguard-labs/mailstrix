@@ -207,6 +207,20 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_threatfox_urlhaus_lifecycle_native_go_consumers(self):
+        for name in ["threatfox", "urlhaus"]:
+            path = f"ci/{name}_lifecycle_test.go"
+            with self.subTest(path=path):
+                result = impact.plan([path])
+                self.assertEqual(
+                    {key for key, value in result.items() if value is True},
+                    {"go", "docker"},
+                )
+                self.assertEqual(result["changed_files"], "--changed -- " + path)
+            for unrelated in [f"ci/{name}_lifecycle_test.py", "ci/unmapped_test.go"]:
+                with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                    impact.plan([unrelated])
+
     def test_mime_attachment_native_go_consumer(self):
         path = "ci/mime_attachment_hash_test.go"
         result = impact.plan([path], False)
