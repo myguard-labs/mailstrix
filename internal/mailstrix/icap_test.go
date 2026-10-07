@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1554,5 +1555,51 @@ func TestICAPCtxCancelMarksStoppingAndRefusesLateAccept(t *testing.T) {
 	s.ShutdownICAP(sctx)
 	if sctx.Err() != nil {
 		t.Fatal("ShutdownICAP after cancel did not return promptly")
+	}
+}
+
+func TestICAPEffortSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		effort int
+		auto   bool
+		held   int
+		want   int
+	}{
+		{"static_respmod", "RESPMOD", 7, false, 0, 7},
+		{"static_reqmod", "REQMOD", 7, false, 0, 7},
+		{"auto_idle", "RESPMOD", 7, true, 0, 7},
+		{"auto_pressure", "RESPMOD", 7, true, 3, 6},
+		{"static_above_max_clamps", "RESPMOD", 20, false, 0, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen atomic.Int64
+			e := &clamdTestEngine{call: func(_ []byte, meta ScanMeta) ([]Match, error) {
+				seen.Store(int64(meta.Effort))
+				return nil, nil
+			}}
+			s := newTestServer(e, "")
+			s.cfg.Effort, s.cfg.EffortMax, s.cfg.EffortAuto = tc.effort, 10, tc.auto
+			s.autoEffort.Store(7)
+			s.admit = make(chan struct{}, 4)
+			for i := 0; i < tc.held; i++ {
+				s.admit <- struct{}{}
+			}
+			addr := startTestICAPServer(t, s)
+			req := icapRESPMODRequest(addr, "inert", true)
+			if tc.method == "REQMOD" {
+				req = icapREQMODRequest(addr, "inert", true)
+			}
+			if resp := doICAP(t, addr, req); !strings.HasPrefix(resp, "ICAP/1.0 204") {
+				t.Fatalf("resp=%q", resp)
+			}
+			if e.calls.Load() != 1 {
+				t.Fatalf("scans %d, want 1", e.calls.Load())
+			}
+			if got := int(seen.Load()); got != tc.want {
+				t.Fatalf("effort=%d, want %d", got, tc.want)
+			}
+		})
 	}
 }
