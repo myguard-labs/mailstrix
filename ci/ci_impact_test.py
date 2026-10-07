@@ -46,6 +46,7 @@ class ImpactTests(unittest.TestCase):
             ("ci/rules_polling_config_test.go", ["go"], ["image", "parity"]),
             ("ci/config_auto_derive_test.go", ["go"], ["image", "parity"]),
             ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
+            ("ci/streamdedupkey_test.go", ["go"], ["image", "parity", "postfix"]),
             (
                 "ci/generate_rules_count_test.sh",
                 ["generate", "shell"],
