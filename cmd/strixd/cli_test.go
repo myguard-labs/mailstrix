@@ -54,15 +54,23 @@ func TestDisablePollingForCacheFallbackPreservesValidation(t *testing.T) {
 
 func TestInfoReportsTemporaryManifestContention(t *testing.T) {
 	dir := t.TempDir()
-	lock, err := os.OpenFile(filepath.Join(dir, ".rules.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := os.OpenFile(filepath.Clean(filepath.Join(dir, ".rules.lock")), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Close()
+	t.Cleanup(func() {
+		if err := lock.Close(); err != nil {
+			t.Errorf("close lock file: %v", err)
+		}
+	})
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck -- test teardown
+	t.Cleanup(func() {
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+			t.Errorf("unlock manifest lock: %v", err)
+		}
+	})
 	status := -1
 	out := captureStdout(t, func() { status = cmdInfo([]string{"-json", "-cache-dir", dir}) })
 	if status != 0 || !strings.Contains(out, "cached manifest temporarily unavailable") {
@@ -225,7 +233,7 @@ func TestScanDirRecurses(t *testing.T) {
 	withRules(t, eicarRule)
 	root := t.TempDir()
 	sub := filepath.Join(root, "cur")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
+	if err := os.MkdirAll(sub, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(sub, "msg:2,S"), []byte(eicarPayload), 0o600); err != nil {
@@ -254,7 +262,9 @@ func TestScanStdin(t *testing.T) {
 	if _, err := w.WriteString(eicarPayload); err != nil {
 		t.Fatal(err)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdin pipe writer: %v", err)
+	}
 	origIn := os.Stdin
 	os.Stdin = r
 	defer func() { os.Stdin = origIn }()

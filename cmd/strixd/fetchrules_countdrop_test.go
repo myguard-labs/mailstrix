@@ -23,7 +23,7 @@ func serveBundle(t *testing.T, n int) *httptest.Server {
 	}
 	path := filepath.Join(t.TempDir(), "compiled.yac")
 	makeCompiledYac(t, path, src.String())
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		t.Fatal(err)
 	}
