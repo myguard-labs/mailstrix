@@ -1256,10 +1256,17 @@ func (m ScanMeta) cacheKey() string {
 	// defaults + the boot wordlist are process-constant and deliberately NOT keyed
 	// (a wordlist change = redeploy = new process = cold cache).
 	if len(m.PWCandidates) > 0 {
+		// Length-prefixed (fixed-width big-endian uint64) so the encoding is
+		// injective: ["a","b"] and ["a\x00b"] can no longer alias. The count is
+		// hashed first. No candidate byte is altered.
 		h := xxhash.New()
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(m.PWCandidates)))
+		_, _ = h.Write(n[:])
 		for _, c := range m.PWCandidates {
+			binary.BigEndian.PutUint64(n[:], uint64(len(c)))
+			_, _ = h.Write(n[:])
 			_, _ = h.WriteString(c)
-			_, _ = h.Write([]byte{0})
 		}
 		k += "\x00pw:" + strconv.FormatUint(h.Sum64(), 16)
 	}

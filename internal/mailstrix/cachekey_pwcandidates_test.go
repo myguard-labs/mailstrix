@@ -94,12 +94,64 @@ func TestCacheKeyPWCandidates(t *testing.T) {
 			t.Fatalf("key grew with input: %d vs %d", len(long), len(short))
 		}
 	})
-	t.Run("embedded NUL collision is not asserted", func(t *testing.T) {
-		// The hash stream is c1,NUL,c2,NUL: a candidate containing NUL can alias a
-		// split list. Not guaranteed either way by the implementation; the server
-		// header parse strips control bytes so it is unreachable from the wire.
-		if pwMeta("a", "b").cacheKey() == pwMeta("a\x00b").cacheKey() {
-			t.Logf("observed: [a b] and [a\\x00b] share a cache key (internal callers only)")
+	t.Run("embedded NUL does not alias a split list (AUD-M2b)", func(t *testing.T) {
+		pairs := [][2]ScanMeta{
+			{pwMeta("a", "b"), pwMeta("a\x00b")},
+			{pwMeta("a", ""), pwMeta("a\x00")},
+			{pwMeta("", ""), pwMeta("\x00")},
+			{pwMeta("a\x00", "b"), pwMeta("a", "\x00b")},
+			{pwMeta("\x00"), pwMeta("", "")},
+		}
+		for i, p := range pairs {
+			if p[0].cacheKey() == p[1].cacheKey() {
+				t.Fatalf("pair %d collides: %q", i, p[0].cacheKey())
+			}
+		}
+	})
+	t.Run("positive distinct lists differ identical lists match", func(t *testing.T) {
+		lists := [][]string{{"a"}, {"b"}, {"a", "b"}, {"b", "a"}, {"ab"}, {""}, {"", ""}, {"a\x00b"}}
+		seen := map[string]int{}
+		for i, l := range lists {
+			k := pwMeta(l...).cacheKey()
+			if j, dup := seen[k]; dup {
+				t.Fatalf("lists %d and %d share key %q", j, i, k)
+			}
+			seen[k] = i
+			if k != pwMeta(append([]string(nil), l...)...).cacheKey() {
+				t.Fatalf("list %d unstable", i)
+			}
+		}
+	})
+	t.Run("boundary empty candidate versus none versus two", func(t *testing.T) {
+		const hist = "f.zip\x00.zip\x00zip\x002"
+		var nilList []string
+		if got := pwMeta(nilList...).cacheKey(); got != hist {
+			t.Fatalf("nil key changed: %q", got)
+		}
+		if got := pwMeta([]string{}...).cacheKey(); got != hist {
+			t.Fatalf("empty key changed: %q", got)
+		}
+		one, two := pwMeta("").cacheKey(), pwMeta("", "").cacheKey()
+		if one == hist || two == hist || one == two {
+			t.Fatalf("empty-candidate keys not distinct: %q %q %q", hist, one, two)
+		}
+	})
+	t.Run("malformed very long candidate and NUL-only candidates", func(t *testing.T) {
+		long := strings.Repeat("\x00", 1<<20)
+		a, b := pwMeta(long).cacheKey(), pwMeta(long+"\x00").cacheKey()
+		if a == b {
+			t.Fatal("long NUL candidates of different length collide")
+		}
+		if a != pwMeta(long).cacheKey() {
+			t.Fatal("long candidate unstable")
+		}
+		if pwMeta(long[:10], long[:10]).cacheKey() == pwMeta(long[:20]).cacheKey() {
+			t.Fatal("split NUL runs collide")
+		}
+	})
+	t.Run("negative order remains significant with NUL candidates", func(t *testing.T) {
+		if pwMeta("a\x00", "b").cacheKey() == pwMeta("b", "a\x00").cacheKey() {
+			t.Fatal("order ignored")
 		}
 	})
 }
