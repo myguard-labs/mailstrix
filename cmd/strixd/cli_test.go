@@ -155,37 +155,6 @@ func withRules(t *testing.T, content string) {
 	t.Setenv("MAILSTRIX_RULES", "")
 }
 
-// captureStdout redirects os.Stdout for the duration of fn and returns what was
-// written. CLI output goes to stdout, so the tests assert on it directly.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	orig := os.Stdout
-	os.Stdout = w
-	done := make(chan string, 1)
-	go func() {
-		var b strings.Builder
-		buf := make([]byte, 4096)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				b.Write(buf[:n])
-			}
-			if err != nil {
-				break
-			}
-		}
-		done <- b.String()
-	}()
-	fn()
-	w.Close()
-	os.Stdout = orig
-	return <-done
-}
-
 func TestCheckRulesOK(t *testing.T) {
 	withRules(t, eicarRule)
 	var code int
