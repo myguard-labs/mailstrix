@@ -171,14 +171,15 @@ func (s *Server) refuseICAP(conn net.Conn) {
 // logRefusedICAP logs the cap being hit at most once per icapRefuseLogInterval.
 // Unthrottled it is one synchronous stderr write per attacker connect, which
 // fills the log volume and slows the accept loop. The exact count is in the
-// icap_conn_refused_total metric.
+// icap_conn_refused_total metric. A zero stamp means "never logged": the first
+// line is not suppressed on a young process.
 func (s *Server) logRefusedICAP() {
 	// Monotonic, not wall clock: an NTP step backwards would leave a wall-clock
 	// stamp in the future, and the throttle would suppress the cap-reached line
 	// for the whole skew — losing the only log signal precisely during a flood.
 	now := int64(time.Since(processStart))
 	last := s.icapRefuseLog.Load()
-	if now-last < int64(icapRefuseLogInterval) {
+	if last != 0 && now-last < int64(icapRefuseLogInterval) {
 		return
 	}
 	if !s.icapRefuseLog.CompareAndSwap(last, now) {
