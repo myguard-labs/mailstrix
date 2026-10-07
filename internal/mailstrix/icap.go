@@ -450,7 +450,10 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	defer func() { <-s.admit }()
 
 	t0 := time.Now()
-	icapMeta := ScanMeta{RawKey: streamDedupKey(buf)}
+	// Effort follows the configured level and auto load shedding, as the clamd
+	// path does; autoEnvDefault needs the admission slot held above.
+	icapMeta := ScanMeta{RawKey: streamDedupKey(buf),
+		Effort: ResolveEffortLevel(0, false, s.autoEnvDefault(true), s.cfg.EffortMax)}
 	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap", buf, icapMeta)
 	if cacheStatus == "canceled" {
 		// A follower that stopped waiting on its leader has no verdict: answer
