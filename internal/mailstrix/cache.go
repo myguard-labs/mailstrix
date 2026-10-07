@@ -12,16 +12,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Cache stores scan verdicts keyed by a Fingerprint-prefixed streamDedupKey: a
-// non-cryptographic 128-bit xxhash of the body (scanner.go), NOT a crypto hash.
-// This is a dedup key, not collision-resistant — random collision is negligible
-// at 128 bits, but a deliberate collision against a pre-seeded clean entry could
-// be served the clean verdict. Accepted threat model: the cache is process-local
-// (or a trusted shared Redis), not attacker-writable. A YARA verdict is a pure
-// function of the scanned bytes and the rule set, so unlike gozer's collaborative
-// verdicts there is nothing to invalidate per-message — entries only expire by
-// TTL. On a rules reload the whole cache is dropped (Flush) since old verdicts
-// were computed against the previous rule set.
+// Cache stores scan verdicts keyed by a Fingerprint-prefixed streamDedupKey:
+// an unseeded xxh3 Hash128 (github.com/zeebo/xxh3, not cryptographic). Every
+// mail sender writes entries: each scanned body/stream stores its verdict under
+// its own key, populating both L1 (in-process LRU) and L2 (shared Redis). The
+// residual risk is a crafted body whose key collides with an existing clean
+// entry's key under the same Fingerprint; random collision at 128 bits is
+// negligible, and targeted collision is the accepted risk. A per-process random
+// seed would break the shared L2 (keys must agree across instances). Verdicts
+// are pure functions of bytes and rules, so entries expire only by TTL. On a
+// rules reload, the whole cache is Flush'd since old verdicts were computed
+// against the previous rule set. Redis L2 is trusted; only strixd writes it.
 type Cache interface {
 	// Get returns an immutable match slice owned by the cache. Callers must not
 	// mutate the returned slice or its Match entries.
