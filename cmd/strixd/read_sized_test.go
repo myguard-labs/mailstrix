@@ -17,11 +17,11 @@ func TestReadAllSized(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := func(limit int64) []byte {
-		f, err := os.Open(path)
+		f, err := os.Open(filepath.Clean(path))
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		b, err := readAllSized(f, limit)
 		if err != nil {
 			t.Fatal(err)
@@ -44,8 +44,8 @@ func TestReadAllSized(t *testing.T) {
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f, _ := os.Open(empty)
-	defer f.Close()
+	f, _ := os.Open(filepath.Clean(empty))
+	defer func() { _ = f.Close() }()
 	if got, err := readAllSized(f, 100); err != nil || len(got) != 0 {
 		t.Errorf("empty file: %d bytes, %v", len(got), err)
 	}
@@ -58,9 +58,9 @@ func TestReadAllSizedOneAlloc(t *testing.T) {
 		t.Fatal(err)
 	}
 	allocs := testing.AllocsPerRun(5, func() {
-		f, _ := os.Open(path)
+		f, _ := os.Open(filepath.Clean(path))
 		_, _ = readAllSized(f, -1)
-		f.Close()
+		_ = f.Close()
 	})
 	if allocs > 8 {
 		t.Errorf("allocs per read = %g, want a pre-sized buffer", allocs)
