@@ -392,3 +392,52 @@ func TestCapStopBatchDropperStreams(t *testing.T) {
 		t.Fatalf("256 carved files past stream cap not recorded: %v (streams=%d)", res.CapHits, len(res.Streams))
 	}
 }
+
+// Header-encrypted 7z fixtures (password "test"), generated with /usr/bin/7z:
+//
+//	hdrenc-oversize.7z: 7z a -p'test' -mhe=on -mx=9 hdrenc-oversize.7z asmall.dat zbig.dat   (zbig.dat = 17000000 zero bytes, asmall.dat = "hello-in-cap\n"; the in-cap asmall.dat must sort first, because the crack step validates on the first regular member and skips an oversize one)
+//	hdrenc-small.7z:    7z a -p'test' -mhe=on hdrenc-small.7z small.txt          (small.txt = "hello-in-cap\n")
+//	hdrenc-dir.7z:      7z a -p'test' -mhe=on hdrenc-dir.7z emptydir             (empty directory only)
+func capHdrEnc7z(t *testing.T, name string, cands ...string) extract.Result {
+	t.Helper()
+	buf, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := extract.FullOptions(time.Time{})
+	opts.ArchivePWEnabled = true
+	opts.PWCandidates = cands
+	return extract.ExtractWithOptions(buf, opts)
+}
+
+func TestCapStopHeaderEncrypted7zMemberSize(t *testing.T) {
+	t.Run("oversize-records-member-size", func(t *testing.T) {
+		res := capHdrEnc7z(t, "hdrenc-oversize.7z", "wrong", "test")
+		// DecryptedArchive stays false here (nothing was emitted); the hit itself
+		// proves the crack path, since the listing is hidden without the password.
+		if !capHasHit(res, "member-size") {
+			t.Fatalf("CapHits=%v, want member-size", res.CapHits)
+		}
+	})
+	t.Run("in-cap-no-hit-and-extracted", func(t *testing.T) {
+		res := capHdrEnc7z(t, "hdrenc-small.7z", "test")
+		if !res.DecryptedArchive || capHasHit(res, "member-size") {
+			t.Fatalf("decrypted=%v CapHits=%v", res.DecryptedArchive, res.CapHits)
+		}
+		if len(res.Streams) == 0 {
+			t.Fatal("in-cap member not extracted")
+		}
+	})
+	t.Run("directory-no-hit", func(t *testing.T) {
+		res := capHdrEnc7z(t, "hdrenc-dir.7z", "test")
+		if capHasHit(res, "member-size") {
+			t.Fatalf("directory recorded member-size: %v", res.CapHits)
+		}
+	})
+	t.Run("wrong-password-no-hit", func(t *testing.T) {
+		res := capHdrEnc7z(t, "hdrenc-oversize.7z", "wrong")
+		if capHasHit(res, "member-size") {
+			t.Fatalf("uncracked archive recorded member-size: %v", res.CapHits)
+		}
+	})
+}
