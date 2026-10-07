@@ -801,7 +801,11 @@ func emit7zMembers(zr *sevenzip.Reader, res *Result, b *archiveBudget, depth int
 			archiveCapHit(res, b)
 			break
 		}
-		if f.FileInfo().IsDir() || f.UncompressedSize > maxBytesPerMember {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if f.UncompressedSize > maxBytesPerMember {
+			res.stopHit("member-size") // AUD-04c2
 			continue
 		}
 		data, ok := boundedDecrypted7zMember(zr.File, i, b, deadline)

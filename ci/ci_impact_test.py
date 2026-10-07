@@ -288,6 +288,29 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_hdrenc_7z_fixture_go_mapping_negative_control(self):
+        paths = [
+            "ci/testdata/hdrenc-dir.7z",
+            "ci/testdata/hdrenc-oversize.7z",
+            "ci/testdata/hdrenc-small.7z",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                result = impact.plan([path])
+                self.assertEqual(
+                    {key for key, value in result.items() if value is True},
+                    {"go", "docker"},
+                )
+                self.assertEqual(result["changed_files"], f"--changed -- {path}")
+
+                # The same named test must fail if this mapping is removed.
+                without_path = [name for name in impact.GO_INPUTS if name != path]
+                with (
+                    mock.patch.object(impact, "GO_INPUTS", without_path),
+                    self.assertRaisesRegex(ValueError, "unmapped changed path"),
+                ):
+                    impact.plan([path])
+
     def test_urlhaus_shared_host_native_go_consumer(self):
         path = "ci/urlhaus_shared_host_test.go"
         result = impact.plan([path])

@@ -27,6 +27,10 @@ ci/**
 !ci/testdata
 ci/testdata/**
 !ci/testdata/rc4md5-biff.xls
+# Header-encrypted 7z fixtures read by ci/extract_cap_stops_test.go (AUD-04c2).
+!ci/testdata/hdrenc-dir.7z
+!ci/testdata/hdrenc-oversize.7z
+!ci/testdata/hdrenc-small.7z
 !third_party
 !third_party/**
 !tools
