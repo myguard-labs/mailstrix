@@ -209,3 +209,87 @@ func TestRulesAllowHTTPEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestTokenNextPaddedWithSpaces verifies that TokenNext with leading/trailing spaces
+// is stored trimmed and accepted by clients sending the trimmed form.
+func TestTokenNextPaddedWithSpaces(t *testing.T) {
+	c := &Config{Token: "primary", TokenNext: "  nexttoken  "}
+	c.sanitize()
+	if c.TokenNext != "nexttoken" {
+		t.Errorf("TokenNext trimmed: got %q, want %q", c.TokenNext, "nexttoken")
+	}
+	// Verify it's in the accepted-token set and can be matched.
+	found := false
+	for _, tok := range c.tokens {
+		if tok == "nexttoken" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("TokenNext not in accepted tokens: %v", c.tokens)
+	}
+}
+
+// TestTokenNextDeduplicatedAgainstPrimary verifies that a padded TokenNext
+// equal to a primary token (after trimming) does not create a duplicate.
+func TestTokenNextDeduplicatedAgainstPrimary(t *testing.T) {
+	c := &Config{Token: "primary", TokenNext: "  primary  "}
+	c.sanitize()
+	// Count how many times "primary" appears in the token set.
+	count := 0
+	for _, tok := range c.tokens {
+		if tok == "primary" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("primary token appears %d times, want 1 (no duplicate)", count)
+	}
+}
+
+// TestPaddedSentinelStillDisabled verifies that a padded sentinel like " none "
+// still disables auth and yields an empty token set.
+func TestPaddedSentinelStillDisabled(t *testing.T) {
+	c := &Config{Token: "  none  ", TokenNext: "  off  "}
+	c.sanitize()
+	if c.Token != "" {
+		t.Errorf("padded 'none' sentinel not disabled: got %q", c.Token)
+	}
+	if len(c.tokens) != 0 {
+		t.Errorf("padded sentinel tokens not empty: %v", c.tokens)
+	}
+}
+
+// TestPaddedPrimaryTokenStoredTrimmed verifies that a single padded primary token
+// is stored trimmed in c.Token and is the only member of c.tokens.
+func TestPaddedPrimaryTokenStoredTrimmed(t *testing.T) {
+	c := &Config{Token: "  mysecret  "}
+	c.sanitize()
+	if c.Token != "mysecret" {
+		t.Errorf("primary token trimmed: got %q, want %q", c.Token, "mysecret")
+	}
+	if len(c.tokens) != 1 || c.tokens[0] != "mysecret" {
+		t.Errorf("tokens: got %v, want [mysecret]", c.tokens)
+	}
+}
+
+// TestCommaSeparatedTokensAreTrimmed verifies that comma-separated parts in the
+// primary token are each trimmed before being stored in c.tokens.
+func TestCommaSeparatedTokensAreTrimmed(t *testing.T) {
+	c := &Config{Token: "  token1  ,  token2  ,  token3  "}
+	c.sanitize()
+	if len(c.tokens) != 3 {
+		t.Errorf("expected 3 tokens, got %d: %v", len(c.tokens), c.tokens)
+	}
+	expected := []string{"token1", "token2", "token3"}
+	for i, want := range expected {
+		if i >= len(c.tokens) {
+			t.Errorf("missing token %q", want)
+			break
+		}
+		if c.tokens[i] != want {
+			t.Errorf("token[%d]: got %q, want %q", i, c.tokens[i], want)
+		}
+	}
+}

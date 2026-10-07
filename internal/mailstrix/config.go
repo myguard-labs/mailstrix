@@ -433,13 +433,15 @@ const (
 
 // normalizeToken maps the explicit "no auth" sentinels (and an unset value) to
 // an empty token, so /scan runs OPEN. A real secret equal to one of these words
-// is not supported — use a longer, non-sentinel token.
+// is not supported — use a longer, non-sentinel token. Non-sentinel values are
+// returned trimmed to ensure consistency between the checked value and stored value.
 func normalizeToken(t string) string {
-	switch strings.ToLower(strings.TrimSpace(t)) {
+	trimmed := strings.TrimSpace(t)
+	switch strings.ToLower(trimmed) {
 	case "", "none", "off", "0", "disabled", "false":
 		return ""
 	}
-	return t
+	return trimmed
 }
 
 // --- env helpers (identical semantics to gozer) ---
