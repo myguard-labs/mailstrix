@@ -603,12 +603,83 @@ func TestResponseBodyEOF(t *testing.T) {
 	}
 }
 
+// lagContext closes Done at its deadline but cancels derived contexts one fake
+// millisecond later. context.WithTimeout promises no stronger order: a parent
+// closes Done before it cancels its children, so a goroutine woken by the
+// caller's Done can still observe a live request context.
+type lagContext struct {
+	context.Context
+	done  chan struct{}
+	mu    sync.Mutex
+	fired bool
+	after map[int]func()
+	next  int
+}
+
+func newLagContext(d time.Duration) *lagContext {
+	c := &lagContext{Context: context.Background(), done: make(chan struct{}), after: make(map[int]func())}
+	time.AfterFunc(d, func() {
+		close(c.done)
+		time.AfterFunc(time.Millisecond, func() {
+			c.mu.Lock()
+			c.fired = true
+			after := c.after
+			c.after = nil
+			c.mu.Unlock()
+			for _, f := range after {
+				f()
+			}
+		})
+	})
+	return c
+}
+
+func (c *lagContext) Done() <-chan struct{} { return c.done }
+
+func (c *lagContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+// AfterFunc makes context.WithTimeout delegate child cancellation to c.
+func (c *lagContext) AfterFunc(f func()) func() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fired {
+		go f()
+		return func() bool { return false }
+	}
+	id := c.next
+	c.next++
+	c.after[id] = f
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		_, pending := c.after[id]
+		delete(c.after, id)
+		return pending
+	}
+}
+
+func eofCallerContext(ending string) (context.Context, context.CancelFunc) {
+	if ending == "lagged" {
+		return newLagContext(time.Second), func() {}
+	}
+	return context.WithTimeout(context.Background(), time.Second)
+}
+
+// The response body ends only once the request context it belongs to is done;
+// "lagged" pins that the caller's Done alone does not order the EOF.
 func TestSubmissionEOFOwnership(t *testing.T) {
-	for _, ending := range []string{"active", "canceled", "deadline"} {
+	for _, ending := range []string{"active", "canceled", "deadline", "lagged"} {
 		for _, complete := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/complete=%t", ending, complete), func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
-					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					ctx, cancel := eofCallerContext(ending)
 					defer cancel()
 					c, err := New(Config{Origin: "https://localhost:443", AllowedDestination: netip.MustParseAddrPort("127.0.0.1:443"),
 						Generation: "fixture-v1", Machine: "one-vm", CredentialReference: "fixture-account"},
@@ -630,8 +701,8 @@ func TestSubmissionEOFOwnership(t *testing.T) {
 							switch ending {
 							case "canceled":
 								cancel()
-							case "deadline":
-								<-ctx.Done()
+							case "deadline", "lagged":
+								<-r.Context().Done()
 							}
 						}}
 						return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(body)}, nil
