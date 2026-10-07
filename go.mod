@@ -14,6 +14,7 @@ require (
 	github.com/redis/go-redis/v9 v9.20.1
 	github.com/saferwall/pe v1.6.5
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
+	github.com/zeebo/xxh3 v1.1.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.58.0
 	www.velocidex.com/golang/oleparse v0.0.0-20251204214047-2e3e765e26a1
@@ -31,6 +32,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect

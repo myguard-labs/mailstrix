@@ -21,6 +21,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 	yara "github.com/hillu/go-yara/v4"
+	"github.com/zeebo/xxh3"
 
 	"github.com/myguard-labs/mailstrix/internal/extract"
 	"github.com/myguard-labs/mailstrix/internal/mbazaar"
@@ -30,26 +31,22 @@ import (
 )
 
 // streamDedupKey returns a 16-byte key for the per-stream dedup set inside
-// Scanner.Scan. xxhash is non-cryptographic but collision odds across ≤256
-// streams of practical size are negligible (~2⁻⁶⁴ per pair), and it is
+// Scanner.Scan. xxh3 is non-cryptographic but collision odds across <=256
+// streams of practical size are negligible (~2^-64 per pair), and it is
 // orders of magnitude faster than SHA-256 on multi-MB buffers.
-// Two independent 64-bit passes (second pass domain-separated with 0x01) give
-// a 128-bit key so the map can use a [16]byte array — allocation-free and
-// faster than a string key.
+// A single xxh3 Hash128 pass over the body yields the 128-bit key (Lo in bytes
+// 0..8, Hi in bytes 8..16, little-endian), so the map can use a [16]byte array
+// (allocation-free, faster than a string key) without reading the body twice.
 // StreamDedupKey is the exported form of streamDedupKey for callers outside the
 // package (e.g. the CLI scan command) that need to precompute the raw-body key
 // for ScanMeta.RawKey (PERF-22).
 func StreamDedupKey(b []byte) [16]byte { return streamDedupKey(b) }
 
 func streamDedupKey(b []byte) [16]byte {
-	lo := xxhash.Sum64(b)
-	d := xxhash.New()
-	_, _ = d.Write([]byte{0x01})
-	_, _ = d.Write(b)
-	hi := d.Sum64()
+	h := xxh3.Hash128(b)
 	var k [16]byte
-	binary.LittleEndian.PutUint64(k[0:8], lo)
-	binary.LittleEndian.PutUint64(k[8:16], hi)
+	binary.LittleEndian.PutUint64(k[0:8], h.Lo)
+	binary.LittleEndian.PutUint64(k[8:16], h.Hi)
 	return k
 }
 
@@ -1749,7 +1746,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	// PERF-36: each res.Streams entry's content key was hashed twice — once in the
 	// scan-dedup loop (scanExtracted) and again in the feed-dedup loop below.
 	// Compute it once per stream here (index-aligned with res.Streams) and reuse it
-	// in both places. Same xxh128 streamDedupKey domain, so dedup behaviour is
+	// in both places. Same xxh3-128 streamDedupKey domain, so dedup behaviour is
 	// byte-identical; only the redundant second hash per stream is removed.
 	streamKeys := make([][16]byte, len(res.Streams))
 	for i, stream := range res.Streams {
@@ -2002,7 +1999,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 		// from the first occurrence, so CheckCandidates output for the dup is 100%
 		// deduped away. Removing the dup call removes ZERO appends to out and is
 		// therefore byte-identical to the output produced today. Uses the same
-		// streamDedupKey (xxhash 128-bit) as the YARA-scan dedup loop above.
+		// streamDedupKey (xxh3 128-bit) as the YARA-scan dedup loop above.
 		// buf is processed first (unchanged); unique streams follow in first-
 		// occurrence order (mirrors the original walk, minus the wasteful dups).
 		fedSeen := make(map[[16]byte]struct{}, len(res.Streams)+1)
