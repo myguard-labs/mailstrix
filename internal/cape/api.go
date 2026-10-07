@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"strings"
@@ -48,13 +49,32 @@ func NewAPIHandler(cfg APIConfig) (*APIHandler, error) {
 // interruptibleBody lets the ingress watchdog end a stalled request-body read:
 // net/http's Body.Close blocks behind an in-flight Read, so the watchdog first
 // moves the connection read deadline into the past. An unsupported writer
-// leaves the plain Close behaviour in place.
+// leaves the plain Close behaviour in place, and report records that failure
+// so a ResponseWriter wrapper that hides deadline support stays visible.
 type interruptibleBody struct {
 	io.ReadCloser
-	rc *http.ResponseController
+	rc     *http.ResponseController
+	report func(error)
 }
 
-func (b interruptibleBody) InterruptRead() { _ = b.rc.SetReadDeadline(time.Now()) }
+// InterruptRead is safe concurrently with Read: it touches only the connection
+// read deadline and calls report, which must itself be concurrency-safe.
+func (b interruptibleBody) InterruptRead() {
+	if err := b.rc.SetReadDeadline(time.Now()); err != nil && b.report != nil {
+		b.report(err)
+	}
+}
+
+// logInterruptFailure logs one line per failed interrupt. The error is a local
+// net/http error (http.ErrNotSupported for a writer without deadline support);
+// it never carries request content.
+func logInterruptFailure(err error) {
+	if errors.Is(err, http.ErrNotSupported) {
+		log.Printf("[mailstrix] WARNING: cape ingress read interrupt unsupported by ResponseWriter; stalled body waits for blocking Close")
+		return
+	}
+	log.Printf("[mailstrix] WARNING: cape ingress read interrupt failed: %v", err)
+}
 
 // ServeHTTP handles CAPE job admission and lookup requests.
 func (h *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +165,7 @@ func (h *APIHandler) submit(w http.ResponseWriter, r *http.Request, tenant strin
 		apiError(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	admission, err := h.cfg.Store.EnqueueClassified(r.Context(), EnqueueRequest{Tenant: tenant, Generation: profile.Generation, SubmissionPolicy: profile.SubmissionPolicy, ResultPolicy: profile.ResultPolicy}, interruptibleBody{ReadCloser: r.Body, rc: http.NewResponseController(w)},
+	admission, err := h.cfg.Store.EnqueueClassified(r.Context(), EnqueueRequest{Tenant: tenant, Generation: profile.Generation, SubmissionPolicy: profile.SubmissionPolicy, ResultPolicy: profile.ResultPolicy}, interruptibleBody{ReadCloser: r.Body, rc: http.NewResponseController(w), report: logInterruptFailure},
 		func(ctx context.Context, body io.Reader) (string, error) {
 			static, err := h.cfg.StaticScan(ctx, tenant, body)
 			if err != nil {
