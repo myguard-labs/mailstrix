@@ -580,9 +580,9 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// This [16]byte is stored on meta so Scanner.Scan can seed the per-stream dedup
 	// set without re-hashing buf, and its string form replaces bodyCacheHash(buf)
 	// as the body component of the verdict-cache key. The domain change from
-	// bodyCacheHash (prefix 0x9e,0x37,0x79,0xb9) to streamDedupKey (prefix 0x01)
-	// alters the cache-key bytes for existing entries, but the verdict cache is
-	// ephemeral and already invalidated by any Fingerprint change — a domain-change
+	// bodyCacheHash (prefix 0x9e,0x37,0x79,0xb9) to streamDedupKey (single xxh3
+	// Hash128 pass, no prefix) alters the cache-key bytes for existing entries, but
+	// the verdict cache is ephemeral and already invalidated by any Fingerprint change — a domain-change
 	// cold-start is equivalent and safe (L2/Redis keys are also per-Fingerprint so
 	// no cross-version collision).
 	meta.RawKey = streamDedupKey(buf)

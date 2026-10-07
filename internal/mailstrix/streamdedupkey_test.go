@@ -46,8 +46,8 @@ func TestStreamDedupKey(t *testing.T) {
 		}
 	})
 
-	// the high and low 64-bit halves must differ for typical input (the two
-	// passes are domain-separated, so a key is not just a doubled xxhash64).
+	// the high and low 64-bit halves must differ for typical input (xxh3
+	// Hash128 Lo and Hi are distinct words, not a doubled 64-bit hash).
 	t.Run("halves are independent", func(t *testing.T) {
 		k := streamDedupKey([]byte("test"))
 		var lo, hi [8]byte
