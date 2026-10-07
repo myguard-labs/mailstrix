@@ -403,19 +403,24 @@ func readMemberTrunc(rc io.Reader, declared uint64) ([]byte, bool) {
 	}
 	truncated := false
 	if err == nil && buf.Len() == maxBytesPerMember {
-		var probe [1]byte
-		for i := 0; i < 8; i++ { // tolerate a reader that returns (0, nil)
-			n, perr := rc.Read(probe[:])
-			if n > 0 {
-				truncated = true
-				break
-			}
-			if perr != nil {
-				break
-			}
-		}
+		truncated = moreBytesFollow(rc)
 	}
 	return buf.Bytes(), truncated
+}
+
+// moreBytesFollow probes rc for one more byte after a cap-sized read.
+func moreBytesFollow(rc io.Reader) bool {
+	var probe [1]byte
+	for i := 0; i < 8; i++ { // tolerate a reader that returns (0, nil)
+		n, perr := rc.Read(probe[:])
+		if n > 0 {
+			return true
+		}
+		if perr != nil {
+			return false
+		}
+	}
+	return false
 }
 
 // unpackZip walks a zip's entries and emits each file member. This is the
@@ -478,12 +483,11 @@ func zipMemberWalkOK(buf []byte, res *Result, b *archiveBudget, depth int, deadl
 // the lazily-built password-decrypt reader.
 func unpackZipReader(zr *zip.Reader, buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
 	res.IsArchive = true
-	// pwc is non-nil only when MAILSTRIX_ARCHIVE_PW is enabled and candidates were
-	// sourced. zdec is a lazily-built yeka/zip reader over the same buffer, used to
-	// decrypt encrypted members (std archive/zip cannot decrypt). zfound caches the
-	// build so a second encrypted member reuses it (or skips after a build failure).
-	pwc := pwCandidates(res)
-	var zdec *zipDecryptReader
+	// pw.pwc is non-nil only when MAILSTRIX_ARCHIVE_PW is enabled and candidates were
+	// sourced. pw.zdec is a lazily-built yeka/zip reader over the same buffer, used to
+	// decrypt encrypted members (std archive/zip cannot decrypt); a second encrypted
+	// member reuses it.
+	pw := &zipPwState{buf: buf, pwc: pwCandidates(res)}
 	// COR-07: visit executable/script members before everything else, so a run
 	// of cheap padding members cannot exhaust maxStreams or the member budget
 	// before a z.vbs at the end is reached. The stable order keeps archive order
@@ -505,25 +509,7 @@ func unpackZipReader(zr *zip.Reader, buf []byte, res *Result, b *archiveBudget, 
 		// it and skip. With candidates, try a bounded decrypt and, on success, emit
 		// the plaintext as a normal member; on failure keep the encrypted signal.
 		if f.Flags&0x1 != 0 {
-			if len(pwc) == 0 {
-				markEncryptedArchive(res)
-				continue
-			}
-			if zdec == nil {
-				zdec = newZipDecryptReader(buf)
-			}
-			// AES (KDF-bound) vs ZipCrypto (cheap) is read straight off the std-zip
-			// member's validated AE-x extra — no extra yeka parse, so a post-cap
-			// member pays nothing.
-			plain := zdec.decryptMember(i, hasAESExtra(f.Extra), f.UncompressedSize64, pwc, b, deadline)
-			if plain == nil {
-				markEncryptedArchive(res)
-				continue
-			}
-			// Emit the payload BEFORE the marker so a maxStreams cap hit can never
-			// drop the decrypted dropper in favour of the marker.
-			emitZipMember(f.Name, plain, res, b, depth, deadline)
-			markDecryptedArchive(res)
+			pw.emitEncrypted(f, i, res, b, depth, deadline)
 			continue
 		}
 		if f.UncompressedSize64 > maxBytesPerMember {
@@ -538,6 +524,50 @@ func unpackZipReader(zr *zip.Reader, buf []byte, res *Result, b *archiveBudget, 
 		_ = rc.Close()
 		emitZipMember(f.Name, data, res, b, depth, deadline)
 	}
+}
+
+// zipPwState carries the password candidates and the lazily-built decrypt
+// reader shared by every encrypted member of one zip.
+type zipPwState struct {
+	buf  []byte
+	pwc  []string
+	zdec *zipDecryptReader
+}
+
+// emitEncrypted handles one encrypted (general-purpose bit 0) member: flag it,
+// or decrypt and emit it as a normal member.
+func (z *zipPwState) emitEncrypted(f *zip.File, i int, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	if len(z.pwc) == 0 {
+		markEncryptedArchive(res)
+		return
+	}
+	if f.UncompressedSize64 > maxBytesPerMember {
+		// AUD-04c5: mirror the cleartext AUD-01 path in unpackZipReader. decryptMember
+		// refuses an oversized member without reading, so record the drop
+		// here; the member keeps ARCHIVE-ENCRYPTED. Only with candidates
+		// (above): no attempt is made without them.
+		res.stopHit("member-size")
+		markEncryptedArchive(res)
+		return
+	}
+	if z.zdec == nil {
+		z.zdec = newZipDecryptReader(z.buf)
+	}
+	// AES (KDF-bound) vs ZipCrypto (cheap) is read straight off the std-zip
+	// member's validated AE-x extra — no extra yeka parse, so a post-cap
+	// member pays nothing.
+	plain, trunc := z.zdec.decryptMember(i, hasAESExtra(f.Extra), f.UncompressedSize64, z.pwc, b, deadline)
+	if plain == nil {
+		markEncryptedArchive(res)
+		return
+	}
+	if trunc {
+		res.stopHit("member-size") // AUD-04c5: stream outran its declared size
+	}
+	// Emit the payload BEFORE the marker so a maxStreams cap hit can never
+	// drop the decrypted dropper in favour of the marker.
+	emitZipMember(f.Name, plain, res, b, depth, deadline)
+	markDecryptedArchive(res)
 }
 
 // unpackGzip decompresses a single-stream gzip (and, if that stream is a tar,

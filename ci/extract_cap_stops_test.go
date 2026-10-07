@@ -26,6 +26,7 @@ import (
 
 	"github.com/myguard-labs/mailstrix/internal/extract"
 	"github.com/myguard-labs/mailstrix/internal/mailstrix"
+	yekazip "github.com/yeka/zip"
 )
 
 // Cap values mirrored from internal/extract; a drift shows up as a failing
@@ -756,6 +757,213 @@ func TestCapStopRarOversizeSkip(t *testing.T) {
 		), "test")
 		if capHasHit(res, "member-size") {
 			t.Fatalf("declared==cap recorded member-size: %v", res.CapHits)
+		}
+	})
+}
+
+// capPWExtract runs the public API with archive-password candidates enabled.
+func capPWExtract(buf []byte, cands ...string) extract.Result {
+	opts := extract.FullOptions(time.Time{})
+	opts.ArchivePWEnabled = true
+	opts.PWCandidates = cands
+	return extract.ExtractWithOptions(buf, opts)
+}
+
+// capRawEncryptedZip builds a zip whose single member has general-purpose bit 0
+// set and the given declared uncompressed size, with junk (undecryptable) data.
+func capRawEncryptedZip(t *testing.T, declared uint64) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateRaw(&zip.FileHeader{
+		Name:               "enc.bin",
+		Method:             zip.Store,
+		Flags:              0x1,
+		CRC32:              1,
+		CompressedSize64:   32,
+		UncompressedSize64: declared,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(bytes.Repeat([]byte{0x5a}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestCapStopEncryptedZipDeclaredOversize covers AUD-04c5 (a): an encrypted zip
+// member declaring more than the cap used to be dropped with no cap hit.
+func TestCapStopEncryptedZipDeclaredOversize(t *testing.T) {
+	t.Run("declared-over-cap-records-member-size", func(t *testing.T) {
+		res := capPWExtract(capRawEncryptedZip(t, capMember+1), "secret")
+		if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+			t.Fatalf("CapHits=%v, want [member-size]", res.CapHits)
+		}
+	})
+	t.Run("declared-at-cap-no-hit", func(t *testing.T) {
+		res := capPWExtract(capRawEncryptedZip(t, capMember), "secret")
+		if capHasHit(res, "member-size") {
+			t.Fatalf("at-cap member recorded member-size: %v", res.CapHits)
+		}
+	})
+	t.Run("no-candidates-no-hit", func(t *testing.T) {
+		res := capPWExtract(capRawEncryptedZip(t, capMember+1))
+		if capHasHit(res, "member-size") {
+			t.Fatalf("no-candidate path recorded member-size: %v", res.CapHits)
+		}
+	})
+}
+
+// capYekaZip builds a genuinely encrypted zip (yeka, stored) holding content, then
+// patches the declared uncompressed size in every local and central header (and a
+// data descriptor if present) to declared.
+func capYekaZip(t *testing.T, enc yekazip.EncryptionMethod, pw string, content []byte, declared uint32) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := yekazip.NewWriter(&buf)
+	w, err := zw.Encrypt("m.bin", pw, enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b := buf.Bytes()
+	patched := 0
+	for _, s := range []struct {
+		sig []byte
+		off int
+	}{{[]byte("PK\x03\x04"), 22}, {[]byte("PK\x01\x02"), 24}} {
+		if i := bytes.Index(b, s.sig); i >= 0 {
+			binary.LittleEndian.PutUint32(b[i+s.off:], declared)
+			patched++
+		}
+	}
+	if patched != 2 {
+		t.Fatalf("patched %d headers, want 2", patched)
+	}
+	return b
+}
+
+// TestCapStopEncryptedZipStreamOutrunsDeclared covers AUD-04c5 (b): the stream
+// exceeds the cap while the headers declare <= cap, so the old bounded read cut it
+// silently.
+func TestCapStopEncryptedZipStreamOutrunsDeclared(t *testing.T) {
+	// yeka's ZipCrypto checksumReader drops the final chunk (returns 0 bytes) when
+	// the stream ends with a size mismatch, so a stream only 1 byte over the cap
+	// errors out instead of reaching the probe; overshoot by a few KiB so the
+	// cap read ends mid-stream.
+	over := capFill(capMember + 4096)
+	over[capMember] = 'Z' // marker in the byte past the cap
+	for name, enc := range map[string]yekazip.EncryptionMethod{"zipcrypto": yekazip.StandardEncryption, "aes256": yekazip.AES256Encryption} {
+		enc := enc
+		t.Run(name, func(t *testing.T) {
+			t.Run("stream-over-cap-records-member-size", func(t *testing.T) {
+				res := capPWExtract(capYekaZip(t, enc, "secret", over, 1000), "wrong", "secret")
+				if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+					t.Fatalf("CapHits=%v, want [member-size]", res.CapHits)
+				}
+				if !res.DecryptedArchive {
+					t.Fatal("archive not reported decrypted")
+				}
+				for _, s := range res.Streams {
+					if len(s) > capMember {
+						t.Fatalf("stream of %d bytes exceeds cap", len(s))
+					}
+				}
+			})
+			t.Run("one-byte-over-cap-declared-mismatch-records-member-size", func(t *testing.T) {
+				res := capPWExtract(capYekaZip(t, enc, "secret", capFill(capMember+1), 1000), "wrong", "secret")
+				if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+					t.Fatalf("CapHits=%v, want [member-size] (enc=%v dec=%v)", res.CapHits, res.EncryptedArchive, res.DecryptedArchive)
+				}
+				if !res.DecryptedArchive {
+					t.Fatal("archive not reported decrypted")
+				}
+				for _, s := range res.Streams {
+					if len(s) > capMember {
+						t.Fatalf("stream of %d bytes exceeds cap", len(s))
+					}
+				}
+			})
+			// yeka reports a declared-size mismatch as ErrUnexpectedEOF on the post-cap
+			// probe for ZipCrypto, so exact-cap content cannot be told from cap+1 when
+			// the declared size is smaller. A mismatch reaching the cap is a malformed
+			// member, so the conservative member-size signal is accepted. AES-256's
+			// probe returns io.EOF, so it records no hit.
+			t.Run("exact-cap-declared-mismatch", func(t *testing.T) {
+				res := capPWExtract(capYekaZip(t, enc, "secret", capFill(capMember), 1000), "wrong", "secret")
+				if enc == yekazip.StandardEncryption {
+					if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+						t.Fatalf("CapHits=%v, want [member-size]", res.CapHits)
+					}
+					if !res.DecryptedArchive {
+						t.Fatal("archive not reported decrypted")
+					}
+				} else if capHasHit(res, "member-size") {
+					t.Fatalf("CapHits=%v, want no member-size", res.CapHits)
+				}
+				for _, s := range res.Streams {
+					if len(s) > capMember {
+						t.Fatalf("stream of %d bytes exceeds cap", len(s))
+					}
+				}
+			})
+			t.Run("in-cap-control-no-hit", func(t *testing.T) {
+				in := capFill(capMember)
+				res := capPWExtract(capYekaZip(t, enc, "secret", in, capMember), "secret")
+				if capHasHit(res, "member-size") || !res.DecryptedArchive {
+					t.Fatalf("CapHits=%v decrypted=%v", res.CapHits, res.DecryptedArchive)
+				}
+			})
+		})
+	}
+}
+
+// TestCapStopEncryptedZipAESAuthFailureAtCap pins what happens when an AES-256
+// member holds exactly the cap, declares an honest size, and one byte of its
+// 10-byte HMAC authentication code is flipped. yeka authenticates before it
+// releases any plaintext, so the cap-sized read itself fails; the candidate is
+// treated as a wrong password, the archive stays encrypted, and no cap signal
+// is recorded (the post-cap probe in yekaMoreFollow is never reached).
+func TestCapStopEncryptedZipAESAuthFailureAtCap(t *testing.T) {
+	good := capYekaZip(t, yekazip.AES256Encryption, "secret", capFill(capMember), capMember)
+	t.Run("untampered-control-no-hit", func(t *testing.T) {
+		res := capPWExtract(good, "wrong", "secret")
+		if capHasHit(res, "member-size") || !res.DecryptedArchive {
+			t.Fatalf("CapHits=%v decrypted=%v", res.CapHits, res.DecryptedArchive)
+		}
+	})
+	t.Run("flipped-hmac-byte-fails-read-no-hit", func(t *testing.T) {
+		b := append([]byte(nil), good...)
+		ci := bytes.Index(b, []byte("PK\x01\x02"))
+		if ci < 0 || bytes.Index(b, []byte("PK\x03\x04")) != 0 {
+			t.Fatal("zip headers not found")
+		}
+		comp := int(binary.LittleEndian.Uint32(b[ci+20:]))
+		start := 30 + int(binary.LittleEndian.Uint16(b[26:])) + int(binary.LittleEndian.Uint16(b[28:]))
+		if comp < 10 || start+comp > len(b) {
+			t.Fatalf("bad layout comp=%d start=%d", comp, start)
+		}
+		b[start+comp-5] ^= 0xff // inside the trailing 10-byte authentication code
+		res := capPWExtract(b, "wrong", "secret")
+		if len(res.CapHits) != 0 {
+			t.Fatalf("CapHits=%v, want none", res.CapHits)
+		}
+		if res.DecryptedArchive || !res.EncryptedArchive {
+			t.Fatalf("enc=%v dec=%v, want encrypted and not decrypted", res.EncryptedArchive, res.DecryptedArchive)
+		}
+		for _, s := range res.Streams {
+			if len(s) > capMember {
+				t.Fatalf("stream of %d bytes exceeds cap", len(s))
+			}
 		}
 	})
 }

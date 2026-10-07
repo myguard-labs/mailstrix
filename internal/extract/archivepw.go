@@ -180,35 +180,45 @@ func newZipDecryptReader(buf []byte) (zd *zipDecryptReader) {
 // so index idx is the SAME member. Each attempt builds its own yeka reader inside
 // runBounded (no shared mutable *File across the watchdog; the parse is bounded so
 // a malformed central directory can't stall before the attempt caps apply).
-func (zd *zipDecryptReader) decryptMember(idx int, kdf bool, declared uint64, cands []string, b *archiveBudget, deadline time.Time) []byte {
+func (zd *zipDecryptReader) decryptMember(idx int, kdf bool, declared uint64, cands []string, b *archiveBudget, deadline time.Time) (plain []byte, truncated bool) {
 	if zd == nil || !zd.ok {
-		return nil
+		return nil, false
 	}
 	if declared > maxBytesPerMember {
-		return nil // implausibly large member (zip-bomb guard), mirrors cleartext path
+		return nil, false // implausibly large member (zip-bomb guard), mirrors cleartext path
 	}
 	// kdf (WinZip-AES vs cheap ZipCrypto) is determined by the caller from the
 	// std-zip member's validated AE-x extra — no yeka parse here, so a post-cap
 	// member pays nothing before the cap checks below short-circuit.
 	for _, pw := range cands {
 		if expired(deadline) || b.decryptExhausted() {
-			return nil
+			return nil, false
 		}
 		if kdf && b.kdfExhausted() {
-			return nil
+			return nil, false
 		}
 		b.countAttempt(kdf)
 		buf, pw := zd.buf, pw
-		plain, stalled := runBounded(deadline, func() []byte { return openYekaMemberFresh(buf, idx, pw) })
+		// The closure returns a value; the caller records the cap hit from it, so
+		// the Result is never mutated inside the (abandonable) goroutine.
+		got, stalled := runBounded(deadline, func() yekaRead { return openYekaMemberFresh(buf, idx, pw) })
 		if stalled {
 			b.markDecryptStalled() // decoder still running: launch nothing more for this input
-			return nil
+			return nil, false
 		}
-		if plain != nil {
-			return plain
+		if got.plain != nil {
+			return got.plain, got.truncated
 		}
 	}
-	return nil
+	return nil, false
+}
+
+// yekaRead is the outcome of one bounded decrypt attempt: the plaintext (nil on
+// any failure) and whether the stream held more than maxBytesPerMember bytes, so
+// plain is its first maxBytesPerMember bytes (AUD-04c5).
+type yekaRead struct {
+	plain     []byte
+	truncated bool
 }
 
 // openYekaMemberFresh builds its OWN yeka reader over buf, takes the member at
@@ -216,36 +226,40 @@ func (zd *zipDecryptReader) decryptMember(idx int, kdf bool, declared uint64, ca
 // an unconditional recover. A fresh reader per call means the mutable *File
 // password state is never shared with another goroutine (the runBounded watchdog
 // can abandon this call mid-flight). Returns the plaintext or nil on any failure.
-func openYekaMemberFresh(buf []byte, idx int, pw string) (out []byte) {
+func openYekaMemberFresh(buf []byte, idx int, pw string) (out yekaRead) {
 	defer func() {
 		if recover() != nil {
-			out = nil
+			out = yekaRead{}
 		}
 	}()
 	r, err := yekazip.NewReader(bytes.NewReader(buf), int64(len(buf)))
 	if err != nil || idx < 0 || idx >= len(r.File) {
-		return nil
+		return yekaRead{}
 	}
 	if f := r.File[idx]; f.IsEncrypted() {
 		return openYekaMember(f, pw)
 	}
-	return nil
+	return yekaRead{}
 }
 
 // openYekaMember sets the password and reads the member, bounded by
 // maxBytesPerMember, with an unconditional recover around the third-party
 // decrypt+inflate. The caller MUST own f exclusively (a fresh per-attempt reader);
-// f.SetPassword mutates shared state. Returns the plaintext or nil on any failure.
-func openYekaMember(f *yekazip.File, pw string) (out []byte) {
+// f.SetPassword mutates shared state. Returns the plaintext (nil on any failure).
+// After reading the cap it probes one more byte, like readMemberTrunc: yeka only
+// compares the produced length to the declared size at EOF, so a stream longer
+// than the cap that declares <= cap would otherwise be cut silently (AUD-04c5).
+// On truncation the first cap bytes are kept and truncated is set.
+func openYekaMember(f *yekazip.File, pw string) (out yekaRead) {
 	defer func() {
 		if recover() != nil {
-			out = nil
+			out = yekaRead{}
 		}
 	}()
 	f.SetPassword(pw)
 	rc, err := f.Open()
 	if err != nil {
-		return nil
+		return yekaRead{}
 	}
 	defer func() { _ = rc.Close() }()
 	var buf bytes.Buffer
@@ -253,12 +267,42 @@ func openYekaMember(f *yekazip.File, pw string) (out []byte) {
 	// the first bytes of Read; AES fails the HMAC at EOF. Either way a read error
 	// means "wrong password" — fail open to nil.
 	if _, err := buf.ReadFrom(io.LimitReader(rc, maxBytesPerMember)); err != nil {
-		return nil
+		return yekaRead{}
 	}
 	if buf.Len() == 0 {
-		return nil
+		return yekaRead{}
 	}
-	return buf.Bytes()
+	// yeka reports a declared-size mismatch (ZipCrypto) or an HMAC failure (AES)
+	// as an error at EOF, so a stream running past the cap with a smaller declared
+	// size yields (0, err) from the probe rather than a byte. Only io.EOF means a
+	// clean end at the cap; any other post-cap error is treated as truncation.
+	truncated := buf.Len() == maxBytesPerMember && yekaMoreFollow(rc)
+	return yekaRead{plain: buf.Bytes(), truncated: truncated}
+}
+
+// yekaMoreFollow probes rc after a cap-sized read: true on a further byte or on
+// any error other than io.EOF. Unlike moreBytesFollow it is yeka-specific.
+// Limitation: under a declared-size mismatch, ZipCrypto's probe returns
+// ErrUnexpectedEOF for both exactly-cap and cap+1 content, so exact-cap
+// mismatched members are also flagged. That malformed case is accepted as the
+// conservative outcome. AES (AE-x) differs: yeka verifies the HMAC before
+// releasing plaintext, so a tampered authentication code on a member of exactly
+// the cap fails the cap-sized read itself and never reaches this probe (the
+// candidate is rejected, no cap signal). Were an authentication failure ever
+// reported at EOF here, flagging it as truncation would be the accepted
+// conservative outcome, since the password verifier already passed at Open.
+func yekaMoreFollow(rc io.Reader) bool {
+	var probe [1]byte
+	for i := 0; i < 8; i++ { // tolerate a reader that returns (0, nil)
+		n, perr := rc.Read(probe[:])
+		if n > 0 {
+			return true
+		}
+		if perr != nil {
+			return perr != io.EOF
+		}
+	}
+	return false
 }
 
 // crack7zPassword finds the password that decrypts buf, or "" if none in cands do.
