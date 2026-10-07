@@ -329,8 +329,11 @@ func verify7zPassword(buf []byte, targetIdx int, pw string) (ok bool) {
 		return readOne(f)
 	}
 	// Header-encrypted: no specific trigger member, every member needs the password.
+	// Skip directories and members over the per-member cap (they cannot be read to
+	// EOF inside the cap) and validate on the first in-cap regular member; give up
+	// only when no member fits.
 	for _, f := range r.File {
-		if f.FileInfo().IsDir() {
+		if f.FileInfo().IsDir() || f.UncompressedSize > maxBytesPerMember {
 			continue
 		}
 		return readOne(f)
@@ -416,12 +419,18 @@ func verifyRarPassword(buf []byte, pw string) (ok bool) {
 			continue // plaintext member — reading it proves nothing about the password
 		}
 		if h.UnPackedSize > maxBytesPerMember {
-			return false // can't validate an oversized member; treat as unverified
+			continue // declared oversize: cannot validate on it; Next() skips the body by block header
 		}
 		// Read to EOF (cap+1 then check) so a cap-truncated read can't validate a
 		// wrong password ahead of the format's end-of-stream integrity check.
 		n, rerr := io.Copy(io.Discard, io.LimitReader(rr, maxBytesPerMember+1))
-		return rerr == nil && n <= maxBytesPerMember // encrypted member read cleanly => pw correct
+		if rerr != nil {
+			return false // read error: wrong password
+		}
+		if n > maxBytesPerMember {
+			continue // unknown-size member that ran past the cap: a truncated read proves nothing
+		}
+		return true // encrypted member read cleanly => pw correct
 	}
 }
 
