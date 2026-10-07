@@ -2,7 +2,10 @@ package mailstrix
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -218,5 +221,93 @@ func TestLoadArchivePWFileByteCap(t *testing.T) {
 	got = loadArchivePWFile(pwfWrite(t, "BEYONDCAP\n"))
 	if !reflect.DeepEqual(got, []string{"BEYONDCAP"}) {
 		t.Fatalf("in-budget control got %#v", got)
+	}
+}
+
+// archivePWFileFake is an injectable handle for the open seam.
+type archivePWFileFake struct {
+	r       io.Reader
+	statErr error
+	info    fs.FileInfo
+}
+
+func (f *archivePWFileFake) Read(p []byte) (int, error) { return f.r.Read(p) }
+func (f *archivePWFileFake) Close() error               { return nil }
+func (f *archivePWFileFake) Stat() (fs.FileInfo, error) { return f.info, f.statErr }
+
+// archivePWFileRegularInfo returns a regular-file FileInfo from a real temp file.
+func archivePWFileRegularInfo(t *testing.T) fs.FileInfo {
+	t.Helper()
+	fi, err := os.Stat(pwfWrite(t, "x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}
+
+// archivePWFileInject swaps the open seam for the test (no t.Parallel callers).
+func archivePWFileInject(t *testing.T, h archivePWFileHandle) {
+	t.Helper()
+	old := archivePWFileOpen
+	archivePWFileOpen = func(string) (archivePWFileHandle, error) { return h, nil }
+	t.Cleanup(func() { archivePWFileOpen = old })
+}
+
+// archivePWFileErrReader yields data once, then a hard error.
+type archivePWFileErrReader struct {
+	data []byte
+	err  error
+}
+
+func (r *archivePWFileErrReader) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	return 0, r.err
+}
+
+func TestLoadArchivePWFileStatError(t *testing.T) {
+	buf := pwfCapture(t)
+	archivePWFileInject(t, &archivePWFileFake{
+		r:       strings.NewReader("alpha\n"),
+		statErr: errors.New("boom-stat"),
+		info:    archivePWFileRegularInfo(t),
+	})
+	if got := loadArchivePWFile("/seam/path"); got != nil {
+		t.Fatalf("got %#v, want nil", got)
+	}
+	if out := buf.String(); !strings.Contains(out, "not a regular file") || !strings.Contains(out, "boom-stat") {
+		t.Fatalf("missing stat warning, got %q", out)
+	}
+}
+
+func TestLoadArchivePWFileReadErrorMidStream(t *testing.T) {
+	buf := pwfCapture(t)
+	archivePWFileInject(t, &archivePWFileFake{
+		r:    &archivePWFileErrReader{data: []byte("alpha\nbeta\n"), err: errors.New("boom-read")},
+		info: archivePWFileRegularInfo(t),
+	})
+	if got := loadArchivePWFile("/seam/path"); got != nil {
+		t.Fatalf("read error must yield nil, not a partial list; got %#v", got)
+	}
+	if out := buf.String(); !strings.Contains(out, "read error") || !strings.Contains(out, "boom-read") {
+		t.Fatalf("missing read warning, got %q", out)
+	}
+}
+
+func TestLoadArchivePWFileSeamPositiveControl(t *testing.T) {
+	buf := pwfCapture(t)
+	archivePWFileInject(t, &archivePWFileFake{
+		r:    strings.NewReader("alpha\n# c\nbeta\n"),
+		info: archivePWFileRegularInfo(t),
+	})
+	got := loadArchivePWFile("/seam/path")
+	if want := []string{"alpha", "beta"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("unexpected log %q", buf.String())
 	}
 }
