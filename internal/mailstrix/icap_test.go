@@ -1743,3 +1743,146 @@ func TestICAP100ContinueHasNoISTag(t *testing.T) {
 		t.Errorf("final reply after 100: %q", sb.String())
 	}
 }
+
+// reloadEngine simulates a rules reload landing between a scan and its reply:
+// the live fingerprint flips to next as soon as Scan runs, while the scan's own
+// fingerprint (leased before Scan) stays the old one.
+type reloadEngine struct {
+	*fakeEngine
+	live atomic.Value // string
+	next string
+}
+
+func newReloadEngine(fe *fakeEngine, prev, next string) *reloadEngine {
+	e := &reloadEngine{fakeEngine: fe, next: next}
+	e.live.Store(prev)
+	return e
+}
+
+func (e *reloadEngine) Fingerprint() string { return e.live.Load().(string) }
+
+func (e *reloadEngine) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
+	m, err := e.fakeEngine.Scan(buf, meta)
+	e.live.Store(e.next)
+	return m, err
+}
+
+// icapISTagOf extracts the ISTag header value from a raw ICAP reply.
+func icapISTagOf(t *testing.T, resp string) string {
+	t.Helper()
+	for _, l := range strings.Split(resp, "\r\n") {
+		if v, ok := strings.CutPrefix(l, "ISTag: "); ok {
+			return v
+		}
+	}
+	t.Fatalf("no ISTag in reply:\n%s", resp)
+	return ""
+}
+
+// TestICAPPostScan204UsesScanFingerprint (AUD-14b): a rules reload between the
+// scan and the reply must not tag the verdict with the new rule set's ISTag.
+func TestICAPPostScan204UsesScanFingerprint(t *testing.T) {
+	eng := newReloadEngine(&fakeEngine{count: 1, fp: "fp-old"}, "fp-old", "fp-new")
+	s := newTestServer(eng, "")
+	addr := startTestICAPServer(t, s)
+
+	resp := doICAP(t, addr, icapRESPMODRequest(addr, "hello world", true))
+	if !strings.HasPrefix(resp, "ICAP/1.0 204 No Modification") {
+		t.Fatalf("want 204, got:\n%s", resp)
+	}
+	if got, want := icapISTagOf(t, resp), icapISTag("fp-old"); got != want {
+		t.Errorf("post-scan 204 ISTag = %s, want scan fingerprint tag %s", got, want)
+	}
+	if icapISTag("fp-old") == icapISTag("fp-new") {
+		t.Fatal("test fingerprints must produce distinct ISTags")
+	}
+	if got := icapISTagOf(t, resp); got == icapISTag("fp-new") {
+		t.Errorf("204 carried the post-reload ISTag %s", got)
+	}
+}
+
+// TestICAPPostScanEchoUsesScanFingerprint is the non-204 control: the echo
+// path already used the scan fingerprint and must keep doing so.
+func TestICAPPostScanEchoUsesScanFingerprint(t *testing.T) {
+	eng := newReloadEngine(&fakeEngine{count: 1, fp: "fp-old"}, "fp-old", "fp-new")
+	s := newTestServer(eng, "")
+	addr := startTestICAPServer(t, s)
+
+	resp := doICAP(t, addr, icapRESPMODRequest(addr, "hello world", false))
+	if !strings.HasPrefix(resp, "ICAP/1.0 200 OK") {
+		t.Fatalf("want 200 echo, got:\n%s", resp)
+	}
+	if got, want := icapISTagOf(t, resp), icapISTag("fp-old"); got != want {
+		t.Errorf("echo ISTag = %s, want %s", got, want)
+	}
+}
+
+// TestICAPPostScan204MatchesLiveWithoutReload is the regression control: with
+// no reload the 204 still carries the current fingerprint's ISTag.
+func TestICAPPostScan204MatchesLiveWithoutReload(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fp-live"}, "")
+	addr := startTestICAPServer(t, s)
+
+	resp := doICAP(t, addr, icapRESPMODRequest(addr, "hello world", true))
+	if got, want := icapISTagOf(t, resp), icapISTag("fp-live"); got != want {
+		t.Errorf("204 ISTag = %s, want %s", got, want)
+	}
+}
+
+// TestICAPEmptyBodyRepliesAgreeOnISTag: the empty-body 204 and the empty-body
+// echo both carry the same well-formed ISTag.
+func TestICAPEmptyBodyRepliesAgreeOnISTag(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fp-empty"}, "")
+	addr := startTestICAPServer(t, s)
+	mk := func(allow string) string {
+		return "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n" + allow +
+			"Encapsulated: null-body=0\r\n\r\n"
+	}
+	r204 := doICAP(t, addr, mk("Allow: 204\r\n"))
+	rEcho := doICAP(t, addr, mk(""))
+	if !strings.HasPrefix(r204, "ICAP/1.0 204") {
+		t.Fatalf("want 204, got:\n%s", r204)
+	}
+	if !strings.HasPrefix(rEcho, "ICAP/1.0 200 OK") {
+		t.Fatalf("want 200 echo, got:\n%s", rEcho)
+	}
+	t204, tEcho := icapISTagOf(t, r204), icapISTagOf(t, rEcho)
+	if t204 != tEcho || t204 != icapISTag("fp-empty") {
+		t.Errorf("empty-body ISTags differ: 204=%s echo=%s want=%s", t204, tEcho, icapISTag("fp-empty"))
+	}
+	if len(t204) < 3 || t204[0] != '"' || t204[len(t204)-1] != '"' {
+		t.Errorf("ISTag not quoted/well-formed: %q", t204)
+	}
+}
+
+// TestICAPEmptyBodyNilEngineDoesNotPanic: the empty-body replies must be
+// nil-engine safe and still carry a well-formed ISTag.
+func TestICAPEmptyBodyNilEngineDoesNotPanic(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1}, "")
+	s.engine = nil
+	addr := startTestICAPServer(t, s)
+	mk := func(allow string) string {
+		return "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n" + allow +
+			"Encapsulated: null-body=0\r\n\r\n"
+	}
+	for name, req := range map[string]string{"204": mk("Allow: 204\r\n"), "echo": mk("")} {
+		resp := doICAP(t, addr, req)
+		if got := icapISTagOf(t, resp); got != icapISTag("") {
+			t.Errorf("%s: nil-engine ISTag = %s, want %s", name, got, icapISTag(""))
+		}
+	}
+}
+
+// TestICAPErrorRepliesCarryISTag: refuse/error replies keep the live
+// fingerprint and still carry a well-formed ISTag.
+func TestICAPErrorReplyKeepsLiveISTag(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fp-live"}, "")
+	addr := startTestICAPServer(t, s)
+	resp := doICAP(t, addr, "FOO icap://"+addr+"/scan ICAP/1.0\r\nHost: "+addr+"\r\nEncapsulated: null-body=0\r\n\r\n")
+	if !strings.HasPrefix(resp, "ICAP/1.0 405") {
+		t.Fatalf("want 405, got:\n%s", resp)
+	}
+	if got, want := icapISTagOf(t, resp), icapISTag("fp-live"); got != want {
+		t.Errorf("405 ISTag = %s, want %s", got, want)
+	}
+}

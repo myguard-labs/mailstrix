@@ -427,10 +427,12 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 
 	// Empty body — trivially clean.
 	if len(buf) == 0 {
+		// Read the fingerprint once so the 204 and the echo agree; nil-safe.
+		emptyFP := s.icapFingerprint()
 		if allow204 {
-			return s.icapWriteStatus(w, 204, "No Modification", "")
+			return s.icapWriteStatusFP(w, emptyFP, 204, "No Modification", "")
 		}
-		return icapWriteEcho(w, s.engine.Fingerprint(), echo, nil)
+		return icapWriteEcho(w, emptyFP, echo, nil)
 	}
 
 	// The ICAP conn has no request-scoped context like the HTTP path
@@ -480,7 +482,9 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		s.vlogf("ICAP %s %dB cache=%s %.1fms -> 0 matches", method, len(buf), cacheStatus, msSince(t0))
 	}
 	if allow204 {
-		return s.icapWriteStatus(w, 204, "No Modification", "")
+		// Tag the verdict with the fingerprint of the rule set that produced
+		// it, not the live one, which a reload may have changed since.
+		return s.icapWriteStatusFP(w, fp, 204, "No Modification", "")
 	}
 	return icapWriteEcho(w, fp, echo, buf)
 }
@@ -501,8 +505,15 @@ func (s *Server) icapFingerprint() string {
 // lines, each ending in CRLF. The interim "100 Continue" is not a final
 // response and is written directly.
 func (s *Server) icapWriteStatus(w io.Writer, code int, reason, extra string) error {
+	return s.icapWriteStatusFP(w, s.icapFingerprint(), code, reason, extra)
+}
+
+// icapWriteStatusFP is icapWriteStatus with an explicit fingerprint, for
+// replies that carry a scan verdict and must be tagged with the fingerprint
+// of the rule set that produced it.
+func (s *Server) icapWriteStatusFP(w io.Writer, fp string, code int, reason, extra string) error {
 	_, err := io.WriteString(w, icapProtoVersion+" "+strconv.Itoa(code)+" "+reason+"\r\n"+
-		"ISTag: "+icapISTag(s.icapFingerprint())+"\r\n"+extra+"\r\n")
+		"ISTag: "+icapISTag(fp)+"\r\n"+extra+"\r\n")
 	return err
 }
 
