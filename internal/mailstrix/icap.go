@@ -314,8 +314,8 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 		return s.handleICAPMod(w, br, method, hdr, sections)
 	default:
 		// The body framing of an unknown method is unknown, so its bytes would
-		// be parsed as the next request: answer 405 and close (COR-19).
-		_ = s.icapWriteStatus(w, 405, "Method Not Allowed", "")
+		// be parsed as the next request: answer 501 (RFC 3507 4.3.3) and close (COR-19).
+		_ = s.icapWriteStatus(w, 501, "Method Not Implemented", "")
 		return errors.New("icap: unsupported method " + strconv.Quote(method))
 	}
 }

@@ -151,7 +151,7 @@ func TestICAPISTagHashesWholeFingerprint(t *testing.T) {
 	}
 }
 
-// TestICAPUnknownMethodCloses (COR-19): an unknown method gets 405 and the
+// TestICAPUnknownMethodCloses (COR-19): an unknown method gets 501 and the
 // connection is closed, so its body is never parsed as the next request.
 func TestICAPUnknownMethodCloses(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1, fp: "fp"}, "")
@@ -159,11 +159,11 @@ func TestICAPUnknownMethodCloses(t *testing.T) {
 	req := "PURGE icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n" +
 		"OPTIONS icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\nEncapsulated: null-body=0\r\n\r\n"
 	resp := doICAP(t, addr, req)
-	if !strings.HasPrefix(resp, "ICAP/1.0 405 Method Not Allowed\r\nISTag: "+icapISTag("fp")+"\r\n\r\n") {
-		t.Fatalf("want 405, got:\n%q", resp)
+	if !strings.HasPrefix(resp, "ICAP/1.0 501 Method Not Implemented\r\nISTag: "+icapISTag("fp")+"\r\n\r\n") {
+		t.Fatalf("want 501, got:\n%q", resp)
 	}
 	if strings.Contains(resp, "Methods: REQMOD") {
-		t.Fatalf("connection kept serving after 405:\n%q", resp)
+		t.Fatalf("connection kept serving after 501:\n%q", resp)
 	}
 }
 
@@ -1734,7 +1734,7 @@ func TestICAP204CarriesISTag(t *testing.T) {
 	}
 }
 
-// TestICAPErrorRepliesCarryISTag: 400, 405 and 413 are final replies and each
+// TestICAPErrorRepliesCarryISTag: 400, 501 and 413 are final replies and each
 // carries a well-formed ISTag.
 func TestICAPErrorRepliesCarryISTag(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1, fp: "fperr"}, "")
@@ -1745,7 +1745,7 @@ func TestICAPErrorRepliesCarryISTag(t *testing.T) {
 	}{
 		{"malformed request line", "garbage\r\n\r\n", "ICAP/1.0 400 Bad Request\r\n"},
 		{"missing Encapsulated", "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n", "ICAP/1.0 400 Bad Request\r\n"},
-		{"unknown method", "PURGE icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n", "ICAP/1.0 405 Method Not Allowed\r\n"},
+		{"unknown method", "PURGE icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n", "ICAP/1.0 501 Method Not Implemented\r\n"},
 		{"oversize body", icapRESPMODRequest(addr, strings.Repeat("X", 100), true), "ICAP/1.0 413 Request Entity Too Large\r\n"},
 	}
 	for _, tc := range cases {
@@ -1967,10 +1967,10 @@ func TestICAPErrorReplyKeepsLiveISTag(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1, fp: "fp-live"}, "")
 	addr := startTestICAPServer(t, s)
 	resp := doICAP(t, addr, "FOO icap://"+addr+"/scan ICAP/1.0\r\nHost: "+addr+"\r\nEncapsulated: null-body=0\r\n\r\n")
-	if !strings.HasPrefix(resp, "ICAP/1.0 405") {
-		t.Fatalf("want 405, got:\n%s", resp)
+	if !strings.HasPrefix(resp, "ICAP/1.0 501") {
+		t.Fatalf("want 501, got:\n%s", resp)
 	}
 	if got, want := icapISTagOf(t, resp), icapISTag("fp-live"); got != want {
-		t.Errorf("405 ISTag = %s, want %s", got, want)
+		t.Errorf("501 ISTag = %s, want %s", got, want)
 	}
 }
