@@ -653,16 +653,20 @@ func TestCapRarBuilderSanity(t *testing.T) {
 	})
 }
 
-// capRarUnknownBody returns n bytes of filler with the marker at index markAt.
+// capRarUnknownBody returns n bytes of filler with the whole marker at index markAt.
 func capRarUnknownBody(n, markAt int) []byte {
+	const mark = "CAPMARK"
+	if markAt < 0 || markAt+len(mark) > n {
+		panic(fmt.Sprintf("capRarUnknownBody: marker at %d does not fit in %d bytes", markAt, n))
+	}
 	b := capFill(n)
-	copy(b[markAt:], "CAPMARK")
+	copy(b[markAt:], mark)
 	return b
 }
 
 func TestCapStopRarUnknownSizeMember(t *testing.T) {
 	t.Run("plain-over-cap-records-member-size", func(t *testing.T) {
-		body := capRarUnknownBody(capMember+1, capMember-1) // marker straddles the cap edge
+		body := capRarUnknownBody(capMember+1, capMember-6) // marker straddles the cap: its last byte is the first past it
 		res := capRarExtract(capRar5(t, capRarMember{name: "u.bin", data: body, declared: capUnknown, unknownSize: true}))
 		if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
 			t.Fatalf("CapHits=%v, want exactly [member-size]", res.CapHits)
@@ -682,7 +686,7 @@ func TestCapStopRarUnknownSizeMember(t *testing.T) {
 		// The small first member is what the cracker validates the password on; the
 		// unknown-size member after it is read through the cracked fresh reader.
 		small := []byte("hello-in-cap")
-		body := capRarUnknownBody(capMember+1, capMember-1)
+		body := capRarUnknownBody(capMember+1, capMember-6)
 		res := capRarExtract(capRar5(t,
 			capRarMember{name: "a.txt", data: small, plainLen: len(small), declared: uint64(len(small)), password: "test"},
 			capRarMember{name: "u.bin", data: body, plainLen: len(body), declared: capUnknown, unknownSize: true, password: "test"},
