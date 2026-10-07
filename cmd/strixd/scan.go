@@ -180,7 +180,7 @@ func scanFile(path string, scanner *mailstrix.Scanner, maxBody int64, nameOverri
 	if err != nil {
 		return scanItem{Path: path, Err: err.Error()}
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	name := nameOverride
 	if name == "" {
 		name = filepath.Base(path)
