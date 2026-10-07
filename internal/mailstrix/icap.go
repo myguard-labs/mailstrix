@@ -188,6 +188,27 @@ func (s *Server) logRefusedICAP() {
 		s.cfg.ICAPMaxConns, s.metrics.icapBusy.Load())
 }
 
+// logBadEncapsulatedICAP logs a missing/malformed Encapsulated 400 at most once
+// per icapBadEncapLogInterval. Unthrottled it is one synchronous stderr write
+// per malformed request, so a client can flood the log volume. Same monotonic
+// stamp and Load/compare/CompareAndSwap pattern as logRefusedICAP, with its own
+// stamp so a refuse flood cannot hide this line and vice versa. A zero stamp
+// means "never logged": the first line is not suppressed on a young process.
+func (s *Server) logBadEncapsulatedICAP(method string, encErr error) {
+	now := int64(time.Since(processStart))
+	last := s.icapBadEncapLog.Load()
+	if last != 0 && now-last < int64(icapBadEncapLogInterval) {
+		return
+	}
+	if now == 0 {
+		now = 1 // keep 0 reserved for "never logged"
+	}
+	if !s.icapBadEncapLog.CompareAndSwap(last, now) {
+		return // another goroutine just logged it
+	}
+	s.errf("ICAP %s 400: %v", method, encErr)
+}
+
 func (s *Server) serveICAPConn(conn net.Conn) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
@@ -232,6 +253,8 @@ const (
 	icapRefuseWriteTimeout = 5 * time.Second
 	// icapRefuseLogInterval throttles the cap-reached log line.
 	icapRefuseLogInterval = 10 * time.Second
+	// icapBadEncapLogInterval throttles the malformed-Encapsulated 400 log line.
+	icapBadEncapLogInterval = 10 * time.Second
 	// icapMaxRefuseInflight bounds concurrent 503-refusal goroutines. Past it a
 	// refused connection is closed without a reply.
 	icapMaxRefuseInflight = 64
@@ -284,7 +307,7 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 		// parsed as the next request. Answer 400 and drop the connection.
 		sections, encErr := parseICAPEncapsulated(hdr.Get("Encapsulated"))
 		if encErr != nil {
-			s.errf("ICAP %s 400: %v", method, encErr)
+			s.logBadEncapsulatedICAP(method, encErr)
 			_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 			return encErr
 		}

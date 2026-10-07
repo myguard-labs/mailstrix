@@ -106,14 +106,15 @@ type Server struct {
 	httpSrv  atomic.Pointer[http.Server] // set by ListenAndServe; used by Shutdown
 	draining atomic.Bool                 // true once Shutdown begins -> /ready 503s
 
-	icapLn        atomic.Pointer[net.Listener]
-	icapDown      atomic.Bool // ICAP listener failed to bind or stopped accepting -> /ready 503s (COR-15)
-	icapMu        sync.Mutex  // guards icapStopping and every icapWg.Add against Wait
-	icapStopping  bool        // set by ShutdownICAP; no new connection is admitted after
-	icapWg        sync.WaitGroup
-	icapConns     chan struct{} // live-connection cap, taken at accept() (pre-admission)
-	icapRefuse    chan struct{} // bounds concurrent 503-refusal goroutines
-	icapRefuseLog atomic.Int64  // UnixNano of the last cap-reached log line (throttle)
+	icapLn          atomic.Pointer[net.Listener]
+	icapDown        atomic.Bool // ICAP listener failed to bind or stopped accepting -> /ready 503s (COR-15)
+	icapMu          sync.Mutex  // guards icapStopping and every icapWg.Add against Wait
+	icapStopping    bool        // set by ShutdownICAP; no new connection is admitted after
+	icapWg          sync.WaitGroup
+	icapConns       chan struct{} // live-connection cap, taken at accept() (pre-admission)
+	icapRefuse      chan struct{} // bounds concurrent 503-refusal goroutines
+	icapRefuseLog   atomic.Int64  // UnixNano of the last cap-reached log line (throttle)
+	icapBadEncapLog atomic.Int64  // monotonic stamp of the last malformed-Encapsulated 400 log line (throttle)
 }
 
 func newLoggers(cfg *Config) (info, errl *log.Logger) {
