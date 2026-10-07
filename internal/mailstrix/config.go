@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"os"
@@ -623,6 +624,19 @@ func loadArchivePWFileIf(enabled bool, path string) []string {
 	return loadArchivePWFile(path)
 }
 
+// archivePWFileHandle is the subset of *os.File that loadArchivePWFile uses.
+type archivePWFileHandle interface {
+	io.Reader
+	Stat() (fs.FileInfo, error)
+	Close() error
+}
+
+// archivePWFileOpen opens the wordlist; a package variable only so tests can
+// inject Stat/Read failures. Production always uses the O_NONBLOCK os.OpenFile.
+var archivePWFileOpen = func(path string) (archivePWFileHandle, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 G703 -- operator-provided wordlist path (env), not attacker input
+}
+
 // loadArchivePWFile reads the optional password wordlist named by
 // MAILSTRIX_ARCHIVE_PW_FILE. One candidate per line; blank lines and lines
 // starting with '#' are skipped; each line is trimmed and truncated to
@@ -638,7 +652,7 @@ func loadArchivePWFile(path string) []string {
 	// Open with O_NONBLOCK so opening a FIFO/special path returns immediately
 	// instead of blocking startup, then fstat the OPEN fd (no TOCTOU — we classify
 	// exactly what we opened) and reject anything that isn't a regular file.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 G703 -- operator-provided wordlist path (env), not attacker input
+	f, err := archivePWFileOpen(path)
 	if err != nil {
 		log.Printf("[mailstrix] WARNING: MAILSTRIX_ARCHIVE_PW_FILE=%q unreadable (%v); decrypt enabled but using built-in password list only", path, err) // #nosec G706 -- operator-provided env path, not attacker-tainted
 		return nil
