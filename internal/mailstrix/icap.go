@@ -164,7 +164,7 @@ func (s *Server) refuseICAP(conn net.Conn) {
 		defer func() { <-s.icapRefuse }()
 		defer func() { _ = conn.Close() }() // #nosec G104 -- refused conn; close error is not actionable
 		_ = conn.SetWriteDeadline(time.Now().Add(icapRefuseWriteTimeout))
-		_, _ = io.WriteString(conn, icapProtoVersion+" 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+		_ = s.icapWriteStatus(conn, 503, "Service Unavailable", "Connection: close\r\n")
 	}()
 }
 
@@ -246,13 +246,13 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 	line, err := readBoundedLine(br, maxICAPHeaderLine)
 	if err != nil {
 		if errors.Is(err, errICAPLineTooLong) {
-			_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+			_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 		}
 		return err
 	}
 	parts := strings.Fields(line)
 	if len(parts) != 3 || parts[2] != icapProtoVersion {
-		_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+		_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 		return errors.New("bad ICAP request line")
 	}
 
@@ -264,7 +264,7 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 	// for content it never read. Fail closed.
 	hdr, err := readBoundedMIMEHeader(br)
 	if err != nil {
-		_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+		_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 		return err
 	}
 
@@ -285,14 +285,14 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 		sections, encErr := parseICAPEncapsulated(hdr.Get("Encapsulated"))
 		if encErr != nil {
 			s.errf("ICAP %s 400: %v", method, encErr)
-			_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+			_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 			return encErr
 		}
 		return s.handleICAPMod(w, br, method, hdr, sections)
 	default:
 		// The body framing of an unknown method is unknown, so its bytes would
 		// be parsed as the next request: answer 405 and close (COR-19).
-		_, _ = io.WriteString(w, icapProtoVersion+" 405 Method Not Allowed\r\n\r\n")
+		_ = s.icapWriteStatus(w, 405, "Method Not Allowed", "")
 		return errors.New("icap: unsupported method " + strconv.Quote(method))
 	}
 }
@@ -374,7 +374,7 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		case "req-hdr", "res-hdr":
 			raw, herr := readHTTPHeaders(br)
 			if herr != nil {
-				_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+				_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 				return herr
 			}
 			echo.hdrs = append(echo.hdrs, icapEchoHdr{name: sec.name, raw: raw})
@@ -389,11 +389,11 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	if hasBody {
 		preview, ieof, readErr := readICAPChunkedBody(br, s.cfg.MaxBody)
 		if errors.Is(readErr, errICAPBodyTooLarge) {
-			_, _ = io.WriteString(w, icapProtoVersion+" 413 Request Entity Too Large\r\n\r\n")
+			_ = s.icapWriteStatus(w, 413, "Request Entity Too Large", "")
 			return readErr
 		}
 		if readErr != nil {
-			_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+			_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 			return readErr
 		}
 		buf = preview
@@ -409,16 +409,16 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 				return werr
 			}
 			if s.cfg.MaxBody-int64(len(buf)) <= 0 {
-				_, _ = io.WriteString(w, icapProtoVersion+" 413 Request Entity Too Large\r\n\r\n")
+				_ = s.icapWriteStatus(w, 413, "Request Entity Too Large", "")
 				return errICAPBodyTooLarge
 			}
 			full, _, contErr := readICAPChunkedAppend(br, buf, s.cfg.MaxBody)
 			if errors.Is(contErr, errICAPBodyTooLarge) {
-				_, _ = io.WriteString(w, icapProtoVersion+" 413 Request Entity Too Large\r\n\r\n")
+				_ = s.icapWriteStatus(w, 413, "Request Entity Too Large", "")
 				return contErr
 			}
 			if contErr != nil {
-				_, _ = io.WriteString(w, icapProtoVersion+" 400 Bad Request\r\n\r\n")
+				_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 				return contErr
 			}
 			buf = full
@@ -428,8 +428,7 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	// Empty body — trivially clean.
 	if len(buf) == 0 {
 		if allow204 {
-			_, err := io.WriteString(w, icapProtoVersion+" 204 No Modification\r\n\r\n")
-			return err
+			return s.icapWriteStatus(w, 204, "No Modification", "")
 		}
 		return icapWriteEcho(w, s.engine.Fingerprint(), echo, nil)
 	}
@@ -444,7 +443,7 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	if !s.acquireOn(ctx, s.admit) {
 		s.metrics.busy.Add(1)
 		s.errf("ICAP 503 busy (max_inflight=%d reached)", s.cfg.MaxInflight)
-		_, _ = io.WriteString(w, icapProtoVersion+" 503 Service Unavailable\r\n\r\n")
+		_ = s.icapWriteStatus(w, 503, "Service Unavailable", "")
 		return errors.New("icap busy")
 	}
 	defer func() { <-s.admit }()
@@ -459,14 +458,14 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		// A follower that stopped waiting on its leader has no verdict: answer
 		// 503 so the client retries or applies its own policy, never 204 clean.
 		s.errf("ICAP %s %dB 503: gave up waiting on coalesced scan", method, len(buf))
-		_, _ = io.WriteString(w, icapProtoVersion+" 503 Service Unavailable\r\n\r\n")
+		_ = s.icapWriteStatus(w, 503, "Service Unavailable", "")
 		return errors.New("icap coalesced wait timed out")
 	}
 	actionable := actionableMatches(matches)
 	if reason := degradedReason(matches); reason != "" && len(actionable) == 0 {
 		// No complete verdict (COR-04): never answer 204/clean for it.
 		s.errf("ICAP %s %dB 500: no complete verdict (%s)", method, len(buf), reason)
-		_, _ = io.WriteString(w, icapProtoVersion+" 500 Server Error\r\n\r\n")
+		_ = s.icapWriteStatus(w, 500, "Server Error", "")
 		return errors.New("icap scan degraded: " + reason)
 	}
 
@@ -481,10 +480,30 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		s.vlogf("ICAP %s %dB cache=%s %.1fms -> 0 matches", method, len(buf), cacheStatus, msSince(t0))
 	}
 	if allow204 {
-		_, err := io.WriteString(w, icapProtoVersion+" 204 No Modification\r\n\r\n")
-		return err
+		return s.icapWriteStatus(w, 204, "No Modification", "")
 	}
 	return icapWriteEcho(w, fp, echo, buf)
+}
+
+// icapFingerprint returns the active rule-set fingerprint, or "" when the
+// server has no engine. A nil engine must not panic on the refuse/early-error
+// paths, which only need a well-formed (stable) ISTag.
+func (s *Server) icapFingerprint() string {
+	if s.engine == nil {
+		return ""
+	}
+	return s.engine.Fingerprint()
+}
+
+// icapWriteStatus writes a final ICAP status reply with no encapsulated body.
+// RFC 3507 section 4.7 requires an ISTag on every ICAP response, so every 204
+// and error reply goes through here. extra is zero or more complete header
+// lines, each ending in CRLF. The interim "100 Continue" is not a final
+// response and is written directly.
+func (s *Server) icapWriteStatus(w io.Writer, code int, reason, extra string) error {
+	_, err := io.WriteString(w, icapProtoVersion+" "+strconv.Itoa(code)+" "+reason+"\r\n"+
+		"ISTag: "+icapISTag(s.icapFingerprint())+"\r\n"+extra+"\r\n")
+	return err
 }
 
 // icapISTag produces a quoted ISTag from the engine fingerprint (≤32 chars).

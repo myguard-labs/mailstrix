@@ -159,7 +159,7 @@ func TestICAPUnknownMethodCloses(t *testing.T) {
 	req := "PURGE icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n" +
 		"OPTIONS icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\nEncapsulated: null-body=0\r\n\r\n"
 	resp := doICAP(t, addr, req)
-	if !strings.HasPrefix(resp, "ICAP/1.0 405 Method Not Allowed\r\n\r\n") {
+	if !strings.HasPrefix(resp, "ICAP/1.0 405 Method Not Allowed\r\nISTag: "+icapISTag("fp")+"\r\n\r\n") {
 		t.Fatalf("want 405, got:\n%q", resp)
 	}
 	if strings.Contains(resp, "Methods: REQMOD") {
@@ -1601,5 +1601,145 @@ func TestICAPEffortSelection(t *testing.T) {
 				t.Fatalf("effort=%d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// icapTagOf returns the ISTag header value of the first reply in resp, or "".
+func icapTagOf(resp string) string {
+	head, _, _ := strings.Cut(resp, "\r\n\r\n")
+	for _, l := range strings.Split(head, "\r\n") {
+		if v, ok := strings.CutPrefix(l, "ISTag: "); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// wellFormedISTag reports whether tag is a quoted opaque tag within RFC 3507's
+// 32-byte cap.
+func wellFormedISTag(tag string) bool {
+	return len(tag) >= 3 && len(tag) <= 32 && strings.HasPrefix(tag, `"`) && strings.HasSuffix(tag, `"`)
+}
+
+// TestICAP204CarriesISTag (AUD-14a, RFC 3507 section 4.7): a 204 carries the
+// same ISTag as OPTIONS, for both the empty-body and the scanned-body paths.
+func TestICAP204CarriesISTag(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fp204"}, "")
+	addr := startTestICAPServer(t, s)
+	opt := doICAP(t, addr, "OPTIONS icap://"+addr+"/scan ICAP/1.0\r\nHost: "+addr+"\r\nEncapsulated: null-body=0\r\n\r\n")
+	want := icapTagOf(opt)
+	if !wellFormedISTag(want) {
+		t.Fatalf("OPTIONS ISTag malformed: %q", want)
+	}
+	nullBody := "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\nAllow: 204\r\nEncapsulated: null-body=0\r\n\r\n"
+	for name, req := range map[string]string{
+		"scanned": icapRESPMODRequest(addr, "hello world", true),
+		"empty":   nullBody,
+	} {
+		resp := doICAP(t, addr, req)
+		if !strings.HasPrefix(resp, "ICAP/1.0 204 No Modification\r\n") {
+			t.Fatalf("%s: want 204, got %q", name, resp)
+		}
+		if got := icapTagOf(resp); got != want {
+			t.Errorf("%s: 204 ISTag = %q, want OPTIONS ISTag %q", name, got, want)
+		}
+	}
+}
+
+// TestICAPErrorRepliesCarryISTag: 400, 405 and 413 are final replies and each
+// carries a well-formed ISTag.
+func TestICAPErrorRepliesCarryISTag(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fperr"}, "")
+	s.cfg.MaxBody = 10
+	addr := startTestICAPServer(t, s)
+	cases := []struct {
+		name, req, status string
+	}{
+		{"malformed request line", "garbage\r\n\r\n", "ICAP/1.0 400 Bad Request\r\n"},
+		{"missing Encapsulated", "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n", "ICAP/1.0 400 Bad Request\r\n"},
+		{"unknown method", "PURGE icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\n\r\n", "ICAP/1.0 405 Method Not Allowed\r\n"},
+		{"oversize body", icapRESPMODRequest(addr, strings.Repeat("X", 100), true), "ICAP/1.0 413 Request Entity Too Large\r\n"},
+	}
+	for _, tc := range cases {
+		resp := doICAP(t, addr, tc.req)
+		if !strings.HasPrefix(resp, tc.status) {
+			t.Errorf("%s: want %q, got %q", tc.name, tc.status, resp)
+			continue
+		}
+		if tag := icapTagOf(resp); !wellFormedISTag(tag) || tag != icapISTag("fperr") {
+			t.Errorf("%s: ISTag %q, want %q", tc.name, tag, icapISTag("fperr"))
+		}
+	}
+}
+
+// TestICAPRefusedCarriesISTag: the cap-refusal 503 carries an ISTag and keeps
+// Connection: close.
+func TestICAPRefusedCarriesISTag(t *testing.T) {
+	s := NewServer(&Config{ICAPAddr: "127.0.0.1:0", MaxConcurrent: 1, ICAPMaxConns: 1}, &fakeEngine{count: 1, fp: "fpref"})
+	a, b := net.Pipe()
+	defer func() { _ = a.Close() }()
+	done := make(chan string, 1)
+	go func() {
+		var sb strings.Builder
+		_, _ = io.Copy(&sb, a)
+		done <- sb.String()
+	}()
+	s.refuseICAP(b)
+	resp := <-done
+	want := "ICAP/1.0 503 Service Unavailable\r\nISTag: " + icapISTag("fpref") + "\r\nConnection: close\r\n\r\n"
+	if resp != want {
+		t.Errorf("refused reply = %q, want %q", resp, want)
+	}
+}
+
+// TestICAPNilEngineStatusNoPanic: with no engine the status helper still emits
+// a well-formed ISTag rather than panicking.
+func TestICAPNilEngineStatusNoPanic(t *testing.T) {
+	s := &Server{}
+	var sb strings.Builder
+	if err := s.icapWriteStatus(&sb, 400, "Bad Request", ""); err != nil {
+		t.Fatal(err)
+	}
+	if tag := icapTagOf(sb.String()); !wellFormedISTag(tag) {
+		t.Errorf("nil-engine ISTag malformed: %q in %q", tag, sb.String())
+	}
+}
+
+// TestICAP100ContinueHasNoISTag: the interim 100 Continue is not a final
+// response and must stay bare; the final reply after it carries the ISTag.
+func TestICAP100ContinueHasNoISTag(t *testing.T) {
+	s := newTestServer(&fakeEngine{count: 1, fp: "fp100"}, "")
+	addr := startTestICAPServer(t, s)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	resHdr := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n"
+	req := "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\nAllow: 204\r\nPreview: 0\r\n" +
+		fmt.Sprintf("Encapsulated: res-hdr=0, res-body=%d\r\n\r\n", len(resHdr)) + resHdr + "0\r\n\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	first, err := br.ReadString('\n')
+	if err != nil || first != "ICAP/1.0 100 Continue\r\n" {
+		t.Fatalf("want 100 Continue, got %q (%v)", first, err)
+	}
+	blank, _ := br.ReadString('\n')
+	if blank != "\r\n" {
+		t.Fatalf("100 Continue carries extra headers: %q", blank)
+	}
+	if _, err := io.WriteString(conn, "2\r\nok\r\n0\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.CloseWrite()
+	}
+	var sb strings.Builder
+	_, _ = io.Copy(&sb, br)
+	if !strings.HasPrefix(sb.String(), "ICAP/1.0 204 ") || icapTagOf(sb.String()) != icapISTag("fp100") {
+		t.Errorf("final reply after 100: %q", sb.String())
 	}
 }
