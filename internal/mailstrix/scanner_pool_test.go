@@ -198,3 +198,66 @@ func TestScannerPoolConcurrentAlternatingReload(t *testing.T) {
 		}
 	}
 }
+
+// staleCallerCase drives the AUD-P3a-r1 interleave for one slot: a getScanner
+// call that selected the slot for rules R0 is paused (hook) while Reload stores
+// R1 and a new caller installs the live generation for R1. The paused call must
+// neither retire that live generation nor install one bound to R0.
+func staleCallerCase(t *testing.T, big bool) {
+	t.Helper()
+	s := newBigScanner(t, 1<<20)
+	live, slot := &s.rules, &s.scanners
+	if big {
+		live, slot = &s.bigRules, &s.bigScanners
+	}
+	r0 := live.Load()
+	sc, g0 := poolGet(t, s, r0)
+	s.putScanner(sc, g0)
+	if slot.Load() != g0 {
+		t.Fatal("live generation for R0 not installed")
+	}
+	r1, err := compileDir(writeRules(t, eicarRule), func(string, ...any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r1.Destroy()
+
+	var g1 *scannerGen
+	getScannerAfterSelectHook = func() {
+		getScannerAfterSelectHook = nil // simulate Reload exactly once
+		live.Store(r1)
+		sc1, gen1 := poolGet(t, s, r1)
+		s.putScanner(sc1, gen1)
+		g1 = gen1
+	}
+	t.Cleanup(func() { getScannerAfterSelectHook = nil })
+
+	stale, sg := poolGet(t, s, r0)
+	if g1 == nil {
+		t.Fatal("hook did not run")
+	}
+	if slot.Load() != g1 {
+		t.Fatalf("live slot is not the R1 generation: %p, want %p", slot.Load(), g1)
+	}
+	if slot.Load().rules != r1 {
+		t.Fatal("live slot bound to replaced rules")
+	}
+	wantGen(t, "live R1 generation retired by stale caller", g1, 1, false)
+	if sg == g1 || sg == g0 {
+		t.Fatal("stale caller got a pooled generation")
+	}
+	wantGen(t, "stale caller generation", sg, 0, true)
+	s.putScanner(stale, sg)
+	wantGen(t, "live R1 generation after stale put", g1, 1, false)
+}
+
+// Regression (AUD-P3a-r1): a getScanner call paused across a Reload must not
+// retire the new live main generation or install one for replaced rules.
+func TestScannerPoolStaleCallerDoesNotRetireLivePool(t *testing.T) {
+	staleCallerCase(t, false)
+}
+
+// Same interleave on the big-file slot.
+func TestScannerPoolStaleCallerDoesNotRetireLiveBigPool(t *testing.T) {
+	staleCallerCase(t, true)
+}

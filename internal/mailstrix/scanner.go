@@ -253,7 +253,9 @@ func (s *Scanner) loadedRulesManifest() (RulesManifest, bool) {
 // (AUD-P3), so mixed traffic does not rebuild the pool on every switch.
 // getScanner installs a fresh generation in a slot when that slot's rules
 // change and retires the old one; a retired generation refuses returns, so
-// putScanner destroys a scanner whose generation is no longer live.
+// putScanner destroys a scanner whose generation is no longer live. "Change" is
+// judged against a fresh load of s.rules / s.bigRules at each decision, never a
+// snapshot taken earlier in the call.
 type scannerGen struct {
 	rules   *yara.Rules
 	mu      sync.Mutex
@@ -305,52 +307,47 @@ func (g *scannerGen) retire() {
 }
 
 // retireStale removes and retires slot's generation when it no longer serves
-// cur (Reload replaced or unset those rules).
-func retireStale(slot *atomic.Pointer[scannerGen], cur *yara.Rules) {
-	if g := slot.Load(); g != nil && g.rules != cur && slot.CompareAndSwap(g, nil) {
+// the slot's CURRENT rules (Reload replaced or unset them). live is read afresh
+// here, never from a caller snapshot: a stale snapshot would retire a newer
+// live generation. Staleness is permanent (the generation keeps its *yara.Rules
+// referenced, so the pointer cannot be reused), so the check cannot misfire.
+func retireStale(slot *atomic.Pointer[scannerGen], live *atomic.Pointer[yara.Rules]) {
+	if g := slot.Load(); g != nil && g.rules != live.Load() && slot.CompareAndSwap(g, nil) {
 		g.retire()
 	}
 }
 
+// getScannerAfterSelectHook, when non-nil, runs in getScanner after the slot is
+// chosen and before any retire/install step. Tests use it to interleave a
+// Reload at that point; production leaves it nil (one nil check).
+var getScannerAfterSelectHook func()
+
 // getScanner returns a yara.Scanner bound to rules, reusing a pooled one when
 // possible. The caller MUST hand it back via putScanner. gen is returned so
 // putScanner can verify the scanner still belongs to a live generation.
+//
+// There is no entry snapshot of the live rules: every decision (slot choice,
+// retireStale, and each install) re-reads s.rules / s.bigRules at the moment it
+// acts, so a call paused across a Reload never retires the new live generation
+// nor installs one bound to replaced rules. No Scanner lock is taken (see
+// fingerprintLocked: a recursive RLock can deadlock behind a waiting writer).
 func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, error) {
-	main, big := s.rules.Load(), s.bigRules.Load()
+	var slot *atomic.Pointer[scannerGen]
+	var live *atomic.Pointer[yara.Rules]
+	switch rules {
+	case s.rules.Load():
+		slot, live = &s.scanners, &s.rules
+	case s.bigRules.Load():
+		slot, live = &s.bigScanners, &s.bigRules
+	}
+	if h := getScannerAfterSelectHook; h != nil {
+		h()
+	}
 	// Retire whichever slot Reload left behind so its idle C scanners are freed
 	// on the next pooled scan of either set, not only of the same set.
-	retireStale(&s.scanners, main)
-	retireStale(&s.bigScanners, big)
-	var slot *atomic.Pointer[scannerGen]
-	switch rules {
-	case main:
-		slot = &s.scanners
-	case big:
-		slot = &s.bigScanners
-	}
-	var gen *scannerGen
-	if slot == nil {
-		// PERF-64: only the CURRENT main or big-file rules get a pooled
-		// generation. A scan still holding rules a reload replaced would
-		// otherwise install a pool for them and evict the live one. It gets a
-		// one-off, already-retired generation; putScanner destroys its scanner.
-		gen = &scannerGen{rules: rules, retired: true}
-	} else {
-		for gen == nil {
-			cur := slot.Load()
-			if cur != nil && cur.rules == rules {
-				gen = cur
-				break
-			}
-			fresh := &scannerGen{rules: rules}
-			if slot.CompareAndSwap(cur, fresh) {
-				if cur != nil {
-					cur.retire()
-				}
-				gen = fresh
-			}
-		}
-	}
+	retireStale(&s.scanners, &s.rules)
+	retireStale(&s.bigScanners, &s.bigRules)
+	gen := installGen(slot, live, rules)
 	if sc := gen.get(); sc != nil {
 		return sc, gen, nil
 	}
@@ -359,6 +356,42 @@ func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, err
 		return nil, nil, err
 	}
 	return sc, gen, nil
+}
+
+// installGen returns the generation getScanner should draw from: the slot's
+// existing one for rules, a freshly installed one, or a one-off retired one
+// (PERF-64) when slot is nil or rules is no longer live.
+func installGen(slot *atomic.Pointer[scannerGen], live *atomic.Pointer[yara.Rules], rules *yara.Rules) *scannerGen {
+	for {
+		// PERF-64: only the CURRENT main or big-file rules get a pooled
+		// generation. A scan still holding rules a reload replaced would
+		// otherwise install a pool for them and evict the live one. It gets a
+		// one-off, already-retired generation; putScanner destroys its scanner.
+		// The live check repeats before each install because Reload can land
+		// between the slot choice above and the install.
+		if slot == nil || live.Load() != rules {
+			return &scannerGen{rules: rules, retired: true}
+		}
+		cur := slot.Load()
+		if cur != nil && cur.rules == rules {
+			return cur
+		}
+		fresh := &scannerGen{rules: rules}
+		if live.Load() != rules {
+			continue // replaced meanwhile: next pass takes the one-off path
+		}
+		if slot.CompareAndSwap(cur, fresh) {
+			if cur != nil {
+				cur.retire()
+			}
+			if live.Load() != rules && slot.CompareAndSwap(fresh, nil) {
+				// Reload landed during the install: do not leave a generation
+				// bound to replaced rules in the live slot.
+				fresh.retire()
+			}
+			return fresh
+		}
+	}
 }
 
 // putScanner returns sc to its generation's free-list, or Destroys it if the
