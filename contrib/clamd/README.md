@@ -164,9 +164,11 @@ separately to each gate.
 
 Upload buffers hold the existing shared admission budget; scans also hold the
 shared CPU budget. Buffer capacity is capped at the payload limit, with up to
-twice that capacity temporarily held during growth. clamd deliberately bypasses
-verdict caching/coalescing so scanner errors remain distinguishable from clean
-results. It invokes the shared core once; it does not add a second verdict engine.
+twice that capacity temporarily held during growth. clamd scans share the
+verdict cache and coalesce concurrent identical streams; failed or incomplete
+scans are never cached, so a scanner error still answers as an error rather than
+a clean result. It invokes the shared core once; it does not add a second
+verdict engine.
 
 Shutdown stops listeners and uploads, then drains active scans. Socket closure
 cannot forcibly stop a native scan; it retains its buffer and permits until it
