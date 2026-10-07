@@ -1036,14 +1036,19 @@ type rarOpen struct {
 // pw is "" for a plain archive, or the cracked archive password. ran is false when the
 // decoder stalled or the pool was full: the member is left unextracted, counted as
 // detection loss, and the caller keeps walking.
-func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, deadline time.Time) (out []byte, ran bool) {
-	r, ok := runBoundedPlain(deadline, func() []byte {
-		return readRarMemberFresh(buf, idx, pw, declared)
+func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, deadline time.Time) (out []byte, truncated, ran bool) {
+	type rarRead struct {
+		data      []byte
+		truncated bool
+	}
+	r, ok := runBoundedPlain(deadline, func() rarRead {
+		d, t := readRarMemberFresh(buf, idx, pw, declared)
+		return rarRead{d, t}
 	})
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
-	return r, true
+	return r.data, r.truncated, true
 }
 
 // readRarMemberFresh opens its own rardecode reader over buf, advances to the idx'th
@@ -1054,10 +1059,15 @@ func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, dead
 // Only ever call this from boundedRarMemberFresh, so the decode stays on a pooled
 // worker and an abandoned one cannot outlive its slot. Never call it for a SOLID
 // member — see boundedRarMemberFresh.
-func readRarMemberFresh(buf []byte, idx int, pw string, declared uint64) (out []byte) {
+//
+// truncated reports that the member held more than maxBytesPerMember (AUD-04c3): a
+// header with UnKnownSize carries UnPackedSize=-1, which passes the caller's
+// oversize precheck, and rardecode then does not bound the read. The flag is
+// returned, never applied to a Result here, because this runs on a pooled worker.
+func readRarMemberFresh(buf []byte, idx int, pw string, declared uint64) (out []byte, truncated bool) {
 	defer func() {
 		if recover() != nil {
-			out = nil
+			out, truncated = nil, false
 		}
 	}()
 	var rr *rardecode.Reader
@@ -1068,18 +1078,18 @@ func readRarMemberFresh(buf []byte, idx int, pw string, declared uint64) (out []
 		rr, err = rardecode.NewReader(bytes.NewReader(buf))
 	}
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	for i := 0; ; {
 		h, err := rr.Next()
 		if err != nil {
-			return nil // EOF before idx, or a header we can't read
+			return nil, false // EOF before idx, or a header we can't read
 		}
 		if h.IsDir {
 			continue // dirs are skipped by the walk too, so they don't consume an ordinal
 		}
 		if i == idx {
-			return readMember(rr, declared)
+			return readMemberTrunc(rr, declared)
 		}
 		i++
 	}
@@ -1158,6 +1168,7 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 				// transparently). On an oversized member or a read failure, keep the
 				// ARCHIVE-ENCRYPTED signal so the hidden-payload tell isn't silently lost.
 				if h.UnPackedSize > maxBytesPerMember {
+					res.stopHit("member-size") // AUD-04c4: skipped oversize member is a cap hit
 					markEncryptedArchive(res)
 					continue
 				}
@@ -1172,7 +1183,10 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 					markEncryptedArchive(res)
 					continue
 				}
-				data, ran := boundedRarMemberFresh(buf, idx, pw, decl, deadline)
+				data, trunc, ran := boundedRarMemberFresh(buf, idx, pw, decl, deadline)
+				if ran && trunc {
+					res.stopHit("member-size") // AUD-04c3: UnKnownSize member exceeded the cap
+				}
 				if !ran {
 					// Decoder stalled or pool full: this member's bytes were never read.
 					// Keep the encrypted tell — we know it was there, we just couldn't
@@ -1223,6 +1237,7 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 			continue
 		}
 		if h.UnPackedSize > maxBytesPerMember {
+			res.stopHit("member-size") // AUD-04c4: skipped oversize member is a cap hit
 			continue
 		}
 		var decl uint64
@@ -1230,9 +1245,12 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 			decl = uint64(h.UnPackedSize)
 		}
 		// A9: the body decodes on a pooled worker over its OWN reader, never off rr.
-		data, ran := boundedRarMemberFresh(buf, idx, "", decl, deadline)
+		data, trunc, ran := boundedRarMemberFresh(buf, idx, "", decl, deadline)
 		if !ran {
 			continue // stalled/refused: member dropped (counted), keep walking
+		}
+		if trunc {
+			res.stopHit("member-size") // AUD-04c3: UnKnownSize member exceeded the cap
 		}
 		emitMember(data, res, b, depth, deadline)
 		emitted = true
