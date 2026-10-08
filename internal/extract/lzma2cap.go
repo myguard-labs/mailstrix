@@ -19,8 +19,7 @@ const lzma2DictCeiling = 64 << 20
 // the dictionary from the single property byte (up to 4 GiB) and ulikunitz
 // allocates it eagerly. Same policy as LZMA: effective = min(declared,
 // unpackSize), floored at lzma.MinDictCap; effective > lzma2DictCeiling is
-// refused with errLZMADictCap, otherwise decode with the declared size clamped
-// to the ceiling (which leaves the effective dictionary unchanged).
+// refused with errLZMADictCap, otherwise decode with the effective size.
 
 // lzma2MethodID is the 7z method ID of LZMA2 (sevenzip/register.go).
 var lzma2MethodID = []byte{0x21}
@@ -59,13 +58,10 @@ func boundedLZMA2Dict(props []byte, unpack uint64) (int, error) {
 	if eff > lzma2DictCeiling {
 		return 0, errLZMADictCap
 	}
-	if declared > lzma2DictCeiling {
-		declared = lzma2DictCeiling
-	}
-	if declared < lzma.MinDictCap {
-		declared = lzma.MinDictCap
-	}
-	return int(declared), nil
+	// Decode with the effective size: back-references never reach past the
+	// bytes already decoded, so a tiny member that declares a huge dictionary
+	// does not get a ceiling-sized allocation.
+	return int(eff), nil
 }
 
 // newBoundedLZMA2Reader is the sevenzip.Decompressor for LZMA2 with the

@@ -39,8 +39,13 @@ func TestBoundedLZMA2Dict(t *testing.T) {
 	if _, err := boundedLZMA2Dict([]byte{40}, 64<<20+1); !errors.Is(err, errLZMADictCap) {
 		t.Errorf("p=40 big unpack: %v", err)
 	}
-	if d, err := boundedLZMA2Dict([]byte{40}, 1000); err != nil || d != lzma2DictCeiling {
+	// A tiny member declaring 4 GiB decodes with the floored effective size,
+	// not a ceiling-sized allocation.
+	if d, err := boundedLZMA2Dict([]byte{40}, 1000); err != nil || d != 4096 { // lzma.MinDictCap
 		t.Errorf("p=40 small unpack: %d %v", d, err)
+	}
+	if d, err := boundedLZMA2Dict([]byte{40}, 1<<20); err != nil || d != 1<<20 {
+		t.Errorf("p=40 1 MiB unpack: %d %v", d, err)
 	}
 	if d, err := boundedLZMA2Dict([]byte{0}, 10); err != nil || d != 4096 {
 		t.Errorf("p=0: %d %v", d, err)
