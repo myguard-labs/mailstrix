@@ -467,6 +467,8 @@ func TestHTMLScriptURIMarker(t *testing.T) {
 		"<html><a href = \"  \t\n javascript:alert(1)\">x</a></html>",
 		`<html><a href="javascript:x`,
 		`<html><a href=javascript:`,
+		`<html><a title="a>b" href="javascript:x">x</a></html>`,
+		`<html><!-- c --><a href="javascript:x">x</a></html>`,
 	}
 	for _, in := range pos {
 		if !streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
@@ -478,11 +480,28 @@ func TestHTMLScriptURIMarker(t *testing.T) {
 		`<html><a href="https://example.com/javascript:x">x</a></html>`,
 		`<html><a data-href="javascript:x">x</a></html>`,
 		`plain text href="javascript:alert(1)"`,
+		`<html><p>Example: href="javascript:alert(1)"</p></html>`,
+		`<html><a href="/">y</a><p>Example: href="javascript:alert(1)"</p></html>`,
+		`<html><!-- <a href="javascript:x"> --><p>x</p></html>`,
+		`<html><a href="/">y</a><!-- href="javascript:x" --></html>`,
+		"<html><a href=\x1ajavascript\x1a>x</a></html>",
+		"<html><a href=\x1ajavascript\x1a alert(1)>x</a></html>",
 	}
 	for _, in := range neg {
 		if streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
 			t.Errorf("unexpected HTML-SCRIPT-URI for:\n%s", in)
 		}
+	}
+}
+
+// TestHasScriptURIAttrDirect exercises the scanner without the markup gate.
+func TestHasScriptURIAttrDirect(t *testing.T) {
+	far := time.Now().Add(time.Hour)
+	if hasScriptURIAttr([]byte(`<html><p>Example: href="javascript:alert(1)"</p></html>`), far) {
+		t.Error("prose attribute-lookalike must not match")
+	}
+	if !hasScriptURIAttr([]byte(`<a title='x>y' href="javascript:1">`), far) {
+		t.Error("real attribute after quoted > must match")
 	}
 }
 

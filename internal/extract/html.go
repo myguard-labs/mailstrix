@@ -159,63 +159,108 @@ func looksLikeMarkup(head []byte) bool {
 var scriptURIAttrs = [][]byte{[]byte("href"), []byte("src"), []byte("action"), []byte("formaction")}
 
 // hasScriptURIAttr reports whether any href/src/action/formaction attribute
-// value starts (after leading whitespace/control chars and an optional quote)
-// with javascript: or vbscript: (case-insensitive). No entity decoding.
-// Single bounded pass, no allocation.
+// inside an HTML start tag has a value that starts (after leading
+// whitespace/control chars and an optional quote) with javascript: or
+// vbscript: (case-insensitive). Text outside start tags and comments is
+// ignored. No entity decoding. Single bounded forward pass, no allocation.
 func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
 	n := 0
+	inTag := false
+	var quote byte
 	for i := 0; i < len(buf); i++ {
-		if buf[i] != '=' {
-			continue
-		}
-		if n++; n&0xfff == 0 && expired(deadline) {
-			return false
-		}
-		j := i
-		for j > 0 && (buf[j-1] == ' ' || buf[j-1] == '\t' || buf[j-1] == '\n' || buf[j-1] == '\r') {
-			j--
-		}
-		matched := false
-		for _, name := range scriptURIAttrs {
-			if j < len(name) || !asciiEqualFold(buf[j-len(name):j], name) {
+		c := buf[i]
+		if !inTag {
+			if c != '<' || i+1 >= len(buf) {
 				continue
 			}
-			if k := j - len(name); k > 0 {
-				c := buf[k-1]
-				if c == '-' || c == '_' || c >= '0' && c <= '9' || c|0x20 >= 'a' && c|0x20 <= 'z' {
-					continue
+			if bytes.HasPrefix(buf[i:], []byte("<!--")) {
+				end := bytes.Index(buf[i+4:], []byte("-->"))
+				if end < 0 {
+					return false
 				}
+				i += 4 + end + 2
+			} else if d := buf[i+1] | 0x20; d >= 'a' && d <= 'z' {
+				inTag = true
 			}
-			matched = true
-			break
-		}
-		if !matched {
 			continue
 		}
-		k := i + 1
-		for k < len(buf) && (buf[k] <= ' ') {
-			k++
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
 		}
-		if k < len(buf) && (buf[k] == '"' || buf[k] == '\'') {
-			k++
-		}
-		for k < len(buf) && buf[k] <= ' ' {
-			k++
-		}
-		rest := buf[k:]
-		if hasPrefixFold(rest, "javascript:") || hasPrefixFold(rest, "vbscript:") {
-			return true
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '>':
+			inTag = false
+		case '=':
+			if n++; n&0xfff == 0 && expired(deadline) {
+				return false
+			}
+			if scriptURIValueAt(buf, i) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// scriptURIValueAt reports whether buf[eq]=='=' ends a script-URI attribute
+// name and its value starts with javascript: or vbscript:.
+func scriptURIValueAt(buf []byte, eq int) bool {
+	j := eq
+	for j > 0 && (buf[j-1] == ' ' || buf[j-1] == '\t' || buf[j-1] == '\n' || buf[j-1] == '\r') {
+		j--
+	}
+	matched := false
+	for _, name := range scriptURIAttrs {
+		if j < len(name) || !asciiEqualFold(buf[j-len(name):j], name) {
+			continue
+		}
+		if k := j - len(name); k > 0 {
+			c := buf[k-1]
+			if c == '-' || c == '_' || c >= '0' && c <= '9' || c|0x20 >= 'a' && c|0x20 <= 'z' {
+				continue
+			}
+		}
+		matched = true
+		break
+	}
+	if !matched {
+		return false
+	}
+	k := eq + 1
+	for k < len(buf) && buf[k] <= ' ' {
+		k++
+	}
+	if k < len(buf) && (buf[k] == '"' || buf[k] == '\'') {
+		k++
+	}
+	for k < len(buf) && buf[k] <= ' ' {
+		k++
+	}
+	rest := buf[k:]
+	return hasPrefixFold(rest, "javascript:") || hasPrefixFold(rest, "vbscript:")
+}
+
+// foldByte lowercases ASCII letters only; every other byte is unchanged.
+func foldByte(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c | 0x20
+	}
+	return c
+}
+
+// asciiEqualFold compares a against the lowercase literal b, folding only
+// ASCII letters in a.
 func asciiEqualFold(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i]|0x20 != b[i] {
+		if foldByte(a[i]) != b[i] {
 			return false
 		}
 	}
@@ -227,7 +272,7 @@ func hasPrefixFold(b []byte, p string) bool {
 		return false
 	}
 	for i := 0; i < len(p); i++ {
-		if b[i]|0x20 != p[i] {
+		if foldByte(b[i]) != p[i] {
 			return false
 		}
 	}
