@@ -863,6 +863,10 @@ func TestCapStopEncryptedZipStreamOutrunsDeclared(t *testing.T) {
 	// cap read ends mid-stream.
 	over := capFill(capMember + 4096)
 	over[capMember] = 'Z' // marker in the byte past the cap
+	// Decrypting a 16 MiB member under -race on a contended runner can overrun the
+	// 750ms production per-attempt watchdog (AUD-04c8-zc); raise it for this test
+	// only. A hard stall is still bounded by the minute-scale ceiling.
+	t.Cleanup(extract.SetDecryptAttemptTimeForTest(time.Minute))
 	for name, enc := range map[string]yekazip.EncryptionMethod{"zipcrypto": yekazip.StandardEncryption, "aes256": yekazip.AES256Encryption} {
 		enc := enc
 		t.Run(name, func(t *testing.T) {
