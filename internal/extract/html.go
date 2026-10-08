@@ -52,7 +52,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"regexp"
+	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // asciiContainsFold reports whether haystack contains needle using ASCII
@@ -155,6 +158,67 @@ func looksLikeMarkup(head []byte) bool {
 		bytes.Contains(head, []byte("data:"))
 }
 
+// scriptURIAttrs are the attribute names whose value is navigated/executed.
+var scriptURIAttrs = map[string]bool{"href": true, "src": true, "action": true, "formaction": true}
+
+// hasScriptURIAttr reports whether any href/src/action/formaction attribute
+// of a start tag has a value that starts (after leading C0 controls and
+// space, ignoring ASCII tab/LF/CR anywhere, as browsers do) with javascript:
+// or vbscript: (case-insensitive). Tokenization, comments and raw-text
+// elements follow golang.org/x/net/html. The tokenizer decodes entities, so
+// entity-encoded schemes also match here.
+// ICAP-385-1b (OBFUSCATED marker) would compare the raw attribute source
+// against the decoded value at the match site below.
+// The caller passes the already-capped head; MaxBuf is bounded to len(buf).
+func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
+	z := html.NewTokenizer(bytes.NewReader(buf))
+	z.SetMaxBuf(len(buf) + 1)
+	for n := 1; ; n++ {
+		if n&0xff == 0 && expired(deadline) {
+			return false
+		}
+		switch z.Next() {
+		case html.ErrorToken:
+			return false
+		case html.StartTagToken, html.SelfClosingTagToken:
+			for more := true; more; {
+				var key, val []byte
+				key, val, more = z.TagAttr()
+				if scriptURIAttrs[string(key)] && isScriptURI(val) {
+					return true
+				}
+			}
+		}
+	}
+}
+
+// isScriptURI reports whether v starts with javascript: or vbscript: after
+// browser URL normalisation (leading C0/space stripped, tab/LF/CR removed).
+func isScriptURI(v []byte) bool {
+	i := 0
+	for i < len(v) && v[i] <= ' ' {
+		i++
+	}
+	var w [11]byte // len("javascript:")
+	k := 0
+	for ; i < len(v) && k < len(w); i++ {
+		if c := v[i]; c != '\t' && c != '\n' && c != '\r' {
+			w[k] = foldByte(c)
+			k++
+		}
+	}
+	s := string(w[:k])
+	return s == "javascript:" || strings.HasPrefix(s, "vbscript:")
+}
+
+// foldByte lowercases ASCII letters only; every other byte is unchanged.
+func foldByte(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c | 0x20
+	}
+	return c
+}
+
 // fromHTMLSmuggling inspects a plain-text/markup buffer for HTML-smuggling and
 // scripted-SVG signatures, emitting PURE markers and (for force-downloaded
 // data: URIs) carving the decoded payload back through extractChild. Self-
@@ -183,6 +247,11 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 	hasDownload := reHTMLDownloadAttr.Match(head) || bytes.Contains(head, []byte(".click("))
 	if hasBlobAPI && hasDownload && len(res.Streams) < maxStreams {
 		res.Streams = append(res.Streams, []byte("HTML-SMUGGLING-BLOB"))
+	}
+
+	// Signal 4: javascript:/vbscript: URI in a navigational attribute.
+	if hasScriptURIAttr(head, deadline) && len(res.Streams) < maxStreams {
+		res.Streams = append(res.Streams, []byte("HTML-SCRIPT-URI"))
 	}
 
 	// Signal 3: scripted SVG. Only when an <svg> root is present AND it carries

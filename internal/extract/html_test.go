@@ -456,6 +456,111 @@ func TestSVGScriptMarker(t *testing.T) {
 	}
 }
 
+func TestHTMLScriptURIMarker(t *testing.T) {
+	pos := []string{
+		`<html><a href="javascript:alert(1)">x</a></html>`,
+		`<html><a href="/">y</a><img src='javascript:alert(1)'></html>`,
+		`<html><a href="/">y</a><form action="javascript:evil()"><input></form></html>`,
+		`<html><a href="/">y</a><button formaction=javascript:evil()>x</button></html>`,
+		`<html><a href="vbscript:msgbox(1)">x</a></html>`,
+		`<html><A HREF="JaVaScRiPt:alert(1)">x</A></html>`,
+		"<html><a href = \"  \t\n javascript:alert(1)\">x</a></html>",
+		`<html><a title="a>b" href="javascript:x">x</a></html>`,
+		`<html><!-- c --><a href="javascript:x">x</a></html>`,
+		`<script>x</script><a href="javascript:x">x</a>`,
+		`<SCRIPT>x</SCRIPT ><a href="javascript:x">x</a>`,
+		`<scriptx href=javascript:1>`,
+		`<titlebar></titlebar><a href=javascript:1>`,
+		`<textarea>t</textarea><a href=javascript:1>`,
+	}
+	for _, in := range pos {
+		if !streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
+			t.Errorf("expected HTML-SCRIPT-URI for:\n%s", in)
+		}
+	}
+	neg := []string{
+		`<html><a href="/">y</a><p>click javascript:alert(1) here</p></html>`,
+		`<html><a href="https://example.com/javascript:x">x</a></html>`,
+		`<html><a data-href="javascript:x">x</a></html>`,
+		`plain text href="javascript:alert(1)"`,
+		`<html><p>Example: href="javascript:alert(1)"</p></html>`,
+		`<html><a href="/">y</a><p>Example: href="javascript:alert(1)"</p></html>`,
+		`<html><!-- <a href="javascript:x"> --><p>x</p></html>`,
+		`<html><a href="/">y</a><!-- href="javascript:x" --></html>`,
+		"<html><a href=\x1ajavascript\x1a>x</a></html>",
+		"<html><a href=\x1ajavascript\x1a alert(1)>x</a></html>",
+		`<textarea><a href="javascript:alert(1)"></textarea>`,
+		`<script>s='<a href="javascript:x()">'</script>`,
+		`<style><a href="javascript:x"></style>`,
+		`<title><a href="javascript:x"></title>`,
+		`<script><a href="javascript:x"></SCRIPT>`,
+		`<textarea><a href="javascript:x">`,
+		`<plaintext></plaintext><a href="javascript:x">`,
+		`<script></scripts><a href="javascript:x">`,
+	}
+	for _, in := range neg {
+		if streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
+			t.Errorf("unexpected HTML-SCRIPT-URI for:\n%s", in)
+		}
+	}
+}
+
+// TestHTMLScriptURIUnterminatedTag: browsers (and x/net/html) drop a start tag
+// truncated at EOF, so its href is never navigable. Previously asserted as
+// positive by the byte scanner; changed in ICAP-385-1a to match browsers.
+func TestHTMLScriptURIUnterminatedTag(t *testing.T) {
+	for _, in := range []string{`<html><a href="javascript:x`, `<html><a href=javascript:`} {
+		if streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
+			t.Errorf("unterminated tag must not emit HTML-SCRIPT-URI: %s", in)
+		}
+	}
+}
+
+// TestHasScriptURIAttrDirect exercises the scanner without the markup gate.
+func TestHasScriptURIAttrDirect(t *testing.T) {
+	far := time.Now().Add(time.Hour)
+	if hasScriptURIAttr([]byte(`<html><p>Example: href="javascript:alert(1)"</p></html>`), far) {
+		t.Error("prose attribute-lookalike must not match")
+	}
+	if !hasScriptURIAttr([]byte(`<a title='x>y' href="javascript:1">`), far) {
+		t.Error("real attribute after quoted > must match")
+	}
+	for _, in := range []string{
+		`<textarea><a href="javascript:1"></textarea>`,
+		`<TEXTAREA><a href="javascript:1"></TEXTAREA>`,
+		`<textarea><a href="javascript:1">`,
+		`<noscript><a href=javascript:1></noscript>`,
+	} {
+		if hasScriptURIAttr([]byte(in), far) {
+			t.Errorf("raw-text content must not match: %s", in)
+		}
+	}
+	if !hasScriptURIAttr([]byte(`<script>x</script><a href="javascript:1">`), far) {
+		t.Error("anchor after closed script must match")
+	}
+	// Form feed is HTML whitespace before '='.
+	if !hasScriptURIAttr([]byte("<a href\f=javascript:1>"), far) {
+		t.Error("form feed before = must match")
+	}
+	// '=' inside an unquoted value is not a new assignment.
+	for _, in := range []string{
+		`<a data-note=href=javascript:1>`,
+		`<a title=a=b href=/x data=src=vbscript:1>`,
+	} {
+		if hasScriptURIAttr([]byte(in), far) {
+			t.Errorf("= inside unquoted value must not match: %s", in)
+		}
+	}
+	// Unquoted value ends at whitespace; a later real attribute still matches.
+	if !hasScriptURIAttr([]byte(`<a title=x=y href=javascript:1>`), far) {
+		t.Error("real attribute after unquoted value must match")
+	}
+	// Quoted value after '=' with surrounding whitespace keeps quote state.
+	if hasScriptURIAttr([]byte(`<a title = "href=javascript:1">`), far) {
+		t.Error("= inside quoted value must not match")
+	}
+}
+
 // TestSVGEmbeddedPayloadCarve: an <svg> with an <image href> base64 data: URI
 // whose decoded bytes are a container magic (PK zip) must emit
 // SVG-EMBEDDED-PAYLOAD and carve the dropper — no download attribute required.
@@ -585,5 +690,65 @@ func TestHTMLSmugglingNestedInZip(t *testing.T) {
 	res := Extract(zipBuf, time.Time{})
 	if !streamsContain(res, "HTML-SMUGGLING-BLOB") {
 		t.Error("HTML smuggling inside a zip member was not detected (nested path)")
+	}
+}
+
+// TestHasScriptURIAttrTokenizer covers HTML tokenization edge cases the
+// previous hand-rolled scanner got wrong (ICAP-385-1a).
+func TestHasScriptURIAttrTokenizer(t *testing.T) {
+	far := time.Now().Add(time.Hour)
+	pos := []string{
+		`<a 'x href=javascript:1>`,
+		`<!-- c --!><a href=javascript:1>`,
+		"<a href=\"java\tscript:1\">",
+		"<a href=\"java\nscr\ript:1\">",
+		`<a href="&#106;avascript:1">`,
+		"<a href=\"\x01 javascript:1\">",
+		`<a HREF=JaVaScRiPt:1>`,
+		`<form action=vbscript:x>`,
+		`<button formaction=javascript:1>`,
+		`<img src=javascript:1/>`,
+	}
+	for _, in := range pos {
+		if !hasScriptURIAttr([]byte(in), far) {
+			t.Errorf("expected match: %q", in)
+		}
+	}
+	neg := []string{
+		`<a data.href=javascript:1>`,
+		`<a xhref=javascript:1>`,
+		`<a href=javascripts:1>`,
+		`<a href="/javascript:1">`,
+		`<!-- <a href=javascript:1> -->`,
+		`<a title=x>`,
+	}
+	for _, in := range neg {
+		if hasScriptURIAttr([]byte(in), far) {
+			t.Errorf("unexpected match: %q", in)
+		}
+	}
+	// Malformed input at EOF must not panic.
+	for _, in := range []string{`<a href=`, `<a href="javascript:1`, `<a href="`, `<`, `<a`, `<!--`, `<a 'x`, `</`, `<a href=javascript:1`} {
+		_ = hasScriptURIAttr([]byte(in), far)
+	}
+	// Expired deadline fails open.
+	long := bytes.Repeat([]byte(`<a title=x>`), 5000)
+	long = append(long, []byte(`<a href=javascript:1>`)...)
+	if hasScriptURIAttr(long, time.Now().Add(-time.Second)) {
+		t.Error("expired deadline must not match")
+	}
+}
+
+// TestHTMLScriptURICapBoundary: an attribute beyond htmlScanCap is not scanned.
+func TestHTMLScriptURICapBoundary(t *testing.T) {
+	pad := bytes.Repeat([]byte(" "), htmlScanCap)
+	in := append([]byte(`<a title=x>`), pad...)
+	in = append(in, []byte(`<a href=javascript:1>`)...)
+	if streamHas(runHTML(in), "HTML-SCRIPT-URI") {
+		t.Error("attribute beyond htmlScanCap must not be scanned")
+	}
+	in2 := append([]byte(`<a href=javascript:1>`), pad...)
+	if !streamHas(runHTML(in2), "HTML-SCRIPT-URI") {
+		t.Error("attribute inside htmlScanCap must match")
 	}
 }
