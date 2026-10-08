@@ -62,7 +62,12 @@ func fromBatchDropper(buf []byte, res *Result, b *archiveBudget, depth int, dead
 		return
 	}
 
-	for _, data := range carveBatchFiles(buf) {
+	files, truncated := carveBatchFiles(buf)
+	if truncated {
+		res.stopHit("member-size") // set only by a refused or clamped carve line
+	}
+
+	for _, data := range files {
 		if expired(deadline) {
 			break // deadline has its own incompleteness path
 		}
@@ -80,7 +85,10 @@ func fromBatchDropper(buf []byte, res *Result, b *archiveBudget, depth int, dead
 // from buf. It is pure (no recursion, no Result), so the cheap looksLikeBatch
 // prefilter alone ("@echo off") never counts as unvisited content.
 func batchWouldCarve(buf []byte) bool {
-	for _, data := range carveBatchFiles(buf) {
+	// Ignore truncated flag: this function is a pure check for depth gating,
+	// so it doesn't report incompleteness.
+	files, _ := carveBatchFiles(buf)
+	for _, data := range files {
 		if len(data) >= minMemberBytes {
 			return true
 		}
@@ -90,10 +98,12 @@ func batchWouldCarve(buf []byte) bool {
 
 // carveBatchFiles parses echo-redirect blocks and returns each reconstructed
 // file, clamped to maxBytesPerMember. Memory is bounded by maxBatchAccum and
-// maxBatchBlocks.
-func carveBatchFiles(buf []byte) [][]byte {
+// maxBatchBlocks. Returns (files, truncated) where truncated=true if either
+// a per-file join was clamped at maxBytesPerMember or the accumulation cap
+// stopped parsing early.
+func carveBatchFiles(buf []byte) ([][]byte, bool) {
 	if !looksLikeBatch(buf) {
-		return nil
+		return nil, false
 	}
 
 	// ── Parse echo-redirect blocks ────────────────────────────────────────────
@@ -131,13 +141,15 @@ func carveBatchFiles(buf []byte) [][]byte {
 
 	linesBuf := buf
 	blocksEmitted := 0
-	accum := 0 // cumulative reconstructed bytes accumulated so far (cap guard)
+	accum := 0         // cumulative reconstructed bytes accumulated so far (cap guard)
+	truncated := false // set when join clamps or accumulation cap stops parsing
 
 	// addLine appends a reconstructed (caret-unescaped) line to a file, accounting
 	// it against the shared accumulation cap. Returns false once the cap is hit so
 	// the caller stops parsing — a hostile mega-block can't grow memory unbounded.
 	addLine := func(idx int, text []byte) bool {
 		if accum+len(text) > maxBatchAccum {
+			truncated = true
 			return false
 		}
 		files[idx].lines = append(files[idx].lines, text)
@@ -235,10 +247,11 @@ func carveBatchFiles(buf []byte) [][]byte {
 		data := bytes.Join(files[i].lines, []byte("\r\n"))
 		if len(data) > maxBytesPerMember {
 			data = data[:maxBytesPerMember]
+			truncated = true
 		}
 		out = append(out, data)
 	}
-	return out
+	return out, truncated
 }
 
 // parseRedirectLine parses the part of a redirect line AFTER the leading > or >>

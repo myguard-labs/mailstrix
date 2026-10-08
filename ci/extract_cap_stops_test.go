@@ -967,3 +967,130 @@ func TestCapStopEncryptedZipAESAuthFailureAtCap(t *testing.T) {
 		}
 	})
 }
+
+// capBatchBlock builds a batch dropper with one multi-line echo block that
+// redirects to a single file. Each element of texts becomes one "echo TEXT"
+// line, so carveBatchFiles sees exactly those texts (the "echo " prefix is
+// stripped, there are no carets, and only a trailing CR is trimmed). Text
+// bytes are 'A', so no caret, CR or LF can alter the arithmetic.
+func capBatchBlock(texts ...int) []byte {
+	var sb strings.Builder
+	sb.WriteString("@echo off\r\n")
+	sb.WriteString(`>"C:\Temp\f.vbs" (` + "\r\n")
+	for _, n := range texts {
+		sb.WriteString("echo ")
+		sb.Write(capFill(n))
+		sb.WriteString("\r\n")
+	}
+	sb.WriteString(")\r\n")
+	return []byte(sb.String())
+}
+
+// capEvenLines splits total text bytes over k lines (k > 0).
+func capEvenLines(total, k int) []int {
+	out := make([]int, k)
+	for i := range out {
+		out[i] = total / k
+		if i < total%k {
+			out[i]++
+		}
+	}
+	return out
+}
+
+func capHasStreamLen(res extract.Result, n int) bool {
+	for _, s := range res.Streams {
+		if len(s) == n {
+			return true
+		}
+	}
+	return false
+}
+
+func capExactMemberSize(t *testing.T, res extract.Result) {
+	t.Helper()
+	if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+		t.Fatalf("CapHits=%v, want exactly [member-size]", res.CapHits)
+	}
+}
+
+// A batch dropper whose carved file is clamped (CRLF join) or whose parsing is
+// stopped (accumulation cap) must record exactly one member-size cap hit.
+func TestCapStopBatchCarverMemberSize(t *testing.T) {
+	const k = 1024 // lines; the join adds 2*(k-1) CRLF bytes the accum cap never sees
+
+	// Text totals capMember+1-2(k-1) < capMember, so addLine never refuses and
+	// only the join clamp (joined length capMember+1) can set the hit.
+	t.Run("crlf-clamp-over-cap", func(t *testing.T) {
+		total := capMember + 1 - 2*(k-1)
+		res := capExtract(capBatchBlock(capEvenLines(total, k)...))
+		capExactMemberSize(t, res)
+		if !capHasStreamLen(res, capMember) {
+			t.Fatalf("no carved stream of length %d (clamped)", capMember)
+		}
+	})
+
+	// Joined length exactly capMember: no clamp, no hit, full stream carved.
+	t.Run("crlf-join-exactly-cap-no-hit", func(t *testing.T) {
+		total := capMember - 2*(k-1)
+		res := capExtract(capBatchBlock(capEvenLines(total, k)...))
+		if capHasHit(res, "member-size") {
+			t.Fatalf("join of exactly capMember recorded member-size: %v", res.CapHits)
+		}
+		if !capHasStreamLen(res, capMember) {
+			t.Fatalf("no carved stream of length %d", capMember)
+		}
+	})
+
+	// A 4-byte first line plus a line that takes accumulated text to
+	// capMember+1: the second line is refused and parsing stops, while the
+	// joined length of what was kept (4 bytes) is nowhere near the clamp.
+	t.Run("accum-cap-stops-parsing", func(t *testing.T) {
+		res := capExtract(capBatchBlock(4, capMember-3))
+		capExactMemberSize(t, res)
+	})
+
+	// Accum boundary: with more than one line the CRLF join would exceed the
+	// cap at exactly capMember of text, so the boundary uses a single line.
+	t.Run("single-line-exactly-cap-no-hit", func(t *testing.T) {
+		res := capExtract(capBatchBlock(capMember))
+		if capHasHit(res, "member-size") {
+			t.Fatalf("single line of capMember bytes recorded member-size: %v", res.CapHits)
+		}
+		if !capHasStreamLen(res, capMember) {
+			t.Fatalf("no carved stream of length %d", capMember)
+		}
+	})
+
+	// A lone line of capMember+1 is refused before anything is kept; the
+	// payload would vanish silently, so member-size must still be recorded.
+	t.Run("single-line-over-cap-records-member-size", func(t *testing.T) {
+		res := capExtract(capBatchBlock(capMember + 1))
+		capExactMemberSize(t, res)
+		for _, s := range res.Streams {
+			if len(s) > capMember {
+				t.Fatalf("stream of %d bytes exceeds capMember", len(s))
+			}
+		}
+	})
+
+	// Negative control: a dropper with small payload stays under cap and has no hit.
+	t.Run("small-payload-no-hit", func(t *testing.T) {
+		bat := []byte("@echo off\r\n" +
+			`>>"C:\Temp\f.vbs" echo Dim http` + "\r\n" +
+			`>>"C:\Temp\f.vbs" echo Set http = CreateObject("MSXML2.ServerXMLHTTP")` + "\r\n")
+		res := capExtract(bat)
+		if capHasHit(res, "member-size") {
+			t.Fatalf("small batch dropper flagged member-size: %v", res.CapHits)
+		}
+	})
+
+	// Negative control: a batch dropper with just "@echo off" (no actual carve).
+	t.Run("prefilter-only-no-hit", func(t *testing.T) {
+		bat := []byte("@echo off\r\nrem no drops here\r\nexit /b 0\r\n")
+		res := capExtract(bat)
+		if capHasHit(res, "member-size") {
+			t.Fatalf("batch with no actual carve flagged member-size: %v", res.CapHits)
+		}
+	})
+}
