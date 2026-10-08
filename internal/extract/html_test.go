@@ -529,6 +529,27 @@ func TestHasScriptURIAttrDirect(t *testing.T) {
 	if !hasScriptURIAttr([]byte(`<script>x</script><a href="javascript:1">`), far) {
 		t.Error("anchor after closed script must match")
 	}
+	// Form feed is HTML whitespace before '='.
+	if !hasScriptURIAttr([]byte("<a href\f=javascript:1>"), far) {
+		t.Error("form feed before = must match")
+	}
+	// '=' inside an unquoted value is not a new assignment.
+	for _, in := range []string{
+		`<a data-note=href=javascript:1>`,
+		`<a title=a=b href=/x data=src=vbscript:1>`,
+	} {
+		if hasScriptURIAttr([]byte(in), far) {
+			t.Errorf("= inside unquoted value must not match: %s", in)
+		}
+	}
+	// Unquoted value ends at whitespace; a later real attribute still matches.
+	if !hasScriptURIAttr([]byte(`<a title=x=y href=javascript:1>`), far) {
+		t.Error("real attribute after unquoted value must match")
+	}
+	// Quoted value after '=' with surrounding whitespace keeps quote state.
+	if hasScriptURIAttr([]byte(`<a title = "href=javascript:1">`), far) {
+		t.Error("= inside quoted value must not match")
+	}
 }
 
 // TestSVGEmbeddedPayloadCarve: an <svg> with an <image href> base64 data: URI

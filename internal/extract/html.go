@@ -207,9 +207,34 @@ func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
 			if scriptURIValueAt(buf, i) {
 				return true
 			}
+			i = skipAttrValue(buf, i+1, &quote)
 		}
 	}
 	return false
+}
+
+// isHTMLSpace reports HTML ASCII whitespace (space, tab, LF, FF, CR).
+func isHTMLSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
+}
+
+// skipAttrValue consumes the attribute value starting at from (after '=') and
+// returns the index of its last consumed byte. A quoted value only consumes
+// the opening quote and sets *quote; an unquoted value runs to whitespace or
+// '>' so an '=' inside it is never taken as a new assignment.
+func skipAttrValue(buf []byte, from int, quote *byte) int {
+	k := from
+	for k < len(buf) && isHTMLSpace(buf[k]) {
+		k++
+	}
+	if k < len(buf) && (buf[k] == '"' || buf[k] == '\'') {
+		*quote = buf[k]
+		return k
+	}
+	for k < len(buf) && !isHTMLSpace(buf[k]) && buf[k] != '>' {
+		k++
+	}
+	return k - 1
 }
 
 // rawTextTags are elements whose content is text, not markup.
@@ -259,7 +284,7 @@ func skipRawText(buf []byte, from int, name string) int {
 // name and its value starts with javascript: or vbscript:.
 func scriptURIValueAt(buf []byte, eq int) bool {
 	j := eq
-	for j > 0 && (buf[j-1] == ' ' || buf[j-1] == '\t' || buf[j-1] == '\n' || buf[j-1] == '\r') {
+	for j > 0 && isHTMLSpace(buf[j-1]) {
 		j--
 	}
 	matched := false
