@@ -1107,6 +1107,7 @@ type capCabFile struct {
 // offset with its own cb, which may deliberately disagree with data.
 func capCab(files []capCabFile, data []byte, mszip bool) []byte {
 	var blocks [][]byte
+	sizes := make([]int, 0)
 	var dict []byte
 	for off := 0; off < len(data); off += 32768 {
 		end := off + 32768
@@ -1114,6 +1115,7 @@ func capCab(files []capCabFile, data []byte, mszip bool) []byte {
 			end = len(data)
 		}
 		chunk := data[off:end]
+		sizes = append(sizes, len(chunk))
 		if !mszip {
 			blocks = append(blocks, chunk)
 			continue
@@ -1134,6 +1136,13 @@ func capCab(files []capCabFile, data []byte, mszip bool) []byte {
 			dict = dict[len(dict)-32768:]
 		}
 	}
+	return capCabBlocks(files, blocks, sizes, mszip)
+}
+
+// capCabBlocks assembles a one-folder CAB from explicit CFDATA payloads
+// (already CK-framed when mszip), so a test can emit empty blocks. sizes holds
+// each block's declared uncompressed length.
+func capCabBlocks(files []capCabFile, blocks [][]byte, sizes []int, mszip bool) []byte {
 	filesLen := 0
 	for _, f := range files {
 		filesLen += 16 + len(f.name) + 1
@@ -1168,11 +1177,7 @@ func capCab(files []capCabFile, data []byte, mszip bool) []byte {
 	pos = coffData
 	for i, b := range blocks {
 		binary.LittleEndian.PutUint16(buf[pos+4:], uint16(len(b)&0xFFFF))
-		n := 32768
-		if i == len(blocks)-1 {
-			n = len(data) - 32768*i
-		}
-		binary.LittleEndian.PutUint16(buf[pos+6:], uint16(n))
+		binary.LittleEndian.PutUint16(buf[pos+6:], uint16(sizes[i]))
 		copy(buf[pos+8:], b)
 		pos += 8 + len(b)
 	}
@@ -1225,5 +1230,34 @@ func TestCapStopCabMemberSize(t *testing.T) {
 	})
 	t.Run("cab-mszip-folder-exactly-cap-declared-past-no-hit", func(t *testing.T) {
 		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember), true)))
+	})
+	// Stored folder fills exactly the cap, then an empty CFDATA block, then a
+	// block with real data: the empty block must not end the scan (AUD-04c8).
+	storedBlocks := func(tail ...[]byte) ([][]byte, []int) {
+		var blocks [][]byte
+		var sizes []int
+		data := capFill(capMember)
+		for off := 0; off < len(data); off += 32768 {
+			end := off + 32768
+			if end > len(data) {
+				end = len(data)
+			}
+			blocks = append(blocks, data[off:end])
+			sizes = append(sizes, end-off)
+		}
+		for _, b := range tail {
+			blocks = append(blocks, b)
+			sizes = append(sizes, len(b))
+		}
+		return blocks, sizes
+	}
+	files := []capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}
+	t.Run("cab-stored-empty-block-after-cap-then-data", func(t *testing.T) {
+		blocks, sizes := storedBlocks([]byte{}, []byte("tail"))
+		wantOnly(t, capExtract(capCabBlocks(files, blocks, sizes, false)))
+	})
+	t.Run("cab-stored-empty-block-after-cap-only-no-hit", func(t *testing.T) {
+		blocks, sizes := storedBlocks([]byte{})
+		noHit(t, capExtract(capCabBlocks(files, blocks, sizes, false)))
 	})
 }

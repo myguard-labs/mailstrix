@@ -215,10 +215,9 @@ func decompressCabFolder(buf []byte, folder cfFolder, cbCFData uint8, compType u
 		switch compType {
 		case 0x00: // NONE — data is stored as-is.
 			remaining := maxBytesPerMember - len(folderData)
-			if remaining <= 0 {
-				// Cap already reached: any further stored bytes are discarded.
-				return folderData, len(compressedBlock) > 0
-			}
+			// remaining is never negative: folderData only grows by take <= remaining.
+			// At the cap (remaining == 0) take is 0, so a non-empty block reports
+			// capped below while an empty block falls through and the scan goes on.
 			take := len(compressedBlock)
 			if take > remaining {
 				take = remaining
