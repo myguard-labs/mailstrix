@@ -30,6 +30,7 @@ package extract
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"time"
 
@@ -317,58 +318,84 @@ func yekaMoreFollow(rc io.Reader) bool {
 // -1 for the header-encrypted case (whole listing hidden → any member validates).
 // A wrong password is rejected by reading that ENCRYPTED member — never a sibling
 // plaintext member, which would read cleanly under any password and false-validate.
-func crack7zPassword(buf []byte, targetIdx int, cands []string, b *archiveBudget, deadline time.Time) string {
-	for _, pw := range cands {
+func crack7zPassword(buf []byte, targetIdx int, cands []string, b *archiveBudget, deadline time.Time) (pw string, dictCap bool) {
+	for _, cand := range cands {
 		if expired(deadline) || b.decryptExhausted() || b.kdfExhausted() {
-			return ""
+			return "", false
 		}
 		b.countAttempt(true)
-		pw := pw
-		ok, stalled := runBounded(deadline, func() bool { return verify7zPassword(buf, targetIdx, pw) })
+		cand := cand
+		type verdict struct{ ok, dictCap bool }
+		v, stalled := runBounded(deadline, func() verdict {
+			ok, dc := verify7zPassword(buf, targetIdx, cand)
+			return verdict{ok, dc}
+		})
 		if stalled {
 			b.markDecryptStalled() // decoder still running: launch nothing more for this input
-			return ""
+			return "", false
 		}
-		if ok {
-			return pw
+		if v.dictCap {
+			// AUD-17e: stop trying candidates. The refusal is not evidence for or
+			// against this candidate (see verify7zPassword), so no password is claimed.
+			return "", true
+		}
+		if v.ok {
+			return cand, false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // verify7zPassword reports whether pw decrypts buf, proven by reading the bytes of
 // the encrypted member at targetIdx (or, when targetIdx<0, the first regular member
 // — only valid for the header-encrypted case where every member is encrypted). A
 // wrong password trips the decompressor on Read. Unconditional recover.
-func verify7zPassword(buf []byte, targetIdx int, pw string) (ok bool) {
+//
+// dictCap is true when the LZMA dictionary ceiling (AUD-17a) refused the archive's
+// header or the member. It is never reported together with ok.
+//
+// AUD-17e, why dictCap is a valid cap stop and not a password verdict: the 7z AES
+// coder has no password check. Its constructor only derives a key, and a wrong
+// password merely yields garbage bytes later. The LZMA coder's dictionary check
+// (boundedLZMADict) runs in the decompressor constructor from the coder properties
+// and unpack size in the folder info, before any ciphertext is read, so it fires
+// identically for right and wrong passwords. For a member-encrypted archive (plain
+// header) the signal is therefore password-independent. For a header-encrypted
+// archive the properties live inside the encrypted header, so the refusal is only
+// reachable once the header decrypts, i.e. with the right password. Either way a
+// dict-cap error proves nothing about the candidate and is never counted as cracked.
+func verify7zPassword(buf []byte, targetIdx int, pw string) (ok, dictCap bool) {
 	defer func() {
 		if recover() != nil {
-			ok = false
+			ok, dictCap = false, false
 		}
 	}()
 	r, err := sevenzip.NewReaderWithPassword(bytes.NewReader(buf), int64(len(buf)), pw)
 	if err != nil {
-		return false
+		return false, errors.Is(err, errLZMADictCap)
 	}
-	readOne := func(f *sevenzip.File) bool {
+	readOne := func(f *sevenzip.File) (bool, bool) {
 		// Validate only on a member that fits the per-member cap, and read it to
 		// EOF: a truncated read at the cap returns no error and could "validate" a
 		// wrong password before the format's CRC/HMAC-at-EOF check fires.
 		if f.UncompressedSize > maxBytesPerMember {
-			return false
+			return false, false
 		}
 		rc, err := f.Open()
 		if err != nil {
-			return false
+			return false, errors.Is(err, errLZMADictCap)
 		}
 		n, rerr := io.Copy(io.Discard, io.LimitReader(rc, maxBytesPerMember+1))
 		_ = rc.Close()
-		return rerr == nil && n <= maxBytesPerMember
+		if errors.Is(rerr, errLZMADictCap) {
+			return false, true
+		}
+		return rerr == nil && n <= maxBytesPerMember, false
 	}
 	if targetIdx >= 0 && targetIdx < len(r.File) {
 		f := r.File[targetIdx]
 		if f.FileInfo().IsDir() {
-			return false
+			return false, false
 		}
 		return readOne(f)
 	}
@@ -382,22 +409,23 @@ func verify7zPassword(buf []byte, targetIdx int, pw string) (ok bool) {
 		}
 		return readOne(f)
 	}
-	return false
+	return false, false
 }
 
 // open7zReader builds a 7z reader with a KNOWN-GOOD password (from crack7zPassword)
-// under an unconditional recover. Returns nil on any error/panic.
-func open7zReader(buf []byte, pw string) (zr *sevenzip.Reader) {
+// under an unconditional recover. Returns nil on any error/panic; dictCap is true
+// when the nil is the AUD-17a dictionary refusal (a cap stop, not corruption).
+func open7zReader(buf []byte, pw string) (zr *sevenzip.Reader, dictCap bool) {
 	defer func() {
 		if recover() != nil {
-			zr = nil
+			zr, dictCap = nil, false
 		}
 	}()
 	r, err := sevenzip.NewReaderWithPassword(bytes.NewReader(buf), int64(len(buf)), pw)
 	if err != nil {
-		return nil
+		return nil, errors.Is(err, errLZMADictCap)
 	}
-	return r
+	return r, false
 }
 
 // crackRarPassword finds the password that decrypts buf, or "" if none do. RAR
