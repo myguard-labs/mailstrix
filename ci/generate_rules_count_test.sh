@@ -28,8 +28,9 @@ assert_bad_count_stops_publication() {
 }
 
 assert_loaded_rules_count 42
-assert_loaded_rules_count 0
+assert_loaded_rules_count 1
 assert_loaded_rules_count 2147483647
+assert_bad_count_stops_publication COUNT_REPORT='check-rules: OK — 0 rules loaded (fingerprint fixture)'
 for invalid_rules in '' -1 +1 01 1.5 1e2 2147483648 9223372036854775808 ' 42' '42 ' $'4\n2'; do
     assert_bad_count_stops_publication COUNT_REPORT="check-rules: OK — ${invalid_rules} rules loaded (fingerprint fixture)"
 done

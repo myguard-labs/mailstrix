@@ -271,6 +271,9 @@ MAX_RULES=2147483647
 if [ "${#RULES}" -gt "${#MAX_RULES}" ] || [ "$RULES" -gt "$MAX_RULES" ]; then
     die "native rule count exceeds ${MAX_RULES}"
 fi
+if [ "$RULES" -eq 0 ]; then
+    die "native rule verifier loaded 0 rules; refusing to publish an empty bundle"
+fi
 
 # 2) Determine the new monotonic version: previous (from the published manifest)
 #    + 1. Never reuse or decrement.
