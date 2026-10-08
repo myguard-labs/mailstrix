@@ -23,7 +23,14 @@ def test_stage_command():
 
 
 class VetWiringTests(unittest.TestCase):
-    def invoke(self, scope, violation=False, selector_failure=False, test_failure=False):
+    def invoke(
+        self,
+        scope,
+        violation=False,
+        selector_failure=False,
+        test_failure=False,
+        full=False,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory)
             (fixture / "go.mod").write_text("module example.com/fixture\n\ngo 1.26\n")
@@ -36,13 +43,21 @@ class VetWiringTests(unittest.TestCase):
                     f'package {name}\nimport "fmt"\n'
                     f'func Check() {{ fmt.Printf("%d", {argument}) }}\n'
                 )
-            test_body = 't.Fatal("selected test failure")' if test_failure else "Check()"
+            test_body = (
+                't.Fatal("selected test failure")' if test_failure else "Check()"
+            )
             (fixture / "affected/fixture_test.go").write_text(
                 'package affected\nimport "testing"\n'
                 f"func TestSelected(t *testing.T) {{ {test_body} }}\n"
             )
             binary = fixture / "bin"
             binary.mkdir()
+            if full:
+                (fixture / "ci").mkdir()
+                # Inert stand-in: records that the combined-coverage check ran.
+                gate = fixture / "ci/go_coverage.sh"
+                gate.write_text('#!/bin/sh\necho "gate $*" >> "$TRACE"\n')
+                gate.chmod(0o755)
             shim = binary / "go"
             shim.write_text("""#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE"
@@ -70,7 +85,7 @@ exec "$REAL_GO" "$@"
                     TRACE=str(trace),
                     SCOPE=scope,
                     SELECTOR_FAILURE=str(int(selector_failure)),
-                    CHANGED_FILES="--changed -- affected/fixture.go",
+                    CHANGED_FILES="" if full else "--changed -- affected/fixture.go",
                 ),
                 capture_output=True,
                 text=True,
@@ -82,14 +97,35 @@ exec "$REAL_GO" "$@"
         result, trace = self.invoke("./affected")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vet -tags yara_static ./affected\n", trace)
-        self.assertIn("test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace)
+        self.assertIn(
+            "test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace
+        )
         self.assertNotIn("./unaffected", trace)
+        self.assertNotIn("cover", trace)
+
+    def test_full_run_reuses_test_run_for_combined_coverage(self):
+        result, trace = self.invoke("./affected", full=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "test -race -p 1 -timeout 30m -tags yara_static "
+            "-coverpkg=./... -coverprofile=/tmp/cover.out ./affected\n",
+            trace,
+        )
+        self.assertEqual(trace.count("test -race"), 1)
+        self.assertIn("gate /tmp/cover.out\n", trace)
+
+    def test_full_run_test_failure_skips_coverage_gate(self):
+        result, trace = self.invoke("./affected", full=True, test_failure=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("gate", trace)
 
     def test_selected_test_failure_is_fatal(self):
         result, trace = self.invoke("./affected", test_failure=True)
         self.assertNotEqual(result.returncode, 0, "selected test failure must fail")
         self.assertIn("selected test failure", result.stdout)
-        self.assertIn("test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace)
+        self.assertIn(
+            "test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace
+        )
 
     def test_affected_vet_violation_is_fatal_before_tests(self):
         result, trace = self.invoke("./affected", violation=True)

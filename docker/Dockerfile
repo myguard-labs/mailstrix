@@ -93,6 +93,9 @@ FROM build AS test
 # fail selection; documentation without a test contract selects no packages.
 # Race-instrumented boundary suites can use several GiB each. Run package
 # processes serially so their peaks fit the 6 GiB CI runner; retain every test.
+# A full run (no CHANGED_FILES) reuses that one test run for a combined
+# -coverpkg=./... profile checked by ci/go_coverage.sh; scoped runs skip it
+# because a partial total is not comparable to the floor.
 ARG CHANGED_FILES=""
 # CHANGED_FILES and pkgs are space-separated lists: word splitting is intended.
 # hadolint ignore=SC2086
@@ -100,9 +103,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
     && echo "go test scope: ${pkgs:-<none, docs-only change>}" \
+    && cover="" \
+    && if [ -z "$CHANGED_FILES" ]; then cover="-coverpkg=./... -coverprofile=/tmp/cover.out"; fi \
     && if [ -n "$pkgs" ]; then \
-        go vet -tags yara_static $pkgs && go test -race -p 1 -timeout 30m -tags yara_static $pkgs; \
-    fi
+        go vet -tags yara_static $pkgs && go test -race -p 1 -timeout 30m -tags yara_static $cover $pkgs; \
+    fi \
+    && if [ -n "$cover" ]; then ci/go_coverage.sh /tmp/cover.out; fi
 
 # ---- binary export (release artifacts; not part of the runtime image) -------
 # Optional parity image uses only trusted repository rule sources. It has no

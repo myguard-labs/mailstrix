@@ -162,6 +162,8 @@ GO_INPUTS = [
     "ci/testdata/lzmadict-enc-in.7z",
     "ci/testdata/lzmadict-enc-over.7z",
     "ci/testdata/lzmadict-hdrenc-over.7z",
+    "ci/go_coverage.sh",
+    "ci/go_coverage_test.py",
     "ci/clamd_cache_test.go",
     "ci/scanner_budget_test.go",
     "ci/streamdedupkey_test.go",
