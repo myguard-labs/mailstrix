@@ -1096,6 +1096,13 @@ func TestCapStopBatchCarverMemberSize(t *testing.T) {
 	})
 }
 
+// capCabFill is the CAB tests' filler. 'A' is a base64/hex-looking byte, so a
+// 16 MiB run of it sends every encoded-text decoder over the whole member under
+// -race (about 12s per Extract); 0xFF is none of those and keeps the same size.
+func capCabFill(n int) []byte {
+	return bytes.Repeat([]byte{0xFF}, n)
+}
+
 type capCabFile struct {
 	name string
 	cb   uint32
@@ -1198,45 +1205,45 @@ func TestCapStopCabMemberSize(t *testing.T) {
 		}
 	}
 	t.Run("cab-member-over-cap", func(t *testing.T) {
-		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember + 1}}, capFill(capMember+1), false)))
+		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember + 1}}, capCabFill(capMember+1), false)))
 	})
 	t.Run("cab-member-exactly-cap-no-hit", func(t *testing.T) {
-		res := capExtract(capCab([]capCabFile{{"a.bin", capMember}}, capFill(capMember), false))
+		res := capExtract(capCab([]capCabFile{{"a.bin", capMember}}, capCabFill(capMember), false))
 		noHit(t, res)
 		if len(res.Streams) == 0 {
 			t.Fatal("in-cap member not extracted")
 		}
 	})
 	t.Run("cab-folder-cap-cuts-second-file", func(t *testing.T) {
-		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember+10), false)))
+		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capCabFill(capMember+10), false)))
 	})
 	t.Run("cab-folder-exactly-cap-no-hit", func(t *testing.T) {
-		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 10}}, capFill(capMember), false)))
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 10}}, capCabFill(capMember), false)))
 	})
 	t.Run("cab-short-folder-no-hit", func(t *testing.T) {
 		// Declared size exceeds the CFDATA present, but far below the cap.
-		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", 100000}}, capFill(1000), false)))
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", 100000}}, capCabFill(1000), false)))
 	})
 	t.Run("cab-mszip-folder-cap-cuts-second-file", func(t *testing.T) {
-		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember+10), true)))
+		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capCabFill(capMember+10), true)))
 	})
 	t.Run("cab-mszip-folder-exactly-cap-no-hit", func(t *testing.T) {
-		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 10}}, capFill(capMember), true)))
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 10}}, capCabFill(capMember), true)))
 	})
 	// Folder data ends exactly at the cap and nothing was discarded, but the
 	// declared file range runs past it (incomplete/corrupt folder): not a cap hit.
 	t.Run("cab-folder-exactly-cap-declared-past-no-hit", func(t *testing.T) {
-		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember), false)))
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capCabFill(capMember), false)))
 	})
 	t.Run("cab-mszip-folder-exactly-cap-declared-past-no-hit", func(t *testing.T) {
-		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember), true)))
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capCabFill(capMember), true)))
 	})
 	// Stored folder fills exactly the cap, then an empty CFDATA block, then a
 	// block with real data: the empty block must not end the scan (AUD-04c8).
 	storedBlocks := func(tail ...[]byte) ([][]byte, []int) {
 		var blocks [][]byte
 		var sizes []int
-		data := capFill(capMember)
+		data := capCabFill(capMember)
 		for off := 0; off < len(data); off += 32768 {
 			end := off + 32768
 			if end > len(data) {
