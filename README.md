@@ -317,7 +317,9 @@ Point `-url` /
 `https`; a plain-`http` mirror needs an explicit opt-in (`-allow-http`,
 `serve -rules-allow-http`, or `MAILSTRIX_RULES_ALLOW_HTTP=1`). Other schemes and
 URLs without a host are always refused, and a redirect from `https` to `http` is
-refused even with the opt-in.
+refused even with the opt-in. The base URL must not contain userinfo
+(credentials), query parameters, or fragments; these are refused to prevent
+credential leaks and broken asset URL construction.
 
 A bundle is refused when the rules actually loaded from the verified download
 number zero, or fall below 50% of the installed bundle's rule count (exactly 50%

@@ -481,6 +481,86 @@ func TestCheckRulesURL(t *testing.T) {
 	}
 }
 
+func TestCheckRulesBaseURL(t *testing.T) {
+	for _, tc := range []struct {
+		raw       string
+		allowHTTP bool
+		ok        bool
+		desc      string
+	}{
+		{"https://example.com/rules/", false, true, "https with trailing slash"},
+		{"https://example.com/rules", false, true, "https without trailing slash"},
+		{"http://mirror.lan/rules", true, true, "http with opt-in"},
+		{"https://s3cretU:s3cretP@example.com/r", false, false, "userinfo with password"},
+		{"https://s3cretU@example.com/r", false, false, "userinfo without password"},
+		{"https://example.com/r?x=1", false, false, "query with value"},
+		{"https://example.com/r?", false, false, "bare trailing query marker"},
+		{"https://example.com/r#frag", false, false, "fragment"},
+		{"https://example.com/r#", false, false, "bare trailing fragment marker"},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := checkRulesBaseURL(tc.raw, tc.allowHTTP)
+			if (err == nil) != tc.ok {
+				t.Fatalf("checkRulesBaseURL(%q, %v) = %v, want ok=%v", tc.raw, tc.allowHTTP, err, tc.ok)
+			}
+			// For userinfo cases, verify that error message does not contain credentials
+			if !tc.ok && strings.Contains(tc.raw, "s3cretU") {
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "s3cretU") || strings.Contains(errMsg, "s3cretP") {
+					t.Errorf("error message leaked credentials: %v", errMsg)
+				}
+			}
+			// For query/fragment cases, verify that error message does not contain the URL
+			if !tc.ok && (strings.Contains(tc.raw, "?") || strings.Contains(tc.raw, "#")) {
+				errMsg := err.Error()
+				if strings.Contains(errMsg, tc.raw) {
+					t.Errorf("error message echoed the URL: %v", errMsg)
+				}
+			}
+		})
+	}
+}
+
+// TestFetchRulesRefusesUserinfoBaseURL verifies that a base URL with userinfo
+// (credentials) is rejected before any HTTP request is made.
+func TestFetchRulesRefusesUserinfoBaseURL(t *testing.T) {
+	rt := &countingTransport{}
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	_, err := FetchRules(context.Background(), "https://s3cretU:s3cretP@example.com/r", cacheDir, "4.5.2", &http.Client{Transport: rt}, false)
+	if err == nil {
+		t.Fatal("userinfo base URL was accepted")
+	}
+	if rt.n.Load() != 0 {
+		t.Fatalf("userinfo base URL made %d requests, want 0", rt.n.Load())
+	}
+	if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+		t.Fatalf("userinfo base URL touched the cache dir")
+	}
+}
+
+// TestFetchRulesFollowsHTTPSRedirectToQueryURL verifies that redirects to URLs
+// with query parameters (e.g., GitHub release assets) still succeed. The base URL
+// itself must not have a query, but redirect targets may.
+func TestFetchRulesFollowsHTTPSRedirectToQueryURL(t *testing.T) {
+	yac := newRulesYac(t)
+	var storeHits, frontHits atomic.Int64
+	store := httptest.NewTLSServer(countingHandler(&storeHits, rulesHandler(yac, 2, "4.5.2", "", testRulesManifestGenerated)))
+	defer store.Close()
+	front := httptest.NewTLSServer(redirectHandler(&frontHits, func() string { return store.URL }))
+	defer front.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(store.Certificate())
+	pool.AddCert(front.Certificate())
+	hc := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}},
+	}
+	// Base URL has no query, so it should pass validation
+	res, err := FetchRules(context.Background(), front.URL+"/", t.TempDir(), "4.5.2", hc, false)
+	if err != nil || !res.Updated || res.NewVersion != 2 {
+		t.Fatalf("https->https redirect to query URL: res=%+v err=%v", res, err)
+	}
+}
+
 // Redirects to a non-http scheme are refused by the guard itself.
 func TestRulesClientRefusesRedirectToOtherScheme(t *testing.T) {
 	hc := rulesClient(&http.Client{}, true)

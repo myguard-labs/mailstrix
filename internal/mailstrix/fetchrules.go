@@ -75,9 +75,12 @@ type FetchResult struct {
 //
 // baseURL must be https. Plain http is accepted only when allowHTTP is set
 // (MAILSTRIX_RULES_ALLOW_HTTP); any other scheme or a missing host is refused
-// before any request. Redirects must never leave https once the chain has used
-// it, even with allowHTTP, and are capped at maxRulesRedirects hops. hc is never
-// modified: its CheckRedirect still runs after these checks on a private copy.
+// before any request. baseURL must not contain userinfo (credentials), query
+// parameters, or fragments; these are refused to prevent credential leaks and
+// broken asset URL construction. Redirects must never leave https once the chain
+// has used it, even with allowHTTP, and are capped at maxRulesRedirects hops.
+// hc is never modified: its CheckRedirect still runs after these checks on a
+// private copy.
 func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool) (FetchResult, error) {
 	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, allowHTTP, 0, 0, nil)
 }
@@ -104,6 +107,31 @@ func checkRulesURL(raw string, allowHTTP bool) error {
 	}
 	if u.Hostname() == "" {
 		return fmt.Errorf("rules URL has no host")
+	}
+	return nil
+}
+
+// checkRulesBaseURL validates a base URL for the rules bundle: it must pass
+// checkRulesURL and must not contain userinfo (credentials), query parameters,
+// or fragments. These are refused to prevent credential leaks and broken asset
+// URL construction (asset URLs are built by simple string concatenation).
+func checkRulesBaseURL(raw string, allowHTTP bool) error {
+	if err := checkRulesURL(raw, allowHTTP); err != nil {
+		return err
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Already checked in checkRulesURL, should not happen
+		return fmt.Errorf("rules URL is malformed: %w", err)
+	}
+	if u.User != nil {
+		return fmt.Errorf("rules URL must not contain credentials (userinfo)")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("rules URL must not contain a query string")
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("rules URL must not contain a fragment")
 	}
 	return nil
 }
@@ -146,7 +174,7 @@ func rulesClient(hc *http.Client, allowHTTP bool) *http.Client {
 // the cache lock. It runs only after both cache files have been installed.
 func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool, minimumVersion int, liveCount int, reload func() error) (FetchResult, error) {
 	res := FetchResult{}
-	if err := checkRulesURL(baseURL, allowHTTP); err != nil {
+	if err := checkRulesBaseURL(baseURL, allowHTTP); err != nil {
 		return res, err
 	}
 	if hc == nil {
