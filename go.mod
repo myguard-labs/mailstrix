@@ -15,10 +15,12 @@ require (
 	github.com/saferwall/pe v1.6.5
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
 	github.com/zeebo/xxh3 v1.1.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.58.0
 	www.velocidex.com/golang/oleparse v0.0.0-20251204214047-2e3e765e26a1
 )
+
+require golang.org/x/net v0.59.0
 
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
@@ -44,8 +46,8 @@ require (
 	github.com/ulikunitz/xz v0.5.15
 	go.uber.org/atomic v1.11.0 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
-	golang.org/x/crypto v0.56.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	modernc.org/libc v1.75.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect

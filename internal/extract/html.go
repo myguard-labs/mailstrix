@@ -52,7 +52,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"regexp"
+	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // asciiContainsFold reports whether haystack contains needle using ASCII
@@ -156,166 +159,56 @@ func looksLikeMarkup(head []byte) bool {
 }
 
 // scriptURIAttrs are the attribute names whose value is navigated/executed.
-var scriptURIAttrs = [][]byte{[]byte("href"), []byte("src"), []byte("action"), []byte("formaction")}
+var scriptURIAttrs = map[string]bool{"href": true, "src": true, "action": true, "formaction": true}
 
 // hasScriptURIAttr reports whether any href/src/action/formaction attribute
-// inside an HTML start tag has a value that starts (after leading
-// whitespace/control chars and an optional quote) with javascript: or
-// vbscript: (case-insensitive). Text outside start tags and comments is
-// ignored. No entity decoding. Single bounded forward pass, no allocation.
+// of a start tag has a value that starts (after leading C0 controls and
+// space, ignoring ASCII tab/LF/CR anywhere, as browsers do) with javascript:
+// or vbscript: (case-insensitive). Tokenization, comments and raw-text
+// elements follow golang.org/x/net/html. The tokenizer decodes entities, so
+// entity-encoded schemes also match here.
+// ICAP-385-1b (OBFUSCATED marker) would compare the raw attribute source
+// against the decoded value at the match site below.
+// The caller passes the already-capped head; MaxBuf is bounded to len(buf).
 func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
-	n := 0
-	inTag := false
-	ts := 0
-	var quote byte
-	for i := 0; i < len(buf); i++ {
-		c := buf[i]
-		if !inTag {
-			if c != '<' || i+1 >= len(buf) {
-				continue
-			}
-			if bytes.HasPrefix(buf[i:], []byte("<!--")) {
-				end := bytes.Index(buf[i+4:], []byte("-->"))
-				if end < 0 {
-					return false
+	z := html.NewTokenizer(bytes.NewReader(buf))
+	z.SetMaxBuf(len(buf) + 1)
+	for n := 1; ; n++ {
+		if n&0xff == 0 && expired(deadline) {
+			return false
+		}
+		switch z.Next() {
+		case html.ErrorToken:
+			return false
+		case html.StartTagToken, html.SelfClosingTagToken:
+			for more := true; more; {
+				var key, val []byte
+				key, val, more = z.TagAttr()
+				if scriptURIAttrs[string(key)] && isScriptURI(val) {
+					return true
 				}
-				i += 4 + end + 2
-			} else if d := buf[i+1] | 0x20; d >= 'a' && d <= 'z' {
-				inTag = true
-				ts = i + 1
 			}
-			continue
-		}
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		switch c {
-		case '"', '\'':
-			quote = c
-		case '>':
-			inTag = false
-			if name := rawTextTagName(buf, ts); name != "" {
-				i = skipRawText(buf, i+1, name) - 1
-			}
-		case '=':
-			if n++; n&0xfff == 0 && expired(deadline) {
-				return false
-			}
-			if scriptURIValueAt(buf, i) {
-				return true
-			}
-			i = skipAttrValue(buf, i+1, &quote)
 		}
 	}
-	return false
 }
 
-// isHTMLSpace reports HTML ASCII whitespace (space, tab, LF, FF, CR).
-func isHTMLSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
-}
-
-// skipAttrValue consumes the attribute value starting at from (after '=') and
-// returns the index of its last consumed byte. A quoted value only consumes
-// the opening quote and sets *quote; an unquoted value runs to whitespace or
-// '>' so an '=' inside it is never taken as a new assignment.
-func skipAttrValue(buf []byte, from int, quote *byte) int {
-	k := from
-	for k < len(buf) && isHTMLSpace(buf[k]) {
-		k++
+// isScriptURI reports whether v starts with javascript: or vbscript: after
+// browser URL normalisation (leading C0/space stripped, tab/LF/CR removed).
+func isScriptURI(v []byte) bool {
+	i := 0
+	for i < len(v) && v[i] <= ' ' {
+		i++
 	}
-	if k < len(buf) && (buf[k] == '"' || buf[k] == '\'') {
-		*quote = buf[k]
-		return k
-	}
-	for k < len(buf) && !isHTMLSpace(buf[k]) && buf[k] != '>' {
-		k++
-	}
-	return k - 1
-}
-
-// rawTextTags are elements whose content is text, not markup.
-var rawTextTags = []string{"script", "style", "textarea", "title", "xmp",
-	"noscript", "iframe", "noembed", "noframes", "plaintext"}
-
-// rawTextTagName returns the raw-text element name of the start tag whose name
-// begins at buf[ts], or "" when it is not one (ASCII case-insensitive, exact).
-func rawTextTagName(buf []byte, ts int) string {
-	e := ts
-	for e < len(buf) && buf[e] > ' ' && buf[e] != '/' && buf[e] != '>' {
-		e++
-	}
-	for _, n := range rawTextTags {
-		if len(n) == e-ts && hasPrefixFold(buf[ts:e], n) {
-			return n
+	var w [11]byte // len("javascript:")
+	k := 0
+	for ; i < len(v) && k < len(w); i++ {
+		if c := v[i]; c != '\t' && c != '\n' && c != '\r' {
+			w[k] = foldByte(c)
+			k++
 		}
 	}
-	return ""
-}
-
-// skipRawText returns the index of the "</name" that closes a raw-text element
-// whose content starts at from, or len(buf) when unclosed (plaintext never
-// closes).
-func skipRawText(buf []byte, from int, name string) int {
-	if name == "plaintext" {
-		return len(buf)
-	}
-	for i := from; i+1 < len(buf); i++ {
-		j := bytes.IndexByte(buf[i:], '<')
-		if j < 0 {
-			break
-		}
-		i += j
-		if i+1 >= len(buf) || buf[i+1] != '/' {
-			continue
-		}
-		e := i + 2 + len(name)
-		if hasPrefixFold(buf[i+2:], name) && (e >= len(buf) || buf[e] <= ' ' || buf[e] == '/' || buf[e] == '>') {
-			return i
-		}
-	}
-	return len(buf)
-}
-
-// scriptURIValueAt reports whether buf[eq]=='=' ends a script-URI attribute
-// name and its value starts with javascript: or vbscript:.
-func scriptURIValueAt(buf []byte, eq int) bool {
-	j := eq
-	for j > 0 && isHTMLSpace(buf[j-1]) {
-		j--
-	}
-	matched := false
-	for _, name := range scriptURIAttrs {
-		if j < len(name) || !asciiEqualFold(buf[j-len(name):j], name) {
-			continue
-		}
-		if k := j - len(name); k > 0 {
-			c := buf[k-1]
-			if c == '-' || c == '_' || c >= '0' && c <= '9' || c|0x20 >= 'a' && c|0x20 <= 'z' {
-				continue
-			}
-		}
-		matched = true
-		break
-	}
-	if !matched {
-		return false
-	}
-	k := eq + 1
-	for k < len(buf) && buf[k] <= ' ' {
-		k++
-	}
-	if k < len(buf) && (buf[k] == '"' || buf[k] == '\'') {
-		k++
-	}
-	for k < len(buf) && buf[k] <= ' ' {
-		k++
-	}
-	rest := buf[k:]
-	return hasPrefixFold(rest, "javascript:") || hasPrefixFold(rest, "vbscript:")
+	s := string(w[:k])
+	return s == "javascript:" || strings.HasPrefix(s, "vbscript:")
 }
 
 // foldByte lowercases ASCII letters only; every other byte is unchanged.
@@ -324,32 +217,6 @@ func foldByte(c byte) byte {
 		return c | 0x20
 	}
 	return c
-}
-
-// asciiEqualFold compares a against the lowercase literal b, folding only
-// ASCII letters in a.
-func asciiEqualFold(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if foldByte(a[i]) != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func hasPrefixFold(b []byte, p string) bool {
-	if len(b) < len(p) {
-		return false
-	}
-	for i := 0; i < len(p); i++ {
-		if foldByte(b[i]) != p[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // fromHTMLSmuggling inspects a plain-text/markup buffer for HTML-smuggling and
