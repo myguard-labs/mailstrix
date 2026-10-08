@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"path"
 	"strings"
@@ -655,6 +656,14 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		return
 	}
 	zr, err := open.r, open.err
+	if errors.Is(err, errLZMADictCap) {
+		// AUD-17a: an LZMA-encoded header (kEncodedHeader) is decoded inside
+		// NewReader; the dictionary ceiling refused it. That is an incomplete scan,
+		// not a header-encrypted or corrupt archive, so skip the crack/classify path.
+		res.IsArchive = true
+		res.stopHit("lzma-dict")
+		return
+	}
 	if err != nil {
 		// The reader won't open. This is either a header-encrypted 7z (the file
 		// list itself is AES-wrapped) or plain corruption. With candidates, try to
@@ -728,6 +737,10 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		if !ran {
 			continue
 		}
+		if plain.capStop {
+			res.stopHit("lzma-dict") // AUD-17: member needs more LZMA dictionary than lzmaDictCeiling
+			continue
+		}
 		if data, ok := plain.data, plain.ok; ok {
 			emitMember(data, res, b, depth, deadline)
 			continue
@@ -757,7 +770,7 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 			markEncryptedArchive(res)
 			continue
 		}
-		if data, ok := boundedDecrypted7zMember(dec.File, i, b, deadline); ok {
+		if data, ok := boundedDecrypted7zMember(dec.File, i, b, res, deadline); ok {
 			// Payload before marker so a maxStreams cap can't drop the dropper.
 			emitMember(data, res, b, depth, deadline)
 			markDecryptedArchive(res)
@@ -791,8 +804,8 @@ type sevenzipOpen struct {
 // the immutable archive buffer, so an abandoned read cannot corrupt the walk.
 func boundedPlain7zMember(f *sevenzip.File, deadline time.Time) (memberRead, bool) {
 	return runBoundedPlain(deadline, func() memberRead {
-		data, ok := open7zMemberPlain(f)
-		return memberRead{data: data, ok: ok}
+		data, ok, capStop := open7zMemberPlain(f)
+		return memberRead{data: data, ok: ok, capStop: capStop}
 	})
 }
 
@@ -804,22 +817,23 @@ func boundedPlain7zMember(f *sevenzip.File, deadline time.Time) (memberRead, boo
 //
 // Call it through boundedPlain7zMember, never directly: the LZMA decode runs on
 // hostile input and cannot be cancelled, so it belongs on a pooled worker (A8).
-func open7zMemberPlain(f *sevenzip.File) (out []byte, ok bool) {
+func open7zMemberPlain(f *sevenzip.File) (out []byte, ok, capStop bool) {
 	defer func() {
 		if recover() != nil {
-			out, ok = nil, false
+			out, ok, capStop = nil, false, false
 		}
 	}()
 	rc, err := f.Open()
 	if err != nil {
-		return nil, false
+		// AUD-17: a refused LZMA dictionary is a cap stop, not corruption.
+		return nil, false, errors.Is(err, errLZMADictCap)
 	}
 	defer func() { _ = rc.Close() }()
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(io.LimitReader(rc, maxBytesPerMember)); err != nil {
-		return nil, false // decrypt-garbage tripped the decompressor, or truncation
+		return nil, false, errors.Is(err, errLZMADictCap) // garbage tripped the decompressor, or truncation
 	}
-	return buf.Bytes(), true // clean read (possibly empty for an empty member)
+	return buf.Bytes(), true, false // clean read (possibly empty for an empty member)
 }
 
 // emit7zMembers walks an already-decrypted 7z reader (the header-encrypted case,
@@ -838,7 +852,7 @@ func emit7zMembers(zr *sevenzip.Reader, res *Result, b *archiveBudget, depth int
 			res.stopHit("member-size") // AUD-04c2
 			continue
 		}
-		data, ok := boundedDecrypted7zMember(zr.File, i, b, deadline)
+		data, ok := boundedDecrypted7zMember(zr.File, i, b, res, deadline)
 		if !ok || len(data) == 0 {
 			if b.decryptExhausted() {
 				break // stalled decoder: stop walking this archive entirely
@@ -856,6 +870,10 @@ func emit7zMembers(zr *sevenzip.Reader, res *Result, b *archiveBudget, depth int
 type memberRead struct {
 	data []byte
 	ok   bool
+	// capStop is set when the read was refused by the LZMA dictionary ceiling
+	// (AUD-17); the caller records a "lzma-dict" cap hit instead of treating
+	// the member as corrupt or encrypted.
+	capStop bool
 }
 
 // boundedDecrypted7zMember reads a member with the CRACKED password on a pooled
@@ -865,17 +883,20 @@ type memberRead struct {
 // the containment entirely — the crack would land inside a worker slot and then the
 // (unbounded) extraction would run on the scan goroutine. A stall latches the budget,
 // so the remaining members of a hostile archive are not fed to the decoder as well.
-func boundedDecrypted7zMember(files []*sevenzip.File, idx int, b *archiveBudget, deadline time.Time) ([]byte, bool) {
+func boundedDecrypted7zMember(files []*sevenzip.File, idx int, b *archiveBudget, res *Result, deadline time.Time) ([]byte, bool) {
 	if b.decryptExhausted() {
 		return nil, false // already stalled/capped: launch no more decoder work
 	}
 	r, stalled := runBounded(deadline, func() memberRead {
-		data, ok := openDecrypted7zMember(files, idx)
-		return memberRead{data: data, ok: ok}
+		data, ok, capStop := openDecrypted7zMember(files, idx)
+		return memberRead{data: data, ok: ok, capStop: capStop}
 	})
 	if stalled {
 		b.markDecryptStalled()
 		return nil, false
+	}
+	if r.capStop {
+		res.stopHit("lzma-dict") // AUD-17
 	}
 	return r.data, r.ok
 }
@@ -885,29 +906,29 @@ func boundedDecrypted7zMember(files []*sevenzip.File, idx int, b *archiveBudget,
 // decompress runs on hostile input). Returns (data, true) on a clean read,
 // (nil, false) on miss / error / oversize. Call it through
 // boundedDecrypted7zMember — it must not run on the scan goroutine.
-func openDecrypted7zMember(files []*sevenzip.File, idx int) (out []byte, ok bool) {
+func openDecrypted7zMember(files []*sevenzip.File, idx int) (out []byte, ok, capStop bool) {
 	defer func() {
 		if recover() != nil {
-			out, ok = nil, false
+			out, ok, capStop = nil, false, false
 		}
 	}()
 	if idx < 0 || idx >= len(files) {
-		return nil, false
+		return nil, false, false
 	}
 	f := files[idx]
 	if f.FileInfo().IsDir() || f.UncompressedSize > maxBytesPerMember {
-		return nil, false
+		return nil, false, false
 	}
 	rc, err := f.Open()
 	if err != nil {
-		return nil, false
+		return nil, false, errors.Is(err, errLZMADictCap) // AUD-17
 	}
 	defer func() { _ = rc.Close() }()
 	data := readMember(rc, f.UncompressedSize)
 	if data == nil {
-		return nil, false // read/decompress failure: not a clean decrypt
+		return nil, false, false // read/decompress failure: not a clean decrypt
 	}
-	return data, true
+	return data, true, false
 }
 
 // isEncryptedErr reports whether a member Open error is an encryption/password
