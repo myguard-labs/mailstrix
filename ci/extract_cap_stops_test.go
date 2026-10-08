@@ -433,6 +433,9 @@ func capHdrEnc7z(t *testing.T, name string, cands ...string) extract.Result {
 }
 
 func TestCapStopHeaderEncrypted7zMemberSize(t *testing.T) {
+	// Cap-sized encrypted member: lift the 750ms production decrypt watchdog so a
+	// loaded -race runner cannot abandon the decrypt (AUD-CI-WD).
+	t.Cleanup(extract.SetDecryptAttemptTimeForTest(time.Minute))
 	t.Run("oversize-records-member-size", func(t *testing.T) {
 		res := capHdrEnc7z(t, "hdrenc-oversize.7z", "wrong", "test")
 		// DecryptedArchive stays false here (nothing was emitted); the hit itself
@@ -678,6 +681,9 @@ func capRarUnknownBody(n, markAt int) []byte {
 }
 
 func TestCapStopRarUnknownSizeMember(t *testing.T) {
+	// Cap-sized encrypted member: lift the 750ms production decrypt watchdog so a
+	// loaded -race runner cannot abandon the decrypt (AUD-CI-WD).
+	t.Cleanup(extract.SetDecryptAttemptTimeForTest(time.Minute))
 	t.Run("plain-over-cap-records-member-size", func(t *testing.T) {
 		body := capRarUnknownBody(capMember+1, capMember-6) // marker straddles the cap: its last byte is the first past it
 		res := capRarExtract(capRar5(t, capRarMember{name: "u.bin", data: body, declared: capUnknown, unknownSize: true}))
