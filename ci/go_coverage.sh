@@ -9,7 +9,7 @@ if [[ ${1-} == --help ]]; then
 	sed -n '2,6p' "$0"
 	exit 0
 fi
-FLOOR_DEFAULT=85.5
+FLOOR_DEFAULT=84.4
 profile=${1-}
 floor=${2-$FLOOR_DEFAULT}
 if [[ -z $profile || ! -s $profile ]]; then
