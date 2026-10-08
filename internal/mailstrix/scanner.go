@@ -1703,18 +1703,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	if incomplete {
 		s.logf("extraction budget exhausted; scan result is incomplete")
 	}
-	if res.IsDoc {
-		s.exDocs.Add(1)
-	}
-	if res.Encrypted {
-		s.exEncrypted.Add(1)
-	}
-	if res.Failed {
-		s.exFailed.Add(1)
-	}
-	if res.Panicked {
-		s.exPanicked.Add(1)
-	}
+	s.recordExtractMetrics(&res)
 	// An extractor panic aborted extraction mid-way, so members may be missing:
 	// the verdict is partial (COR-05) and is marked incomplete, never cached or
 	// reported clean. res.Failed alone stays fail-open for mail: it also flags
@@ -1733,55 +1722,6 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	}
 	if (res.Failed || res.Panicked) && completionErr == nil {
 		completionErr = fmt.Errorf("extractor did not complete")
-	}
-	if res.IsMSI {
-		s.exMSI.Add(1)
-	}
-	if res.IsMSG {
-		s.exMSG.Add(1)
-	}
-	if res.IsOneNote {
-		s.exOneNote.Add(1)
-	}
-	if res.IsArchive {
-		s.exArchive.Add(1)
-	}
-	if res.DecryptedArchive {
-		s.exArchiveDecrypted.Add(1)
-	}
-	if res.IsOLEPackage {
-		s.exOLEPackage.Add(1)
-	}
-	if res.IsLNK {
-		s.exLNK.Add(1)
-	}
-	if res.IsPDF {
-		s.exPDF.Add(1)
-	}
-	if res.IsRTF {
-		s.exRTF.Add(1)
-	}
-	if res.IsSLK {
-		s.exSLK.Add(1)
-	}
-	if res.EncodedScript {
-		s.exEncodedScript.Add(1)
-	}
-	if res.HasDocProps {
-		s.exDocProps.Add(1)
-	}
-	if res.HasXLMFold {
-		s.exXLMFold.Add(1)
-	}
-	if res.DecodedStreams > 0 {
-		s.exDecoded.Add(1)
-	}
-	// Macro/extracted-stream accounting excludes the static-decode blobs (the
-	// trailing DecodedStreams entries) so a plain script body carrying a base64
-	// run isn't miscounted as a macro document; decode is tracked by exDecoded.
-	if n := len(res.Streams) - res.DecodedStreams; n > 0 {
-		s.exMacroDocs.Add(1)
-		s.exStreams.Add(uint64(n))
 	}
 	// Enrich with the decompressed macro source. A sub-scan error must NOT
 	// discard the matches already found on the raw bytes, so it is logged and
@@ -1988,113 +1928,15 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	// MalwareBazaar identifies complete files, never MIME envelopes or derived
 	// streams. Keep both hashing and lookup behind the effort/checker gate.
 	if profile.ReputationFeeds && s.mbazaar != nil {
-		candidates := [][]byte{buf}
-		if res.TopType == extract.TopTypeMIME {
-			candidates = res.MIMEAttachments
-		}
-		seen := make(map[[sha256.Size]byte]struct{})
-		for _, candidate := range candidates {
-			if !deadline.IsZero() && !time.Now().Before(deadline) {
-				incomplete = true
-				break
-			}
-			digest := sha256.Sum256(candidate)
-			if _, duplicate := seen[digest]; duplicate {
-				continue
-			}
-			seen[digest] = struct{}{}
-			for _, h := range s.mbazaar.CheckDigest(digest) {
-				out = append(out, Match{Rule: h.Rule(), Tags: []string{"malwarebazaar"}, Meta: map[string]string{"sha256": h.SHA256}})
-			}
-		}
+		mbMatches, mbIncomplete := s.mbazaarMatches(buf, &res, deadline)
+		out = append(out, mbMatches...)
+		incomplete = incomplete || mbIncomplete
 	}
-	// Reputation feeds: URLhaus, ThreatFox. URL candidates are extracted
-	// ONCE per buffer (raw + defanged pass) and fanned to both checkers,
-	// eliminating redundant regex walks and full-buffer defang copies.
-	// Each feed still deduplicates across buffers via its own seenX map.
+	// Reputation feeds: URLhaus, ThreatFox (see urlFeedMatches).
 	if profile.ReputationFeeds && (s.urlhaus != nil || s.threatfox != nil) {
-		// maxN is the largest per-feed budget; Extract uses it so the candidate
-		// list is long enough for any single checker. Each checker truncates to
-		// its own (smaller) budget via the maxURLs argument to CheckCandidates.
-		maxN := s.urlhausMax
-		if s.threatfoxMax > maxN {
-			maxN = s.threatfoxMax
-		}
-
-		// PERF-37: the per-feed dedup maps are allocated lazily on the FIRST hit, not
-		// upfront. A clean message (no malware URL anywhere — the overwhelming common
-		// case) produces no hit, so these stay nil and cost zero allocations. Reads of
-		// a nil map are safe in Go (`_, dup := seen[k]` on nil → dup=false), so the
-		// dedup check works before the first hit forces the make().
-		var seenURL, seenTF map[string]struct{}
-
-		// addFeedHits extracts URL candidates from b once and fans to all enabled
-		// checkers. URLhaus: check the raw message and every decompressed
-		// macro/RTF stream for known malware-distribution URLs (incl. defanged).
-		// Each distinct URL becomes its own match (deduped across buffers) so the
-		// mail history shows exactly which URLs hit.
-		addFeedHits := func(b []byte) {
-			cands := urlcand.Extract(b, maxN)
-
-			// URLhaus: known malware-distribution URLs.
-			if s.urlhaus != nil {
-				for _, h := range s.urlhaus.CheckCandidates(cands, s.urlhausMax) {
-					if _, dup := seenURL[h.URL]; dup {
-						continue
-					}
-					if seenURL == nil {
-						seenURL = make(map[string]struct{})
-					}
-					seenURL[h.URL] = struct{}{}
-					out = append(out, Match{Rule: h.Rule(), Tags: []string{"urlhaus"}, Meta: map[string]string{"url": h.URL}})
-				}
-			}
-			// ThreatFox: URL/domain IOC lookup — botnet C&C indicators.
-			if s.threatfox != nil {
-				for _, h := range s.threatfox.CheckCandidates(cands, s.threatfoxMax) {
-					if _, dup := seenTF[h.URL]; dup {
-						continue
-					}
-					if seenTF == nil {
-						seenTF = make(map[string]struct{})
-					}
-					seenTF[h.URL] = struct{}{}
-					out = append(out, Match{Rule: h.Rule(), Tags: []string{"threatfox"}, Meta: map[string]string{"url": h.URL}})
-				}
-			}
-		}
-		// PERF-33: skip streams whose bytes are byte-identical to buf or to an
-		// already-processed stream. Identical bytes → identical urlcand.Extract
-		// candidates → any URL they'd yield is already in seenURL/seenTF
-		// from the first occurrence, so CheckCandidates output for the dup is 100%
-		// deduped away. Removing the dup call removes ZERO appends to out and is
-		// therefore byte-identical to the output produced today. Uses the same
-		// streamDedupKey (xxh3 128-bit) as the YARA-scan dedup loop above.
-		// buf is processed first (unchanged); unique streams follow in first-
-		// occurrence order (mirrors the original walk, minus the wasteful dups).
-		fedSeen := make(map[[16]byte]struct{}, len(res.Streams)+1)
-		// PERF-36: reuse the raw-body key (rawSeed = meta.RawKey when the handler
-		// precomputed it, else streamDedupKey(buf) — same value the scan-dedup set was
-		// seeded with, and correct on the CLI path) plus the per-stream keys computed
-		// once above, instead of re-hashing buf and every stream a second time.
-		fedSeen[rawSeed] = struct{}{}
-		addFeedHits(buf)
-		for i, stream := range res.Streams {
-			// PERF-52: URL extraction costs ~50 ms/MiB, so many large streams
-			// could run seconds past the shared deadline. Stop at the deadline
-			// and mark the verdict incomplete instead.
-			if !deadline.IsZero() && !time.Now().Before(deadline) {
-				s.logf("scan budget exhausted during reputation lookups; %d streams left unchecked", len(res.Streams)-i)
-				incomplete = true
-				break
-			}
-			k := streamKeys[i]
-			if _, dup := fedSeen[k]; dup {
-				continue
-			}
-			fedSeen[k] = struct{}{}
-			addFeedHits(stream)
-		}
+		ufMatches, ufIncomplete := s.urlFeedMatches(buf, &res, streamKeys, rawSeed, deadline)
+		out = append(out, ufMatches...)
+		incomplete = incomplete || ufIncomplete
 	}
 	out = s.applyResponseTags(out)
 	if incomplete {
@@ -2525,4 +2367,162 @@ func metaString(v any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// recordExtractMetrics folds one extraction result into the /metrics
+// counters. Pure accounting: it never influences the verdict.
+func (s *Scanner) recordExtractMetrics(res *extract.Result) {
+	flags := [...]struct {
+		set bool
+		ctr *atomic.Uint64
+	}{
+		{res.IsDoc, &s.exDocs},
+		{res.Encrypted, &s.exEncrypted},
+		{res.Failed, &s.exFailed},
+		{res.Panicked, &s.exPanicked},
+		{res.IsMSI, &s.exMSI},
+		{res.IsMSG, &s.exMSG},
+		{res.IsOneNote, &s.exOneNote},
+		{res.IsArchive, &s.exArchive},
+		{res.DecryptedArchive, &s.exArchiveDecrypted},
+		{res.IsOLEPackage, &s.exOLEPackage},
+		{res.IsLNK, &s.exLNK},
+		{res.IsPDF, &s.exPDF},
+		{res.IsRTF, &s.exRTF},
+		{res.IsSLK, &s.exSLK},
+		{res.EncodedScript, &s.exEncodedScript},
+		{res.HasDocProps, &s.exDocProps},
+		{res.HasXLMFold, &s.exXLMFold},
+		{res.DecodedStreams > 0, &s.exDecoded},
+	}
+	for _, f := range flags {
+		if f.set {
+			f.ctr.Add(1)
+		}
+	}
+	// Macro/extracted-stream accounting excludes the static-decode blobs (the
+	// trailing DecodedStreams entries) so a plain script body carrying a base64
+	// run isn't miscounted as a macro document; decode is tracked by exDecoded.
+	if n := len(res.Streams) - res.DecodedStreams; n > 0 {
+		s.exMacroDocs.Add(1)
+		s.exStreams.Add(uint64(n))
+	}
+}
+
+// mbazaarMatches looks up the whole-file SHA-256 of buf (or of each MIME
+// attachment) in MalwareBazaar. incomplete is true when the shared deadline
+// expired before every candidate was checked.
+func (s *Scanner) mbazaarMatches(buf []byte, res *extract.Result, deadline time.Time) (matches []Match, incomplete bool) {
+	candidates := [][]byte{buf}
+	if res.TopType == extract.TopTypeMIME {
+		candidates = res.MIMEAttachments
+	}
+	seen := make(map[[sha256.Size]byte]struct{})
+	for _, candidate := range candidates {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			incomplete = true
+			break
+		}
+		digest := sha256.Sum256(candidate)
+		if _, duplicate := seen[digest]; duplicate {
+			continue
+		}
+		seen[digest] = struct{}{}
+		for _, h := range s.mbazaar.CheckDigest(digest) {
+			matches = append(matches, Match{Rule: h.Rule(), Tags: []string{"malwarebazaar"}, Meta: map[string]string{"sha256": h.SHA256}})
+		}
+	}
+	return matches, incomplete
+}
+
+// urlFeedMatches runs the URLhaus and ThreatFox feeds. URL candidates are extracted
+// ONCE per buffer (raw + defanged pass) and fanned to both checkers,
+// eliminating redundant regex walks and full-buffer defang copies.
+// Each feed still deduplicates across buffers via its own seenX map.
+// incomplete is true when the shared deadline expired before every stream was
+// checked.
+func (s *Scanner) urlFeedMatches(buf []byte, res *extract.Result, streamKeys [][16]byte, rawSeed [16]byte, deadline time.Time) (matches []Match, incomplete bool) {
+	// maxN is the largest per-feed budget; Extract uses it so the candidate
+	// list is long enough for any single checker. Each checker truncates to
+	// its own (smaller) budget via the maxURLs argument to CheckCandidates.
+	maxN := s.urlhausMax
+	if s.threatfoxMax > maxN {
+		maxN = s.threatfoxMax
+	}
+
+	// PERF-37: the per-feed dedup maps are allocated lazily on the FIRST hit, not
+	// upfront. A clean message (no malware URL anywhere — the overwhelming common
+	// case) produces no hit, so these stay nil and cost zero allocations. Reads of
+	// a nil map are safe in Go (`_, dup := seen[k]` on nil → dup=false), so the
+	// dedup check works before the first hit forces the make().
+	var seenURL, seenTF map[string]struct{}
+
+	// addFeedHits extracts URL candidates from b once and fans to all enabled
+	// checkers. URLhaus: check the raw message and every decompressed
+	// macro/RTF stream for known malware-distribution URLs (incl. defanged).
+	// Each distinct URL becomes its own match (deduped across buffers) so the
+	// mail history shows exactly which URLs hit.
+	addFeedHits := func(b []byte) {
+		cands := urlcand.Extract(b, maxN)
+
+		// URLhaus: known malware-distribution URLs.
+		if s.urlhaus != nil {
+			for _, h := range s.urlhaus.CheckCandidates(cands, s.urlhausMax) {
+				if _, dup := seenURL[h.URL]; dup {
+					continue
+				}
+				if seenURL == nil {
+					seenURL = make(map[string]struct{})
+				}
+				seenURL[h.URL] = struct{}{}
+				matches = append(matches, Match{Rule: h.Rule(), Tags: []string{"urlhaus"}, Meta: map[string]string{"url": h.URL}})
+			}
+		}
+		// ThreatFox: URL/domain IOC lookup — botnet C&C indicators.
+		if s.threatfox != nil {
+			for _, h := range s.threatfox.CheckCandidates(cands, s.threatfoxMax) {
+				if _, dup := seenTF[h.URL]; dup {
+					continue
+				}
+				if seenTF == nil {
+					seenTF = make(map[string]struct{})
+				}
+				seenTF[h.URL] = struct{}{}
+				matches = append(matches, Match{Rule: h.Rule(), Tags: []string{"threatfox"}, Meta: map[string]string{"url": h.URL}})
+			}
+		}
+	}
+	// PERF-33: skip streams whose bytes are byte-identical to buf or to an
+	// already-processed stream. Identical bytes → identical urlcand.Extract
+	// candidates → any URL they'd yield is already in seenURL/seenTF
+	// from the first occurrence, so CheckCandidates output for the dup is 100%
+	// deduped away. Removing the dup call removes ZERO appends to out and is
+	// therefore byte-identical to the output produced today. Uses the same
+	// streamDedupKey (xxh3 128-bit) as the YARA-scan dedup loop above.
+	// buf is processed first (unchanged); unique streams follow in first-
+	// occurrence order (mirrors the original walk, minus the wasteful dups).
+	fedSeen := make(map[[16]byte]struct{}, len(res.Streams)+1)
+	// PERF-36: reuse the raw-body key (rawSeed = meta.RawKey when the handler
+	// precomputed it, else streamDedupKey(buf) — same value the scan-dedup set was
+	// seeded with, and correct on the CLI path) plus the per-stream keys computed
+	// once above, instead of re-hashing buf and every stream a second time.
+	fedSeen[rawSeed] = struct{}{}
+	addFeedHits(buf)
+	for i, stream := range res.Streams {
+		// PERF-52: URL extraction costs ~50 ms/MiB, so many large streams
+		// could run seconds past the shared deadline. Stop at the deadline
+		// and mark the verdict incomplete instead.
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			s.logf("scan budget exhausted during reputation lookups; %d streams left unchecked", len(res.Streams)-i)
+			incomplete = true
+			break
+		}
+		k := streamKeys[i]
+		if _, dup := fedSeen[k]; dup {
+			continue
+		}
+		fedSeen[k] = struct{}{}
+		addFeedHits(stream)
+	}
+	return matches, incomplete
 }
