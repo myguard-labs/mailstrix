@@ -99,7 +99,7 @@ type Scanner struct {
 	// scanned against a tiny subset instead of the full ~12k-rule set. Built in
 	// Reload by recompiling the same source and calling Disable() on every rule
 	// that lacks the "marker" tag. A nil pointer means the bundle could not be
-	// built (logged); scanExtracted then falls back to the full ruleset (no
+	// built (logged); extractScan.scan then falls back to the full ruleset (no
 	// detection loss). filterMarkerChannel remains as belt-and-suspenders.
 	markerRules atomic.Pointer[yara.Rules]
 	rawScanErrs atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
@@ -1644,7 +1644,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	// in a macro/embedded stream, and returning here would fail open and miss it.
 	// Instead drop the (absent) raw matches and continue to extraction + the
 	// reputation feeds below; the extracted streams are small and fast and run
-	// under whatever deadline remains (each scanExtracted short-circuits when the
+	// under whatever deadline remains (each extractScan.scan short-circuits when the
 	// shared budget is gone, so this can never spend more wall-clock). If nothing
 	// is recovered downstream the original error is returned at the end, so the
 	// non-document fail-open contract is unchanged.
@@ -1661,10 +1661,6 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	// stream (O(N) total rather than O(N²)). Use a
 	// struct key instead of "namespace/rule" concatenation so stream merges do
 	// not allocate one synthetic key string per match.
-	type matchKey struct {
-		namespace string
-		rule      string
-	}
 	matchSeen := make(map[matchKey]struct{}, len(out)+16)
 	for i := range out {
 		matchSeen[matchKey{namespace: out[i].Namespace, rule: out[i].Rule}] = struct{}{}
@@ -1754,7 +1750,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 		}
 	}
 	// PERF-36: each res.Streams entry's content key was hashed twice — once in the
-	// scan-dedup loop (scanExtracted) and again in the feed-dedup loop below.
+	// scan-dedup loop (extractScan.scan) and again in the feed-dedup loop below.
 	// Compute it once per stream here (index-aligned with res.Streams) and reuse it
 	// in both places. Same xxh3-128 streamDedupKey domain, so dedup behaviour is
 	// byte-identical; only the redundant second hash per stream is removed.
@@ -1762,127 +1758,11 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	for i, stream := range res.Streams {
 		streamKeys[i] = streamDedupKey(stream)
 	}
-	// scanExtracted runs one extracted entry (real content stream OR an out-of-band
-	// marker) through dedup, the shared scan budget, and merge. Returns true when
-	// the budget is exhausted so the caller stops the whole sweep. Markers and
-	// Streams share one `seen` set and one budget — a marker byte-identical to a
-	// real stream is scanned once, and markers can't overrun the deadline.
-	// PERF-68: per-scan counters so the budget log reports what is actually left
-	// and the oversized-stream reroute logs once per scan, not once per stream.
-	var streamsVisited, markersVisited, oversizedRerouted int
-	scanExtracted := func(stream []byte, h [16]byte, markerChannel bool) (stop bool) {
-		if markerChannel {
-			markersVisited++
-		} else {
-			streamsVisited++
-		}
-		if _, dup := seen[h]; dup {
-			s.exDeduped.Add(1)
-			return false
-		}
-		seen[h] = struct{}{}
-		budget := s.scanTimeout
-		if !deadline.IsZero() {
-			// Native scans need at least one whole second; scanOne would round
-			// a smaller positive budget up past the shared deadline.
-			if budget = time.Until(deadline); budget < time.Second {
-				s.logf("scan budget exhausted; %d streams + %d markers left unscanned",
-					len(res.Streams)-streamsVisited+1, max(len(res.Markers)-markersVisited+1, 0))
-				incomplete = true
-				return true
-			}
-		}
-		// Set the VBA external ONLY when this stream is genuine VBA macro source
-		// (vbaKeys membership), so the macro-keyword rules (Didier vba.yara: `VBA and
-		// any of(...)`) fire on decompressed macros — inert on raw bytes — but NOT on
-		// a PDF/archive/script/marker/decoded stream that merely happens to contain a
-		// macro keyword. A marker-channel entry is never VBA. filename/extension carry
-		// through so a name-keyed rule fires the same on the container's decompressed
-		// macros as on its raw bytes.
-		isVBA := false
-		if !markerChannel && len(vbaKeys) > 0 {
-			_, isVBA = vbaKeys[h]
-		}
-		// Oversized-stream cost gate (BIGFILE, extracted side): an extractor can emit
-		// multi-MiB children (VBA 4 MiB, bin 8 MiB, archive member 16 MiB, PDF/RTF/
-		// TNEF/package cumulative tens of MiB). Scanning such a child against the full
-		// ~12k-rule set is the same unbounded cost the raw gate guards against, and it
-		// drains the shared deadline budget for the remaining streams even when the raw
-		// body was under threshold. Route oversized REAL-content streams through the
-		// big-file ruleset too; marker-channel entries are tiny + synthetic so they
-		// always keep the full set. Mirrors the raw gate (nil bigRules → full set).
-		streamRules := rules
-		if !markerChannel && s.bigFileThreshold > 0 && int64(len(stream)) > s.bigFileThreshold {
-			if big := generation.bigRules; big != nil {
-				streamRules = big
-				s.bigFileStreamScans.Add(1)
-				oversizedRerouted++
-			} else if s.bigNilWarned.CompareAndSwap(false, true) {
-				s.logf("WARNING: oversized extracted stream (%dB) but no big-file ruleset loaded; using full set (may time out)", len(stream))
-			}
-		}
-		// PERF-18: for the out-of-band Markers channel, use the marker-only bundle
-		// (full ruleset with non-marker rules disabled) so the scan runs against a
-		// tiny subset instead of the full ~12k-rule set. Falls back to the full
-		// ruleset when the bundle is not available. filterMarkerChannel remains as
-		// belt-and-suspenders regardless of which ruleset is used.
-		if markerChannel {
-			if mb := generation.markerRules; mb != nil {
-				streamRules = mb
-			}
-		}
-		if markerChannel {
-			s.markerChannelScans.Add(1)
-		} else {
-			s.streamChannelScans.Add(1)
-		}
-		// PERF-41: the out-of-band marker channel scans synthetic literal markers
-		// against the marker-only bundle, whose rules carry their whole condition in
-		// the marker bytes and do NOT reference the filename/extension/file_type/VBA
-		// externals (the rename/type signal is encoded IN the marker string, not read
-		// from a var). Passing the attachment externals would force the expensive
-		// per-scan yara.Scanner (DefineVariable) path; with zero scanVars the marker
-		// scan takes the cheap rules.ScanMem path with compile-time defaults. Real
-		// content streams keep the externals (a name/type-keyed rule must still fire).
-		vars := scanVars{vba: isVBA, filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}
-		if markerChannel {
-			vars = scanVars{}
-		}
-		m, serr := s.scanOne(streamRules, stream, vars, budget)
-		if serr != nil {
-			completionErr = serr
-			// This stream went unscanned, so the verdict is partial whatever the
-			// clock says: libyara takes whole seconds, so a native timeout can
-			// fire while the shared deadline has not passed yet.
-			incomplete = true
-			s.logf("scan of extracted stream failed (raw verdict kept): %v", serr)
-			return false
-		}
-		// Phase 2 marker-channel: real content streams reject marker-tagged hits;
-		// the out-of-band Markers channel keeps ONLY marker-tagged hits.
-		m = filterMarkerChannel(m, markerChannel)
-		// Inline incremental dedup: matchSeen is built once before the stream
-		// loop (seeded from raw matches) and updated here, so we never rebuild
-		// the map from scratch on each stream — O(N) total vs O(N²) before.
-		before := len(out)
-		for _, mm := range m {
-			k := matchKey{namespace: mm.Namespace, rule: mm.Rule}
-			if _, dup := matchSeen[k]; dup {
-				continue
-			}
-			matchSeen[k] = struct{}{}
-			out = append(out, mm)
-		}
-		// Anything appended is a rule that fired on the extracted stream but NOT
-		// on the raw bytes — count it as pre-extraction's payoff.
-		if added := len(out) - before; added > 0 {
-			s.exStreamMatches.Add(uint64(added))
-		}
-		return false
-	}
+	x := &extractScan{s: s, seen: seen, deadline: deadline, res: &res, vbaKeys: vbaKeys, rules: rules,
+		generation: generation, meta: meta, matchSeen: matchSeen, out: out, incomplete: incomplete, completionErr: completionErr}
 	order := streamScanOrder(res.Streams, res.ContentStreams)
 	for _, i := range order {
-		if scanExtracted(res.Streams[i], streamKeys[i], false) {
+		if x.scan(res.Streams[i], streamKeys[i], false) {
 			break
 		}
 	}
@@ -1895,7 +1775,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	if d := extMismatch(res, meta.Extension); d != "" {
 		s.exExtMismatch.Add(1)
 		mk := []byte(extMismatchMarkerPrefix + " " + d)
-		scanExtracted(mk, streamDedupKey(mk), true)
+		x.scan(mk, streamDedupKey(mk), true)
 	}
 	// PLAN-marker-channel Phase 2: the out-of-band PURE markers are still scanned
 	// against the full ruleset, but filterMarkerChannel now keeps ONLY
@@ -1905,12 +1785,13 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	// are unaffected. Phase 3 will compile a markers.yac so marker rules execute
 	// ONLY on this channel (the perf win), making the filter redundant.
 	for _, marker := range res.Markers {
-		if scanExtracted(marker, streamDedupKey(marker), true) {
+		if x.scan(marker, streamDedupKey(marker), true) {
 			break
 		}
 	}
-	if oversizedRerouted > 0 {
-		s.logf("%d oversized extracted streams (> %dB threshold): scanned against big-file ruleset instead of full set", oversizedRerouted, s.bigFileThreshold)
+	out, incomplete, completionErr = x.out, x.incomplete, x.completionErr
+	if x.oversizedRerouted > 0 {
+		s.logf("%d oversized extracted streams (> %dB threshold): scanned against big-file ruleset instead of full set", x.oversizedRerouted, s.bigFileThreshold)
 	}
 	// Drop denylisted rule names (public-ruleset demo/noise rules) before the
 	// synthetic feed matches are added, so MALWAREBAZAAR_*/URLHAUS_* are never
