@@ -777,6 +777,14 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	s.loadedManifest.Store(manifest)
 	s.rulesModUnix.Store(modUnix)
 	s.generationMu.Unlock()
+	// AUD-P3b: free the replaced generations' idle C scanners now rather than
+	// on the next pooled scan. retireStale re-reads the live rules, so it only
+	// retires a slot whose rules this publication replaced or unset; scanners
+	// checked out across the swap are still destroyed by putScanner. The old
+	// *yara.Rules stays referenced by each scanner and its generation, so no
+	// scanner is destroyed after its rules are freed.
+	retireStale(&s.scanners, &s.rules)
+	retireStale(&s.bigScanners, &s.bigRules)
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())
 

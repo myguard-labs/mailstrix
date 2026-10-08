@@ -1,6 +1,7 @@
 package mailstrix
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -260,4 +261,99 @@ func TestScannerPoolStaleCallerDoesNotRetireLivePool(t *testing.T) {
 // Same interleave on the big-file slot.
 func TestScannerPoolStaleCallerDoesNotRetireLiveBigPool(t *testing.T) {
 	staleCallerCase(t, true)
+}
+
+// populateSlots fills the main and big pool slots with one idle scanner each
+// and returns their generations plus a main scanner still checked out.
+func populateSlots(t *testing.T, s *Scanner) (mg, bg *scannerGen, inflight *yara.Scanner) {
+	t.Helper()
+	main, big := mainAndBig(t, s)
+	idle, g := poolGet(t, s, main)
+	inflight, ig := poolGet(t, s, main)
+	if ig != g || idle == inflight {
+		t.Fatal("expected two distinct scanners from one main generation")
+	}
+	s.putScanner(idle, g)
+	b, h := poolGet(t, s, big)
+	s.putScanner(b, h)
+	if s.scanners.Load() != g || s.bigScanners.Load() != h {
+		t.Fatal("pool slots not installed")
+	}
+	return g, h, inflight
+}
+
+// AUD-P3b positive: a successful Reload retires both replaced generations and
+// frees their idle scanners at publication, with no further pooled scan. A
+// scanner checked out across the Reload is destroyed on put, never reused.
+func TestScannerPoolReloadRetiresEagerly(t *testing.T) {
+	s := newBigScanner(t, 1<<20)
+	mg, bg, inflight := populateSlots(t, s)
+
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if s.scanners.Load() != nil || s.bigScanners.Load() != nil {
+		t.Fatalf("Reload left stale slots: main=%p big=%p", s.scanners.Load(), s.bigScanners.Load())
+	}
+	wantGen(t, "old main gen after reload", mg, 0, true)
+	wantGen(t, "old big gen after reload", bg, 0, true)
+
+	s.putScanner(inflight, mg) // checked out across Reload: destroyed, not pooled
+	wantGen(t, "old main gen after in-flight put", mg, 0, true)
+
+	newMain := s.rules.Load()
+	m, g := poolGet(t, s, newMain)
+	if m == inflight || g == mg {
+		t.Fatal("in-flight scanner or old generation reused after reload")
+	}
+	s.putScanner(m, g)
+}
+
+// AUD-P3b boundary: a Reload that publishes no big-file ruleset retires the
+// big slot at publication; the main slot is retired the same way.
+func TestScannerPoolReloadBigUnsetRetiresEagerly(t *testing.T) {
+	s := newBigScanner(t, 1<<20)
+	mg, bg, inflight := populateSlots(t, s)
+	s.putScanner(inflight, mg)
+	s.mu.Lock()
+	s.bigSrcDir, s.bigSrcFile = "", ""
+	s.mu.Unlock()
+	s.bigRules.Store(nil)
+
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if s.bigRules.Load() != nil {
+		t.Fatal("expected bigRules unset after reload")
+	}
+	if s.bigScanners.Load() != nil || s.scanners.Load() != nil {
+		t.Fatal("Reload left a stale slot with big rules unset")
+	}
+	wantGen(t, "unset big gen", bg, 0, true)
+	wantGen(t, "old main gen", mg, 0, true)
+}
+
+// AUD-P3b negative: a failed Reload keeps the previous rules, so their live
+// generations stay installed with their idle scanners intact.
+func TestScannerPoolFailedReloadKeepsLiveGenerations(t *testing.T) {
+	s := newBigScanner(t, 1<<20)
+	main, big := mainAndBig(t, s)
+	mg, bg, inflight := populateSlots(t, s)
+	s.mu.Lock()
+	s.srcFile = filepath.Join(t.TempDir(), "missing.yac")
+	s.mu.Unlock()
+
+	if err := s.Reload(); err == nil {
+		t.Fatal("Reload of a missing bundle succeeded")
+	}
+	if s.rules.Load() != main || s.bigRules.Load() != big {
+		t.Fatal("failed Reload replaced the rules")
+	}
+	if s.scanners.Load() != mg || s.bigScanners.Load() != bg {
+		t.Fatal("failed Reload removed a live generation")
+	}
+	wantGen(t, "live main gen after failed reload", mg, 1, false)
+	wantGen(t, "live big gen after failed reload", bg, 1, false)
+	s.putScanner(inflight, mg)
+	wantGen(t, "live main gen after in-flight put", mg, 2, false)
 }
