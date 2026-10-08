@@ -1113,20 +1113,28 @@ type capCabFile struct {
 // data in CFDATA blocks of <= 32768 bytes; each file is declared at the running
 // offset with its own cb, which may deliberately disagree with data.
 func capCab(files []capCabFile, data []byte, mszip bool) []byte {
-	var blocks [][]byte
-	sizes := make([]int, 0)
+	blocks, sizes := [][]byte{}, []int{}
+	if mszip {
+		blocks, sizes = capMSZIPBlocks(data)
+	} else {
+		for off := 0; off < len(data); off += 32768 {
+			end := min(off+32768, len(data))
+			blocks = append(blocks, data[off:end])
+			sizes = append(sizes, end-off)
+		}
+	}
+	return capCabBlocks(files, blocks, sizes, mszip)
+}
+
+// capMSZIPBlocks frames data as CK-prefixed MSZIP CFDATA payloads of <= 32768
+// bytes, each deflated against the previous 32K of output.
+func capMSZIPBlocks(data []byte) ([][]byte, []int) {
+	blocks, sizes := [][]byte{}, []int{}
 	var dict []byte
 	for off := 0; off < len(data); off += 32768 {
-		end := off + 32768
-		if end > len(data) {
-			end = len(data)
-		}
+		end := min(off+32768, len(data))
 		chunk := data[off:end]
 		sizes = append(sizes, len(chunk))
-		if !mszip {
-			blocks = append(blocks, chunk)
-			continue
-		}
 		var cb bytes.Buffer
 		cb.WriteString("CK")
 		var fw *flate.Writer
@@ -1143,7 +1151,7 @@ func capCab(files []capCabFile, data []byte, mszip bool) []byte {
 			dict = dict[len(dict)-32768:]
 		}
 	}
-	return capCabBlocks(files, blocks, sizes, mszip)
+	return blocks, sizes
 }
 
 // capCabBlocks assembles a one-folder CAB from explicit CFDATA payloads
@@ -1266,5 +1274,25 @@ func TestCapStopCabMemberSize(t *testing.T) {
 	t.Run("cab-stored-empty-block-after-cap-only-no-hit", func(t *testing.T) {
 		blocks, sizes := storedBlocks([]byte{})
 		noHit(t, capExtract(capCabBlocks(files, blocks, sizes, false)))
+	})
+	// Same sequence in MSZIP: an empty deflate block (CK + final empty stored
+	// block) after the cap decodes to zero bytes and must not end the scan.
+	mszipBlocks := func(tail [][]byte, tailSizes []int) ([][]byte, []int) {
+		blocks, sizes := capMSZIPBlocks(capCabFill(capMember))
+		return append(blocks, tail...), append(sizes, tailSizes...)
+	}
+	emptyCK := []byte{'C', 'K', 0x01, 0x00, 0x00, 0xFF, 0xFF}
+	var tailCK bytes.Buffer
+	tailCK.WriteString("CK")
+	tw, _ := flate.NewWriter(&tailCK, flate.BestSpeed)
+	_, _ = tw.Write([]byte("tail"))
+	_ = tw.Close()
+	t.Run("cab-mszip-empty-block-after-cap-then-data", func(t *testing.T) {
+		blocks, sizes := mszipBlocks([][]byte{emptyCK, tailCK.Bytes()}, []int{0, 4})
+		wantOnly(t, capExtract(capCabBlocks(files, blocks, sizes, true)))
+	})
+	t.Run("cab-mszip-empty-block-after-cap-only-no-hit", func(t *testing.T) {
+		blocks, sizes := mszipBlocks([][]byte{emptyCK}, []int{0})
+		noHit(t, capExtract(capCabBlocks(files, blocks, sizes, true)))
 	})
 }
