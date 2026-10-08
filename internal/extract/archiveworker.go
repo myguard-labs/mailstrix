@@ -177,7 +177,7 @@ func runBounded[T any](deadline time.Time, fn func() T) (out T, stalled bool) {
 // reported as a clean empty read. ran distinguishes them: it is false only when the
 // work never ran at all (deadline already blown, or the pool was full).
 func runBoundedRan[T any](deadline time.Time, fn func() T) (out T, ran, stalled bool) {
-	limit := maxDecryptAttemptTime
+	limit := decryptAttemptLimit()
 	if !deadline.IsZero() {
 		if rem := time.Until(deadline); rem < limit {
 			limit = rem
