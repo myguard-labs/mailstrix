@@ -637,54 +637,34 @@ func (s *Scanner) reloadLockedCache() error {
 	return s.reloadLockedCacheDeny(nil)
 }
 
-func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.reloadAttempts.Add(1)
-	start := time.Now()
-	defer func() { s.reloadLastMillis.Store(time.Since(start).Milliseconds()) }()
-
-	var (
-		rules         *yara.Rules
-		mainRuleFiles []string
-		err           error
-	)
+// loadMainRules loads or compiles the main ruleset from srcFile or srcDir.
+func (s *Scanner) loadMainRules() (*yara.Rules, error) {
 	if s.srcFile != "" {
-		rules, err = yara.LoadRules(s.srcFile)
-	} else {
-		mainRuleFiles, err = validatedRuleFiles(s.srcDir, s.logf)
-		if err == nil {
-			rules, err = compileRuleFiles(s.srcDir, mainRuleFiles, s.logf)
-		}
+		return yara.LoadRules(s.srcFile)
 	}
+	mainRuleFiles, err := validatedRuleFiles(s.srcDir, s.logf)
 	if err != nil {
-		s.reloadFail.Add(1)
-		if denyOverride != nil {
-			s.publishDenylist(denyOverride)
-		}
-		s.logf("ERROR reload failed, keeping previous rules: %v", err)
-		return err
+		return nil, err
 	}
+	return compileRuleFiles(s.srcDir, mainRuleFiles, s.logf)
+}
 
-	// PERF-30: pre-disable denied rules in the NEWLY LOADED bundle before it is
-	// exposed to scanners. This is safe: the object is fresh from LoadRules/compile
-	// and no scanner holds a reference to it yet (we have not called Swap yet).
-	// disableDeniedRules skips global and private rules to avoid silently suppressing
-	// non-denied rules that reference them in their conditions.
-	deny := func() map[string]struct{} {
-		if denyOverride != nil {
-			return *denyOverride
-		}
-		if p := s.denylist.Load(); p != nil {
-			return *p
-		}
-		return nil
-	}()
-	mainDisabled := disableDeniedRules(rules, deny)
+// effectiveDeny resolves the denylist for this reload: the override when
+// given, else the currently published one.
+func (s *Scanner) effectiveDeny(denyOverride *map[string]struct{}) map[string]struct{} {
+	if denyOverride != nil {
+		return *denyOverride
+	}
+	if p := s.denylist.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
-	list := rules.GetRules()
-	fp := fingerprint(list)
+// resolveManifest returns the verified local manifest (nil when absent or
+// invalid) and the ruleset modification time, preferring the manifest's
+// generation time when it is sane.
+func (s *Scanner) resolveManifest() (*RulesManifest, int64) {
 	modUnix := rulesetModUnix(s.srcFile, s.srcDir)
 	var manifest *RulesManifest
 	if s.cacheDir != "" {
@@ -696,86 +676,92 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 			}
 		}
 	}
-	// Record the policy used for native pre-disabling as part of each bundle's
-	// identity. A failed auxiliary load retains BOTH its old rules and identity.
-	dlFP := denylistHash(deny)
-	mainContent := rulesetContentHash(s.srcFile, s.srcDir, "", "") + ":" + dlFP
-	bigRules, markerRules := s.bigRules.Load(), s.markerRules.Load()
-	bigContent, markerContent := s.bigContent, s.markerContent
+	return manifest, modUnix
+}
 
-	// The previous *yara.Rules is intentionally NOT Destroy()ed here: an in-flight
-	// scan may still hold the pointer it loaded before the swap, and freeing the
-	// native rules under it would crash. go-yara registers a runtime finalizer on
-	// *Rules (via runtime.SetFinalizer in Compile/GetRules), so the old set is
-	// freed by the GC once no goroutine references it. Reloads are infrequent, so
-	// finalizer-driven cleanup is the safe choice over manual/refcounted retire.
-	src := s.srcDir
-	if s.srcFile != "" {
-		src = s.srcFile
+// reloadBigBundle reloads the big-file (oversized-buffer) ruleset: compiled/loaded
+// the SAME way as the main set and swapped in atomically so it stays in sync on
+// every reload/SIGHUP. A failure here must NOT fail the reload — retain the
+// previous big bundle (rules AND identity), or use the full ruleset if no
+// previous big bundle exists.
+func (s *Scanner) reloadBigBundle(deny map[string]struct{}, dlFP string, bigRules *yara.Rules, bigContent string) (*yara.Rules, string) {
+	if s.bigSrcFile == "" && s.bigSrcDir == "" {
+		return bigRules, bigContent
 	}
-	s.logf("loaded %d YARA rules from %s (fp=%s, deny-disabled=%d)", len(list), src, fp, mainDisabled)
-
-	// Big-file (oversized-buffer) ruleset: compiled/loaded the SAME way as the main
-	// set and swapped in atomically so it stays in sync on every reload/SIGHUP. A
-	// failure here must NOT fail the reload — retain the previous big bundle,
-	// or use the full ruleset if no previous big bundle exists.
-	if s.bigSrcFile != "" || s.bigSrcDir != "" {
-		var (
-			big    *yara.Rules
-			bigErr error
-		)
-		if s.bigSrcFile != "" {
-			big, bigErr = yara.LoadRules(s.bigSrcFile)
-		} else {
-			big, bigErr = compileDir(s.bigSrcDir, s.logf)
-		}
-		if bigErr != nil {
-			s.logf("WARNING: big-file ruleset reload failed, keeping previous (oversized-buffer gate may fall back to full set): %v", bigErr)
-		} else {
-			bigSrc := s.bigSrcDir
-			if s.bigSrcFile != "" {
-				bigSrc = s.bigSrcFile
-			}
-			// PERF-30: pre-disable denied rules before exposing the fresh big-bundle.
-			bigDisabled := disableDeniedRules(big, deny)
-			bigRules = big
-			bigContent = rulesetContentHash(s.bigSrcFile, s.bigSrcDir, "", "") + ":" + dlFP
-			s.logf("loaded %d big-file YARA rules from %s (oversized-buffer gate, threshold=%dB, deny-disabled=%d)", len(big.GetRules()), bigSrc, s.bigFileThreshold, bigDisabled)
-		}
+	var (
+		big    *yara.Rules
+		bigErr error
+	)
+	if s.bigSrcFile != "" {
+		big, bigErr = yara.LoadRules(s.bigSrcFile)
+	} else {
+		big, bigErr = compileDir(s.bigSrcDir, s.logf)
 	}
+	if bigErr != nil {
+		s.logf("WARNING: big-file ruleset reload failed, keeping previous (oversized-buffer gate may fall back to full set): %v", bigErr)
+		return bigRules, bigContent
+	}
+	bigSrc := s.bigSrcDir
+	if s.bigSrcFile != "" {
+		bigSrc = s.bigSrcFile
+	}
+	// PERF-30: pre-disable denied rules before exposing the fresh big-bundle.
+	bigDisabled := disableDeniedRules(big, deny)
+	bigContent = rulesetContentHash(s.bigSrcFile, s.bigSrcDir, "", "") + ":" + dlFP
+	s.logf("loaded %d big-file YARA rules from %s (oversized-buffer gate, threshold=%dB, deny-disabled=%d)", len(big.GetRules()), bigSrc, s.bigFileThreshold, bigDisabled)
+	return big, bigContent
+}
 
-	// PERF-69: clone the freshly prepared main bundle before publication and
-	// disable all non-marker-tagged rules. A failure here must NOT fail the
-	// reload — retain the previous marker bundle, or use the full ruleset when
-	// there is no previous marker bundle.
-	// PERF-30: pass the deny map so denied marker rules are also pre-disabled;
-	// a denied rule that happens to carry the "marker" tag should still be skipped.
+// reloadMarkerBundle clones the freshly prepared main bundle.
+// PERF-69: clone the main bundle before publication and disable all
+// non-marker-tagged rules. A failure here must NOT fail the reload — retain the
+// previous marker bundle (rules AND identity), or use the full ruleset when
+// there is no previous marker bundle.
+// PERF-30: pass the deny map so denied marker rules are also pre-disabled;
+// a denied rule that happens to carry the "marker" tag should still be skipped.
+func (s *Scanner) reloadMarkerBundle(rules *yara.Rules, deny map[string]struct{}, mainContent string, markerRules *yara.Rules, markerContent string) (*yara.Rules, string) {
 	if mb, mbErr := cloneMarkerBundle(rules, deny, s.logf); mbErr != nil {
 		s.logf("WARNING: PERF-18 marker bundle build failed, keeping previous (or full ruleset fallback): %v", mbErr)
 	} else if mb != nil {
-		markerRules = mb
-		markerContent = mainContent
+		return mb, mainContent
 	}
+	return markerRules, markerContent
+}
 
-	// Hash the effective bundles, including retained auxiliaries after a failed
-	// load. Hashing only today's source files would misidentify that fallback.
-	h := sha256.Sum256([]byte(mainContent + "\x00big\x00" + bigContent + "\x00marker\x00" + markerContent))
-	ch := hex.EncodeToString(h[:8])
+// reloadBundle is the set of values published atomically by a reload.
+type reloadBundle struct {
+	rules         *yara.Rules
+	bigRules      *yara.Rules
+	markerRules   *yara.Rules
+	bigContent    string
+	markerContent string
+	list          []yara.Rule
+	fp            string
+	ch            string
+	deny          map[string]struct{}
+	dlFP          string
+	manifest      *RulesManifest
+	modUnix       int64
+}
+
+// publishReload swaps the prepared bundle in under generationMu, then retires
+// the replaced generations' idle scanners.
+func (s *Scanner) publishReload(b *reloadBundle) {
 	s.generationMu.Lock()
 	if old := s.fp.Load(); old != nil {
 		s.reloadPrevFP.Store(old)
 	}
-	s.rules.Store(rules)
-	s.bigRules.Store(bigRules)
-	s.markerRules.Store(markerRules)
-	s.bigContent, s.markerContent = bigContent, markerContent
-	s.count.Store(int64(len(list)))
-	s.fp.Store(&fp)
-	s.contentFP.Store(&ch)
-	s.denylist.Store(&deny)
-	s.denylistFP.Store(&dlFP)
-	s.loadedManifest.Store(manifest)
-	s.rulesModUnix.Store(modUnix)
+	s.rules.Store(b.rules)
+	s.bigRules.Store(b.bigRules)
+	s.markerRules.Store(b.markerRules)
+	s.bigContent, s.markerContent = b.bigContent, b.markerContent
+	s.count.Store(int64(len(b.list)))
+	s.fp.Store(&b.fp)
+	s.contentFP.Store(&b.ch)
+	s.denylist.Store(&b.deny)
+	s.denylistFP.Store(&b.dlFP)
+	s.loadedManifest.Store(b.manifest)
+	s.rulesModUnix.Store(b.modUnix)
 	// Reset the top-matches counter so counts reflect the current rule set only,
 	// not a mix of old and new rule names that may have been renamed/removed.
 	// Inside the publication lock so the epoch bump is atomic with the swap: a
@@ -790,6 +776,67 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	// scanner is destroyed after its rules are freed.
 	retireStale(&s.scanners, &s.rules)
 	retireStale(&s.bigScanners, &s.bigRules)
+}
+
+func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.reloadAttempts.Add(1)
+	start := time.Now()
+	defer func() { s.reloadLastMillis.Store(time.Since(start).Milliseconds()) }()
+
+	rules, err := s.loadMainRules()
+	if err != nil {
+		s.reloadFail.Add(1)
+		if denyOverride != nil {
+			s.publishDenylist(denyOverride)
+		}
+		s.logf("ERROR reload failed, keeping previous rules: %v", err)
+		return err
+	}
+
+	// PERF-30: pre-disable denied rules in the NEWLY LOADED bundle before it is
+	// exposed to scanners. This is safe: the object is fresh from LoadRules/compile
+	// and no scanner holds a reference to it yet (we have not called Swap yet).
+	// disableDeniedRules skips global and private rules to avoid silently suppressing
+	// non-denied rules that reference them in their conditions.
+	deny := s.effectiveDeny(denyOverride)
+	mainDisabled := disableDeniedRules(rules, deny)
+
+	list := rules.GetRules()
+	fp := fingerprint(list)
+	manifest, modUnix := s.resolveManifest()
+	// Record the policy used for native pre-disabling as part of each bundle's
+	// identity. A failed auxiliary load retains BOTH its old rules and identity.
+	dlFP := denylistHash(deny)
+	mainContent := rulesetContentHash(s.srcFile, s.srcDir, "", "") + ":" + dlFP
+
+	// The previous *yara.Rules is intentionally NOT Destroy()ed here: an in-flight
+	// scan may still hold the pointer it loaded before the swap, and freeing the
+	// native rules under it would crash. go-yara registers a runtime finalizer on
+	// *Rules (via runtime.SetFinalizer in Compile/GetRules), so the old set is
+	// freed by the GC once no goroutine references it. Reloads are infrequent, so
+	// finalizer-driven cleanup is the safe choice over manual/refcounted retire.
+	src := s.srcDir
+	if s.srcFile != "" {
+		src = s.srcFile
+	}
+	s.logf("loaded %d YARA rules from %s (fp=%s, deny-disabled=%d)", len(list), src, fp, mainDisabled)
+
+	bigRules, bigContent := s.reloadBigBundle(deny, dlFP, s.bigRules.Load(), s.bigContent)
+	markerRules, markerContent := s.reloadMarkerBundle(rules, deny, mainContent, s.markerRules.Load(), s.markerContent)
+
+	// Hash the effective bundles, including retained auxiliaries after a failed
+	// load. Hashing only today's source files would misidentify that fallback.
+	h := sha256.Sum256([]byte(mainContent + "\x00big\x00" + bigContent + "\x00marker\x00" + markerContent))
+	ch := hex.EncodeToString(h[:8])
+	s.publishReload(&reloadBundle{
+		rules: rules, bigRules: bigRules, markerRules: markerRules,
+		bigContent: bigContent, markerContent: markerContent,
+		list: list, fp: fp, ch: ch, deny: deny, dlFP: dlFP,
+		manifest: manifest, modUnix: modUnix,
+	})
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())
 
