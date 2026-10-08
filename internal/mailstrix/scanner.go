@@ -1235,7 +1235,7 @@ func fileCompiles(path string) error {
 	if err != nil {
 		return err
 	}
-	defer fh.Close()
+	defer func() { _ = fh.Close() }() // read-only file: discarding Close error is correct
 	if err := c.AddFile(fh, filepath.Base(path)); err != nil {
 		return err
 	}
