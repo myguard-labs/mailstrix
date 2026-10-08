@@ -30,7 +30,7 @@ if [ "$1" = run ]; then
     if [[ " $* " == *' check-rules '* ]]; then
         printf 'count %s\n' "$*" >> "$EVENTS"
         [ "${FAIL_COUNT:-0}" -eq 0 ] || exit 51
-        printf '%s\n' "${COUNT_REPORT-check-rules: OK — 0 rules loaded (fingerprint fixture)}"
+        printf '%s\n' "${COUNT_REPORT-check-rules: OK — 1 rules loaded (fingerprint fixture)}"
         exit 0
     fi
     printf 'verify %s\n' "$*" >> "$EVENTS"
@@ -235,7 +235,7 @@ assert_event() {
 }
 
 assert_receipt() {  # assert_receipt <stage> <status> [rules]
-    python3 - "$test_root/log" "$1" "$2" "${3:-0}" <<'PY'
+    python3 - "$test_root/log" "$1" "$2" "${3:-1}" <<'PY'
 import json
 import sys
 
@@ -601,23 +601,25 @@ assert_partial_receipt_write_is_not_retried 1 0 0
 assert_partial_receipt_write_is_not_retried 0 1 0
 assert_partial_receipt_write_is_not_retried 1 1 0
 assert_partial_receipt_write_is_not_retried 0 0 1
-# Negative control for CI-04-ZERO-NOTIFY: with a zero count the production body
-# carries no count at all, and a fabricated "42 rules" must be REJECTED by the
-# exact-body oracle rather than pass on the absence of one literal.
+# Negative control for CI-04-ZERO-NOTIFY: a zero count is rejected during the
+# count check, not later during oracle matching, so the verifier count check
+# must die before publication is attempted. Verify that fabricated "42 rules"
+# would be rejected by the exact-body oracle on a valid (non-zero) count.
 assert_fabricated_count_is_rejected() {
     local actual
     # Explicit export/unset instead of the assignment-prefix form: that form's
     # scoping around a function call differs across bash versions and POSIX mode.
     export MAILSTRIX_TEST_INJECT_RULES_COUNT=42
-    run_script COUNT_REPORT="check-rules: OK — 0 rules loaded (fingerprint fixture)"
+    run_script COUNT_REPORT="check-rules: OK — 1 rules loaded (fingerprint fixture)"
     unset MAILSTRIX_TEST_INJECT_RULES_COUNT
     [ "$actual" -eq 0 ] || assert_event 'fabricated-count fixture run failed'
     grep -Eq 'notify-body .*42 rules' "$EVENTS" || assert_event 'fabricated-count fixture did not inject a count'
-    if success_notification_body_matches 0; then
-        assert_event 'fabricated count body was accepted by the oracle'
+    # The oracle should reject a body with conflicting counts (1 rules, 42 rules).
+    if success_notification_body_matches 1; then
+        assert_event 'fabricated count body was accepted with conflicting counts'
     fi
-    # Prove the same fixture is genuinely rejected (oracle is not blanket-failing).
-    success_notification_body_matches 42 || assert_event 'fabricated-count fixture body did not match its own expected body'
+    # Verify that the oracle rejects a body that tries to claim 42 rules.
+    ! success_notification_body_matches 42 || assert_event 'fabricated-count fixture oracle accepted injected count'
 }
 
 # shellcheck source=ci/generate_rules_count_test.sh

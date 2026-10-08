@@ -120,7 +120,7 @@ func TestRulesUpdaterUpgradeAndUnchanged(t *testing.T) {
 		t.Fatalf("version body=%s", w.Body.String())
 	}
 	w = get(srv, "/metrics")
-	for _, metric := range []string{"mailstrix_rules_published_version 2", "mailstrix_rules_loaded_version 2", "mailstrix_rules_cached_version 2", "mailstrix_rules_age_check_enabled 0"} {
+	for _, metric := range []string{"mailstrix_rules_published_version 2", "mailstrix_rules_loaded_version 2", "mailstrix_rules_cached_version 2", "mailstrix_rules_age_check_enabled 0", "mailstrix_rules_update_count_drop_refusals_total 0"} {
 		if !strings.Contains(w.Body.String(), metric) {
 			t.Errorf("missing %q", metric)
 		}

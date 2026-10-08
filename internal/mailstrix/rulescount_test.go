@@ -182,6 +182,11 @@ func TestRulesUpdaterRefusesCountDropAndReportsState(t *testing.T) {
 	if got := u.scanner.RuleCount(); got != 10 {
 		t.Fatalf("active rules=%d, want 10 retained", got)
 	}
+	srv := NewServer(&Config{MaxConcurrent: 1, MaxBody: 1 << 20}, u.scanner)
+	srv.SetRulesUpdater(u)
+	if body := get(srv, "/metrics").Body.String(); !strings.Contains(body, "\nmailstrix_rules_update_count_drop_refusals_total 1\n") {
+		t.Fatalf("refusal not exported on /metrics:\n%s", body)
+	}
 }
 
 func TestRulesUpdaterAllowsCountDropWithOptIn(t *testing.T) {
