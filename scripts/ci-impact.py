@@ -152,6 +152,7 @@ GO_INPUTS = [
     "ci/extract_cap_stops_test.go",
     "ci/extract_verify_first_member_test.go",
     "ci/extract_lzma_dict_cap_test.go",
+    "ci/extract_lzma2_dict_cap_test.go",
     "ci/testdata/hdrenc-dir.7z",
     "ci/testdata/hdrenc-oversize.7z",
     "ci/testdata/hdrenc-small.7z",
