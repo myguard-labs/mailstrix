@@ -1,9 +1,12 @@
 package mailstrix
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -295,5 +298,41 @@ func TestCommaSeparatedTokensAreTrimmed(t *testing.T) {
 		if c.tokens[i] != want {
 			t.Errorf("token[%d]: got %q, want %q", i, c.tokens[i], want)
 		}
+	}
+}
+
+// TestEffortAutoNoWarning pins AUD-N8: MAILSTRIX_EFFORT=auto enables auto
+// shedding without an invalid-number warning and keeps the idle level at
+// EffortMax; a numeric value parses; a genuinely invalid value still warns.
+func TestEffortAutoNoWarning(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	const warn = "invalid MAILSTRIX_EFFORT="
+	for _, v := range []string{"auto", "AUTO", " Auto "} {
+		buf.Reset()
+		t.Setenv("MAILSTRIX_EFFORT", v)
+		c := LoadConfig()
+		if strings.Contains(buf.String(), warn) {
+			t.Errorf("MAILSTRIX_EFFORT=%q logged an invalid-number warning: %q", v, buf.String())
+		}
+		if !c.EffortAuto || c.Effort != c.EffortMax {
+			t.Errorf("MAILSTRIX_EFFORT=%q: EffortAuto=%v Effort=%d, want true and %d", v, c.EffortAuto, c.Effort, c.EffortMax)
+		}
+	}
+	buf.Reset()
+	t.Setenv("MAILSTRIX_EFFORT", "5")
+	if c := LoadConfig(); c.EffortAuto || c.Effort != 5 || strings.Contains(buf.String(), warn) {
+		t.Errorf("MAILSTRIX_EFFORT=5: EffortAuto=%v Effort=%d log=%q, want false, 5, no warning", c.EffortAuto, c.Effort, buf.String())
+	}
+	buf.Reset()
+	t.Setenv("MAILSTRIX_EFFORT", "abc")
+	c := LoadConfig()
+	if !strings.Contains(buf.String(), warn) {
+		t.Errorf("MAILSTRIX_EFFORT=abc: no invalid-number warning logged: %q", buf.String())
+	}
+	if c.EffortAuto || c.Effort != c.EffortMax {
+		t.Errorf("MAILSTRIX_EFFORT=abc: EffortAuto=%v Effort=%d, want false and %d", c.EffortAuto, c.Effort, c.EffortMax)
 	}
 }

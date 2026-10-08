@@ -283,12 +283,12 @@ func LoadConfig() *Config {
 		RuleDenylist:     envSet("MAILSTRIX_RULE_DENYLIST", "http"),
 		RuleAllowlist:    envSet("MAILSTRIX_RULE_ALLOWLIST", ""),
 		EffortMax:        envInt("MAILSTRIX_EFFORT_MAX", defaultEffortMax),
-		Effort:           envInt("MAILSTRIX_EFFORT", 0), // 0 -> sanitize sets = EffortMax
+		Effort:           envIntAuto("MAILSTRIX_EFFORT", 0), // 0 -> sanitize sets = EffortMax
 		// MAILSTRIX_EFFORT=auto (EFFORT-2) flips auto pressure-shedding. The numeric
-		// Effort above stays the IDLE ceiling for the auto resolver (with "auto" the
-		// Atoi above fails -> Effort==0 -> sanitize sets it = EffortMax, i.e. the
-		// idle level is full depth) and is also the fallback level if auto is later
-		// disabled by config error.
+		// Effort above stays the IDLE ceiling for the auto resolver ("auto" maps to
+		// the 0 default without an invalid-number warning -> sanitize sets it =
+		// EffortMax, i.e. the idle level is full depth) and is also the fallback
+		// level if auto is later disabled by config error.
 		EffortAuto: strings.EqualFold(strings.TrimSpace(os.Getenv("MAILSTRIX_EFFORT")), "auto"),
 	}
 	c.AllowRulesCountDrop = envBool("MAILSTRIX_RULES_ALLOW_COUNT_DROP")
