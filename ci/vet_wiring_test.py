@@ -23,7 +23,17 @@ def test_stage_command():
 
 
 class VetWiringTests(unittest.TestCase):
-    def invoke(self, scope, violation=False, selector_failure=False, test_failure=False):
+    def invoke(
+        self,
+        scope,
+        violation=False,
+        selector_failure=False,
+        test_failure=False,
+        full=False,
+        ci_pkg=False,
+        ci_failure=False,
+        changed="--changed -- affected/fixture.go",
+    ):
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory)
             (fixture / "go.mod").write_text("module example.com/fixture\n\ngo 1.26\n")
@@ -36,13 +46,28 @@ class VetWiringTests(unittest.TestCase):
                     f'package {name}\nimport "fmt"\n'
                     f'func Check() {{ fmt.Printf("%d", {argument}) }}\n'
                 )
-            test_body = 't.Fatal("selected test failure")' if test_failure else "Check()"
+            test_body = (
+                't.Fatal("selected test failure")' if test_failure else "Check()"
+            )
             (fixture / "affected/fixture_test.go").write_text(
                 'package affected\nimport "testing"\n'
                 f"func TestSelected(t *testing.T) {{ {test_body} }}\n"
             )
             binary = fixture / "bin"
             binary.mkdir()
+            if full or ci_pkg:
+                (fixture / "ci").mkdir()
+                if ci_pkg:
+                    body = 't.Fatal("ci test failure")' if ci_failure else ""
+                    (fixture / "ci/ci_test.go").write_text(
+                        'package ci\nimport "testing"\n'
+                        f"func TestCI(t *testing.T) {{ {body} }}\n"
+                    )
+            if full:
+                # Inert stand-in: records that the combined-coverage check ran.
+                gate = fixture / "ci/go_coverage.sh"
+                gate.write_text('#!/bin/sh\necho "gate $*" >> "$TRACE"\n')
+                gate.chmod(0o755)
             shim = binary / "go"
             shim.write_text("""#!/bin/sh
 printf '%s\\n' "$*" >> "$TRACE"
@@ -70,7 +95,7 @@ exec "$REAL_GO" "$@"
                     TRACE=str(trace),
                     SCOPE=scope,
                     SELECTOR_FAILURE=str(int(selector_failure)),
-                    CHANGED_FILES="--changed -- affected/fixture.go",
+                    CHANGED_FILES="" if full else changed,
                 ),
                 capture_output=True,
                 text=True,
@@ -82,14 +107,92 @@ exec "$REAL_GO" "$@"
         result, trace = self.invoke("./affected")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vet -tags yara_static ./affected\n", trace)
-        self.assertIn("test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace)
+        self.assertIn(
+            "test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace
+        )
         self.assertNotIn("./unaffected", trace)
+        self.assertNotIn("cover", trace)
+
+    COVER = (
+        "test -race -p 1 -timeout 30m -tags yara_static "
+        "-coverpkg=./... -coverprofile=/tmp/cover.out "
+    )
+    PLAIN = "test -race -p 1 -timeout 30m -tags yara_static "
+
+    def test_full_run_reuses_test_run_for_combined_coverage(self):
+        result, trace = self.invoke("./affected", full=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.COVER + "example.com/fixture/affected\n", trace)
+        self.assertEqual(trace.count("test -race"), 1)
+        self.assertEqual(trace.count("vet -tags"), 1)
+        self.assertEqual(trace.count("gate /tmp/cover.out\n"), 1)
+
+    def test_full_run_tests_ci_outside_coverage_run(self):
+        result, trace = self.invoke("./affected ./ci", full=True, ci_pkg=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.COVER + "example.com/fixture/affected\n", trace)
+        self.assertIn(self.PLAIN + "example.com/fixture/ci\n", trace)
+        self.assertEqual(trace.count("test -race"), 2)
+        self.assertEqual(trace.count("example.com/fixture/ci"), 1)
+        self.assertEqual(trace.count("vet -tags yara_static ./affected ./ci\n"), 1)
+        self.assertEqual(trace.count("gate /tmp/cover.out\n"), 1)
+        self.assertLess(trace.index("test -race"), trace.index("gate"))
+        self.assertLess(trace.rindex("test -race"), trace.index("gate"))
+
+    def test_full_run_only_ci_skips_coverage_gate(self):
+        result, trace = self.invoke("./ci", full=True, ci_pkg=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.PLAIN + "example.com/fixture/ci\n", trace)
+        self.assertEqual(trace.count("test -race"), 1)
+        self.assertNotIn("cover", trace)
+        self.assertNotIn("gate", trace)
+
+    def test_full_run_ci_failure_fails_and_skips_gate(self):
+        result, trace = self.invoke(
+            "./affected ./ci", full=True, ci_pkg=True, ci_failure=True
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ci test failure", result.stdout)
+        self.assertEqual(trace.count("test -race"), 2)
+        self.assertNotIn("gate", trace)
+
+    def test_full_run_covered_failure_fails_and_skips_gate(self):
+        result, trace = self.invoke(
+            "./affected ./ci", full=True, ci_pkg=True, test_failure=True
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("selected test failure", result.stdout)
+        self.assertNotIn("gate", trace)
+
+    def test_full_run_empty_selection_runs_nothing(self):
+        result, trace = self.invoke("", full=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("test ", trace)
+        self.assertNotIn("gate", trace)
+
+    def test_scoped_run_with_ci_has_no_cover_and_single_test_run(self):
+        result, trace = self.invoke(
+            "./affected ./ci",
+            ci_pkg=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.PLAIN + "./affected ./ci\n", trace)
+        self.assertEqual(trace.count("test -race"), 1)
+        self.assertNotIn("cover", trace)
+        self.assertNotIn("gate", trace)
+
+    def test_full_run_test_failure_skips_coverage_gate(self):
+        result, trace = self.invoke("./affected", full=True, test_failure=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("gate", trace)
 
     def test_selected_test_failure_is_fatal(self):
         result, trace = self.invoke("./affected", test_failure=True)
         self.assertNotEqual(result.returncode, 0, "selected test failure must fail")
         self.assertIn("selected test failure", result.stdout)
-        self.assertIn("test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace)
+        self.assertIn(
+            "test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace
+        )
 
     def test_affected_vet_violation_is_fatal_before_tests(self):
         result, trace = self.invoke("./affected", violation=True)

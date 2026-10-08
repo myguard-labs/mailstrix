@@ -93,16 +93,36 @@ FROM build AS test
 # fail selection; documentation without a test contract selects no packages.
 # Race-instrumented boundary suites can use several GiB each. Run package
 # processes serially so their peaks fit the 6 GiB CI runner; retain every test.
+# A full run (no CHANGED_FILES) reuses that one test run for a combined
+# -coverpkg=./... profile checked by ci/go_coverage.sh; scoped runs skip it
+# because a partial total is not comparable to the floor. The ./ci package is
+# tested in the same RUN but outside the coverage run: under -race with
+# -coverpkg=./... it exceeds the 30m test timeout (about 4x slower). Every
+# selected package is tested exactly once; a failing test run stops the RUN
+# before the coverage gate, which runs only when the covered run succeeded.
 ARG CHANGED_FILES=""
-# CHANGED_FILES and pkgs are space-separated lists: word splitting is intended.
+# CHANGED_FILES, pkgs, rest and cipkg are space-separated lists: word splitting
+# is intended.
 # hadolint ignore=SC2086
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
     && echo "go test scope: ${pkgs:-<none, docs-only change>}" \
-    && if [ -n "$pkgs" ]; then \
+    && covered="" \
+    && if [ -z "$pkgs" ]; then :; \
+    elif [ -n "$CHANGED_FILES" ]; then \
         go vet -tags yara_static $pkgs && go test -race -p 1 -timeout 30m -tags yara_static $pkgs; \
-    fi
+    else \
+        go vet -tags yara_static $pkgs \
+        && all="$(go list -tags yara_static $pkgs)" \
+        && ci="$(go list -m)/ci" && rest="" && cipkg="" \
+        && for p in $all; do if [ "$p" = "$ci" ]; then cipkg="$p"; else rest="$rest $p"; fi; done \
+        && if [ -n "$rest" ]; then \
+            go test -race -p 1 -timeout 30m -tags yara_static -coverpkg=./... -coverprofile=/tmp/cover.out $rest && covered=1; \
+        fi \
+        && if [ -n "$cipkg" ]; then go test -race -p 1 -timeout 30m -tags yara_static $cipkg; fi; \
+    fi \
+    && if [ -n "$covered" ]; then ci/go_coverage.sh /tmp/cover.out; fi
 
 # ---- binary export (release artifacts; not part of the runtime image) -------
 # Optional parity image uses only trusted repository rule sources. It has no
