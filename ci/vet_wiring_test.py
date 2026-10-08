@@ -82,14 +82,14 @@ exec "$REAL_GO" "$@"
         result, trace = self.invoke("./affected")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("vet -tags yara_static ./affected\n", trace)
-        self.assertIn("test -race -p 1 -tags yara_static ./affected\n", trace)
+        self.assertIn("test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace)
         self.assertNotIn("./unaffected", trace)
 
     def test_selected_test_failure_is_fatal(self):
         result, trace = self.invoke("./affected", test_failure=True)
         self.assertNotEqual(result.returncode, 0, "selected test failure must fail")
         self.assertIn("selected test failure", result.stdout)
-        self.assertIn("test -race -p 1 -tags yara_static ./affected\n", trace)
+        self.assertIn("test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace)
 
     def test_affected_vet_violation_is_fatal_before_tests(self):
         result, trace = self.invoke("./affected", violation=True)
