@@ -84,6 +84,11 @@ local settings = {
   -- Canary/shadow symbol for strixd MAILSTRIX_CANARY responses. Canary hits are
   -- visible in history but never contribute to score.
   canary_symbol = "STRIX_CANARY",
+  -- Zero-weight "unknown, not clean" symbol: strixd answered 200 but flagged the
+  -- reply degraded (incomplete|error|busy) and no actionable (non-canary,
+  -- non-allowlisted) match was found. The degraded reason is the option. An
+  -- actionable match in a degraded reply is still reported as a normal detection.
+  unknown_symbol = "STRIX_UNKNOWN",
   -- What to scan. At least one must be true or the plugin does nothing.
   scan_message = true,         -- the whole rfc822 message in one scan
   scan_parts = true,          -- each MIME part (attachment) separately
@@ -260,7 +265,12 @@ local function post(task, buf, what, fname, effort, cb)
     if type(res) ~= "table" or type(res.matches) ~= "table" then
       return cb({})
     end
-    return cb(res.matches)
+    -- Only a non-empty string counts as degraded; any other type is ignored.
+    local degraded
+    if type(res.degraded) == "string" and res.degraded ~= "" then
+      degraded = res.degraded
+    end
+    return cb(res.matches, degraded)
   end
 
   local headers = { ["Content-Type"] = "application/octet-stream" }
@@ -420,6 +430,8 @@ local function check_cb(task)
   local seen = {}
   local buckets = {} -- symbol name -> { opts = {..}, weight = number }
   local pending = #jobs
+  local degraded_reason = nil -- first degraded reason reported by any /scan reply
+  local actionable = false    -- any scoring (non-canary, non-allowlisted) hit
 
   -- add records a distinct option under a symbol and tracks the strongest weight
   -- seen for that symbol (the max over all its hits) as the value to insert.
@@ -435,6 +447,9 @@ local function check_cb(task)
       b.weight = weight
     end
     b.opts[#b.opts + 1] = opt
+    if sym ~= settings.canary_symbol and sym ~= settings.allow_symbol then
+      actionable = true
+    end
   end
 
   local function finish()
@@ -445,6 +460,10 @@ local function check_cb(task)
         task:insert_result(sym, b.weight, b.opts)
       end
     end
+    -- A degraded reply with no actionable match is UNKNOWN, never clean.
+    if degraded_reason and not actionable then
+      task:insert_result(settings.unknown_symbol, 1.0, { degraded_reason })
+    end
   end
 
   -- Effort tier is a per-message (sender) property: compute once, send on every
@@ -452,7 +471,8 @@ local function check_cb(task)
   local effort = compute_effort(task)
 
   for _, job in ipairs(jobs) do
-    post(task, job.buf, job.what, job.fname, effort, function(matches)
+    post(task, job.buf, job.what, job.fname, effort, function(matches, degraded)
+      if degraded and not degraded_reason then degraded_reason = degraded end
       for _, m in ipairs(matches) do
         if m.rule then
           local is_canary = type(m.meta) == "table" and m.meta.mailstrix_canary == "1"
@@ -593,6 +613,7 @@ for _, s in ipairs({
   settings.threatfox_symbol,
   settings.allow_symbol,
   settings.canary_symbol,
+  settings.unknown_symbol,
 }) do
   rspamd_config:register_symbol({ name = s, type = "virtual", parent = id })
 end

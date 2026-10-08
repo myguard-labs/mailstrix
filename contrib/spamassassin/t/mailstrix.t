@@ -434,4 +434,57 @@ sub fake_scan {
     unlike($argv, qr/-filename/, 'shellout no-filename: -filename flag absent when no name');
 }
 
+# ---- http mode: degraded reply (AUD-12a) -> unknown, not clean ----
+# A degraded reply with no actionable match must behave like shellout mode's
+# exit-2 (undef = backend error), never as a completed clean scan. An actionable
+# match in a degraded reply is still a detection.
+{
+    require HTTP::Tiny;
+    no warnings 'redefine';
+    my $conf = { mailstrix_url => 'http://x', mailstrix_high_score => 75 };
+    my $allow = '{"rule":"MAILSTRIX_SCAN_DEGRADED","meta":{"mailstrix_allow":"1"}}';
+    my %cases = (
+        'degraded no match'       => ['{"matches":[],"degraded":"incomplete"}', undef, 0],
+        'degraded busy'           => ['{"matches":[],"degraded":"busy"}', undef, 0],
+        'degraded log-only marker'=> ["{\"matches\":[$allow],\"degraded\":\"error\"}", undef, 0],
+        'degraded canary only'    => ['{"matches":[{"rule":"S","meta":{"mailstrix_canary":"1"}}],"degraded":"error"}', undef, 0],
+        'degraded actionable'     => ['{"matches":[{"rule":"Real","meta":{"score":10}}],"degraded":"incomplete"}', 1, 1],
+        'not degraded no match'   => ['{"matches":[]}', 1, 0],
+        'empty degraded string'   => ['{"matches":[],"degraded":""}', 1, 0],
+        'degraded wrong type'     => ['{"matches":[],"degraded":["x"]}', 1, 0],
+        'degraded number'         => ['{"matches":[],"degraded":0}', 1, 0],
+    );
+    for my $name (sort keys %cases) {
+        my ($json, $want_ret, $want_match) = @{$cases{$name}};
+        local *HTTP::Tiny::post = sub { return { success => 1, status => 200, content => $json }; };
+        my $pms = fresh_pms();
+        my $ret = $self->_scan_http($pms, $conf, \(my $m = 'm'));
+        is($ret, $want_ret, "http $name: return value");
+        is($pms->{mailstrix_matched}, $want_match, "http $name: matched flag");
+    }
+
+    # End to end through parsed_metadata: unknown follows fail-open policy like a backend error.
+    local *Mail::SpamAssassin::Plugin::Mailstrix::_message_part_buffers = sub { return (['p', undef]); };
+    local *HTTP::Tiny::post = sub {
+        return { success => 1, status => 200, content => '{"matches":[],"degraded":"busy"}' };
+    };
+    for my $fo (0, 1) {
+        my $pms = fresh_pms();
+        $pms->{conf} = { mailstrix_url => 'http://x', mailstrix_mode => 'http', mailstrix_max_size => 0,
+                         mailstrix_part_mode => 1, mailstrix_fail_open => $fo, mailstrix_high_score => 75 };
+        $pms->{msg} = bless {}, 'main::FakeMsg';
+        $self->parsed_metadata({ permsgstatus => $pms });
+        is($pms->{mailstrix_error}, $fo ? 0 : 1, "degraded unknown: fail_open=$fo error flag");
+        is($pms->{mailstrix_matched}, 0, "degraded unknown: fail_open=$fo not a match");
+    }
+}
+
+# ---- shellout parity: client exit 2 (its degraded mapping) is also undef ----
+{
+    my $bin = fake_scan('degraded', "#!/bin/sh\ncat >/dev/null\nexit 2\n");
+    my $pms = fresh_pms();
+    my $ok = $self->_scan_shellout($pms, { mailstrix_scan_bin => $bin, mailstrix_url => 'http://x' }, \(my $m = 'm'));
+    is($ok, undef, 'shellout degraded (client exit 2): undef, same as http degraded');
+}
+
 done_testing();

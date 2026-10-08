@@ -228,7 +228,7 @@ sub parsed_metadata {
 
 # _scan_http POSTs the message to <mailstrix_url>/scan and fills the cache from the
 # JSON verdict. Returns 1 on a completed scan (match or clean), undef on a
-# transport/HTTP error. $fname (optional) is the attachment filename forwarded
+# transport/HTTP error or a degraded reply with no actionable match. $fname (optional) is the attachment filename forwarded
 # as a base64 X-MAILSTRIX-Filename header so name/extension-keyed YARA rules fire.
 sub _scan_http {
     my ($self, $pms, $conf, $msgref, $fname) = @_;
@@ -277,6 +277,7 @@ sub _scan_http {
     }
 
     my $high = $conf->{mailstrix_high_score} // 75;
+    my $actionable = 0;   # matches in THIS reply that are neither canary nor allowlisted
     for my $m (@{$data->{matches}}) {
         my $name = $m->{rule} // next;
         next if $m->{meta} && (
@@ -285,8 +286,20 @@ sub _scan_http {
         );
         push @{$pms->{mailstrix_rules}}, $name;
         $pms->{mailstrix_matched} = 1;
+        $actionable++;
         my $score = $m->{meta} && defined $m->{meta}{score} ? $m->{meta}{score} + 0 : undef;
         $pms->{mailstrix_high} = 1 if defined $score && $score >= $high;
+    }
+    # A degraded reply (incomplete|error|busy) with no actionable match is
+    # UNKNOWN, not clean. Report it as a backend error exactly like shellout mode
+    # (strix-scan exits 2 for it), so the caller applies mailstrix_fail_open /
+    # MAILSTRIX_ERROR identically in both modes. An actionable match in a degraded
+    # reply is still a detection and was recorded above.
+    # Reason must look like a word (incomplete|error|busy); numbers/refs are malformed.
+    my $degraded = $data->{degraded};
+    if (defined $degraded && !ref($degraded) && $degraded =~ /^[A-Za-z][\w-]*\z/ && !$actionable) {
+        info("strixd: degraded verdict (%s) with no actionable match: unknown, not clean", $degraded);
+        return undef;
     }
     dbg("strixd: http scan matched %d rule(s)%s",
         scalar(@{$pms->{mailstrix_rules}}),

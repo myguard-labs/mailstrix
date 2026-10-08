@@ -75,7 +75,7 @@ local function test(name, opts, valid, disabled)
   elseif disabled then
     assert(#errors == 0 and #symbols == 0 and #requests == 0, name .. ": disabled behavior changed")
   else
-    assert(#errors == 0 and #symbols == 10, name .. ": supported policy registration changed")
+    assert(#errors == 0 and #symbols == 11, name .. ": supported policy registration changed")
     symbols[1].callback({
       get_user = noop,
       get_content = function() return "synthetic mail" end,

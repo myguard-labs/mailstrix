@@ -19,6 +19,10 @@ client.
 Like the Sieve path it **fails open** by default: a strixd outage, timeout, or
 transport error is treated as *clean*, so a down backend never tags every
 message. (Set `mailstrix_fail_open 0` to fire `MAILSTRIX_ERROR` instead.)
+A degraded `/scan` reply (`incomplete`, `error`, `busy`) with no actionable match is
+unknown, not clean: http mode treats it like a backend error (as shellout mode
+does), so it follows the same fail-open / `MAILSTRIX_ERROR` policy. An actionable
+match in a degraded reply still scores.
 
 ## Two modes
 
