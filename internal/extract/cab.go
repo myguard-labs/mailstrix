@@ -131,7 +131,7 @@ func unpackCab(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 			continue
 		}
 
-		folderData := decompressCabFolder(buf, folder, cbCFData, uint8(compType))
+		folderData, folderCapped := decompressCabFolder(buf, folder, cbCFData, uint8(compType))
 
 		for _, f := range files {
 			if int(f.iFolder) != fi {
@@ -141,7 +141,7 @@ func unpackCab(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 				break
 			}
 
-			cabNoteMemberCap(res, f, len(folderData))
+			cabNoteMemberCap(res, f, len(folderData), folderCapped)
 
 			start := int(f.uoffFolderStart)
 			fileEnd := start + int(f.cbFile)
@@ -168,23 +168,28 @@ func unpackCab(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 
 // cabNoteMemberCap records member-size when a CAB file's declared range is
 // cut by the per-member cap: either the file alone exceeds it, or the folder
-// data was capped and the file's declared end lies beyond what was kept. A
-// short or corrupt folder (below the cap) is not a cap hit. Arithmetic is in
-// uint64 since cbFile and uoffFolderStart are uint32.
-func cabNoteMemberCap(res *Result, f cfFile, folderLen int) {
+// data was actually truncated by the cap (capped, i.e. bytes were discarded)
+// and the file's declared end lies beyond what was kept. A short or corrupt
+// folder, including one that ends exactly at the cap with nothing discarded,
+// is not a cap hit. Arithmetic is in uint64 since cbFile and uoffFolderStart
+// are uint32.
+func cabNoteMemberCap(res *Result, f cfFile, folderLen int, capped bool) {
 	if uint64(f.cbFile) > uint64(maxBytesPerMember) {
 		res.stopHit("member-size")
 		return
 	}
-	if folderLen >= maxBytesPerMember &&
+	if capped &&
 		uint64(f.uoffFolderStart)+uint64(f.cbFile) > uint64(folderLen) {
 		res.stopHit("member-size")
 	}
 }
 
 // decompressCabFolder reads and decompresses all CFDATA blocks for a folder.
-// Returns raw concatenated folder data (up to maxBytesPerMember bytes).
-func decompressCabFolder(buf []byte, folder cfFolder, cbCFData uint8, compType uint8) []byte {
+// Returns raw concatenated folder data (up to maxBytesPerMember bytes) and
+// capped, which is true only when data was actually discarded because of the
+// cap (a block was truncated, or a readable block yielding bytes follows once
+// the cap was reached). A folder ending exactly at the cap is not capped.
+func decompressCabFolder(buf []byte, folder cfFolder, cbCFData uint8, compType uint8) ([]byte, bool) {
 	dataOffset := int(folder.coffCabStart)
 	nBlocks := int(folder.cCFData)
 	perBlockReserved := int(cbCFData)
@@ -211,15 +216,16 @@ func decompressCabFolder(buf []byte, folder cfFolder, cbCFData uint8, compType u
 		case 0x00: // NONE — data is stored as-is.
 			remaining := maxBytesPerMember - len(folderData)
 			if remaining <= 0 {
-				return folderData
+				// Cap already reached: any further stored bytes are discarded.
+				return folderData, len(compressedBlock) > 0
 			}
 			take := len(compressedBlock)
 			if take > remaining {
 				take = remaining
 			}
 			folderData = append(folderData, compressedBlock[:take]...)
-			if len(folderData) >= maxBytesPerMember {
-				return folderData
+			if take < len(compressedBlock) {
+				return folderData, true
 			}
 
 		case 0x01: // MSZIP: "CK" + raw DEFLATE with 32K sliding window.
@@ -236,13 +242,16 @@ func decompressCabFolder(buf []byte, folder cfFolder, cbCFData uint8, compType u
 				r = flate.NewReader(bytes.NewReader(deflateData))
 			}
 
+			// Read one byte past the limit so output beyond the cap is
+			// detectable; never retain more than limit+1 bytes from one read.
 			limit := maxBytesPerMember - len(folderData)
-			if limit <= 0 {
-				_ = r.Close()
-				return folderData
-			}
-			decompressed, _ := io.ReadAll(io.LimitReader(r, int64(limit)))
+			decompressed, _ := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 			_ = r.Close()
+
+			if len(decompressed) > limit {
+				folderData = append(folderData, decompressed[:limit]...)
+				return folderData, true
+			}
 
 			// Update the 32K MSZIP sliding-window dict for the NEXT block. Build it
 			// into a fresh slice (never append into the dict the previous
@@ -258,14 +267,11 @@ func decompressCabFolder(buf []byte, folder cfFolder, cbCFData uint8, compType u
 				mszipDict = combined
 
 				folderData = append(folderData, decompressed...)
-				if len(folderData) >= maxBytesPerMember {
-					return folderData
-				}
 			}
 		}
 
 		dataOffset = compEnd
 	}
 
-	return folderData
+	return folderData, false
 }

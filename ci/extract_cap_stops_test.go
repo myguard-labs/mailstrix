@@ -1218,4 +1218,12 @@ func TestCapStopCabMemberSize(t *testing.T) {
 	t.Run("cab-mszip-folder-exactly-cap-no-hit", func(t *testing.T) {
 		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 10}}, capFill(capMember), true)))
 	})
+	// Folder data ends exactly at the cap and nothing was discarded, but the
+	// declared file range runs past it (incomplete/corrupt folder): not a cap hit.
+	t.Run("cab-folder-exactly-cap-declared-past-no-hit", func(t *testing.T) {
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember), false)))
+	})
+	t.Run("cab-mszip-folder-exactly-cap-declared-past-no-hit", func(t *testing.T) {
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember), true)))
+	})
 }
