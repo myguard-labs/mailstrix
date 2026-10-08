@@ -673,8 +673,11 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		if len(pwc) > 0 {
 			// Header-encrypted: no specific trigger member (the whole listing is
 			// hidden), so verify against any member — targetIdx -1.
-			if pw := crack7zPassword(buf, -1, pwc, b, deadline); pw != "" {
-				if dr := open7zReader(buf, pw); dr != nil {
+			pw, dictCap := crack7zPassword(buf, -1, pwc, b, deadline)
+			if pw != "" {
+				dr, odc := open7zReader(buf, pw)
+				dictCap = dictCap || odc
+				if dr != nil {
 					// Emit members first; mark decrypted only if ≥1 payload landed, so
 					// a maxStreams cap can't sacrifice the dropper for the marker.
 					if emit7zMembers(dr, res, b, depth, deadline) {
@@ -684,6 +687,11 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 					}
 					return
 				}
+			}
+			if dictCap {
+				// AUD-17e: the (decrypted) header or member needs more LZMA dictionary
+				// than lzmaDictCeiling: an incomplete scan, same as the plain path.
+				res.stopHit("lzma-dict")
 			}
 			// Candidates were tried and none worked. A NewReader failure on a valid 7z
 			// (magic already matched by the dispatcher) is overwhelmingly a header-
@@ -707,8 +715,14 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 			decTried = true // crack once; a failed crack is not retried per member
 			// Validate the password against the member that actually failed the
 			// plaintext read (the encrypted one), not a sibling plaintext member.
-			if pw := crack7zPassword(buf, targetIdx, pwc, b, deadline); pw != "" {
-				dec = open7zReader(buf, pw)
+			pw, dictCap := crack7zPassword(buf, targetIdx, pwc, b, deadline)
+			if pw != "" {
+				var odc bool
+				dec, odc = open7zReader(buf, pw)
+				dictCap = dictCap || odc
+			}
+			if dictCap {
+				res.stopHit("lzma-dict") // AUD-17e
 			}
 		}
 	}

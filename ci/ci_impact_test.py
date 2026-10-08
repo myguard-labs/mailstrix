@@ -320,6 +320,9 @@ class ImpactTests(unittest.TestCase):
             "ci/testdata/vfm-nonsolid.7z",
             "ci/testdata/vfm-solid.7z",
             "ci/testdata/vfm-onlybig.7z",
+            "ci/testdata/lzmadict-enc-in.7z",
+            "ci/testdata/lzmadict-enc-over.7z",
+            "ci/testdata/lzmadict-hdrenc-over.7z",
         ]
         for path in paths:
             with self.subTest(path=path):

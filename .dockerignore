@@ -35,6 +35,10 @@ ci/testdata/**
 !ci/testdata/vfm-nonsolid.7z
 !ci/testdata/vfm-solid.7z
 !ci/testdata/vfm-onlybig.7z
+# Encrypted LZMA dict-cap 7z fixtures read by ci/extract_lzma_dict_cap_test.go (AUD-17e).
+!ci/testdata/lzmadict-enc-in.7z
+!ci/testdata/lzmadict-enc-over.7z
+!ci/testdata/lzmadict-hdrenc-over.7z
 !third_party
 !third_party/**
 !tools

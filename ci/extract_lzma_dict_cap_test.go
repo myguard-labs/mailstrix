@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"hash/crc32"
+	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -269,4 +270,94 @@ func TestLZMADictCapEncodedHeader(t *testing.T) {
 			t.Fatalf("at-ceiling header misreported: %v", res.CapHits)
 		}
 	})
+}
+
+// AUD-17e: the 7z password paths must surface the dictionary refusal as a
+// "lzma-dict" cap stop instead of collapsing it into "wrong password".
+//
+// Fixtures (7-Zip, password "test"; the 9 MiB all-'A' member packs to ~1.4 KiB,
+// and 7-Zip clamps the declared 16 MiB dictionary to the 9 MiB unpack size, which
+// is still above the 8 MiB ceiling):
+//
+//	lzmadict-enc-over.7z:      7z a -p'test' -mhe=off -m0=lzma:d=16m -ms=off X big.txt
+//	lzmadict-enc-in.7z:        7z a -p'test' -mhe=off -m0=lzma:d=64k X small.txt (4 KiB)
+//	lzmadict-hdrenc-over.7z:   7z a -p'test' -mhe=on  -m0=lzma:d=16m X big.txt
+func lzmaEncRun(t *testing.T, name string, cands ...string) extract.Result {
+	t.Helper()
+	t.Cleanup(extract.SetDecryptAttemptTimeForTest(time.Minute))
+	buf, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := extract.FullOptions(time.Time{})
+	opts.ArchivePWEnabled = true
+	opts.PWCandidates = cands
+	return extract.ExtractWithOptions(buf, opts)
+}
+
+func TestLZMADictCapEncrypted7z(t *testing.T) {
+	// Member-encrypted (plain header): the AES coder only derives a key (no
+	// password check) and the LZMA coder is constructed from plaintext folder
+	// props, so the cap fires whatever the password. Recorded for right, wrong
+	// and absent candidates alike; a cap error never counts as a cracked password.
+	for _, cands := range [][]string{{"test"}, {"wrong", "test"}, {"wrong"}, nil} {
+		res := lzmaEncRun(t, "lzmadict-enc-over.7z", cands...)
+		if !hasStopKind(res, "lzma-dict") {
+			t.Errorf("cands=%v: CapHits=%v, want lzma-dict", cands, res.CapHits)
+		}
+		if res.DecryptedArchive || hasStreamWith(res, []byte("AAAA")) || !res.IsArchive {
+			t.Errorf("cands=%v: decrypted=%v streams=%d isArchive=%v", cands, res.DecryptedArchive, len(res.Streams), res.IsArchive)
+		}
+	}
+}
+
+func TestLZMADictCapHeaderEncrypted7z(t *testing.T) {
+	// Header-encrypted: the coder props sit inside the encrypted header, so the
+	// refusal is only reachable once the header decrypts (right password). The
+	// crack records it once, claims no password, and stops.
+	for _, cands := range [][]string{{"test"}, {"wrong", "test"}, {"wrong", "test", "never"}} {
+		res := lzmaEncRun(t, "lzmadict-hdrenc-over.7z", cands...)
+		if !hasStopKind(res, "lzma-dict") {
+			t.Errorf("cands=%v: CapHits=%v, want lzma-dict", cands, res.CapHits)
+		}
+		if n := countHits(res, "lzma-dict"); n != 1 {
+			t.Errorf("cands=%v: lzma-dict recorded %d times, want 1", cands, n)
+		}
+		if res.DecryptedArchive || hasStreamWith(res, []byte("AAAA")) {
+			t.Errorf("cands=%v: must not claim a decrypt (decrypted=%v)", cands, res.DecryptedArchive)
+		}
+	}
+	// Wrong-only: the header never decrypts, so the cap is unobservable and the
+	// archive stays plain "encrypted" (no lzma-dict claim).
+	for _, cands := range [][]string{{"wrong"}, nil} {
+		res := lzmaEncRun(t, "lzmadict-hdrenc-over.7z", cands...)
+		if hasStopKind(res, "lzma-dict") || res.DecryptedArchive {
+			t.Errorf("cands=%v: CapHits=%v decrypted=%v", cands, res.CapHits, res.DecryptedArchive)
+		}
+	}
+}
+
+func countHits(res extract.Result, kind string) int {
+	n := 0
+	for _, h := range res.CapHits {
+		if h == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func TestLZMADictCapEncrypted7zInCeilingControl(t *testing.T) {
+	res := lzmaEncRun(t, "lzmadict-enc-in.7z", "wrong", "test")
+	if hasStopKind(res, "lzma-dict") {
+		t.Fatalf("CapHits=%v, want no lzma-dict", res.CapHits)
+	}
+	if !res.DecryptedArchive || !hasStreamWith(res, []byte("BBBB")) {
+		t.Fatalf("decrypted=%v streams=%d: in-ceiling member not extracted", res.DecryptedArchive, len(res.Streams))
+	}
+	// wrong-only: still encrypted, no lzma-dict hit.
+	res = lzmaEncRun(t, "lzmadict-enc-in.7z", "wrong")
+	if hasStopKind(res, "lzma-dict") || res.DecryptedArchive {
+		t.Fatalf("wrong-only: decrypted=%v CapHits=%v", res.DecryptedArchive, res.CapHits)
+	}
 }
