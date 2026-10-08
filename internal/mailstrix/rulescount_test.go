@@ -341,7 +341,7 @@ func TestFetchRulesLiveCountFloorsBaseline(t *testing.T) {
 			}
 			srv := rulesServer(t, compiledYacBytes(t, nRules(tc.in)), 2, "4.5.2", "")
 			defer srv.Close()
-			res, err := fetchRules(context.Background(), srv.URL, dir, "4.5.2", srv.Client(), true, 0, tc.live, nil)
+			res, err := fetchRules(context.Background(), srv.URL, dir, "4.5.2", srv.Client(), fetchOptions{allowHTTP: true, liveCount: tc.live})
 			if tc.wantErr {
 				if !errors.Is(err, ErrRuleCountDrop) || res.Updated {
 					t.Fatalf("res=%+v err=%v, want ErrRuleCountDrop", res, err)

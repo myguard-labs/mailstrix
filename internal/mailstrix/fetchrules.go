@@ -55,6 +55,21 @@ type FetchResult struct {
 	PublishedVersion int // latest validated remote manifest, even on later failure
 }
 
+// fetchOptions groups optional parameters passed to fetchRules.
+type fetchOptions struct {
+	// allowHTTP permits plain http URLs (MAILSTRIX_RULES_ALLOW_HTTP).
+	allowHTTP bool
+	// minimumVersion is the version floor for published rules; versions older than
+	// this are refused. Used to prevent downgrades when rules are already loaded.
+	minimumVersion int
+	// liveCount is the rule count of the running scanner (0 when none); it floors
+	// the count-drop baseline.
+	liveCount int
+	// reload is called after both cache files have been installed; it must leave
+	// the active scanner unchanged on error and must not reacquire the cache lock.
+	reload func() error
+}
+
 // FetchRules implements the manifest-driven update: fetch the remote manifest,
 // decide from it, and (only when warranted) download + verify + atomically swap
 // the compiled bundle in the cache, keeping one backup.
@@ -82,7 +97,7 @@ type FetchResult struct {
 // hc is never modified: its CheckRedirect still runs after these checks on a
 // private copy.
 func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool) (FetchResult, error) {
-	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, allowHTTP, 0, 0, nil)
+	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, fetchOptions{allowHTTP: allowHTTP})
 }
 
 // maxRulesRedirects bounds the redirect chain of one rules request (a GitHub
@@ -175,18 +190,15 @@ func rulesClient(hc *http.Client, allowHTTP bool) *http.Client {
 // On a reported failure the cache pair and pre-existing backup are restored;
 // rollback errors are explicit.
 // Individual renames are atomic, but this is not a two-file power-loss journal.
-// liveCount is the rule count of the running scanner (0 when none); it floors
-// the count-drop baseline. reload must leave the active scanner unchanged on error and must not reacquire
-// the cache lock. It runs only after both cache files have been installed.
-func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool, minimumVersion int, liveCount int, reload func() error) (FetchResult, error) {
+func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, opts fetchOptions) (FetchResult, error) {
 	res := FetchResult{}
-	if err := checkRulesBaseURL(baseURL, allowHTTP); err != nil {
+	if err := checkRulesBaseURL(baseURL, opts.allowHTTP); err != nil {
 		return res, err
 	}
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
-	hc = rulesClient(hc, allowHTTP)
+	hc = rulesClient(hc, opts.allowHTTP)
 	base := strings.TrimRight(baseURL, "/")
 
 	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
@@ -209,8 +221,8 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 		return res, fmt.Errorf("fetch manifest: %w", err)
 	}
 	res.PublishedVersion = remote.Version
-	if remote.Version < minimumVersion {
-		return res, fmt.Errorf("published version %d is older than loaded version %d", remote.Version, minimumVersion)
+	if remote.Version < opts.minimumVersion {
+		return res, fmt.Errorf("published version %d is older than loaded version %d", remote.Version, opts.minimumVersion)
 	}
 	if remote.Version <= local.Version {
 		res.Reason = fmt.Sprintf("up to date (local v%d, remote v%d)", local.Version, remote.Version)
@@ -255,7 +267,7 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	}
 	// Refuse an empty or sharply shrunken ruleset (counted from the loaded bundle,
 	// not the manifest) before touching the cache; current rules stay installed.
-	curCount, err := currentRuleCount(ctx, cachePath, liveCount)
+	curCount, err := currentRuleCount(ctx, cachePath, opts.liveCount)
 	if err != nil {
 		return res, err
 	}
@@ -322,8 +334,8 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	if err := writeLocalManifest(localManifestPath, remote); err != nil {
 		return res, rollback(fmt.Errorf("write local manifest: %w", err))
 	}
-	if reload != nil {
-		if err := reload(); err != nil {
+	if opts.reload != nil {
+		if err := opts.reload(); err != nil {
 			return res, rollback(fmt.Errorf("reload downloaded rules: %w", err))
 		}
 	}

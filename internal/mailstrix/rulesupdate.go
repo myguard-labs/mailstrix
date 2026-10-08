@@ -144,7 +144,7 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 	if u.cfg.AllowRulesCountDrop {
 		fetchCtx = WithAllowRuleCountDrop(ctx)
 	}
-	res, err := fetchRules(fetchCtx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, u.cfg.RulesAllowHTTP, minimumVersion, int(u.scanner.RuleCount()), reload)
+	res, err := fetchRules(fetchCtx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, fetchOptions{allowHTTP: u.cfg.RulesAllowHTTP, minimumVersion: minimumVersion, liveCount: int(u.scanner.RuleCount()), reload: reload})
 	observedCached, observedLoaded := res.NewVersion, 0
 	if res.Updated {
 		// fetchRules returns only after the same locked transaction installed and
