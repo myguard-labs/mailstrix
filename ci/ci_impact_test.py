@@ -149,6 +149,27 @@ class ImpactTests(unittest.TestCase):
         ):
             impact.plan([path])
 
+    def test_cape_store_seam_native_go_consumer(self):
+        path = "ci/cape_store_seam_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/cape_store_seam_test.py"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+        without_path = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_path),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+
     def test_scanner_budget_native_go_consumer(self):
         path = "ci/scanner_budget_test.go"
         result = impact.plan([path])

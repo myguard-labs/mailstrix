@@ -171,7 +171,7 @@ type Store struct {
 
 // OpenStore validates cfg and opens the durable CAPE job store.
 func OpenStore(ctx context.Context, cfg StoreConfig) (*Store, error) {
-	return openStore(ctx, cfg, storeHooks{clock: realStoreClock{}, capacity: filesystemCapacity})
+	return openStore(ctx, cfg, storeHooks{clock: realStoreClock{}, capacity: openStoreCapacity()})
 }
 
 func validateStoreConfig(c *StoreConfig) error {
