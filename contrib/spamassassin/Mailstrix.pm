@@ -236,7 +236,7 @@ sub _scan_http {
     my $have = eval { require HTTP::Tiny; require JSON::PP; 1 };
     if (!$have) {
         info("strixd: http mode needs HTTP::Tiny + JSON::PP (core since Perl 5.14); error: %s", $@);
-        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+        return;
     }
 
     my $url = $conf->{mailstrix_url};
@@ -267,13 +267,13 @@ sub _scan_http {
 
     if (!$res->{success}) {
         info("strixd: POST %s failed: %s %s", $url, $res->{status} // '?', $res->{reason} // '');
-        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+        return;
     }
 
     my $data = eval { JSON::PP::decode_json($res->{content}) };
     if (!$data || ref($data->{matches}) ne 'ARRAY') {
         info("strixd: could not parse verdict JSON: %s", $@ || 'no matches array');
-        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+        return;
     }
 
     my $high = $conf->{mailstrix_high_score} // 75;
@@ -299,7 +299,7 @@ sub _scan_http {
     my $degraded = $data->{degraded};
     if (defined $degraded && !ref($degraded) && $degraded =~ /^[A-Za-z][\w-]*\z/ && !$actionable) {
         info("strixd: degraded verdict (%s) with no actionable match: unknown, not clean", $degraded);
-        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+        return;
     }
     dbg("strixd: http scan matched %d rule(s)%s",
         scalar(@{$pms->{mailstrix_rules}}),
@@ -319,7 +319,7 @@ sub _scan_shellout {
     my $bin = $conf->{mailstrix_scan_bin};
     if (!defined $bin || !-x $bin) {
         info("strixd: shellout mode: strix-scan binary not executable: %s", $bin // '(unset)');
-        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+        return;
     }
 
     my @args = ($bin,
@@ -340,10 +340,10 @@ sub _scan_shellout {
     local $SIG{PIPE} = 'IGNORE';
     my ($pid, $out);
     my ($rd, $wr);
-    pipe($rd, my $cwr) or do { info("strixd: pipe: %s", $!); return undef; };  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
-    pipe(my $crd, $wr) or do { info("strixd: pipe: %s", $!); return undef; };  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+    pipe($rd, my $cwr) or do { info("strixd: pipe: %s", $!); return; };
+    pipe(my $crd, $wr) or do { info("strixd: pipe: %s", $!); return; };
     $pid = fork();
-    if (!defined $pid) { info("strixd: fork: %s", $!); return undef; }  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+    if (!defined $pid) { info("strixd: fork: %s", $!); return; }
     if ($pid == 0) {
         # child
         open(STDIN,  '<&', $crd) or POSIX::_exit(2);
@@ -378,7 +378,7 @@ sub _scan_shellout {
     }
     # exit 2 = the client's own error (we set -fail-open=false). Treat as backend error.
     info("strixd: shellout client exit %d", $code);
-    return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+    return;
 }
 
 # _message_part_buffers returns an array of [ $decoded_body, $filename_or_undef ]
