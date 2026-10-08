@@ -589,8 +589,8 @@ which matches the fail-open posture above.
 | `-listen` / `MAILSTRIX_MILTER_LISTEN` | `inet:127.0.0.1:8081` | `inet:HOST:PORT` or `unix:/path.sock` |
 | `-token-file` / `MAILSTRIX_TOKEN` | — | strixd's shared secret; `-token-file` keeps it out of the process list |
 | `-timeout` | `20s` | hard per-message deadline; on expiry the message is **accepted** as `unknown` |
-| `-max-body` | `8 MiB` | a larger message is accepted **unscanned** rather than scanned as a truncated prefix (which would be a silent miss) |
-| `-max-conns` | `64` | max concurrent MTA connections; bounds memory at roughly `max-conns × max-body`, so a flood of large messages cannot OOM the filter (an OOM restart would, with `milter_default_action = accept`, let mail through unscanned) |
+| `-max-body` | `8 MiB` | a larger message is accepted **unscanned** rather than scanned as a truncated prefix (which would be a silent miss); the milter path may transiently hold up to ~2x this value per message during buffering |
+| `-max-conns` | `64` | max concurrent MTA connections; bounds memory at roughly `max-conns × max-body × 2` for the milter path (due to transient buffering), so a flood of large messages cannot OOM the filter (an OOM restart would, with `milter_default_action = accept`, let mail through unscanned) |
 | `-cape-policy` / `MAILSTRIX_CAPE_POLICY` | `static-only` | Delivery always follows the current static verdict; this adapter is report-only. Accepted values are `static-only` and the empty string, which behave identically. An empty environment variable is treated as unset and selects the default. Any other value, including quarantine or temporary-failure policies, is rejected at startup with exit status 2. |
 | `-log-clean` | off | log clean verdicts too (noisy) |
 
