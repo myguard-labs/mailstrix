@@ -125,9 +125,9 @@ func TestActionableMatchesSkipsLogOnlyWithoutMutatingInput(t *testing.T) {
 	}
 }
 
-// TestReloadDenylistMergesFile verifies that ReloadDenylist reads a file and
+// TestReloadAllMergesFile verifies that ReloadAll reads a file and
 // merges its entries with the env-based baseDenylist.
-func TestReloadDenylistMergesFile(t *testing.T) {
+func TestReloadAllMergesFile(t *testing.T) {
 	dir := writeRules(t, eicarRule)
 	// Write a denylist file with one rule name.
 	denyFile := filepath.Join(t.TempDir(), "deny.txt")
@@ -154,9 +154,9 @@ func TestReloadDenylistMergesFile(t *testing.T) {
 	}
 }
 
-// TestReloadDenylistMissingFile verifies that a missing denylist file logs a
+// TestReloadAllMissingFile verifies that a missing denylist file logs a
 // warning but does not crash (fail-open).
-func TestReloadDenylistMissingFile(t *testing.T) {
+func TestReloadAllMissingFile(t *testing.T) {
 	dir := writeRules(t, eicarRule)
 	cfg := &Config{
 		RulesDir:     dir,
@@ -184,9 +184,9 @@ func TestReloadDenylistMissingFile(t *testing.T) {
 	}
 }
 
-// TestReloadDenylistNoFile verifies that with no DenylistFile configured,
-// ReloadDenylist is a no-op.
-func TestReloadDenylistNoFile(t *testing.T) {
+// TestReloadAllNoFile verifies that with no DenylistFile configured,
+// ReloadAll falls back to a plain Reload and keeps the env denylist.
+func TestReloadAllNoFile(t *testing.T) {
 	dir := writeRules(t, eicarRule)
 	cfg := &Config{
 		RulesDir:     dir,
@@ -198,8 +198,10 @@ func TestReloadDenylistNoFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScanner: %v", err)
 	}
-	// Calling again should be a no-op.
-	s.ReloadDenylist()
+	// No file configured: plain Reload, env entries unchanged.
+	if err := s.ReloadAll(); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := (*s.denylist.Load())["fromenv"]; !ok {
 		t.Error("env denylist entry should still be present")
 	}
@@ -258,14 +260,16 @@ func TestReloadAllCompilesOnceWithDenylist(t *testing.T) {
 		t.Fatalf("denylisted rule still fires after ReloadAll: %v", m)
 	}
 
-	// Negative control: the legacy two-call sequence compiles twice.
+	// Negative control: Reload() then ReloadAll() compiles twice (proves counter counts every compile).
 	compiles = 0
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	s.ReloadDenylist()
+	if err := s.ReloadAll(); err != nil {
+		t.Fatal(err)
+	}
 	if compiles != 2 {
-		t.Fatalf("legacy Reload+ReloadDenylist compiled %d times, want 2", compiles)
+		t.Fatalf("Reload+ReloadAll compiled %d times, want 2", compiles)
 	}
 
 	// Unreadable denylist file falls back to a single plain reload.

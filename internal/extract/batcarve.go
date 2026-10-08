@@ -71,14 +71,10 @@ func fromBatchDropper(buf []byte, res *Result, b *archiveBudget, depth int, dead
 		if expired(deadline) {
 			break // deadline has its own incompleteness path
 		}
-		// The stream cap is enforced (and recorded via archiveCapHit) by
-		// emitMember (archive.go:348), so only the archive budget stops the walk.
-		if b.spent() {
-			if len(data) >= minMemberBytes {
-				archiveCapHit(res, b) // a carved file is left unemitted
-			}
-			break
-		}
+		// emitMember records both the stream cap and the archive-budget cap
+		// (archive.go emitMember), and skips sub-minimum files without a cap hit,
+		// so a spent budget needs no check here: a tiny carved file must not end
+		// the walk before a later full-size one is reported.
 		emitMember(data, res, b, depth, deadline)
 	}
 }
