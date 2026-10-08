@@ -147,14 +147,19 @@ func TestReloadGenerationFailureAndDenyPolicy(t *testing.T) {
 	// Preserve the previous failure policy: post-filter changes still apply;
 	// previously pre-disabled native rules cannot be re-enabled by a failed load.
 	reloadWrite(t, denyPath, "second\n")
-	s.ReloadDenylist()
+	if err := s.ReloadAll(); err != nil {
+		// ReloadAll will return an error because the main rules are still malformed.
+		// The deny list update should still apply.
+	}
 	check("")
 	failedFP := s.Fingerprint()
 	if failedFP == oldFP {
 		t.Fatal("effective deny update kept old cache identity")
 	}
 	reloadWrite(t, path, source)
-	s.ReloadDenylist()
+	if err := s.ReloadAll(); err != nil {
+		t.Fatal(err)
+	}
 	check("First")
 	if s.Fingerprint() == failedFP {
 		t.Fatal("successful native re-enable shared failed-reload identity")
@@ -164,7 +169,9 @@ func TestReloadGenerationFailureAndDenyPolicy(t *testing.T) {
 	if err := os.Remove(denyPath); err != nil {
 		t.Fatal(err)
 	}
-	s.ReloadDenylist()
+	if err := s.ReloadAll(); err != nil {
+		t.Fatal(err)
+	}
 	check("First")
 	if s.Fingerprint() != goodFP {
 		t.Fatal("missing deny file changed the active generation")

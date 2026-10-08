@@ -208,13 +208,13 @@ type Scanner struct {
 	// denylist holds rule names (lowercase) whose matches are dropped from every
 	// result — public-ruleset demo/noise rules (e.g. Didier's `http`) that are
 	// pure false positives for mail. nil/empty means no filtering. Accessed via
-	// atomic pointer so ReloadDenylist (SIGHUP) can swap it while scans run.
+	// atomic pointer so ReloadAll (SIGHUP) can swap it while scans run.
 	denylist atomic.Pointer[map[string]struct{}]
 	// baseDenylist is the immutable env-parsed denylist, preserved so file-based
-	// additions (ReloadDenylist) can merge on top without losing env entries.
+	// additions (ReloadAll) can merge on top without losing env entries.
 	baseDenylist map[string]struct{}
 	// denylistFile is the path to a file of additional deny rules (one per line).
-	// Empty means no file. Re-read on SIGHUP via ReloadDenylist.
+	// Empty means no file. Re-read on SIGHUP via ReloadAll.
 	denylistFile string
 	// allowlist holds rule names (lowercase) whose matches are KEPT but tagged
 	// `mailstrix_allow=1` so the plugin scores them log-only (0 weight). Lets an
@@ -225,8 +225,7 @@ type Scanner struct {
 	// denylistFP is a short hash of the SORTED effective denylist, folded into
 	// Fingerprint() so two scanners (or the same scanner before/after SIGHUP) with
 	// different denylists produce different verdict-cache keys — see #251 class.
-	// Updated atomically whenever the effective denylist changes (Reload or
-	// ReloadDenylist).
+	// Updated atomically whenever the effective denylist changes (ReloadAll).
 	denylistFP atomic.Pointer[string]
 
 	// topMatches counts rule hits since the last reload for /version observability.
@@ -810,7 +809,7 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 // The effective denylist is also folded (#251-class fix): pre-disabling denied
 // rules changes WHICH rules can fire, so two scanners with different denylists
 // must never share a verdict-cache entry. denylistFP is a hash of the SORTED
-// deny set (deterministic across replicas) updated on every Reload/ReloadDenylist.
+// deny set (deterministic across replicas) updated on every ReloadAll.
 //
 // Finally, the scoring policy is folded too. Allowlist and canary do not change
 // which rules fire, but they DO change response metadata that shipped consumers
@@ -882,7 +881,7 @@ func (s *Scanner) scoringPolicyHash() string {
 // denylistHash returns a short deterministic hash of the SORTED deny set so the
 // same set always produces the same value across replicas. The empty set hashes
 // to a fixed constant so a nil/empty denylist is distinguishable from a
-// non-empty one. Called by Reload and ReloadDenylist to refresh denylistFP.
+// non-empty one. Called by ReloadAll to refresh denylistFP.
 func denylistHash(deny map[string]struct{}) string {
 	if len(deny) == 0 {
 		return "0000000000000000"
@@ -2297,28 +2296,9 @@ func actionableMatches(matches []Match) []Match {
 	return out
 }
 
-// ReloadDenylist re-reads the denylist file (if configured) and merges its
-// entries with the immutable env-based denylist. Safe to call from the SIGHUP
-// handler. If the file doesn't exist or is unreadable, a warning is logged and
-// the scanner continues with only the env-based entries (fail-open).
-func (s *Scanner) ReloadDenylist() {
-	merged, ok := s.mergedDenylist()
-	if !ok {
-		return
-	}
-	// Re-apply deny set to loaded bundles by triggering a full Reload.
-	// This is safe: Reload compiles fresh bundles (new C objects) and swaps
-	// them atomically, so in-flight scans on the old bundles are unaffected.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if err := s.reloadWithDenylist(ctx, &merged); err != nil {
-		s.logf("WARNING: Reload after denylist change failed: %v (pre-disable may be stale)", err)
-	}
-}
-
 // ReloadAll recompiles the rules ONCE with the freshly re-read denylist file
-// (when configured) applied before publication. Reload followed by
-// ReloadDenylist compiled the same rule set twice per SIGHUP/startup (AUD-N5).
+// (when configured) applied before publication. This avoids the old
+// double-compile cost of separate Reload + ReloadDenylist calls (AUD-N5).
 // An unreadable denylist file falls back to a plain Reload, as before.
 func (s *Scanner) ReloadAll() error {
 	merged, ok := s.mergedDenylist()
