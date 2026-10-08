@@ -229,12 +229,12 @@ func TestDecrypted7zMemberIsPooled(t *testing.T) {
 	// pooled read is never entered and nothing is decrypted.
 	b := &archiveBudget{}
 	b.markDecryptStalled()
-	if data, ok := boundedDecrypted7zMember(nil, 0, b, time.Time{}); ok || data != nil {
+	if data, ok := boundedDecrypted7zMember(nil, 0, b, nil, time.Time{}); ok || data != nil {
 		t.Fatal("a stalled budget still ran a decrypted-member read — the latch does not gate the post-crack path")
 	}
 
 	// And an expired deadline must not spawn a worker either.
-	if _, ok := boundedDecrypted7zMember(nil, 0, &archiveBudget{}, time.Now().Add(-time.Second)); ok {
+	if _, ok := boundedDecrypted7zMember(nil, 0, &archiveBudget{}, nil, time.Now().Add(-time.Second)); ok {
 		t.Fatal("an expired deadline still produced a decrypted member")
 	}
 	drainPool(t)
