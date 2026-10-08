@@ -225,7 +225,7 @@ type Scanner struct {
 	// denylistFP is a short hash of the SORTED effective denylist, folded into
 	// Fingerprint() so two scanners (or the same scanner before/after SIGHUP) with
 	// different denylists produce different verdict-cache keys — see #251 class.
-	// Updated atomically whenever the effective denylist changes (ReloadAll).
+	// Updated atomically whenever the effective denylist changes (Reload or ReloadAll).
 	denylistFP atomic.Pointer[string]
 
 	// topMatches counts rule hits since the last reload for /version observability.
@@ -809,7 +809,7 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 // The effective denylist is also folded (#251-class fix): pre-disabling denied
 // rules changes WHICH rules can fire, so two scanners with different denylists
 // must never share a verdict-cache entry. denylistFP is a hash of the SORTED
-// deny set (deterministic across replicas) updated on every ReloadAll.
+// deny set (deterministic across replicas) updated on every Reload/ReloadAll.
 //
 // Finally, the scoring policy is folded too. Allowlist and canary do not change
 // which rules fire, but they DO change response metadata that shipped consumers
@@ -881,7 +881,7 @@ func (s *Scanner) scoringPolicyHash() string {
 // denylistHash returns a short deterministic hash of the SORTED deny set so the
 // same set always produces the same value across replicas. The empty set hashes
 // to a fixed constant so a nil/empty denylist is distinguishable from a
-// non-empty one. Called by ReloadAll to refresh denylistFP.
+// non-empty one. Called by Reload and ReloadAll to refresh denylistFP.
 func denylistHash(deny map[string]struct{}) string {
 	if len(deny) == 0 {
 		return "0000000000000000"

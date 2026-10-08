@@ -147,9 +147,9 @@ func TestReloadGenerationFailureAndDenyPolicy(t *testing.T) {
 	// Preserve the previous failure policy: post-filter changes still apply;
 	// previously pre-disabled native rules cannot be re-enabled by a failed load.
 	reloadWrite(t, denyPath, "second\n")
-	if err := s.ReloadAll(); err != nil {
-		// ReloadAll will return an error because the main rules are still malformed.
-		// The deny list update should still apply.
+	// Main rules are still malformed: ReloadAll fails, but the deny update applies.
+	if err := s.ReloadAll(); err == nil {
+		t.Fatal("ReloadAll with malformed main rules succeeded")
 	}
 	check("")
 	failedFP := s.Fingerprint()

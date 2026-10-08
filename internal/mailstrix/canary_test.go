@@ -185,7 +185,7 @@ func TestReloadAllMissingFile(t *testing.T) {
 }
 
 // TestReloadAllNoFile verifies that with no DenylistFile configured,
-// ReloadAll is a no-op.
+// ReloadAll falls back to a plain Reload and keeps the env denylist.
 func TestReloadAllNoFile(t *testing.T) {
 	dir := writeRules(t, eicarRule)
 	cfg := &Config{
@@ -198,7 +198,7 @@ func TestReloadAllNoFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScanner: %v", err)
 	}
-	// Calling again should be a no-op (no file configured).
+	// No file configured: plain Reload, env entries unchanged.
 	if err := s.ReloadAll(); err != nil {
 		t.Fatal(err)
 	}
