@@ -397,11 +397,10 @@ func cmdServe(args []string) (exitCode int) {
 		defer close(hupDone)
 		runReloadSignals(updateCtx, hup, func() {
 			logf("SIGHUP: reloading rules")
-			if err := scanner.Reload(); err != nil {
+			if err := scanner.ReloadAll(); err != nil {
 				logf("reload failed: %v", err)
 				return
 			}
-			scanner.ReloadDenylist()
 			srv.FlushCache()
 		})
 	}()

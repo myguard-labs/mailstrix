@@ -17,6 +17,9 @@ type matchCounter struct {
 	mu     sync.Mutex
 	counts map[string]uint64
 	max    int
+	// epoch advances on every Reset; AddAt drops hits recorded by a scan that
+	// pinned an earlier epoch (an old rule generation).
+	epoch uint64
 }
 
 func newMatchCounter(max int) *matchCounter {
@@ -25,11 +28,31 @@ func newMatchCounter(max int) *matchCounter {
 
 // Add increments the counter for each rule name in rules.
 func (c *matchCounter) Add(rules []string) {
+	c.add(rules, nil)
+}
+
+// Epoch returns the current reset epoch.
+func (c *matchCounter) Epoch() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.epoch
+}
+
+// AddAt is Add for a scan that pinned epoch: it is dropped when a Reset has
+// happened since, so old-generation rule names never reach the new counters.
+func (c *matchCounter) AddAt(epoch uint64, rules []string) {
+	c.add(rules, &epoch)
+}
+
+func (c *matchCounter) add(rules []string, epoch *uint64) {
 	if len(rules) == 0 {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if epoch != nil && *epoch != c.epoch {
+		return
+	}
 	for _, r := range rules {
 		c.counts[r]++
 	}
@@ -80,5 +103,6 @@ func (c *matchCounter) TopN(n int) []MatchCount {
 func (c *matchCounter) Reset() {
 	c.mu.Lock()
 	c.counts = make(map[string]uint64)
+	c.epoch++
 	c.mu.Unlock()
 }

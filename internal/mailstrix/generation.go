@@ -23,6 +23,7 @@ import (
 type scannerGeneration struct {
 	rules, bigRules, markerRules *yara.Rules
 	deny                         *map[string]struct{}
+	topEpoch                     uint64 // topMatches epoch pinned with this generation
 }
 
 type scanLease struct {
@@ -35,7 +36,7 @@ func (s *Scanner) acquireScanLease() scanLease {
 	defer s.generationMu.RUnlock()
 	generation := scannerGeneration{
 		rules: s.rules.Load(), bigRules: s.bigRules.Load(), markerRules: s.markerRules.Load(),
-		deny: s.denylist.Load(),
+		deny: s.denylist.Load(), topEpoch: s.topMatches.Epoch(),
 	}
 	return scanLease{
 		fingerprint: s.fingerprintLocked(),
