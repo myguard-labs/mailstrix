@@ -656,6 +656,14 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		return
 	}
 	zr, err := open.r, open.err
+	if errors.Is(err, errLZMADictCap) {
+		// AUD-17a: an LZMA-encoded header (kEncodedHeader) is decoded inside
+		// NewReader; the dictionary ceiling refused it. That is an incomplete scan,
+		// not a header-encrypted or corrupt archive, so skip the crack/classify path.
+		res.IsArchive = true
+		res.stopHit("lzma-dict")
+		return
+	}
 	if err != nil {
 		// The reader won't open. This is either a header-encrypted 7z (the file
 		// list itself is AES-wrapped) or plain corruption. With candidates, try to

@@ -46,6 +46,11 @@ func lzmaRaw(t *testing.T, data []byte) (stream []byte, propsByte byte) {
 // build7z returns a one-file 7z whose LZMA coder declares props verbatim and
 // unpack size n, with stream as the packed data.
 func build7z(stream, props []byte, n uint64) []byte {
+	return wrap7z(stream, plain7zHeader(stream, props, n))
+}
+
+// plain7zHeader returns the (unencoded) Header block for build7z.
+func plain7zHeader(stream, props []byte, n uint64) []byte {
 	var h bytes.Buffer
 	h.Write([]byte{0x01, 0x04})                   // Header, MainStreamsInfo
 	h.Write([]byte{0x06, 0x00, 0x01, 0x09})       // PackInfo: pos 0, 1 stream, Size
@@ -67,8 +72,11 @@ func build7z(stream, props []byte, n uint64) []byte {
 	h.Write(sevenNum(uint64(len(nb)))) //
 	h.Write(nb)                        //
 	h.Write([]byte{0x00, 0x00})        // end FilesInfo, end Header
-	hdr := h.Bytes()
+	return h.Bytes()
+}
 
+// wrap7z lays out signature header + packed streams + trailing header block.
+func wrap7z(stream, hdr []byte) []byte {
 	start := make([]byte, 20)
 	binary.LittleEndian.PutUint64(start[0:], uint64(len(stream)))
 	binary.LittleEndian.PutUint64(start[8:], uint64(len(hdr)))
@@ -200,4 +208,65 @@ func TestLZMADictCapMalformedProps(t *testing.T) {
 			}
 		})
 	}
+}
+
+// encoded7z builds a 7z whose Header is stored as a kEncodedHeader (id 0x17): the
+// real header is LZMA-compressed into a second packed stream and the trailing block
+// is a StreamsInfo declaring hdrProps and hdrUnpack for it. When hdrStream is nil the
+// real header is compressed with a small dictionary (valid archive); otherwise
+// hdrStream is used verbatim (the declared sizes need not match it).
+func encoded7z(t *testing.T, payload []byte, hdrStream, hdrProps []byte, hdrUnpack uint64) []byte {
+	t.Helper()
+	stream, pb := lzmaRaw(t, payload)
+	real := plain7zHeader(stream, lzmaProps(pb, 1<<16), uint64(len(payload)))
+	if hdrStream == nil {
+		var hpb byte
+		hdrStream, hpb = lzmaRaw(t, real)
+		hdrProps = lzmaProps(hpb, 1<<16)
+		hdrUnpack = uint64(len(real))
+	}
+	var e bytes.Buffer
+	e.Write([]byte{0x17, 0x06})               // EncodedHeader, PackInfo
+	e.Write(sevenNum(uint64(len(stream))))    // pack position: after the member stream
+	e.Write([]byte{0x01, 0x09})               // 1 stream, Size
+	e.Write(sevenNum(uint64(len(hdrStream)))) //
+	e.Write([]byte{0x00})                     // end PackInfo
+	e.Write([]byte{0x07, 0x0B, 0x01, 0x00})   // UnpackInfo, Folder, 1 folder, not external
+	e.Write([]byte{0x01, 0x23, 0x03, 0x01, 0x01})
+	e.Write(sevenNum(uint64(len(hdrProps))))
+	e.Write(hdrProps)
+	e.Write([]byte{0x0C})
+	e.Write(sevenNum(hdrUnpack))
+	e.Write([]byte{0x00, 0x00}) // end UnpackInfo, end StreamsInfo
+	return wrap7z(append(append([]byte{}, stream...), hdrStream...), e.Bytes())
+}
+
+// AUD-17a: an LZMA-encoded 7z header is decoded inside sevenzip.NewReader, where the
+// ceiling refusal used to look like a header-encrypted/corrupt archive.
+func TestLZMADictCapEncodedHeader(t *testing.T) {
+	defer extract.SetDecryptAttemptTimeForTest(time.Minute)()
+	t.Run("encoded header within ceiling opens and extracts", func(t *testing.T) {
+		arc := encoded7z(t, []byte("LZMA-MARKER-enchdr\n"), nil, nil, 0)
+		res := extract.ExtractWithOptions(arc, extract.FullOptions(time.Time{}))
+		if !hasStreamWith(res, []byte("LZMA-MARKER-enchdr")) || hasStopKind(res, "lzma-dict") {
+			t.Fatalf("streams=%d caps=%v", len(res.Streams), res.CapHits)
+		}
+	})
+	t.Run("encoded header over ceiling is a cap stop, not clean", func(t *testing.T) {
+		junk, pb := lzmaRaw(t, []byte("x"))
+		arc := encoded7z(t, []byte("LZMA-MARKER-enchdr\n"), junk, lzmaProps(pb, lzmaCeiling+1), lzmaCeiling+1)
+		res := extract.ExtractWithOptions(arc, extract.FullOptions(time.Time{}))
+		if !hasStopKind(res, "lzma-dict") || !res.IsArchive || hasStreamWith(res, []byte("LZMA-MARKER-enchdr")) {
+			t.Fatalf("isArchive=%v caps=%v streams=%d", res.IsArchive, res.CapHits, len(res.Streams))
+		}
+	})
+	t.Run("encoded header at ceiling with large declared dict is not a cap stop", func(t *testing.T) {
+		// min(declared, unpack) == ceiling: allowed; the bogus stream then just fails to decode.
+		junk, pb := lzmaRaw(t, []byte("x"))
+		arc := encoded7z(t, []byte("LZMA-MARKER-enchdr\n"), junk, lzmaProps(pb, 1<<30), lzmaCeiling)
+		res := extract.ExtractWithOptions(arc, extract.FullOptions(time.Time{}))
+		if hasStopKind(res, "lzma-dict") {
+			t.Fatalf("at-ceiling header misreported: %v", res.CapHits)
+		}
+	})
 }
