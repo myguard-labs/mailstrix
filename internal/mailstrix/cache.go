@@ -3,6 +3,8 @@ package mailstrix
 import (
 	"container/list"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net"
@@ -81,7 +83,7 @@ func NewCache(cfg *Config, logf func(string, ...any)) Cache {
 		items: make(map[string]*list.Element, cfg.CacheSize),
 	}
 	if cfg.RedisURL != "" {
-		if rl, err := newRedisLayer(cfg); err != nil {
+		if rl, err := newRedisLayer(cfg, logf); err != nil {
 			logf("WARNING redis cache disabled: %v", err)
 		} else {
 			c.redis = rl
@@ -189,6 +191,55 @@ type redisLayer struct {
 	rdb    *redis.Client
 	prefix string
 	br     redisBreaker
+	macKey []byte // optional HMAC key (MAILSTRIX_REDIS_MAC_KEY); nil = no MAC
+	logf   func(string, ...any)
+	warned atomic.Bool // rejected-value warning is logged once per process
+}
+
+// MinRedisMACKeyLen is the minimum length in bytes of MAILSTRIX_REDIS_MAC_KEY.
+const MinRedisMACKeyLen = 32
+
+// Framing of a MACed value: macVersion || HMAC-SHA256 (32 bytes) || JSON. The
+// MAC covers redisKey || 0x00 || value so a valid value cannot be replayed under
+// another hash. Un-MACed legacy values are JSON ('[' or 'n'), never macVersion.
+const (
+	macVersion byte = 0x01
+	macLen          = sha256.Size
+)
+
+func redisMAC(key []byte, redisKey string, value []byte) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(redisKey))
+	h.Write([]byte{0})
+	h.Write(value)
+	return h.Sum(nil)
+}
+
+// sealRedisValue frames value with a MAC. With no key the value is unchanged.
+func sealRedisValue(key []byte, redisKey string, value []byte) []byte {
+	if len(key) == 0 {
+		return value
+	}
+	out := make([]byte, 0, 1+macLen+len(value))
+	out = append(out, macVersion)
+	out = append(out, redisMAC(key, redisKey, value)...)
+	return append(out, value...)
+}
+
+// openRedisValue verifies and strips the MAC. With no key the value is returned
+// unchanged. A missing, malformed or wrong MAC returns ok=false (cache miss).
+func openRedisValue(key []byte, redisKey string, framed []byte) ([]byte, bool) {
+	if len(key) == 0 {
+		return framed, true
+	}
+	if len(framed) <= 1+macLen || framed[0] != macVersion {
+		return nil, false
+	}
+	value := framed[1+macLen:]
+	if !hmac.Equal(framed[1:1+macLen], redisMAC(key, redisKey, value)) {
+		return nil, false
+	}
+	return value, true
 }
 
 // redisPlaintextRemote returns the Redis host[:port] and a flag indicating whether
@@ -227,12 +278,16 @@ func redisPlaintextRemote(opt *redis.Options) (host string, warn bool) {
 	return parsedHost, true
 }
 
-func newRedisLayer(cfg *Config) (*redisLayer, error) {
+func newRedisLayer(cfg *Config, logf func(string, ...any)) (*redisLayer, error) {
 	opt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		return nil, err
 	}
-	return &redisLayer{rdb: redis.NewClient(opt), prefix: cfg.RedisPrefix}, nil
+	rl := &redisLayer{rdb: redis.NewClient(opt), prefix: cfg.RedisPrefix, logf: logf}
+	if cfg.RedisMACKey != "" {
+		rl.macKey = []byte(cfg.RedisMACKey)
+	}
+	return rl, nil
 }
 
 // redisCallBudget bounds one Redis round-trip. It is deliberately short because
@@ -251,7 +306,8 @@ func (r *redisLayer) get(key string) ([]Match, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), redisCallBudget)
 	defer cancel()
-	b, err := r.rdb.Get(ctx, r.prefix+key).Bytes()
+	rk := r.prefix + key
+	b, err := r.rdb.Get(ctx, rk).Bytes()
 	if err != nil {
 		// redis.Nil is a normal cache miss (Redis is healthy) — it must NOT count
 		// against the breaker; only real errors (timeout, refused) do.
@@ -263,6 +319,14 @@ func (r *redisLayer) get(key string) ([]Match, bool) {
 		return nil, false
 	}
 	r.br.ok()
+	b, ok := openRedisValue(r.macKey, rk, b)
+	if !ok {
+		// Missing/bad MAC: a miss, never a verdict. Warn once, no secret material.
+		if r.logf != nil && r.warned.CompareAndSwap(false, true) {
+			r.logf("WARNING redis cache value failed MAC verification; treated as a miss (further occurrences not logged)")
+		}
+		return nil, false
+	}
 	var m []Match
 	if json.Unmarshal(b, &m) != nil {
 		return nil, false
@@ -280,7 +344,8 @@ func (r *redisLayer) put(key string, matches []Match, ttl time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), redisCallBudget)
 	defer cancel()
-	if err := r.rdb.Set(ctx, r.prefix+key, b, ttl).Err(); err != nil {
+	rk := r.prefix + key
+	if err := r.rdb.Set(ctx, rk, sealRedisValue(r.macKey, rk, b), ttl).Err(); err != nil {
 		r.br.fail()
 	} else {
 		r.br.ok()

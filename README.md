@@ -639,6 +639,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_CACHE_SIZE` | `65536` | in-memory LRU entries |
 | `MAILSTRIX_REDIS_URL` | — | optional shared L2 cache, e.g. `redis://host:6379/6` |
 | `MAILSTRIX_REDIS_PREFIX` | `yara:scan:` | Redis key prefix |
+| `MAILSTRIX_REDIS_MAC_KEY` (or `_FILE`) | — | optional HMAC-SHA256 key (>= 32 bytes) over Redis L2 values, bound to the Redis key; a missing or bad MAC is a cache miss. Unset = no MAC. Roll the key out on all replicas; values written before the rollout read as misses and repopulate |
 | `MAILSTRIX_METRICS_AUTH` | off | require the token for `/metrics` and `/version` (`/health` & `/ready` stay open) |
 | `MAILSTRIX_URLHAUS_KEY[_FILE]` | — | abuse.ch Auth-Key; enables the URLhaus malware-URL lookup |
 | `MAILSTRIX_URLHAUS_REFRESH` | `21600` (6 h) | URLhaus feed refresh (floor 5 min) |
@@ -688,6 +689,8 @@ Redis/Valkey L2 (`MAILSTRIX_REDIS_URL`) dramatically improves throughput for rep
 attachments, which is common in mail (bulk campaigns, MTA retries, one body to N
 recipients). Without it each scanner instance maintains its own in-process LRU
 only.
+Set `MAILSTRIX_REDIS_MAC_KEY` (>= 32 bytes) to authenticate L2 values with an
+HMAC bound to the Redis key; tampered, replayed or un-MACed values are cache misses.
 
 | Profile | `MAILSTRIX_MAX_CONCURRENT` | `MAILSTRIX_MAX_BODY` | `mem_limit` | Redis | Expected p95 | RPS capacity |
 |---------|------------------------|------------------|-------------|-------|-------------|-------------|
