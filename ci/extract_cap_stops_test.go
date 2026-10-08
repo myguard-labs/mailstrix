@@ -950,6 +950,10 @@ func TestCapStopEncryptedZipStreamOutrunsDeclared(t *testing.T) {
 // treated as a wrong password, the archive stays encrypted, and no cap signal
 // is recorded (the post-cap probe in yekaMoreFollow is never reached).
 func TestCapStopEncryptedZipAESAuthFailureAtCap(t *testing.T) {
+	// Decrypting a full maxBytesPerMember AES-256 member can exceed the 750ms
+	// production per-attempt watchdog on a loaded -race runner (the untampered
+	// control then reads as undecrypted). Same override as the sibling tests.
+	t.Cleanup(extract.SetDecryptAttemptTimeForTest(time.Minute))
 	good := capYekaZip(t, yekazip.AES256Encryption, "secret", capFill(capMember), capMember)
 	t.Run("untampered-control-no-hit", func(t *testing.T) {
 		res := capPWExtract(good, "wrong", "secret")
