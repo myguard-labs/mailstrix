@@ -152,3 +152,54 @@ func TestCAPEServiceChainInterruptsStalledBody(t *testing.T) {
 		t.Fatalf("answered before the idle window could elapse (%v): the stall was not what ended it", elapsed)
 	}
 }
+
+// AUD-07g: through the composed chain, a submission to a refused endpoint ends in
+// the scheduler's uncertain-submission state. cape.Client.Submit clears
+// NoBytesSent before invoking the transport and sets UnknownDebt
+// (internal/cape/client.go:293-294), so every transport failure, refusal
+// included, is conservatively uncertain. Store.RecordSubmission therefore takes
+// the default branch of applySubmissionOutcome (internal/cape/store_state.go:
+// 229-233): State=SubmitUncertain, UnknownDebt, Cleanup
+// "remote_delete_failed/unknown", Reason=Transport (outcomeCode, scheduler.go:
+// 306 and 388). The scheduler never re-sends an uncertain row (SCHEDULER.md), so
+// the state is stable. publicJob (api.go:224-251) exposes State, Reason and
+// Cleanup and withholds any result unless State is Completed.
+func TestCAPEServiceChainSubmissionFailureTransitionsJob(t *testing.T) {
+	service, client := startCAPEChain(t)
+	resp, body := chainRequest(t, client, service, "POST", cape.JobsPath, "fixture-alpha", "attachment-bytes")
+	location := resp.Header.Get("Location")
+	if resp.StatusCode != http.StatusAccepted || !strings.HasPrefix(location, cape.JobsPath+"/") {
+		t.Fatalf("authenticated POST not admitted: %d %q %s", resp.StatusCode, location, body)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var view cape.APIJob
+	for {
+		resp, body = chainRequest(t, client, service, "GET", location, "fixture-alpha", "")
+		view = cape.APIJob{}
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &view) != nil {
+			t.Fatalf("job not readable: %d %s", resp.StatusCode, body)
+		}
+		if view.State == cape.Completed {
+			t.Fatalf("refused submission must never complete: %s", body)
+		}
+		if view.State == cape.SubmitUncertain {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job never reached %s after a refused submission; last state %q: %s", cape.SubmitUncertain, view.State, body)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if view.Reason != cape.Transport {
+		t.Fatalf("failure reason not recorded as %s: %s", cape.Transport, body)
+	}
+	if view.Cleanup != "remote_delete_failed/unknown" {
+		t.Fatalf("unknown remote debt not recorded: %s", body)
+	}
+	if view.Evidence == "clean" || len(view.Signals) != 0 || view.StaticVerdict == "" {
+		t.Fatalf("refused submission produced a detonation result or lost the static verdict: %s", body)
+	}
+	if !view.TerminalAt.IsZero() {
+		t.Fatalf("uncertain job must not be terminal: %s", body)
+	}
+}
