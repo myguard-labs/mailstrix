@@ -141,6 +141,8 @@ func unpackCab(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 				break
 			}
 
+			cabNoteMemberCap(res, f, len(folderData))
+
 			start := int(f.uoffFolderStart)
 			fileEnd := start + int(f.cbFile)
 
@@ -161,6 +163,22 @@ func unpackCab(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 
 			emitMember(member, res, b, depth, deadline)
 		}
+	}
+}
+
+// cabNoteMemberCap records member-size when a CAB file's declared range is
+// cut by the per-member cap: either the file alone exceeds it, or the folder
+// data was capped and the file's declared end lies beyond what was kept. A
+// short or corrupt folder (below the cap) is not a cap hit. Arithmetic is in
+// uint64 since cbFile and uoffFolderStart are uint32.
+func cabNoteMemberCap(res *Result, f cfFile, folderLen int) {
+	if uint64(f.cbFile) > uint64(maxBytesPerMember) {
+		res.stopHit("member-size")
+		return
+	}
+	if folderLen >= maxBytesPerMember &&
+		uint64(f.uoffFolderStart)+uint64(f.cbFile) > uint64(folderLen) {
+		res.stopHit("member-size")
 	}
 }
 

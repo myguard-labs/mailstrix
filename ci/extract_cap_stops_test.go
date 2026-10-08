@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"crypto/aes"
 	"crypto/cipher"
@@ -1092,5 +1093,129 @@ func TestCapStopBatchCarverMemberSize(t *testing.T) {
 		if capHasHit(res, "member-size") {
 			t.Fatalf("batch with no actual carve flagged member-size: %v", res.CapHits)
 		}
+	})
+}
+
+type capCabFile struct {
+	name string
+	cb   uint32
+}
+
+// capCab builds a one-folder CAB (stored when mszip is false, else MSZIP with
+// the 32K sliding-window dictionary carried across blocks). The folder holds
+// data in CFDATA blocks of <= 32768 bytes; each file is declared at the running
+// offset with its own cb, which may deliberately disagree with data.
+func capCab(files []capCabFile, data []byte, mszip bool) []byte {
+	var blocks [][]byte
+	var dict []byte
+	for off := 0; off < len(data); off += 32768 {
+		end := off + 32768
+		if end > len(data) {
+			end = len(data)
+		}
+		chunk := data[off:end]
+		if !mszip {
+			blocks = append(blocks, chunk)
+			continue
+		}
+		var cb bytes.Buffer
+		cb.WriteString("CK")
+		var fw *flate.Writer
+		if len(dict) > 0 {
+			fw, _ = flate.NewWriterDict(&cb, flate.BestSpeed, dict)
+		} else {
+			fw, _ = flate.NewWriter(&cb, flate.BestSpeed)
+		}
+		_, _ = fw.Write(chunk)
+		_ = fw.Close()
+		blocks = append(blocks, cb.Bytes())
+		dict = append(append([]byte{}, dict...), chunk...)
+		if len(dict) > 32768 {
+			dict = dict[len(dict)-32768:]
+		}
+	}
+	filesLen := 0
+	for _, f := range files {
+		filesLen += 16 + len(f.name) + 1
+	}
+	coffFiles := 36 + 8
+	coffData := coffFiles + filesLen
+	total := coffData
+	for _, b := range blocks {
+		total += 8 + len(b)
+	}
+	buf := make([]byte, total)
+	copy(buf[0:4], "MSCF")
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(total))
+	binary.LittleEndian.PutUint32(buf[16:20], uint32(coffFiles))
+	buf[24], buf[25] = 3, 1
+	binary.LittleEndian.PutUint16(buf[26:28], 1)
+	binary.LittleEndian.PutUint16(buf[28:30], uint16(len(files)&0xFFFF))
+	binary.LittleEndian.PutUint32(buf[36:40], uint32(coffData))
+	binary.LittleEndian.PutUint16(buf[40:42], uint16(len(blocks)&0xFFFF))
+	if mszip {
+		binary.LittleEndian.PutUint16(buf[42:44], 1)
+	}
+	pos := coffFiles
+	var uoff uint32
+	for _, f := range files {
+		binary.LittleEndian.PutUint32(buf[pos:], f.cb)
+		binary.LittleEndian.PutUint32(buf[pos+4:], uoff)
+		uoff += f.cb
+		copy(buf[pos+16:], f.name)
+		pos += 16 + len(f.name) + 1
+	}
+	pos = coffData
+	for i, b := range blocks {
+		binary.LittleEndian.PutUint16(buf[pos+4:], uint16(len(b)&0xFFFF))
+		n := 32768
+		if i == len(blocks)-1 {
+			n = len(data) - 32768*i
+		}
+		binary.LittleEndian.PutUint16(buf[pos+6:], uint16(n))
+		copy(buf[pos+8:], b)
+		pos += 8 + len(b)
+	}
+	return buf
+}
+
+func TestCapStopCabMemberSize(t *testing.T) {
+	wantOnly := func(t *testing.T, res extract.Result) {
+		t.Helper()
+		if len(res.CapHits) != 1 || res.CapHits[0] != "member-size" {
+			t.Fatalf("CapHits=%v, want exactly [member-size]", res.CapHits)
+		}
+	}
+	noHit := func(t *testing.T, res extract.Result) {
+		t.Helper()
+		if capHasHit(res, "member-size") {
+			t.Fatalf("recorded member-size: %v", res.CapHits)
+		}
+	}
+	t.Run("cab-member-over-cap", func(t *testing.T) {
+		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember + 1}}, capFill(capMember+1), false)))
+	})
+	t.Run("cab-member-exactly-cap-no-hit", func(t *testing.T) {
+		res := capExtract(capCab([]capCabFile{{"a.bin", capMember}}, capFill(capMember), false))
+		noHit(t, res)
+		if len(res.Streams) == 0 {
+			t.Fatal("in-cap member not extracted")
+		}
+	})
+	t.Run("cab-folder-cap-cuts-second-file", func(t *testing.T) {
+		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember+10), false)))
+	})
+	t.Run("cab-folder-exactly-cap-no-hit", func(t *testing.T) {
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 10}}, capFill(capMember), false)))
+	})
+	t.Run("cab-short-folder-no-hit", func(t *testing.T) {
+		// Declared size exceeds the CFDATA present, but far below the cap.
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", 100000}}, capFill(1000), false)))
+	})
+	t.Run("cab-mszip-folder-cap-cuts-second-file", func(t *testing.T) {
+		wantOnly(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 20}}, capFill(capMember+10), true)))
+	})
+	t.Run("cab-mszip-folder-exactly-cap-no-hit", func(t *testing.T) {
+		noHit(t, capExtract(capCab([]capCabFile{{"a.bin", capMember - 10}, {"b.bin", 10}}, capFill(capMember), true)))
 	})
 }
