@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -369,6 +370,40 @@ func TestValidateWildcardBind(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A hostname resolving to an unspecified IP is a wildcard bind; a hostname
+// resolving to a specific IP, or one that fails to resolve, is not.
+func TestValidateWildcardBindHostname(t *testing.T) {
+	prev := lookupBindHost
+	t.Cleanup(func() { lookupBindHost = prev })
+	lookupBindHost = func(h string) ([]net.IP, error) {
+		switch h {
+		case "anyhost":
+			return []net.IP{net.ParseIP("127.0.0.1"), net.IPv4zero}, nil
+		case "anyhost6":
+			return []net.IP{net.IPv6unspecified}, nil
+		case "lan":
+			return []net.IP{net.ParseIP("10.0.0.5")}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	for _, tc := range []struct {
+		addr    string
+		allow   bool
+		wantErr bool
+	}{
+		{"anyhost:1344", false, true},
+		{"anyhost6:1344", false, true},
+		{"anyhost:1344", true, false},
+		{"lan:1344", false, false},
+		{"missing:1344", false, false},
+	} {
+		err := (&Config{ICAPAddr: tc.addr, AllowWildcardBind: tc.allow}).ValidateWildcardBind()
+		if (err != nil) != tc.wantErr || (err != nil && !errors.Is(err, ErrWildcardBind)) {
+			t.Errorf("%s allow=%v: err=%v wantErr=%v", tc.addr, tc.allow, err, tc.wantErr)
+		}
 	}
 }
 

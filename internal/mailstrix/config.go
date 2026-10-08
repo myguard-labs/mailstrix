@@ -490,9 +490,26 @@ func isWildcardAddr(addr string) bool {
 	if host == "" {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsUnspecified()
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsUnspecified()
+	}
+	// A hostname is resolved the way net.Listen would; any unspecified
+	// answer (e.g. an /etc/hosts entry for 0.0.0.0) is a wildcard bind.
+	// Resolution failure is left to the listener, which then fails.
+	ips, err := lookupBindHost(host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if ip.IsUnspecified() {
+			return true
+		}
+	}
+	return false
 }
+
+// lookupBindHost resolves a listen hostname; a variable so tests can stub DNS.
+var lookupBindHost = net.LookupIP
 
 // ValidateWildcardBind rejects a wildcard MAILSTRIX_ICAP_ADDR or
 // MAILSTRIX_CLAMD_TCP_ADDR unless MAILSTRIX_ALLOW_WILDCARD_BIND is set: those
