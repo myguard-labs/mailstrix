@@ -41,6 +41,7 @@ func TestCAPEStoreCapacitySeam(t *testing.T) {
 		t.Fatalf("default OpenStore on a plain directory: got %v, want ErrStoreUnavailable", err)
 	}
 	restore := cape.SetStoreCapacityForTest()
+	t.Cleanup(restore) // idempotent; clears the global override if an assertion fails first
 	if err := openSeamStore(t, cfg); err != nil {
 		t.Fatalf("OpenStore with seam set: %v", err)
 	}
@@ -70,7 +71,9 @@ func TestCAPEStoreCapacitySeamNested(t *testing.T) {
 	}
 	cfg := capeSeamConfig(t)
 	outer := cape.SetStoreCapacityForTest()
+	t.Cleanup(outer) // runs last (LIFO), leaving the override unset on failure
 	inner := cape.SetStoreCapacityForTest()
+	t.Cleanup(inner)
 	inner()
 	if err := openSeamStore(t, cfg); err != nil {
 		t.Fatalf("inner restore cleared the outer override: %v", err)
