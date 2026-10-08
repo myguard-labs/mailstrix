@@ -365,7 +365,9 @@ jobs:
 
       - name: documented rule-source build-args reach the build
         if: needs.changes.outputs.ruleargs == 'true'
-        run: sh packaging/deb/rule_source_args_test.sh
+        run: |
+          sh packaging/deb/rule_source_args_test.sh
+          sh ci/fetch_rules_family_denylist_test.sh
 
       - name: mail-profile rule filter stays conservative
         if: needs.changes.outputs.filter == 'true'
