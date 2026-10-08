@@ -940,8 +940,9 @@ interfaces share the scan engine, verdict cache, and concurrency budget
 (`MAILSTRIX_MAX_INFLIGHT`).
 
 **No ICAP-level authentication.** Gate the port by firewall/network; only
-trusted proxies should reach it (a startup warning is emitted when enabled,
-mirroring the `/scan` open-mode warning).
+trusted proxies should reach it; when a `/scan` token is configured, strixd
+logs a startup warning that this listener does not check it
+(mirroring the `/scan` open-mode warning).
 
 ### Request bounds
 
@@ -1024,7 +1025,8 @@ adapter returns `FOUND` for actionable matches, `OK` for clean or log-only
 results, and `ERROR` when it cannot give a complete verdict. It does not accept
 clamd file-path scans, and it does not turn Mailstrix rules into ClamAV
 signatures. TCP has no protocol authentication or TLS; keep it on a trusted
-network. The [clamd adapter guide](contrib/clamd/README.md) has socket and
+network; when a `/scan` token is configured, strixd logs a startup warning that
+the TCP listener does not check it. The [clamd adapter guide](contrib/clamd/README.md) has socket and
 Docker setup, client examples, supported commands and limits.
 
 ## Observability (Grafana + Prometheus)

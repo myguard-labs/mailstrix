@@ -250,6 +250,32 @@ func shutdownAdapters(ctx context.Context, drain *adapterDrain, httpShutdown fun
 	return err
 }
 
+// tokenBypassWarnings returns one warning string per enabled TCP listener when
+// token is non-empty (i.e., token != "" and strings.TrimSpace(token) != "").
+// Each warning names the listener address and that the token is not checked on it.
+// No warning when token is empty, whitespace-only, or a listener is disabled (empty addr).
+func tokenBypassWarnings(token, icapAddr, clamdTCPAddr string) []string {
+	// Normalize whitespace: if the token is empty or only whitespace, treat as no token.
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+
+	var warnings []string
+
+	// ICAP listener
+	if icapAddr != "" {
+		warnings = append(warnings, "MAILSTRIX_TOKEN is set but the ICAP listener on "+icapAddr+" does not check it; restrict it by firewall/bind address")
+	}
+
+	// clamd TCP listener
+	if clamdTCPAddr != "" {
+		warnings = append(warnings, "MAILSTRIX_TOKEN is set but the clamd TCP listener on "+clamdTCPAddr+" does not check it; restrict it by firewall/bind address")
+	}
+
+	return warnings
+}
+
 // cmdServe loads config from the environment, overlays CLI flags
 // (flag > env > default), compiles the rule set, wires a SIGHUP reloader, and
 // serves until the process is signalled.
@@ -301,6 +327,13 @@ func cmdServe(args []string) (exitCode int) {
 	}
 
 	logf := func(format string, a ...any) { log.Printf("[mailstrix] "+format, a...) }
+
+	// Warn if a /scan token is configured but the ICAP and/or clamd TCP listeners
+	// are enabled without authentication; they are unauthenticated scan oracles
+	// unless restricted by firewall.
+	for _, warn := range tokenBypassWarnings(cfg.Token, cfg.ICAPAddr, cfg.ClamdTCPAddr) {
+		logf(warn)
+	}
 
 	// Seed-on-startup / self-heal: when a writable cache dir is configured, serve
 	// rules from it and reseed from the baked read-only bundle when the cache is
