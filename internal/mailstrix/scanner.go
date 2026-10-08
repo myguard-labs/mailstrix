@@ -343,8 +343,10 @@ func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, err
 	if h := getScannerAfterSelectHook; h != nil {
 		h()
 	}
-	// Retire whichever slot Reload left behind so its idle C scanners are freed
-	// on the next pooled scan of either set, not only of the same set.
+	// Retire stale generations in both slots. Reload itself retires replaced
+	// generations eagerly at publication; these calls are the fallback for a
+	// generation installed during a Reload race (a scan that selected old rules
+	// and installed a generation after Reload's eager retire).
 	retireStale(&s.scanners, &s.rules)
 	retireStale(&s.bigScanners, &s.bigRules)
 	gen := installGen(slot, live, rules)
@@ -1439,9 +1441,10 @@ func capDedupCandidates(lists ...[]string) []string {
 }
 
 // filenameTokens splits an attachment basename into candidate passwords: malspam
-// commonly names the archive after its password (e.g. "invoice_2024.zip" with
-// password "invoice2024", or the password literally in the name). Tokens are the
-// alnum runs of the name with the extension dropped, kept to a sane length range.
+// commonly names the archive after its password or includes it in the name.
+// Fields are extracted from the extension-stripped name by splitting on
+// ' ', '_', '-', '.', '(', ')', '[', ']', then kept if 3-32 bytes long
+// (e.g. "invoice_2024.zip" -> ["invoice", "2024"]).
 func filenameTokens(name string) []string {
 	if name == "" {
 		return nil
