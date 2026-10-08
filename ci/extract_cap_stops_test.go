@@ -35,6 +35,8 @@ import (
 const (
 	capMember = 16 << 20
 	capBin    = 8 << 20
+	// capStreams mirrors maxStreams (internal/extract/extract.go).
+	capStreams = 256
 )
 
 func capHasHit(res extract.Result, kind string) bool {
@@ -395,12 +397,21 @@ func TestCapStopBatchDropperStreams(t *testing.T) {
 		sb.WriteString("cscript f0.vbs\r\n")
 		return []byte(sb.String())
 	}
-	if res := capExtract(build(250)); capHasHit(res, "streams") {
-		t.Fatalf("250 carved files (within cap) flagged: %v", res.CapHits)
+	// Reaching the cap exactly already records "streams": the batch walk fills the
+	// stream budget and cannot prove nothing further was carved.
+	for _, n := range []int{capStreams - 6, capStreams - 1} {
+		if res := capExtract(build(n)); capHasHit(res, "streams") {
+			t.Fatalf("%d carved files (below cap %d) flagged: %v", n, capStreams, res.CapHits)
+		}
 	}
-	res := capExtract(build(256))
-	if !capHasHit(res, "streams") && !capHasHit(res, "archive-budget") {
-		t.Fatalf("256 carved files past stream cap not recorded: %v (streams=%d)", res.CapHits, len(res.Streams))
+	for _, n := range []int{capStreams, capStreams + 1, capStreams + 4} {
+		res := capExtract(build(n))
+		if !capHasHit(res, "streams") {
+			t.Fatalf("%d carved files (cap %d) not recorded as streams: %v (streams=%d)", n, capStreams, res.CapHits, len(res.Streams))
+		}
+		if len(res.Streams) > capStreams {
+			t.Fatalf("%d carved files emitted %d streams, over cap %d", n, len(res.Streams), capStreams)
+		}
 	}
 }
 
