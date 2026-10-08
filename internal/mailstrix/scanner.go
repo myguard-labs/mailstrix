@@ -528,10 +528,9 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 	if s.threatfox != nil {
 		logf("ThreatFox IOC lookup enabled (refresh=%s, max_urls/msg=%d)", cfg.ThreatFoxRefresh, cfg.ThreatFoxMaxURLs)
 	}
-	if err := s.Reload(); err != nil {
+	if err := s.ReloadAll(); err != nil {
 		return nil, err
 	}
-	s.ReloadDenylist()
 	return s, nil
 }
 
@@ -2303,19 +2302,50 @@ func actionableMatches(matches []Match) []Match {
 // handler. If the file doesn't exist or is unreadable, a warning is logged and
 // the scanner continues with only the env-based entries (fail-open).
 func (s *Scanner) ReloadDenylist() {
-	if s.denylistFile == "" {
+	merged, ok := s.mergedDenylist()
+	if !ok {
 		return
 	}
-	merged := make(map[string]struct{}, len(s.baseDenylist))
+	// Re-apply deny set to loaded bundles by triggering a full Reload.
+	// This is safe: Reload compiles fresh bundles (new C objects) and swaps
+	// them atomically, so in-flight scans on the old bundles are unaffected.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := s.reloadWithDenylist(ctx, &merged); err != nil {
+		s.logf("WARNING: Reload after denylist change failed: %v (pre-disable may be stale)", err)
+	}
+}
+
+// ReloadAll recompiles the rules ONCE with the freshly re-read denylist file
+// (when configured) applied before publication. Reload followed by
+// ReloadDenylist compiled the same rule set twice per SIGHUP/startup (AUD-N5).
+// An unreadable denylist file falls back to a plain Reload, as before.
+func (s *Scanner) ReloadAll() error {
+	merged, ok := s.mergedDenylist()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if !ok {
+		return s.reloadWithContext(ctx)
+	}
+	return s.reloadWithDenylist(ctx, &merged)
+}
+
+// mergedDenylist re-reads the denylist file and merges it over the immutable
+// env baseline. ok is false when no file is configured or it cannot be opened.
+func (s *Scanner) mergedDenylist() (merged map[string]struct{}, ok bool) {
+	if s.denylistFile == "" {
+		return nil, false
+	}
+	merged = make(map[string]struct{}, len(s.baseDenylist))
 	for k, v := range s.baseDenylist {
 		merged[k] = v
 	}
 	f, err := os.Open(s.denylistFile) // #nosec G304 -- operator-provided path (env), not attacker input
 	if err != nil {
 		s.logf("WARNING: cannot read denylist file %s: %v (using env-only denylist)", s.denylistFile, err)
-		return
+		return nil, false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	added := 0
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -2333,14 +2363,7 @@ func (s *Scanner) ReloadDenylist() {
 		s.logf("WARNING: error reading denylist file %s: %v (partial load)", s.denylistFile, err)
 	}
 	s.logf("denylist reloaded: %d from env + %d from file = %d total", len(s.baseDenylist), added, len(merged))
-	// Re-apply deny set to loaded bundles by triggering a full Reload.
-	// This is safe: Reload compiles fresh bundles (new C objects) and swaps
-	// them atomically, so in-flight scans on the old bundles are unaffected.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if err := s.reloadWithDenylist(ctx, &merged); err != nil {
-		s.logf("WARNING: Reload after denylist change failed: %v (pre-disable may be stale)", err)
-	}
+	return merged, true
 }
 
 // publishDenylist preserves the post-filter update on a failed rules reload.

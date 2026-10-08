@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	yara "github.com/hillu/go-yara/v4"
 )
 
 // TestCanaryTagsAllMatches verifies that with canary=true every match gets
@@ -209,5 +211,72 @@ func TestDenylistFileEnvParsing(t *testing.T) {
 	c := LoadConfig()
 	if c.DenylistFile != "/tmp/deny.txt" {
 		t.Errorf("DenylistFile = %q, want /tmp/deny.txt", c.DenylistFile)
+	}
+}
+
+// ReloadAll must compile the main rule set once per reload while still applying
+// the freshly re-read denylist file (AUD-N5). Reload followed by ReloadDenylist
+// is the old double-compile sequence and serves as the negative control.
+func TestReloadAllCompilesOnceWithDenylist(t *testing.T) {
+	orig := compileRuleFiles
+	compiles := 0
+	compileRuleFiles = func(dir string, files []string, logf func(string, ...any)) (*yara.Rules, error) {
+		compiles++
+		return orig(dir, files, logf)
+	}
+	t.Cleanup(func() { compileRuleFiles = orig })
+
+	denyFile := filepath.Join(t.TempDir(), "deny.txt")
+	if err := os.WriteFile(denyFile, []byte("# none yet\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{RulesDir: writeRules(t, eicarRule), DenylistFile: denyFile}
+	cfg.sanitize()
+	s, err := NewScanner(cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if compiles != 1 {
+		t.Fatalf("NewScanner compiled %d times, want 1", compiles)
+	}
+	if m, _ := s.Scan(eicar(), ScanMeta{}); len(m) == 0 {
+		t.Fatal("EICAR should fire before it is denied")
+	}
+
+	if err := os.WriteFile(denyFile, []byte("EICAR_Test_File\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	compiles = 0
+	if err := s.ReloadAll(); err != nil {
+		t.Fatal(err)
+	}
+	if compiles != 1 {
+		t.Fatalf("ReloadAll compiled %d times, want 1", compiles)
+	}
+	if m, _ := s.Scan(eicar(), ScanMeta{}); len(m) != 0 {
+		t.Fatalf("denylisted rule still fires after ReloadAll: %v", m)
+	}
+
+	// Negative control: the legacy two-call sequence compiles twice.
+	compiles = 0
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	s.ReloadDenylist()
+	if compiles != 2 {
+		t.Fatalf("legacy Reload+ReloadDenylist compiled %d times, want 2", compiles)
+	}
+
+	// Unreadable denylist file falls back to a single plain reload.
+	if err := os.Remove(denyFile); err != nil {
+		t.Fatal(err)
+	}
+	compiles = 0
+	if err := s.ReloadAll(); err != nil {
+		t.Fatal(err)
+	}
+	if compiles != 1 {
+		t.Fatalf("ReloadAll with missing file compiled %d times, want 1", compiles)
 	}
 }
