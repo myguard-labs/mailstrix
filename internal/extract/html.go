@@ -166,6 +166,7 @@ var scriptURIAttrs = [][]byte{[]byte("href"), []byte("src"), []byte("action"), [
 func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
 	n := 0
 	inTag := false
+	ts := 0
 	var quote byte
 	for i := 0; i < len(buf); i++ {
 		c := buf[i]
@@ -181,6 +182,7 @@ func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
 				i += 4 + end + 2
 			} else if d := buf[i+1] | 0x20; d >= 'a' && d <= 'z' {
 				inTag = true
+				ts = i + 1
 			}
 			continue
 		}
@@ -195,6 +197,9 @@ func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
 			quote = c
 		case '>':
 			inTag = false
+			if name := rawTextTagName(buf, ts); name != "" {
+				i = skipRawText(buf, i+1, name) - 1
+			}
 		case '=':
 			if n++; n&0xfff == 0 && expired(deadline) {
 				return false
@@ -205,6 +210,49 @@ func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
 		}
 	}
 	return false
+}
+
+// rawTextTags are elements whose content is text, not markup.
+var rawTextTags = []string{"script", "style", "textarea", "title", "xmp",
+	"noscript", "iframe", "noembed", "noframes", "plaintext"}
+
+// rawTextTagName returns the raw-text element name of the start tag whose name
+// begins at buf[ts], or "" when it is not one (ASCII case-insensitive, exact).
+func rawTextTagName(buf []byte, ts int) string {
+	e := ts
+	for e < len(buf) && buf[e] > ' ' && buf[e] != '/' && buf[e] != '>' {
+		e++
+	}
+	for _, n := range rawTextTags {
+		if len(n) == e-ts && hasPrefixFold(buf[ts:e], n) {
+			return n
+		}
+	}
+	return ""
+}
+
+// skipRawText returns the index of the "</name" that closes a raw-text element
+// whose content starts at from, or len(buf) when unclosed (plaintext never
+// closes).
+func skipRawText(buf []byte, from int, name string) int {
+	if name == "plaintext" {
+		return len(buf)
+	}
+	for i := from; i+1 < len(buf); i++ {
+		j := bytes.IndexByte(buf[i:], '<')
+		if j < 0 {
+			break
+		}
+		i += j
+		if i+1 >= len(buf) || buf[i+1] != '/' {
+			continue
+		}
+		e := i + 2 + len(name)
+		if hasPrefixFold(buf[i+2:], name) && (e >= len(buf) || buf[e] <= ' ' || buf[e] == '/' || buf[e] == '>') {
+			return i
+		}
+	}
+	return len(buf)
 }
 
 // scriptURIValueAt reports whether buf[eq]=='=' ends a script-URI attribute

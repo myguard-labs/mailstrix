@@ -469,6 +469,11 @@ func TestHTMLScriptURIMarker(t *testing.T) {
 		`<html><a href=javascript:`,
 		`<html><a title="a>b" href="javascript:x">x</a></html>`,
 		`<html><!-- c --><a href="javascript:x">x</a></html>`,
+		`<script>x</script><a href="javascript:x">x</a>`,
+		`<SCRIPT>x</SCRIPT ><a href="javascript:x">x</a>`,
+		`<scriptx href=javascript:1>`,
+		`<titlebar></titlebar><a href=javascript:1>`,
+		`<textarea>t</textarea><a href=javascript:1>`,
 	}
 	for _, in := range pos {
 		if !streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
@@ -486,6 +491,14 @@ func TestHTMLScriptURIMarker(t *testing.T) {
 		`<html><a href="/">y</a><!-- href="javascript:x" --></html>`,
 		"<html><a href=\x1ajavascript\x1a>x</a></html>",
 		"<html><a href=\x1ajavascript\x1a alert(1)>x</a></html>",
+		`<textarea><a href="javascript:alert(1)"></textarea>`,
+		`<script>s='<a href="javascript:x()">'</script>`,
+		`<style><a href="javascript:x"></style>`,
+		`<title><a href="javascript:x"></title>`,
+		`<script><a href="javascript:x"></SCRIPT>`,
+		`<textarea><a href="javascript:x">`,
+		`<plaintext></plaintext><a href="javascript:x">`,
+		`<script></scripts><a href="javascript:x">`,
 	}
 	for _, in := range neg {
 		if streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
@@ -502,6 +515,19 @@ func TestHasScriptURIAttrDirect(t *testing.T) {
 	}
 	if !hasScriptURIAttr([]byte(`<a title='x>y' href="javascript:1">`), far) {
 		t.Error("real attribute after quoted > must match")
+	}
+	for _, in := range []string{
+		`<textarea><a href="javascript:1"></textarea>`,
+		`<TEXTAREA><a href="javascript:1"></TEXTAREA>`,
+		`<textarea><a href="javascript:1">`,
+		`<noscript><a href=javascript:1></noscript>`,
+	} {
+		if hasScriptURIAttr([]byte(in), far) {
+			t.Errorf("raw-text content must not match: %s", in)
+		}
+	}
+	if !hasScriptURIAttr([]byte(`<script>x</script><a href="javascript:1">`), far) {
+		t.Error("anchor after closed script must match")
 	}
 }
 
