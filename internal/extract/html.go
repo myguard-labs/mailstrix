@@ -155,6 +155,85 @@ func looksLikeMarkup(head []byte) bool {
 		bytes.Contains(head, []byte("data:"))
 }
 
+// scriptURIAttrs are the attribute names whose value is navigated/executed.
+var scriptURIAttrs = [][]byte{[]byte("href"), []byte("src"), []byte("action"), []byte("formaction")}
+
+// hasScriptURIAttr reports whether any href/src/action/formaction attribute
+// value starts (after leading whitespace/control chars and an optional quote)
+// with javascript: or vbscript: (case-insensitive). No entity decoding.
+// Single bounded pass, no allocation.
+func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
+	n := 0
+	for i := 0; i < len(buf); i++ {
+		if buf[i] != '=' {
+			continue
+		}
+		if n++; n&0xfff == 0 && expired(deadline) {
+			return false
+		}
+		j := i
+		for j > 0 && (buf[j-1] == ' ' || buf[j-1] == '\t' || buf[j-1] == '\n' || buf[j-1] == '\r') {
+			j--
+		}
+		matched := false
+		for _, name := range scriptURIAttrs {
+			if j < len(name) || !asciiEqualFold(buf[j-len(name):j], name) {
+				continue
+			}
+			if k := j - len(name); k > 0 {
+				c := buf[k-1]
+				if c == '-' || c == '_' || c >= '0' && c <= '9' || c|0x20 >= 'a' && c|0x20 <= 'z' {
+					continue
+				}
+			}
+			matched = true
+			break
+		}
+		if !matched {
+			continue
+		}
+		k := i + 1
+		for k < len(buf) && (buf[k] <= ' ') {
+			k++
+		}
+		if k < len(buf) && (buf[k] == '"' || buf[k] == '\'') {
+			k++
+		}
+		for k < len(buf) && buf[k] <= ' ' {
+			k++
+		}
+		rest := buf[k:]
+		if hasPrefixFold(rest, "javascript:") || hasPrefixFold(rest, "vbscript:") {
+			return true
+		}
+	}
+	return false
+}
+
+func asciiEqualFold(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i]|0x20 != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasPrefixFold(b []byte, p string) bool {
+	if len(b) < len(p) {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if b[i]|0x20 != p[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // fromHTMLSmuggling inspects a plain-text/markup buffer for HTML-smuggling and
 // scripted-SVG signatures, emitting PURE markers and (for force-downloaded
 // data: URIs) carving the decoded payload back through extractChild. Self-
@@ -183,6 +262,11 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 	hasDownload := reHTMLDownloadAttr.Match(head) || bytes.Contains(head, []byte(".click("))
 	if hasBlobAPI && hasDownload && len(res.Streams) < maxStreams {
 		res.Streams = append(res.Streams, []byte("HTML-SMUGGLING-BLOB"))
+	}
+
+	// Signal 4: javascript:/vbscript: URI in a navigational attribute.
+	if hasScriptURIAttr(head, deadline) && len(res.Streams) < maxStreams {
+		res.Streams = append(res.Streams, []byte("HTML-SCRIPT-URI"))
 	}
 
 	// Signal 3: scripted SVG. Only when an <svg> root is present AND it carries

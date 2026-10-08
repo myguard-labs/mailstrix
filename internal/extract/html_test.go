@@ -456,6 +456,36 @@ func TestSVGScriptMarker(t *testing.T) {
 	}
 }
 
+func TestHTMLScriptURIMarker(t *testing.T) {
+	pos := []string{
+		`<html><a href="javascript:alert(1)">x</a></html>`,
+		`<html><a href="/">y</a><img src='javascript:alert(1)'></html>`,
+		`<html><a href="/">y</a><form action="javascript:evil()"><input></form></html>`,
+		`<html><a href="/">y</a><button formaction=javascript:evil()>x</button></html>`,
+		`<html><a href="vbscript:msgbox(1)">x</a></html>`,
+		`<html><A HREF="JaVaScRiPt:alert(1)">x</A></html>`,
+		"<html><a href = \"  \t\n javascript:alert(1)\">x</a></html>",
+		`<html><a href="javascript:x`,
+		`<html><a href=javascript:`,
+	}
+	for _, in := range pos {
+		if !streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
+			t.Errorf("expected HTML-SCRIPT-URI for:\n%s", in)
+		}
+	}
+	neg := []string{
+		`<html><a href="/">y</a><p>click javascript:alert(1) here</p></html>`,
+		`<html><a href="https://example.com/javascript:x">x</a></html>`,
+		`<html><a data-href="javascript:x">x</a></html>`,
+		`plain text href="javascript:alert(1)"`,
+	}
+	for _, in := range neg {
+		if streamHas(runHTML([]byte(in)), "HTML-SCRIPT-URI") {
+			t.Errorf("unexpected HTML-SCRIPT-URI for:\n%s", in)
+		}
+	}
+}
+
 // TestSVGEmbeddedPayloadCarve: an <svg> with an <image href> base64 data: URI
 // whose decoded bytes are a container magic (PK zip) must emit
 // SVG-EMBEDDED-PAYLOAD and carve the dropper — no download attribute required.

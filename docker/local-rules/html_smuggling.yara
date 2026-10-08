@@ -64,6 +64,20 @@ rule SVG_Scripted : svg smuggling heuristic suspicious marker
         filesize < 16MB and $marker
 }
 
+rule HTML_Script_URI : html heuristic suspicious marker
+{
+    meta:
+        author      = "mailstrix"
+        description = "HTML href/src/action/formaction value starting with javascript:/vbscript: (low: web-page exports carry these legitimately)"
+        reference   = "https://attack.mitre.org/techniques/T1059/007/"
+        tier        = "suspicious"
+        score       = "15"
+    strings:
+        $marker = "HTML-SCRIPT-URI" ascii
+    condition:
+        filesize < 16MB and $marker
+}
+
 rule SVG_Embedded_Payload : svg smuggling heuristic suspicious marker
 {
     meta:
