@@ -73,6 +73,27 @@ class GoCoverageTests(unittest.TestCase):
         result = self.run_script(profile(1, 3), "33.4")
         self.assertEqual(result.returncode, 1)
 
+    def test_unrounded_total_just_below_floor_fails(self):
+        # 9998996 of 10000000 statements = 99.98996%: %.4f prints 99.9900, which
+        # must not satisfy a 99.99 floor.
+        content = (
+            "mode: atomic\n"
+            "example.com/m/p/f.go:2.11,2.14 9998996 1\n"
+            "example.com/m/p/f.go:3.11,3.14 1004 0\n"
+        )
+        result = self.run_script(content, "99.99")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("below floor", result.stderr)
+
+    def test_multi_statement_total_equal_to_floor_passes(self):
+        content = (
+            "mode: atomic\n"
+            "example.com/m/p/f.go:2.11,2.14 844 1\n"
+            "example.com/m/p/f.go:3.11,3.14 156 0\n"
+        )
+        result = self.run_script(content, "84.4")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_missing_profile_fails_cleanly(self):
         result = self.run_script(None, "1.0")
         self.assertEqual(result.returncode, 2)

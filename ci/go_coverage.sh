@@ -33,14 +33,16 @@ fi
 # per test binary, so a block counts as covered when any entry hit it.
 total=$(awk 'NR > 1 && NF == 3 { n[$1] = $2; if ($3 > 0) c[$1] = 1 }
 	END { for (k in n) { s += n[k]; if (k in c) h += n[k] }
-		if (s > 0) printf "%.4f", 100 * h / s }' "$profile")
-if [[ ! $total =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+		if (s > 0) printf "%.17g", 100 * h / s }' "$profile")
+if [[ ! $total =~ ^[0-9]+(\.[0-9]+)?(e[-+][0-9]+)?$ ]]; then
 	echo "go_coverage: no total in profile: $profile" >&2
 	exit 2
 fi
+# Compare the unrounded ratio; the 4-decimal value is for the message only.
+shown=$(awk -v t="$total" 'BEGIN { printf "%.4f", t + 0 }')
 if awk -v t="$total" -v f="$floor" 'BEGIN { exit !(t + 0 >= f + 0) }'; then
-	echo "go_coverage: total ${total}% >= floor ${floor}%"
+	echo "go_coverage: total ${shown}% >= floor ${floor}%"
 else
-	echo "go_coverage: total ${total}% is below floor ${floor}%" >&2
+	echo "go_coverage: total ${shown}% is below floor ${floor}%" >&2
 	exit 1
 fi
