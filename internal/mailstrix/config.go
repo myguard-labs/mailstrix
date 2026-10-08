@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"net"
 	"os"
 	"runtime"
 	"strconv"
@@ -170,10 +171,11 @@ type Config struct {
 	ThreatFoxRefresh time.Duration // MAILSTRIX_THREATFOX_REFRESH (default 360m, floor 5m)
 	ThreatFoxMaxURLs int           // MAILSTRIX_THREATFOX_MAX_URLS (per message, default 64)
 
-	ICAPAddr      string // MAILSTRIX_ICAP_ADDR (empty = disabled; e.g. ":1344")
-	ClamdTCPAddr  string // MAILSTRIX_CLAMD_TCP_ADDR (empty = disabled; explicit host:port)
-	ClamdUnixPath string // MAILSTRIX_CLAMD_UNIX_PATH (empty = disabled; filesystem socket)
-	ClamdMaxConns int    // MAILSTRIX_CLAMD_MAX_CONNS (default 64, range 1..1024)
+	ICAPAddr          string // MAILSTRIX_ICAP_ADDR (empty = disabled; e.g. ":1344")
+	ClamdTCPAddr      string // MAILSTRIX_CLAMD_TCP_ADDR (empty = disabled; explicit host:port)
+	AllowWildcardBind bool   // MAILSTRIX_ALLOW_WILDCARD_BIND (default false; required for wildcard ICAP/clamd TCP binds)
+	ClamdUnixPath     string // MAILSTRIX_CLAMD_UNIX_PATH (empty = disabled; filesystem socket)
+	ClamdMaxConns     int    // MAILSTRIX_CLAMD_MAX_CONNS (default 64, range 1..1024)
 
 	// RuleDenylist suppresses matches for these rule names (case-insensitive).
 	// Public rulesets ship demo/noise rules that are pure false positives for
@@ -292,6 +294,7 @@ func LoadConfig() *Config {
 		EffortAuto: strings.EqualFold(strings.TrimSpace(os.Getenv("MAILSTRIX_EFFORT")), "auto"),
 	}
 	c.AllowRulesCountDrop = envBool("MAILSTRIX_RULES_ALLOW_COUNT_DROP")
+	c.AllowWildcardBind = envBool("MAILSTRIX_ALLOW_WILDCARD_BIND")
 	c.inflightAuto = c.MaxInflight == 0
 	c.icapConnsAuto = c.ICAPMaxConns == 0
 	c.sanitize()
@@ -470,6 +473,58 @@ var ErrRedisMACKey = errors.New("MAILSTRIX_REDIS_MAC_KEY too short")
 func (c *Config) ValidateRedisMAC() error {
 	if c.RedisMACKey != "" && len(c.RedisMACKey) < MinRedisMACKeyLen {
 		return fmt.Errorf("%w: need at least %d bytes", ErrRedisMACKey, MinRedisMACKeyLen)
+	}
+	return nil
+}
+
+// ErrWildcardBind reports a wildcard ICAP/clamd TCP bind without opt-in.
+var ErrWildcardBind = errors.New("wildcard bind requires MAILSTRIX_ALLOW_WILDCARD_BIND=1")
+
+// isWildcardAddr reports whether a host:port listen address binds every
+// interface (empty host or an unspecified IP). Unparsable addrs are false.
+func isWildcardAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsUnspecified()
+	}
+	// A hostname is resolved the way net.Listen would; any unspecified
+	// answer (e.g. an /etc/hosts entry for 0.0.0.0) is a wildcard bind.
+	// Resolution failure is left to the listener, which then fails.
+	ips, err := lookupBindHost(host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if ip.IsUnspecified() {
+			return true
+		}
+	}
+	return false
+}
+
+// lookupBindHost resolves a listen hostname; a variable so tests can stub DNS.
+var lookupBindHost = net.LookupIP
+
+// ValidateWildcardBind rejects a wildcard MAILSTRIX_ICAP_ADDR or
+// MAILSTRIX_CLAMD_TCP_ADDR unless MAILSTRIX_ALLOW_WILDCARD_BIND is set: those
+// listeners do not enforce the /scan token and would be a scan oracle.
+func (c *Config) ValidateWildcardBind() error {
+	if c.AllowWildcardBind {
+		return nil
+	}
+	for _, v := range []struct{ name, addr string }{
+		{"MAILSTRIX_ICAP_ADDR", c.ICAPAddr},
+		{"MAILSTRIX_CLAMD_TCP_ADDR", c.ClamdTCPAddr},
+	} {
+		if isWildcardAddr(v.addr) {
+			return fmt.Errorf("%w: %s=%q binds all interfaces", ErrWildcardBind, v.name, v.addr)
+		}
 	}
 	return nil
 }

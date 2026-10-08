@@ -295,6 +295,10 @@ func cmdServe(args []string) (exitCode int) {
 		log.Printf("[mailstrix] %v", err)
 		return 2
 	}
+	if err := cfg.ValidateWildcardBind(); err != nil {
+		log.Printf("[mailstrix] %v", err)
+		return 2
+	}
 	if err := mailstrix.ValidateSecrets(); err != nil {
 		log.Printf("[mailstrix] %v", err)
 		return 2

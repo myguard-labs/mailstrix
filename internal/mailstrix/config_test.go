@@ -2,7 +2,9 @@ package mailstrix
 
 import (
 	"bytes"
+	"errors"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -334,5 +336,85 @@ func TestEffortAutoNoWarning(t *testing.T) {
 	}
 	if c.EffortAuto || c.Effort != c.EffortMax {
 		t.Errorf("MAILSTRIX_EFFORT=abc: EffortAuto=%v Effort=%d, want false and %d", c.EffortAuto, c.Effort, c.EffortMax)
+	}
+}
+
+func TestValidateWildcardBind(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		icap, clamd  string
+		allow        bool
+		wantErr      bool
+		wantVarInMsg string
+	}{
+		{"none", "", "", false, false, ""},
+		{"loopback", "127.0.0.1:1344", "127.0.0.1:3310", false, false, ""},
+		{"specific", "10.0.0.5:1344", "[2001:db8::1]:3310", false, false, ""},
+		{"icap empty host", ":1344", "", false, true, "MAILSTRIX_ICAP_ADDR"},
+		{"icap v4 any", "0.0.0.0:1344", "", false, true, "MAILSTRIX_ICAP_ADDR"},
+		{"icap v6 any", "[::]:1344", "", false, true, "MAILSTRIX_ICAP_ADDR"},
+		{"clamd empty host", "", ":3310", false, true, "MAILSTRIX_CLAMD_TCP_ADDR"},
+		{"clamd v4 any", "", "0.0.0.0:3310", false, true, "MAILSTRIX_CLAMD_TCP_ADDR"},
+		{"clamd v6 any", "", "[::]:3310", false, true, "MAILSTRIX_CLAMD_TCP_ADDR"},
+		{"wildcard with flag", ":1344", "0.0.0.0:3310", true, false, ""},
+		{"unparsable", "garbage", "also-bad", false, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (&Config{ICAPAddr: tc.icap, ClamdTCPAddr: tc.clamd, AllowWildcardBind: tc.allow}).ValidateWildcardBind()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if err != nil {
+				if !errors.Is(err, ErrWildcardBind) || !strings.Contains(err.Error(), "MAILSTRIX_ALLOW_WILDCARD_BIND") || !strings.Contains(err.Error(), tc.wantVarInMsg) {
+					t.Errorf("error %q lacks variable/flag names", err)
+				}
+			}
+		})
+	}
+}
+
+// A hostname resolving to an unspecified IP is a wildcard bind; a hostname
+// resolving to a specific IP, or one that fails to resolve, is not.
+func TestValidateWildcardBindHostname(t *testing.T) {
+	prev := lookupBindHost
+	t.Cleanup(func() { lookupBindHost = prev })
+	lookupBindHost = func(h string) ([]net.IP, error) {
+		switch h {
+		case "anyhost":
+			return []net.IP{net.ParseIP("127.0.0.1"), net.IPv4zero}, nil
+		case "anyhost6":
+			return []net.IP{net.IPv6unspecified}, nil
+		case "lan":
+			return []net.IP{net.ParseIP("10.0.0.5")}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	for _, tc := range []struct {
+		addr    string
+		allow   bool
+		wantErr bool
+	}{
+		{"anyhost:1344", false, true},
+		{"anyhost6:1344", false, true},
+		{"anyhost:1344", true, false},
+		{"lan:1344", false, false},
+		{"missing:1344", false, false},
+	} {
+		err := (&Config{ICAPAddr: tc.addr, AllowWildcardBind: tc.allow}).ValidateWildcardBind()
+		if (err != nil) != tc.wantErr || (err != nil && !errors.Is(err, ErrWildcardBind)) {
+			t.Errorf("%s allow=%v: err=%v wantErr=%v", tc.addr, tc.allow, err, tc.wantErr)
+		}
+	}
+}
+
+func TestLoadConfigAllowWildcardBind(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want bool
+	}{{"", false}, {"1", true}, {"true", true}, {"garbage", false}, {"0", false}} {
+		t.Setenv("MAILSTRIX_ALLOW_WILDCARD_BIND", tc.val)
+		if got := LoadConfig().AllowWildcardBind; got != tc.want {
+			t.Errorf("%q: got %v want %v", tc.val, got, tc.want)
+		}
 	}
 }
