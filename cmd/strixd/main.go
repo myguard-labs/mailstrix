@@ -291,6 +291,10 @@ func cmdServe(args []string) (exitCode int) {
 		log.Printf("[mailstrix] invalid CAPE configuration")
 		return 2
 	}
+	if err := cfg.ValidateRedisMAC(); err != nil {
+		log.Printf("[mailstrix] %v", err)
+		return 2
+	}
 	if err := mailstrix.ValidateSecrets(); err != nil {
 		log.Printf("[mailstrix] %v", err)
 		return 2

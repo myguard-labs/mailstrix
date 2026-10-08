@@ -117,6 +117,9 @@ type Config struct {
 	CacheSize   int           // MAILSTRIX_CACHE_SIZE   (default 65536 in-memory entries)
 	RedisURL    string        // MAILSTRIX_REDIS_URL    (empty -> in-process LRU only)
 	RedisPrefix string        // MAILSTRIX_REDIS_PREFIX (default yara:scan:)
+	// RedisMACKey (MAILSTRIX_REDIS_MAC_KEY[_FILE]) enables an HMAC-SHA256 over
+	// every Redis L2 value; a missing or bad MAC is a cache miss. Empty = off.
+	RedisMACKey string
 
 	Verbose     bool // MAILSTRIX_VERBOSE
 	LogStdout   bool // MAILSTRIX_LOG_STDOUT — info/access to stdout; errors stay stderr
@@ -255,6 +258,7 @@ func LoadConfig() *Config {
 		CacheSize:         envInt("MAILSTRIX_CACHE_SIZE", 65536),
 		RedisURL:          strings.TrimSpace(os.Getenv("MAILSTRIX_REDIS_URL")),
 		RedisPrefix:       envStr("MAILSTRIX_REDIS_PREFIX", "yara:scan:"),
+		RedisMACKey:       envOrFile("MAILSTRIX_REDIS_MAC_KEY"),
 		Verbose:           envBool("MAILSTRIX_VERBOSE"),
 		LogStdout:         envBool("MAILSTRIX_LOG_STDOUT"),
 		MetricsAuth:       envBool("MAILSTRIX_METRICS_AUTH"),
@@ -454,6 +458,20 @@ func normalizeToken(t string) string {
 var secretFileVars = []string{
 	"MAILSTRIX_TOKEN", "MAILSTRIX_TOKEN_NEXT",
 	"MAILSTRIX_URLHAUS_KEY", "MAILSTRIX_MBAZAAR_KEY", "MAILSTRIX_THREATFOX_KEY",
+	"MAILSTRIX_REDIS_MAC_KEY",
+}
+
+// ErrRedisMACKey reports a Redis MAC key shorter than MinRedisMACKeyLen.
+var ErrRedisMACKey = errors.New("MAILSTRIX_REDIS_MAC_KEY too short")
+
+// ValidateRedisMAC fails closed when a MAC key is set but shorter than
+// MinRedisMACKeyLen bytes. An empty key (MAC disabled) is valid. The value is
+// never included in the error.
+func (c *Config) ValidateRedisMAC() error {
+	if c.RedisMACKey != "" && len(c.RedisMACKey) < MinRedisMACKeyLen {
+		return fmt.Errorf("%w: need at least %d bytes", ErrRedisMACKey, MinRedisMACKeyLen)
+	}
+	return nil
 }
 
 // ErrSecretFile reports a *_FILE secret that is set but cannot be read.
