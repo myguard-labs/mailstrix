@@ -94,6 +94,12 @@ const maxRulesRedirects = 10
 func checkRulesURL(raw string, allowHTTP bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
+		// *url.Error quotes the whole raw URL, userinfo included; keep only
+		// the cause so a malformed URL never echoes credentials.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return fmt.Errorf("rules URL is malformed: %w", err)
 	}
 	switch u.Scheme {

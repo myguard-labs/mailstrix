@@ -497,6 +497,7 @@ func TestCheckRulesBaseURL(t *testing.T) {
 		{"https://example.com/r?", false, false, "bare trailing query marker"},
 		{"https://example.com/r#frag", false, false, "fragment"},
 		{"https://example.com/r#", false, false, "bare trailing fragment marker"},
+		{"https://s3cretU:s3cretP@exa mple.com/r", false, false, "malformed URL with userinfo"},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := checkRulesBaseURL(tc.raw, tc.allowHTTP)
