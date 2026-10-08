@@ -934,6 +934,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 		gauge("rules_last_failure_timestamp_seconds", "last failed rules check, 0 never", u.LastFailure)
 		fm("rules_update_failures_total", "failed rules checks", u.Failures)
 		fm("rules_update_reload_failures_total", "failed automatic rules reloads", u.ReloadFailures)
+		fm("rules_update_count_drop_refusals_total", "verified bundles refused for an empty or sharply reduced rule count", u.CountDropRefusals)
 	}
 	gauge("rules_stale", "1 if rules_age_seconds exceeds MAILSTRIX_RULES_MAX_AGE (0 when unset or fresh)", stale)
 
