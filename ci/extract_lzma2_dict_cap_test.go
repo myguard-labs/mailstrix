@@ -16,7 +16,7 @@ import (
 //	      16 MiB member cap, effective dict min(96m,70m) > 64 MiB), members
 //	      LZ2-MARKER-over{,2..5}.bin 'A'-filled, 7z a -m0=lzma2:d=128m -mmt=1 -ms=on over.7z LZ2-MARKER-over*.bin
 //	      (7z l -slt: Method = LZMA2:96m, Solid = +)
-//	edge: 16 MiB, 7z a -m0=lzma2:d=64m -mmt=1 edge.7z LZ2-MARKER-edge.bin (7z l -slt: LZMA2:24)
+//	edge: 16 MiB, 7z a -m0=lzma2:d=64m -mmt=1 edge.7z LZ2-MARKER-edge.bin (7z l -slt: LZMA2:24 = 16 MiB dict; below the ceiling, not at it)
 //	in:   1 MiB, 7z a -m0=lzma2:d=8m  -mmt=1 in.7z   LZ2-MARKER-in.bin
 //	def:  64 KiB, 7z a def.7z LZ2-MARKER-def.bin  (7-Zip default settings)
 const (
@@ -49,7 +49,7 @@ func TestLZMA2DictCap(t *testing.T) {
 		})
 	}
 	run("over ceiling refused", lzma2OverB64, "LZ2-MARKER-over", true)
-	run("exactly at ceiling extracts", lzma2EdgeB64, "LZ2-MARKER-edge", false)
+	run("16 MiB member with d=64m request extracts (7-Zip clamps the dict to 16 MiB; exact 64 MiB bound is unit-tested in lzma2cap_test.go)", lzma2EdgeB64, "LZ2-MARKER-edge", false)
 	run("in ceiling control", lzma2InB64, "LZ2-MARKER-in", false)
 	run("7-Zip default small data", lzma2DefB64, "LZ2-MARKER-def", false)
 }
