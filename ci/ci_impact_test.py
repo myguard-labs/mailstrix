@@ -259,6 +259,18 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_extract_verify_first_member_go_consumer(self):
+        path = "ci/extract_verify_first_member_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/extract_verify_first_member_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_rc4md5_go_mapping_negative_control(self):
         cases = {
             "ci/rc4md5_extract_test.go": "--changed -- ci/rc4md5_extract_test.go",
@@ -293,6 +305,9 @@ class ImpactTests(unittest.TestCase):
             "ci/testdata/hdrenc-dir.7z",
             "ci/testdata/hdrenc-oversize.7z",
             "ci/testdata/hdrenc-small.7z",
+            "ci/testdata/vfm-nonsolid.7z",
+            "ci/testdata/vfm-solid.7z",
+            "ci/testdata/vfm-onlybig.7z",
         ]
         for path in paths:
             with self.subTest(path=path):

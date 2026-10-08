@@ -31,6 +31,10 @@ ci/testdata/**
 !ci/testdata/hdrenc-dir.7z
 !ci/testdata/hdrenc-oversize.7z
 !ci/testdata/hdrenc-small.7z
+# First-in-cap password verification 7z fixtures read by ci/extract_verify_first_member_test.go (AUD-04c9).
+!ci/testdata/vfm-nonsolid.7z
+!ci/testdata/vfm-solid.7z
+!ci/testdata/vfm-onlybig.7z
 !third_party
 !third_party/**
 !tools
