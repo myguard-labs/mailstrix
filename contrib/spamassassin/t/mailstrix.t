@@ -468,14 +468,14 @@ sub fake_scan {
     local *HTTP::Tiny::post = sub {
         return { success => 1, status => 200, content => '{"matches":[],"degraded":"busy"}' };
     };
-    for my $fo (0, 1) {
+    for my $fail_open (0, 1) {
         my $pms = fresh_pms();
         $pms->{conf} = { mailstrix_url => 'http://x', mailstrix_mode => 'http', mailstrix_max_size => 0,
-                         mailstrix_part_mode => 1, mailstrix_fail_open => $fo, mailstrix_high_score => 75 };
+                         mailstrix_part_mode => 1, mailstrix_fail_open => $fail_open, mailstrix_high_score => 75 };
         $pms->{msg} = bless {}, 'main::FakeMsg';
         $self->parsed_metadata({ permsgstatus => $pms });
-        is($pms->{mailstrix_error}, $fo ? 0 : 1, "degraded unknown: fail_open=$fo error flag");
-        is($pms->{mailstrix_matched}, 0, "degraded unknown: fail_open=$fo not a match");
+        is($pms->{mailstrix_error}, $fail_open ? 0 : 1, "degraded unknown: fail_open=$fail_open error flag");
+        is($pms->{mailstrix_matched}, 0, "degraded unknown: fail_open=$fail_open not a match");
     }
 }
 
