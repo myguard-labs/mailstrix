@@ -547,18 +547,32 @@ func TestFetchRulesFollowsHTTPSRedirectToQueryURL(t *testing.T) {
 	var storeHits, frontHits atomic.Int64
 	store := httptest.NewTLSServer(countingHandler(&storeHits, rulesHandler(yac, 2, "4.5.2", "", testRulesManifestGenerated)))
 	defer store.Close()
-	front := httptest.NewTLSServer(redirectHandler(&frontHits, func() string { return store.URL }))
+	// Like a GitHub release asset, every hop lands on a signed object-store
+	// URL whose query string carries the signature.
+	front := httptest.NewTLSServer(countingHandler(&frontHits, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, store.URL+r.URL.Path+"?X-Amz-Signature=abc&X-Amz-Expires=300", http.StatusFound)
+	})))
 	defer front.Close()
 	pool := x509.NewCertPool()
 	pool.AddCert(store.Certificate())
 	pool.AddCert(front.Certificate())
+	var queried atomic.Int64
 	hc := &http.Client{
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}},
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			if req.URL.RawQuery != "" {
+				queried.Add(1)
+			}
+			return nil
+		},
 	}
 	// Base URL has no query, so it should pass validation
 	res, err := FetchRules(context.Background(), front.URL+"/", t.TempDir(), "4.5.2", hc, false)
 	if err != nil || !res.Updated || res.NewVersion != 2 {
 		t.Fatalf("https->https redirect to query URL: res=%+v err=%v", res, err)
+	}
+	if queried.Load() == 0 || storeHits.Load() == 0 {
+		t.Fatalf("redirect never reached a query URL: queried=%d storeHits=%d", queried.Load(), storeHits.Load())
 	}
 }
 
