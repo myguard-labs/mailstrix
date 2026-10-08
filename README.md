@@ -1026,8 +1026,9 @@ results, and `ERROR` when it cannot give a complete verdict. It does not accept
 clamd file-path scans, and it does not turn Mailstrix rules into ClamAV
 signatures. TCP has no protocol authentication or TLS; keep it on a trusted
 network; when a `/scan` token is configured, strixd logs a startup warning that
-the TCP listener does not check it. The [clamd adapter guide](contrib/clamd/README.md) has socket and
-Docker setup, client examples, supported commands and limits.
+the TCP listener does not check it. The
+[clamd adapter guide](contrib/clamd/README.md) has socket and Docker setup,
+client examples, supported commands and limits.
 
 ## Observability (Grafana + Prometheus)
 
