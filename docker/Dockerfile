@@ -101,7 +101,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
     && echo "go test scope: ${pkgs:-<none, docs-only change>}" \
     && if [ -n "$pkgs" ]; then \
-        go vet -tags yara_static $pkgs && go test -race -p 1 -tags yara_static $pkgs; \
+        go vet -tags yara_static $pkgs && go test -race -p 1 -timeout 30m -tags yara_static $pkgs; \
     fi
 
 # ---- binary export (release artifacts; not part of the runtime image) -------

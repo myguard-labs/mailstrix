@@ -718,7 +718,7 @@ func TestRulesetModUnix(t *testing.T) {
 }
 
 // TestScanRaceReload (STAB-10) hammers concurrent Scan() calls while Reload()
-// and ReloadDenylist() fire simultaneously. Run with -race to verify no data
+// and ReloadAll() fire simultaneously. Run with -race to verify no data
 // races exist in the scanner pool / rule-generation machinery.
 func TestScanRaceReload(t *testing.T) {
 	s := newScanner(t, writeRules(t, eicarRule))
@@ -770,7 +770,7 @@ func TestScanRaceReload(t *testing.T) {
 		}
 	}()
 
-	// Fire ReloadDenylist() at least once while scans run.
+	// Fire ReloadAll() at least once while scans run.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -780,7 +780,7 @@ func TestScanRaceReload(t *testing.T) {
 				return
 			default:
 			}
-			s.ReloadDenylist()
+			_ = s.ReloadAll() // errors are fine; old ruleset stays active
 			time.Sleep(50 * time.Millisecond)
 		}
 	}()

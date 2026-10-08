@@ -439,6 +439,8 @@ jobs:
             lua5.4 contrib/rspamd/test/mailstrix_feed_routing_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_cape_policy_spec.lua
             lua5.1 contrib/rspamd/test/mailstrix_cape_policy_spec.lua
+            lua5.4 contrib/rspamd/test/mailstrix_degraded_spec.lua
+            lua5.1 contrib/rspamd/test/mailstrix_degraded_spec.lua
           '
 
       - name: Rspamd policy configtest and daemon startup
