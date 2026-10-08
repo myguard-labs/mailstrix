@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,6 +86,13 @@ func NewCache(cfg *Config, logf func(string, ...any)) Cache {
 		} else {
 			c.redis = rl
 			logf("redis verdict cache enabled (prefix=%s)", cfg.RedisPrefix)
+			// Warn if plaintext connection to a remote host.
+			opt, _ := redis.ParseURL(cfg.RedisURL)
+			if opt != nil {
+				if host, warn := redisPlaintextRemote(opt); warn {
+					logf("WARNING redis cache uses plaintext to non-loopback %s; use rediss:// for TLS", host)
+				}
+			}
 		}
 	}
 	return c
@@ -184,6 +192,42 @@ type redisLayer struct {
 	rdb    *redis.Client
 	prefix string
 	br     redisBreaker
+}
+
+// redisPlaintextRemote returns the Redis host[:port] and a flag indicating whether
+// the connection uses plaintext (redis://) to a non-loopback target. Local connections
+// (unix sockets, localhost, loopback IPs) return warn=false and log no warning.
+func redisPlaintextRemote(opt *redis.Options) (host string, warn bool) {
+	// Unix sockets are local by definition.
+	if opt.Network == "unix" {
+		return "", false
+	}
+
+	// Check if TLS is enabled (rediss:// scheme or explicit TLSConfig).
+	if opt.TLSConfig != nil {
+		return "", false
+	}
+
+	// Extract host from opt.Addr (format: "host:port" or just "host").
+	parsedHost, _, err := net.SplitHostPort(opt.Addr)
+	if err != nil {
+		// If SplitHostPort fails, opt.Addr might not have a port; treat as the host.
+		parsedHost = opt.Addr
+	}
+
+	// Check if host is a loopback address (localhost, 127.0.0.1, ::1, etc.).
+	ip := net.ParseIP(parsedHost)
+	if ip != nil && ip.IsLoopback() {
+		return parsedHost, false
+	}
+
+	// Check if host is the string "localhost".
+	if parsedHost == "localhost" {
+		return parsedHost, false
+	}
+
+	// Plaintext remote connection: log a warning.
+	return parsedHost, true
 }
 
 func newRedisLayer(cfg *Config) (*redisLayer, error) {

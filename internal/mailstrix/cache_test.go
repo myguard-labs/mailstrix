@@ -2,9 +2,12 @@ package mailstrix
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func newLRU(t *testing.T, ttl time.Duration, size int) Cache {
@@ -374,4 +377,196 @@ func TestFlightPanicDoesNotHangWaiters(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("follow-up Do hung; panicked leader left the key registered")
 	}
+}
+
+// TestRedisPlaintextRemoteWarning tests the redisPlaintextRemote helper
+// for detecting plaintext connections to remote (non-loopback) hosts.
+func TestRedisPlaintextRemoteWarning(t *testing.T) {
+	tests := []struct {
+		name         string
+		redisURL     string
+		wantWarn     bool
+		wantHost     string
+		noCredInHost bool // if true, check that credentials do not appear in the returned host
+	}{
+		// Warn: plaintext to remote hosts
+		{
+			name:         "plaintext to remote IP",
+			redisURL:     "redis://10.0.0.5:6379",
+			wantWarn:     true,
+			wantHost:     "10.0.0.5",
+			noCredInHost: true,
+		},
+		{
+			name:         "plaintext to hostname",
+			redisURL:     "redis://cache.example:6379",
+			wantWarn:     true,
+			wantHost:     "cache.example",
+			noCredInHost: true,
+		},
+		{
+			name:         "plaintext remote with credentials",
+			redisURL:     "redis://user:secret@10.0.0.5:6379/0",
+			wantWarn:     true,
+			wantHost:     "10.0.0.5",
+			noCredInHost: true,
+		},
+
+		// No warn: TLS enabled
+		{
+			name:     "TLS to remote IP (rediss://)",
+			redisURL: "rediss://10.0.0.5:6379",
+			wantWarn: false,
+		},
+
+		// No warn: loopback addresses
+		{
+			name:     "plaintext to 127.0.0.1",
+			redisURL: "redis://127.0.0.1:6379",
+			wantWarn: false,
+		},
+		{
+			name:     "plaintext to 127.8.9.10 (loopback range)",
+			redisURL: "redis://127.8.9.10:6379",
+			wantWarn: false,
+		},
+		{
+			name:     "plaintext to localhost",
+			redisURL: "redis://localhost:6379",
+			wantWarn: false,
+		},
+		{
+			name:     "plaintext to ::1 (IPv6 loopback)",
+			redisURL: "redis://[::1]:6379",
+			wantWarn: false,
+		},
+
+		// No warn: unix sockets
+		{
+			name:     "unix socket",
+			redisURL: "unix:///var/run/redis.sock",
+			wantWarn: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt, err := redis.ParseURL(tt.redisURL)
+			if err != nil {
+				t.Fatalf("ParseURL failed: %v", err)
+			}
+
+			host, warn := redisPlaintextRemote(opt)
+
+			if warn != tt.wantWarn {
+				t.Errorf("warn=%v, want %v", warn, tt.wantWarn)
+			}
+
+			if tt.wantWarn && host != tt.wantHost {
+				t.Errorf("host=%q, want %q", host, tt.wantHost)
+			}
+
+			// Verify credentials are not in the returned host string.
+			if tt.noCredInHost && (host != "" && host != "localhost") {
+				if contains(host, "secret") || contains(host, "user") {
+					t.Errorf("host contains credentials: %q", host)
+				}
+			}
+		})
+	}
+}
+
+// TestNewCacheRedisPlaintextWarning tests that NewCache emits the plaintext warning
+// when a plaintext Redis connection to a remote host is configured.
+func TestNewCacheRedisPlaintextWarning(t *testing.T) {
+	tests := []struct {
+		name        string
+		redisURL    string
+		wantWarning bool
+		description string
+	}{
+		{
+			name:        "plaintext remote",
+			redisURL:    "redis://10.0.0.5:6379",
+			wantWarning: true,
+			description: "should warn",
+		},
+		{
+			name:        "TLS remote",
+			redisURL:    "rediss://10.0.0.5:6379",
+			wantWarning: false,
+			description: "should not warn",
+		},
+		{
+			name:        "plaintext localhost",
+			redisURL:    "redis://localhost:6379",
+			wantWarning: false,
+			description: "should not warn for localhost",
+		},
+		{
+			name:        "plaintext 127.0.0.1",
+			redisURL:    "redis://127.0.0.1:6379",
+			wantWarning: false,
+			description: "should not warn for loopback IP",
+		},
+		{
+			name:        "unix socket",
+			redisURL:    "unix:///var/run/redis.sock",
+			wantWarning: false,
+			description: "should not warn for unix socket",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs []string
+			cfg := &Config{
+				CacheTTL:  time.Minute,
+				CacheSize: 10,
+				RedisURL:  tt.redisURL,
+			}
+			cfg.sanitize()
+
+			logf := func(format string, args ...any) {
+				logs = append(logs, fmt.Sprintf(format, args...))
+			}
+
+			// Call NewCache, which will attempt to parse and validate the Redis URL.
+			// For invalid URLs, it will log "redis cache disabled" and return normally.
+			c := NewCache(cfg, logf)
+			if c == nil {
+				t.Fatal("NewCache returned nil")
+			}
+
+			// Check if the plaintext warning was emitted.
+			foundWarning := false
+			for _, log := range logs {
+				if contains(log, "redis cache uses plaintext") {
+					foundWarning = true
+					break
+				}
+			}
+
+			if foundWarning != tt.wantWarning {
+				t.Errorf("%s: foundWarning=%v, want %v. logs=%v",
+					tt.description, foundWarning, tt.wantWarning, logs)
+			}
+		})
+	}
+}
+
+// Helper function to check if a string contains a substring.
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && s[len(s)-len(substr):] == substr ||
+		len(s) > len(substr) && (s[:len(substr)] == substr || indexStr(s, substr) >= 0)
+}
+
+// Helper function for substring search.
+func indexStr(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
 }
