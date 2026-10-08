@@ -83,3 +83,42 @@ func TestMatchCounterConcurrent(t *testing.T) {
 		t.Errorf("after concurrent adds, map size %d exceeds cap %d", sz, matchCounterCap)
 	}
 }
+
+func TestMatchCounterAddAtDropsStaleEpoch(t *testing.T) {
+	c := newMatchCounter(matchCounterCap)
+	old := c.Epoch()
+	c.AddAt(old, []string{"CUR"}) // same epoch: counted
+	c.Reset()
+	c.AddAt(old, []string{"OLD"}) // pinned before Reset: dropped
+	if top := c.TopN(10); len(top) != 0 {
+		t.Fatalf("stale-epoch hit leaked past Reset: %v", top)
+	}
+	c.AddAt(c.Epoch(), []string{"NEW"}) // negative control: current epoch counts
+	if top := c.TopN(10); len(top) != 1 || top[0].Rule != "NEW" || top[0].Count != 1 {
+		t.Fatalf("current-epoch hit lost: %v", top)
+	}
+}
+
+// A scan that leased the old generation and finishes after a Reload must not
+// count its hits in the new generation's top-matches (AUD-N6).
+func TestTopMatchesIgnoresOldGenerationScanAfterReload(t *testing.T) {
+	s := newScanner(t, writeRules(t, eicarRule))
+	defer s.Close()
+	stale := s.acquireScanLease()
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := stale.scan(eicar(), ScanMeta{}); err != nil || len(m) == 0 {
+		t.Fatalf("stale lease scan: %v %v", m, err)
+	}
+	if top := s.TopMatches(10); len(top) != 0 {
+		t.Fatalf("old-generation scan counted after reload: %v", top)
+	}
+	fresh := s.acquireScanLease() // negative control
+	if m, err := fresh.scan(eicar(), ScanMeta{}); err != nil || len(m) == 0 {
+		t.Fatalf("fresh lease scan: %v %v", m, err)
+	}
+	if top := s.TopMatches(10); len(top) != 1 || top[0].Rule != "EICAR_Test_File" {
+		t.Fatalf("current-generation hit not counted: %v", top)
+	}
+}

@@ -778,6 +778,11 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	s.denylistFP.Store(&dlFP)
 	s.loadedManifest.Store(manifest)
 	s.rulesModUnix.Store(modUnix)
+	// Reset the top-matches counter so counts reflect the current rule set only,
+	// not a mix of old and new rule names that may have been renamed/removed.
+	// Inside the publication lock so the epoch bump is atomic with the swap: a
+	// scan that pinned the old generation can no longer add to the new counters.
+	s.topMatches.Reset()
 	s.generationMu.Unlock()
 	// AUD-P3b: free the replaced generations' idle C scanners now rather than
 	// on the next pooled scan. retireStale re-reads the live rules, so it only
@@ -790,9 +795,6 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())
 
-	// Reset the top-matches counter so counts reflect the current rule set only,
-	// not a mix of old and new rule names that may have been renamed/removed.
-	s.topMatches.Reset()
 	return nil
 }
 
@@ -1983,7 +1985,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 		for i, m := range out {
 			names[i] = m.Rule
 		}
-		s.topMatches.Add(names)
+		s.topMatches.AddAt(generation.topEpoch, names)
 	}
 	// MalwareBazaar identifies complete files, never MIME envelopes or derived
 	// streams. Keep both hashing and lookup behind the effort/checker gate.
