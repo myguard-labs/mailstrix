@@ -658,8 +658,9 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_CACHE_DIR` | — (disabled) | writable dir for the live rule bundle; reseeded from `MAILSTRIX_SEED_RULES` when its `compiled.yac` is missing or unreadable |
 | `MAILSTRIX_SEED_RULES` | — | baked read-only `.yac` used to (re)seed `MAILSTRIX_CACHE_DIR` |
 | `MAILSTRIX_CANARY` | `0` | tag every match as log-only canary/shadow output; shipped rspamd/SpamAssassin/Sieve/ICAP integrations observe but do not score/block these hits |
-| `MAILSTRIX_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `:1344`. When set, strixd also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. If the listener cannot bind or stops accepting, `/ready` answers `503`. |
-| `MAILSTRIX_CLAMD_TCP_ADDR` | — (disabled) | Explicit `host:port` |
+| `MAILSTRIX_ICAP_ADDR` | — (disabled) | TCP address for the optional ICAP listener (RFC 3507), e.g. `127.0.0.1:1344`. A wildcard host (`:1344`, `0.0.0.0`, `::`) is refused unless `MAILSTRIX_ALLOW_WILDCARD_BIND=1`. When set, strixd also accepts REQMOD/RESPMOD from ICAP-aware proxies (Squid, c-icap). Unset = ICAP disabled. No ICAP-level auth; gate by network/firewall. If the listener cannot bind or stops accepting, `/ready` answers `503`. |
+| `MAILSTRIX_CLAMD_TCP_ADDR` | — (disabled) | Explicit `host:port`; a wildcard host needs `MAILSTRIX_ALLOW_WILDCARD_BIND=1` |
+| `MAILSTRIX_ALLOW_WILDCARD_BIND` | `0` | permit a wildcard (all-interface) ICAP or clamd TCP bind; these listeners do not check the `/scan` token |
 | `MAILSTRIX_CLAMD_UNIX_PATH` | — (disabled) | Absolute socket path |
 | `MAILSTRIX_CLAMD_MAX_CONNS` | `64` | Shared Unix/TCP cap, range 1–1024 |
 | `MAILSTRIX_VERBOSE` | off | log one line per request |
@@ -929,6 +930,7 @@ c-icap, traffic proxies, MTA content-filters).
 docker run --rm --name mailstrix-icap \
     -e MAILSTRIX_HOST=127.0.0.1 \
     -e MAILSTRIX_ICAP_ADDR=:1344 \
+    -e MAILSTRIX_ALLOW_WILDCARD_BIND=1 \
     -p 127.0.0.1:1344:1344 \
     myguard-labs/mailstrix
 ```

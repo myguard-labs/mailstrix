@@ -2,6 +2,7 @@ package mailstrix
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -334,5 +335,51 @@ func TestEffortAutoNoWarning(t *testing.T) {
 	}
 	if c.EffortAuto || c.Effort != c.EffortMax {
 		t.Errorf("MAILSTRIX_EFFORT=abc: EffortAuto=%v Effort=%d, want false and %d", c.EffortAuto, c.Effort, c.EffortMax)
+	}
+}
+
+func TestValidateWildcardBind(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		icap, clamd  string
+		allow        bool
+		wantErr      bool
+		wantVarInMsg string
+	}{
+		{"none", "", "", false, false, ""},
+		{"loopback", "127.0.0.1:1344", "127.0.0.1:3310", false, false, ""},
+		{"specific", "10.0.0.5:1344", "[2001:db8::1]:3310", false, false, ""},
+		{"icap empty host", ":1344", "", false, true, "MAILSTRIX_ICAP_ADDR"},
+		{"icap v4 any", "0.0.0.0:1344", "", false, true, "MAILSTRIX_ICAP_ADDR"},
+		{"icap v6 any", "[::]:1344", "", false, true, "MAILSTRIX_ICAP_ADDR"},
+		{"clamd empty host", "", ":3310", false, true, "MAILSTRIX_CLAMD_TCP_ADDR"},
+		{"clamd v4 any", "", "0.0.0.0:3310", false, true, "MAILSTRIX_CLAMD_TCP_ADDR"},
+		{"clamd v6 any", "", "[::]:3310", false, true, "MAILSTRIX_CLAMD_TCP_ADDR"},
+		{"wildcard with flag", ":1344", "0.0.0.0:3310", true, false, ""},
+		{"unparsable", "garbage", "also-bad", false, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (&Config{ICAPAddr: tc.icap, ClamdTCPAddr: tc.clamd, AllowWildcardBind: tc.allow}).ValidateWildcardBind()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if err != nil {
+				if !errors.Is(err, ErrWildcardBind) || !strings.Contains(err.Error(), "MAILSTRIX_ALLOW_WILDCARD_BIND") || !strings.Contains(err.Error(), tc.wantVarInMsg) {
+					t.Errorf("error %q lacks variable/flag names", err)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadConfigAllowWildcardBind(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want bool
+	}{{"", false}, {"1", true}, {"true", true}, {"garbage", false}, {"0", false}} {
+		t.Setenv("MAILSTRIX_ALLOW_WILDCARD_BIND", tc.val)
+		if got := LoadConfig().AllowWildcardBind; got != tc.want {
+			t.Errorf("%q: got %v want %v", tc.val, got, tc.want)
+		}
 	}
 }

@@ -11,7 +11,7 @@ Mailstrix rules and detection results do not become ClamAV signatures.
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
 | `MAILSTRIX_CLAMD_UNIX_PATH` | empty | Absolute socket path |
-| `MAILSTRIX_CLAMD_TCP_ADDR` | empty | Explicit `host:port` |
+| `MAILSTRIX_CLAMD_TCP_ADDR` | empty | Explicit `host:port`; wildcard host needs `MAILSTRIX_ALLOW_WILDCARD_BIND=1` |
 | `MAILSTRIX_CLAMD_MAX_CONNS` | `64` | Shared cap, range 1–1024 |
 
 The Unix socket's parent directory must exist. An example TCP address is
@@ -63,6 +63,7 @@ that network can reach the container's port directly.
 docker run --rm --name mailstrix-clamd \
   -e MAILSTRIX_HOST=127.0.0.1 \
   -e MAILSTRIX_CLAMD_TCP_ADDR=0.0.0.0:3310 \
+  -e MAILSTRIX_ALLOW_WILDCARD_BIND=1 \
   -p 127.0.0.1:3310:3310 \
   myguard-labs/mailstrix
 ```
