@@ -12,9 +12,9 @@ import (
 
 const eicar = `X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*`
 
-// fakeYarad mimics yarad's /scan: it returns a match when the body contains the
+// fakeStrixd mimics strixd's /scan: it returns a match when the body contains the
 // EICAR pattern, and records the token / filename headers for assertion.
-func fakeYarad(t *testing.T, gotToken, gotName *string) *httptest.Server {
+func fakeStrixd(t *testing.T, gotToken, gotName *string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/scan" {
@@ -59,7 +59,7 @@ func writeTemp(t *testing.T, data string) string {
 
 func TestMatch(t *testing.T) {
 	var tok, name string
-	srv := fakeYarad(t, &tok, &name)
+	srv := fakeStrixd(t, &tok, &name)
 	defer srv.Close()
 	f := writeTemp(t, eicar)
 	code := run([]string{"-url", srv.URL, "-token", "secret", "-filename", "x.exe", "-quiet", f})
@@ -75,7 +75,7 @@ func TestMatch(t *testing.T) {
 }
 
 func TestClean(t *testing.T) {
-	srv := fakeYarad(t, nil, nil)
+	srv := fakeStrixd(t, nil, nil)
 	defer srv.Close()
 	f := writeTemp(t, "benign")
 	if code := run([]string{"-url", srv.URL, f}); code != 0 {
@@ -115,7 +115,7 @@ func TestMixedLogOnlyAndActionableMatchesExitMatch(t *testing.T) {
 }
 
 func TestFailOpen(t *testing.T) {
-	srv := fakeYarad(t, nil, nil)
+	srv := fakeStrixd(t, nil, nil)
 	url := srv.URL
 	srv.Close() // unreachable
 	f := writeTemp(t, eicar)
@@ -125,7 +125,7 @@ func TestFailOpen(t *testing.T) {
 }
 
 func TestFailClosed(t *testing.T) {
-	srv := fakeYarad(t, nil, nil)
+	srv := fakeStrixd(t, nil, nil)
 	url := srv.URL
 	srv.Close()
 	f := writeTemp(t, eicar)
@@ -136,7 +136,7 @@ func TestFailClosed(t *testing.T) {
 
 func TestTokenFile(t *testing.T) {
 	var tok string
-	srv := fakeYarad(t, &tok, nil)
+	srv := fakeStrixd(t, &tok, nil)
 	defer srv.Close()
 	tf := filepath.Join(t.TempDir(), "tok")
 	if err := os.WriteFile(tf, []byte("filesecret\n"), 0o600); err != nil {
@@ -172,9 +172,9 @@ func TestNoRedirectTokenLeak(t *testing.T) {
 	}
 }
 
-// countingYarad records whether /scan was ever called, so the oversize tests can
+// countingStrixd records whether /scan was ever called, so the oversize tests can
 // prove the client never POSTs a truncated prefix.
-func countingYarad(t *testing.T, called *bool) *httptest.Server {
+func countingStrixd(t *testing.T, called *bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*called = true
@@ -188,7 +188,7 @@ func countingYarad(t *testing.T, called *bool) *httptest.Server {
 // past the cap would otherwise be silently missed.
 func TestOversizeFailOpenDoesNotScan(t *testing.T) {
 	var called bool
-	srv := countingYarad(t, &called)
+	srv := countingStrixd(t, &called)
 	defer srv.Close()
 	f := writeTemp(t, strings.Repeat("A", 100))
 	code := run([]string{"-url", srv.URL, "-max-body", "10", f})
@@ -204,7 +204,7 @@ func TestOversizeFailOpenDoesNotScan(t *testing.T) {
 // and still never posts a truncated prefix.
 func TestOversizeFailClosedErrors(t *testing.T) {
 	var called bool
-	srv := countingYarad(t, &called)
+	srv := countingStrixd(t, &called)
 	defer srv.Close()
 	f := writeTemp(t, strings.Repeat("A", 100))
 	code := run([]string{"-url", srv.URL, "-max-body", "10", "-fail-open=false", f})
@@ -220,7 +220,7 @@ func TestOversizeFailClosedErrors(t *testing.T) {
 // not false-positive on a message that fits).
 func TestExactlyMaxBodyScans(t *testing.T) {
 	var called bool
-	srv := countingYarad(t, &called)
+	srv := countingStrixd(t, &called)
 	defer srv.Close()
 	f := writeTemp(t, strings.Repeat("A", 10))
 	code := run([]string{"-url", srv.URL, "-max-body", "10", f})
@@ -233,7 +233,7 @@ func TestExactlyMaxBodyScans(t *testing.T) {
 }
 
 func TestStdin(t *testing.T) {
-	srv := fakeYarad(t, nil, nil)
+	srv := fakeStrixd(t, nil, nil)
 	defer srv.Close()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -249,9 +249,9 @@ func TestStdin(t *testing.T) {
 	}
 }
 
-// jsonYarad returns a fixed /scan response body so the -json/-label tests can
+// jsonStrixd returns a fixed /scan response body so the -json/-label tests can
 // drive specific rule metadata shapes.
-func jsonYarad(t *testing.T, body string) *httptest.Server {
+func jsonStrixd(t *testing.T, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -291,7 +291,7 @@ func readAllReader(r *os.File) (string, error) {
 // A family-bearing rule (meta: family=X) -> -json emits family:"X", confidence
 // "family", malicious true, exit 1.
 func TestJSONFamilyBearing(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[{"rule":"MALPEDIA_Win_Zeus_Auto","meta":{"family":"Zeus"}}]}`)
+	srv := jsonStrixd(t, `{"matches":[{"rule":"MALPEDIA_Win_Zeus_Auto","meta":{"family":"Zeus"}}]}`)
 	defer srv.Close()
 	f := writeTemp(t, eicar)
 	var code int
@@ -307,7 +307,7 @@ func TestJSONFamilyBearing(t *testing.T) {
 // A generic/technique rule (no family meta) -> empty family, confidence "rule",
 // still malicious.
 func TestJSONGenericNoFamily(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[{"rule":"meth_get_eip","namespace":"generic.yar"}]}`)
+	srv := jsonStrixd(t, `{"matches":[{"rule":"meth_get_eip","namespace":"generic.yar"}]}`)
 	defer srv.Close()
 	f := writeTemp(t, eicar)
 	var code int
@@ -323,7 +323,7 @@ func TestJSONGenericNoFamily(t *testing.T) {
 // A multi-match file with one generic + one family-bearing rule picks the
 // family-bearing one regardless of order.
 func TestJSONMultiMatchPicksFamily(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[{"rule":"http"},{"rule":"ELF_Mirai","meta":{"malware_family":"Mirai"}}]}`)
+	srv := jsonStrixd(t, `{"matches":[{"rule":"http"},{"rule":"ELF_Mirai","meta":{"malware_family":"Mirai"}}]}`)
 	defer srv.Close()
 	f := writeTemp(t, eicar)
 	var code int
@@ -335,7 +335,7 @@ func TestJSONMultiMatchPicksFamily(t *testing.T) {
 
 // A clean result under -json emits malicious:false, empty family, exit 0.
 func TestJSONClean(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[]}`)
+	srv := jsonStrixd(t, `{"matches":[]}`)
 	defer srv.Close()
 	f := writeTemp(t, "benign")
 	var code int
@@ -350,7 +350,7 @@ func TestJSONClean(t *testing.T) {
 
 // -label prints `LABEL <family>` for a family-bearing match and exits 1.
 func TestLabelFamily(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[{"rule":"x","meta":{"actor":"APT28"}}]}`)
+	srv := jsonStrixd(t, `{"matches":[{"rule":"x","meta":{"actor":"APT28"}}]}`)
 	defer srv.Close()
 	f := writeTemp(t, eicar)
 	var code int
@@ -366,7 +366,7 @@ func TestLabelFamily(t *testing.T) {
 // -label prints nothing when no family-bearing rule matched (generic-only or
 // clean), even though a generic match still exits 1.
 func TestLabelNoFamilyPrintsNothing(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[{"rule":"SUSP_generic"}]}`)
+	srv := jsonStrixd(t, `{"matches":[{"rule":"SUSP_generic"}]}`)
 	defer srv.Close()
 	f := writeTemp(t, eicar)
 	var code int
@@ -382,7 +382,7 @@ func TestLabelNoFamilyPrintsNothing(t *testing.T) {
 // Log-only canary/allow hits are dropped before the verdict, so -json on a
 // canary-only response is clean.
 func TestJSONDropsCanary(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[{"rule":"Shadow","meta":{"mailstrix_canary":"1","family":"Ghost"}}]}`)
+	srv := jsonStrixd(t, `{"matches":[{"rule":"Shadow","meta":{"mailstrix_canary":"1","family":"Ghost"}}]}`)
 	defer srv.Close()
 	f := writeTemp(t, eicar)
 	var code int
@@ -397,7 +397,7 @@ func TestJSONDropsCanary(t *testing.T) {
 
 // -json and -label together is a usage error (exit 2), not a silent precedence.
 func TestJSONLabelMutuallyExclusive(t *testing.T) {
-	srv := jsonYarad(t, `{"matches":[]}`)
+	srv := jsonStrixd(t, `{"matches":[]}`)
 	defer srv.Close()
 	f := writeTemp(t, "benign")
 	if code := run([]string{"-url", srv.URL, "-json", "-label", f}); code != 2 {

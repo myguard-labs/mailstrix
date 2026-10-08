@@ -989,7 +989,7 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 // are themselves OLE2 compound files. We read the zip in memory (no temp file)
 // and decompress the VBA out of every *.bin member, mirroring oleparse.ParseFile
 // but without touching disk. A zip we can't open at all is a parse failure; a
-// single unparseable .bin is skipped without losing the rest.
+// single unparsable .bin is skipped without losing the rest.
 // opts carries per-request caps (nil degrades to package defaults).
 // fromOOXML extracts OOXML content from buf and returns whether the zip is
 // classified as an Office document (same predicate as isOfficeZip, computed
@@ -1073,7 +1073,7 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 		}
 		mods, err := oleparse.ParseBufferBlobsLimited(bin, maxBytesPerModule, remainingCode)
 		if err != nil {
-			failedBins++ // one unparseable .bin must not lose the others
+			failedBins++ // one unparsable .bin must not lose the others
 			continue
 		}
 		out = codes(res, mods, out)

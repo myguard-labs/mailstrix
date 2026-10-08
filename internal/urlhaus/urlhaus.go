@@ -393,7 +393,7 @@ func (c *Checker) CheckCandidates(cands []urlcand.Candidate, maxURLs int) []Hit 
 
 // normalizeURL returns a canonical form for set comparison (lowercased scheme +
 // host, default ports stripped, fragment dropped, a bare trailing "/" removed)
-// and the bare hostname. Returns "","" for anything unparseable or non-http.
+// and the bare hostname. Returns "","" for anything unparsable or non-http.
 func normalizeURL(raw string) (norm, host string) {
 	norm, host, _ = urlcand.NormalizeHTTPURL(raw)
 	return norm, host

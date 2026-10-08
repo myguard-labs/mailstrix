@@ -1082,7 +1082,7 @@ func validatedRuleFiles(dir string, logf func(string, ...any)) ([]string, error)
 	for _, f := range files {
 		if compileErr := validateRuleFile(f); compileErr != nil {
 			skipped++
-			logf("skip unparseable rule file %s: %v", filepath.Base(f), compileErr)
+			logf("skip unparsable rule file %s: %v", filepath.Base(f), compileErr)
 			continue
 		}
 		valid = append(valid, f)
@@ -1091,7 +1091,7 @@ func validatedRuleFiles(dir string, logf func(string, ...any)) ([]string, error)
 		return nil, fmt.Errorf("no compilable *.yar/*.yara files in %s (%d skipped)", dir, skipped)
 	}
 	if skipped > 0 {
-		logf("compiled %d rule files, skipped %d unparseable", len(valid), skipped)
+		logf("compiled %d rule files, skipped %d unparsable", len(valid), skipped)
 	}
 	return valid, nil
 }

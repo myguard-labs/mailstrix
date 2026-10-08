@@ -279,7 +279,7 @@ func hasMarker(res Result, name string) bool {
 }
 
 // TestOLEIDVBAPresent_NoFalseMarkerFromLaterStream is the #1 regression for the
-// VBA half: a macro-looking .bin that yields NO VBA codes (unparseable) plus a
+// VBA half: a macro-looking .bin that yields NO VBA codes (unparsable) plus a
 // later DDE field must NOT emit OLEID-VBA-PRESENT. Before the fix, the marker
 // condition measured len(out) > parentStreams at the END of the function, so the
 // DDE-field stream appended after the .bin loop falsely satisfied it.

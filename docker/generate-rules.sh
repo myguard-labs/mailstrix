@@ -32,6 +32,7 @@ REPO="${REPO:-myguard-labs/mailstrix}"
 TAG="${TAG:-rules-current}"
 HERE=""
 WORK=""
+LOG="/opt/myguard/packages/log/yarad-generate-rules.log"
 
 # Seed the best-effort notifier path without a subshell or external command so
 # startup failures while canonicalizing HERE can still notify.
@@ -113,20 +114,20 @@ shout_fail() {  # shout_fail <body> — fires at most once per run
     finish_pending_signal
 }
 published_verify_notice() {  # published_verify_notice <failed|"was interrupted">
-    printf 'rules-current v%s was published, but native verification %s; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$VERSION" "$1"
+    printf 'rules-current v%s was published, but native verification %s; clients may encounter an unverified bundle. Inspect and repair the release. Check %s' "$VERSION" "$1" "$LOG"
 }
 failure_notice() {  # failure_notice <exit-code>
     case "$NIGHTLY_STAGE" in
         receipt)
-            printf '%s' 'terminal receipt preparation or emission failed after rules-current was published and native-verified. Check /opt/myguard/packages/log/yarad-generate-rules.log'
+            printf '%s' "terminal receipt preparation or emission failed after rules-current was published and native-verified. Check $LOG"
             ;;
         *)
             case "$PUBLISH_STATE" in
                 not-started)
-                    printf 'generate-rules.sh exited %s — rules-current NOT updated. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$1"
+                    printf 'generate-rules.sh exited %s — rules-current NOT updated. Check %s' "$1" "$LOG"
                     ;;
                 uncertain)
-                    printf 'generate-rules.sh exited %s — rules-current may be partially updated. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$1"
+                    printf 'generate-rules.sh exited %s — rules-current may be partially updated. Check %s' "$1" "$LOG"
                     ;;
                 published)
                     case "$NIGHTLY_STAGE" in
@@ -136,7 +137,7 @@ failure_notice() {  # failure_notice <exit-code>
                                 *) published_verify_notice failed ;;
                             esac
                             ;;
-                        *) printf 'generate-rules.sh exited %s — rules-current was published, but the nightly did not finish. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$1" ;;
+                        *) printf 'generate-rules.sh exited %s — rules-current was published, but the nightly did not finish. Check %s' "$1" "$LOG" ;;
                     esac
                     ;;
             esac
