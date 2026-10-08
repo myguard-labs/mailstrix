@@ -21,7 +21,7 @@ BEGIN {
 # The plugin file is shipped as spamassassin/Mailstrix.pm, NOT at the module's @INC
 # path (Mail/SpamAssassin/Plugin/Mailstrix.pm), so load it by file path. Executing it
 # defines the Mail::SpamAssassin::Plugin::Mailstrix package.
-require "$FindBin::Bin/../Mailstrix.pm";
+require "$FindBin::Bin/../Mailstrix.pm";  ## no critic (Modules::RequireBarewordIncludes) - load by file path, not module path
 
 # A bare instance is enough to call the _scan_* helpers: they use only $self
 # (for _token), $pms (a plain hashref of cache slots), $conf and the message ref.

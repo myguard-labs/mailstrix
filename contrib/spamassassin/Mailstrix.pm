@@ -38,7 +38,7 @@
 # SpamAssassin can read, point a `loadplugin` line at it (mailstrix.pre), and ship
 # mailstrix.cf with the rule scores.
 
-package Mail::SpamAssassin::Plugin::Mailstrix;
+package Mail::SpamAssassin::Plugin::Mailstrix;  ## no critic (Modules::RequireFilenameMatchesPackage) - SA plugins ship as Mailstrix.pm outside @INC
 
 use strict;
 use warnings;
@@ -236,7 +236,7 @@ sub _scan_http {
     my $have = eval { require HTTP::Tiny; require JSON::PP; 1 };
     if (!$have) {
         info("strixd: http mode needs HTTP::Tiny + JSON::PP (core since Perl 5.14); error: %s", $@);
-        return undef;
+        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
     }
 
     my $url = $conf->{mailstrix_url};
@@ -267,13 +267,13 @@ sub _scan_http {
 
     if (!$res->{success}) {
         info("strixd: POST %s failed: %s %s", $url, $res->{status} // '?', $res->{reason} // '');
-        return undef;
+        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
     }
 
     my $data = eval { JSON::PP::decode_json($res->{content}) };
     if (!$data || ref($data->{matches}) ne 'ARRAY') {
         info("strixd: could not parse verdict JSON: %s", $@ || 'no matches array');
-        return undef;
+        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
     }
 
     my $high = $conf->{mailstrix_high_score} // 75;
@@ -299,7 +299,7 @@ sub _scan_http {
     my $degraded = $data->{degraded};
     if (defined $degraded && !ref($degraded) && $degraded =~ /^[A-Za-z][\w-]*\z/ && !$actionable) {
         info("strixd: degraded verdict (%s) with no actionable match: unknown, not clean", $degraded);
-        return undef;
+        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
     }
     dbg("strixd: http scan matched %d rule(s)%s",
         scalar(@{$pms->{mailstrix_rules}}),
@@ -319,7 +319,7 @@ sub _scan_shellout {
     my $bin = $conf->{mailstrix_scan_bin};
     if (!defined $bin || !-x $bin) {
         info("strixd: shellout mode: strix-scan binary not executable: %s", $bin // '(unset)');
-        return undef;
+        return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
     }
 
     my @args = ($bin,
@@ -340,10 +340,10 @@ sub _scan_shellout {
     local $SIG{PIPE} = 'IGNORE';
     my ($pid, $out);
     my ($rd, $wr);
-    pipe($rd, my $cwr) or do { info("strixd: pipe: %s", $!); return undef; };
-    pipe(my $crd, $wr) or do { info("strixd: pipe: %s", $!); return undef; };
+    pipe($rd, my $cwr) or do { info("strixd: pipe: %s", $!); return undef; };  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
+    pipe(my $crd, $wr) or do { info("strixd: pipe: %s", $!); return undef; };  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
     $pid = fork();
-    if (!defined $pid) { info("strixd: fork: %s", $!); return undef; }
+    if (!defined $pid) { info("strixd: fork: %s", $!); return undef; }  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
     if ($pid == 0) {
         # child
         open(STDIN,  '<&', $crd) or POSIX::_exit(2);
@@ -378,7 +378,7 @@ sub _scan_shellout {
     }
     # exit 2 = the client's own error (we set -fail-open=false). Treat as backend error.
     info("strixd: shellout client exit %d", $code);
-    return undef;
+    return undef;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - checked with defined in parsed_metadata
 }
 
 # _message_part_buffers returns an array of [ $decoded_body, $filename_or_undef ]
@@ -432,8 +432,8 @@ sub _message_part_buffers {
 sub _token {
     my ($self, $conf) = @_;
     my $f = $conf->{mailstrix_token_file};
-    return undef unless defined $f && length $f;
-    open(my $fh, '<', $f) or do { info("strixd: token file %s: %s", $f, $!); return undef; };
+    return undef unless defined $f && length $f;  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - tests check undef via is() list context
+    open(my $fh, '<', $f) or do { info("strixd: token file %s: %s", $f, $!); return undef; };  ## no critic (Subroutines::ProhibitExplicitReturnUndef) - tests check undef via is() list context
     local $/;
     my $t = <$fh>;
     close($fh);
