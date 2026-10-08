@@ -78,6 +78,20 @@ rule HTML_Script_URI : html heuristic suspicious marker
         filesize < 16MB and $marker
 }
 
+rule HTML_Script_URI_Obfuscated : html heuristic suspicious marker
+{
+    meta:
+        author      = "mailstrix"
+        description = "HTML href/src/action/formaction javascript:/vbscript: scheme only visible after entity decoding (&#118;, &#x76;, IE spaced/NUL entities)"
+        reference   = "https://attack.mitre.org/techniques/T1027/"
+        tier        = "suspicious"
+        score       = "40"
+    strings:
+        $marker = "HTML-SCRIPT-URI-OBFUSCATED" ascii
+    condition:
+        filesize < 16MB and $marker
+}
+
 rule SVG_Embedded_Payload : svg smuggling heuristic suspicious marker
 {
     meta:
