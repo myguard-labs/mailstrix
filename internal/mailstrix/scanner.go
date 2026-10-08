@@ -1583,53 +1583,8 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	if rules == nil {
 		return nil, fmt.Errorf("no rules loaded")
 	}
-	// One wall-clock budget for the WHOLE request (raw + every extracted stream),
-	// not per-scan: a hostile document with up to maxStreams macro modules must
-	// not be able to spend scanTimeout × N and monopolize a worker far past the
-	// rspamd/backend timeout. A zero/negative scanTimeout means "no limit" (yara
-	// convention), so the deadline is disabled then.
-	// EFFORT-4: resolve the per-request cap profile from the effort level the
-	// server folded into meta (header ?? auto ?? env, already clamped to the
-	// ceiling). The HTTP path always sets meta.Effort >= 1 (ResolveEffortLevel);
-	// any caller that did NOT resolve effort (the `yarad scan` CLI, a direct
-	// internal Scan with a bare ScanMeta) leaves it at 0 — treat that as "run at
-	// the configured ceiling", NOT as level 1, so an un-resolved scan keeps full
-	// depth rather than silently degrading to the cheapest tier. The profile
-	// drives the MSD decode depth and PDF indicator pass (via extract.Options
-	// below), whether the external reputation feeds run (gated near the end), and
-	// the per-request libyara wall-clock budget (EFFORT-4-SCANTIMEOUT: scaled
-	// 50%→100% of the base across the effort range to shed CPU under load).
-	profile := EffortProfileFor(resolveScanEffort(meta.Effort, s.effortMax), s.effortMax, s.scanTimeout)
-
-	// One wall-clock budget for the WHOLE request (raw + every extracted stream),
-	// not per-scan: a hostile document with up to maxStreams macro modules must
-	// not be able to spend scanTimeout × N and monopolize a worker far past the
-	// rspamd/backend timeout. A zero/negative scanTimeout means "no limit" (yara
-	// convention), so the deadline is disabled then.
-	var deadline time.Time
-	if profile.ScanTimeout > 0 {
-		deadline = time.Now().Add(profile.ScanTimeout)
-	}
-
-	// Oversized-buffer cost gate (BIGFILE): a full-ruleset scan of a multi-MB
-	// buffer is inherently unbounded (size × ~12k rules) and can time out even at a
-	// large ScanTimeout, after which the scanner fail-opens and a padded dropper is
-	// MISSED. When the buffer is over the threshold, scan the RAW bytes against the
-	// small high-signal big-file ruleset instead, so the scan completes fast and the
-	// local heuristics still fire. The trade is deliberate: we give up public-feed
-	// coverage on oversized inputs to GUARANTEE completion + local-rule coverage.
-	// If no big-file ruleset is loaded (misconfig / absent local.yac) we fall back
-	// to the full set rather than disarm — logged once so it's visible, never fatal.
-	rawRules := rules
-	if s.bigFileThreshold > 0 && int64(len(buf)) > s.bigFileThreshold {
-		if big := generation.bigRules; big != nil {
-			rawRules = big
-			s.bigFileScans.Add(1)
-			s.logf("oversized buffer (%dB > %dB threshold): scanning against big-file ruleset instead of full set", len(buf), s.bigFileThreshold)
-		} else if s.bigNilWarned.CompareAndSwap(false, true) {
-			s.logf("WARNING: oversized buffer (%dB) but no big-file ruleset loaded; using full set (may time out)", len(buf))
-		}
-	}
+	setup := s.resolveScanSetup(buf, meta, generation)
+	profile, deadline, rawRules := setup.profile, setup.deadline, setup.rawRules
 
 	// Raw bytes first. A failure here is the scanner's verdict (propagated,
 	// fail-open at the server) — unchanged behaviour for non-documents. Over the
@@ -1820,6 +1775,70 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 		incomplete = incomplete || ufIncomplete
 	}
 	out = s.applyResponseTags(out)
+	return finalScanVerdict(out, incomplete, completionErr, rawErr, meta, deadline)
+}
+
+// scanSetup is the per-request configuration scanGeneration resolves before
+// touching the buffer: the effort profile, the whole-request wall-clock deadline
+// and the ruleset used for the raw-bytes channel.
+type scanSetup struct {
+	profile  EffortProfile
+	deadline time.Time
+	rawRules *yara.Rules
+}
+
+// resolveScanSetup resolves the effort profile, the whole-request deadline and
+// the raw-channel ruleset (BIGFILE gate) for one scan.
+func (s *Scanner) resolveScanSetup(buf []byte, meta ScanMeta, generation scannerGeneration) scanSetup {
+	// EFFORT-4: resolve the per-request cap profile from the effort level the
+	// server folded into meta (header ?? auto ?? env, already clamped to the
+	// ceiling). The HTTP path always sets meta.Effort >= 1 (ResolveEffortLevel);
+	// any caller that did NOT resolve effort (the `yarad scan` CLI, a direct
+	// internal Scan with a bare ScanMeta) leaves it at 0 — treat that as "run at
+	// the configured ceiling", NOT as level 1, so an un-resolved scan keeps full
+	// depth rather than silently degrading to the cheapest tier. The profile
+	// drives the MSD decode depth and PDF indicator pass (via extract.Options
+	// below), whether the external reputation feeds run (gated near the end), and
+	// the per-request libyara wall-clock budget (EFFORT-4-SCANTIMEOUT: scaled
+	// 50%→100% of the base across the effort range to shed CPU under load).
+	profile := EffortProfileFor(resolveScanEffort(meta.Effort, s.effortMax), s.effortMax, s.scanTimeout)
+
+	// One wall-clock budget for the WHOLE request (raw + every extracted stream),
+	// not per-scan: a hostile document with up to maxStreams macro modules must
+	// not be able to spend scanTimeout × N and monopolize a worker far past the
+	// rspamd/backend timeout. A zero/negative scanTimeout means "no limit" (yara
+	// convention), so the deadline is disabled then.
+	var deadline time.Time
+	if profile.ScanTimeout > 0 {
+		deadline = time.Now().Add(profile.ScanTimeout)
+	}
+
+	// Oversized-buffer cost gate (BIGFILE): a full-ruleset scan of a multi-MB
+	// buffer is inherently unbounded (size × ~12k rules) and can time out even at a
+	// large ScanTimeout, after which the scanner fail-opens and a padded dropper is
+	// MISSED. When the buffer is over the threshold, scan the RAW bytes against the
+	// small high-signal big-file ruleset instead, so the scan completes fast and the
+	// local heuristics still fire. The trade is deliberate: we give up public-feed
+	// coverage on oversized inputs to GUARANTEE completion + local-rule coverage.
+	// If no big-file ruleset is loaded (misconfig / absent local.yac) we fall back
+	// to the full set rather than disarm — logged once so it's visible, never fatal.
+	rawRules := generation.rules
+	if s.bigFileThreshold > 0 && int64(len(buf)) > s.bigFileThreshold {
+		if big := generation.bigRules; big != nil {
+			rawRules = big
+			s.bigFileScans.Add(1)
+			s.logf("oversized buffer (%dB > %dB threshold): scanning against big-file ruleset instead of full set", len(buf), s.bigFileThreshold)
+		} else if s.bigNilWarned.CompareAndSwap(false, true) {
+			s.logf("WARNING: oversized buffer (%dB) but no big-file ruleset loaded; using full set (may time out)", len(buf))
+		}
+	}
+	return scanSetup{profile: profile, deadline: deadline, rawRules: rawRules}
+}
+
+// finalScanVerdict turns the accumulated matches and completion state into the
+// scan's return value: it appends the incomplete marker, enforces the
+// requireComplete admission contract, and keeps the raw-failure fail-open.
+func finalScanVerdict(out []Match, incomplete bool, completionErr, rawErr error, meta ScanMeta, deadline time.Time) ([]Match, error) {
 	if incomplete {
 		out = append(out, scanIncompleteMatch())
 		if completionErr == nil {
