@@ -1,9 +1,9 @@
-// Command strix-scan is a tiny, dependency-free client for a running yarad's
+// Command strix-scan is a tiny, dependency-free client for a running strixd's
 // HTTP /scan endpoint. It exists for the host that DELIVERS mail (a Dovecot LDA /
 // Sieve box) but does NOT carry the YARA rules: pipe a message in, let the central
-// yarad scan it, act on the exit code.
+// strixd scan it, act on the exit code.
 //
-// Unlike the main `yarad` binary it links no CGO / libyara and embeds no rules —
+// Unlike the main `strixd` binary it links no CGO / libyara and embeds no rules —
 // it is pure Go and compiles to a small static binary you can drop on any mail
 // host. The whole job is: read the message (stdin or a file), POST it to
 // <url>/scan with the shared token, and translate the JSON verdict into an exit

@@ -120,7 +120,7 @@ func analyzePEBlob(blob []byte, emit func(string)) {
 		return
 	}
 	if err := pef.Parse(); err != nil && len(pef.Sections) == 0 {
-		return // completely unparseable; no sections to analyze
+		return // completely unparsable; no sections to analyze
 	}
 
 	// Section entropy + virtual section check

@@ -121,7 +121,7 @@ func TestRarSolidGuardFailsSafe(t *testing.T) {
 	}
 	for name, buf := range refuse {
 		if !rarArchiveIsSolid(buf) {
-			t.Errorf("%s: reported NON-solid; a classifiable-but-unparseable RAR header must fail SAFE "+
+			t.Errorf("%s: reported NON-solid; a classifiable-but-unparsable RAR header must fail SAFE "+
 				"(refuse), or the guard is bypassable by corrupting the header", name)
 		}
 	}

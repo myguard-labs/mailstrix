@@ -262,7 +262,7 @@ func TestScannerEmptyDirIsError(t *testing.T) {
 }
 
 func TestScannerSkipsBadFileKeepsGood(t *testing.T) {
-	// A dir with one good and one unparseable file must load the good rules and
+	// A dir with one good and one unparsable file must load the good rules and
 	// skip the bad one, not abort the whole compile. This is the real public-
 	// ruleset case (a stray cuckoo/magic import or bad syntax among hundreds).
 	dir := t.TempDir()

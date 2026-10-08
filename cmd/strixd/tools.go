@@ -18,7 +18,7 @@ import (
 // cmdCheckRules compiles the configured rule set and reports the result without
 // starting the server: a CI / pre-deploy gate. Exit 0 = rules compiled and at
 // least one rule loaded; exit 1 = nothing compilable (NewScanner's error). The
-// compile itself logs how many files were skipped as unparseable, so a partially
+// compile itself logs how many files were skipped as unparsable, so a partially
 // broken set is visible but not fatal — matching the running server's posture.
 func cmdCheckRules(args []string) int {
 	cfg := mailstrix.LoadConfig()

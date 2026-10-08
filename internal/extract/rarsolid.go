@@ -141,7 +141,7 @@ func rar5ArchiveIsSolid(b []byte) bool {
 		hdrSize, n := rar5Uvarint(b)
 		hsz, ok := fitsWithin(hdrSize, len(b)-n)
 		if n == 0 || hdrSize == 0 || !ok {
-			return true // unparseable or overlong header: refuse
+			return true // unparsable or overlong header: refuse
 		}
 		hdr := b[n : n+hsz]
 		next := b[n+hsz:]

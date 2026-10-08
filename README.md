@@ -803,7 +803,7 @@ execution stay with `olevba`).
 Public rulesets are messy, so two things keep them from breaking the build:
 libyara is compiled **without** `magic`/`cuckoo` (unneeded for mail; rules
 importing them are skipped), and each file is test-compiled alone first — one
-unparseable file is logged and skipped, not fatal (error only if *nothing*
+unparsable file is logged and skipped, not fatal (error only if *nothing*
 compiles).
 
 ## How it reads documents
