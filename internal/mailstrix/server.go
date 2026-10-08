@@ -191,11 +191,40 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
+// tokenBypassWarnings returns one warning string per enabled TCP listener when
+// a token is configured (s.authRequired() is true). Each warning names the
+// listener address and documents that the token is not checked on it.
+// No warning when no token is configured or a listener is disabled (empty addr).
+func (s *Server) tokenBypassWarnings() []string {
+	if !s.authRequired() {
+		return nil
+	}
+
+	var warnings []string
+
+	// ICAP listener
+	if s.cfg.ICAPAddr != "" {
+		warnings = append(warnings, fmt.Sprintf("WARNING: a /scan token is set but the ICAP listener on %s does not check it; restrict it by firewall or bind address.", s.cfg.ICAPAddr))
+	}
+
+	// clamd TCP listener
+	if s.cfg.ClamdTCPAddr != "" {
+		warnings = append(warnings, fmt.Sprintf("WARNING: a /scan token is set but the clamd TCP listener on %s does not check it; restrict it by firewall or bind address.", s.cfg.ClamdTCPAddr))
+	}
+
+	return warnings
+}
+
 func (s *Server) logStartup(addr string) {
 	if !s.authRequired() {
 		s.errf("WARNING: no token set — /scan is OPEN (no authentication). Anyone who can "+
 			"reach %s can submit scans (CPU-costly). Intended only for a trusted private "+
 			"network; set MAILSTRIX_TOKEN or MAILSTRIX_TOKEN_FILE to require a shared secret.", addr)
+	}
+
+	// Emit warnings when a token is set but listeners are enabled without auth
+	for _, msg := range s.tokenBypassWarnings() {
+		s.errf("%s", msg)
 	}
 	cache := "off"
 	if s.cfg.CacheTTL > 0 {
