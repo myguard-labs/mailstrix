@@ -1586,40 +1586,9 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	setup := s.resolveScanSetup(buf, meta, generation)
 	profile, deadline, rawRules := setup.profile, setup.deadline, setup.rawRules
 
-	// Raw bytes first. A failure here is the scanner's verdict (propagated,
-	// fail-open at the server) — unchanged behaviour for non-documents. Over the
-	// big-file threshold, rawRules is the targeted set (see the gate above);
-	// otherwise it is the full set.
-	s.rawChannelScans.Add(1)
-	out, rawErr := s.scanOne(rawRules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, profile.ScanTimeout)
+	out, rawErr := s.scanRawChannel(rawRules, buf, meta, profile)
 	completionErr := rawErr
-	// A raw-scan failure (timeout on a pathologically slow buffer, or a libyara
-	// error) must NOT short-circuit extraction: a hostile outer container can be
-	// engineered to blow the raw-scan budget while hiding a clear-signal dropper
-	// in a macro/embedded stream, and returning here would fail open and miss it.
-	// Instead drop the (absent) raw matches and continue to extraction + the
-	// reputation feeds below; the extracted streams are small and fast and run
-	// under whatever deadline remains (each extractScan.scan short-circuits when the
-	// shared budget is gone, so this can never spend more wall-clock). If nothing
-	// is recovered downstream the original error is returned at the end, so the
-	// non-document fail-open contract is unchanged.
-	if rawErr != nil {
-		s.rawScanErrs.Add(1)
-		s.logf("raw scan failed (%v); continuing to extraction so hidden streams are not missed", rawErr)
-		out = nil
-	}
-	// Phase 2 marker-channel: a PURE-marker rule must NOT fire on raw bytes (the
-	// literal is yarad-synthetic; a match here means an attacker planted it).
-	out = filterMarkerChannel(out, false)
-	// Build the dedup identity set once from the raw matches so that the stream
-	// loop below can update it incrementally instead of rebuilding it on every
-	// stream (O(N) total rather than O(N²)). Use a
-	// struct key instead of "namespace/rule" concatenation so stream merges do
-	// not allocate one synthetic key string per match.
-	matchSeen := make(map[matchKey]struct{}, len(out)+16)
-	for i := range out {
-		matchSeen[matchKey{namespace: out[i].Namespace, rule: out[i].Rule}] = struct{}{}
-	}
+	matchSeen := newMatchSeen(out)
 	// Pre-extract any OLE2/OOXML macro source and account for it. The flags feed
 	// /metrics so this path is observable; the streams are scanned below. The
 	// same overall deadline bounds extraction time, not just the libyara scans.
@@ -1632,45 +1601,8 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	if !deadline.IsZero() {
 		extractDeadline = time.Now().Add(time.Until(deadline) / 2)
 	}
-	xopts := profile.ExtractOptions(extractDeadline)
-	if s.archivePW {
-		// Effective candidate list, ORDERED most-signal-first so the size cap drops
-		// the low-signal tail: per-message candidates (body-header passwords, then
-		// filename tokens) come BEFORE the process-constant base (defaults ∪
-		// wordlist). This way a large boot wordlist can't starve the per-message
-		// candidates out of the final capped list. Deduped + capped once at the end.
-		xopts.PWCandidates = capDedupCandidates(
-			meta.PWCandidates,             // highest signal: explicit body password
-			filenameTokens(meta.Filename), // next: password-in-name (capped)
-			s.archivePWDefaults,           // built-ins: survive the cap (small, high-value)
-			s.archivePWWordlist,           // lowest signal: trimmed first by the cap
-		)
-		xopts.ArchivePWEnabled = len(xopts.PWCandidates) > 0
-	}
-	res := extract.ExtractWithOptions(buf, xopts)
-	// Extractors stop between items once their deadline passes, so reaching it
-	// means members/blobs may have been left unextracted: the verdict is partial.
-	incomplete := !extractDeadline.IsZero() && !time.Now().Before(extractDeadline)
-	if incomplete {
-		s.logf("extraction budget exhausted; scan result is incomplete")
-	}
-	s.recordExtractMetrics(&res)
-	// An extractor panic aborted extraction mid-way, so members may be missing:
-	// the verdict is partial (COR-05) and is marked incomplete, never cached or
-	// reported clean. res.Failed alone stays fail-open for mail: it also flags
-	// ordinary parse rejections of corrupt input (a non-OLE *.bin member, an
-	// unopenable OOXML zip) whose bytes the raw scan already covered, and its
-	// deadline cases are caught by the extraction-budget check above. CAPE
-	// admission fails on either via completionErr.
-	if res.Panicked {
-		incomplete = true
-	}
-	// COR-07b: an extraction cap stopped the walk with input left, so members
-	// past the cap were never scanned; the verdict is partial like a panic.
-	if len(res.CapHits) > 0 {
-		s.logf("extraction cap hit (%s); scan marked incomplete", strings.Join(res.CapHits, ","))
-		incomplete = true
-	}
+	res := extract.ExtractWithOptions(buf, s.buildExtractOptions(meta, profile, extractDeadline))
+	incomplete := s.extractionIncomplete(&res, extractDeadline)
 	if (res.Failed || res.Panicked) && completionErr == nil {
 		completionErr = fmt.Errorf("extractor did not complete")
 	}
@@ -1692,18 +1624,6 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 		rawSeed = streamDedupKey(buf)
 	}
 	seen[rawSeed] = struct{}{}
-	// vbaKeys identifies the genuine VBA macro-source streams (the extractor's
-	// codes() output) by content hash, so the VBA external is set ONLY for those.
-	// Previously every extracted stream scanned with VBA=true, over-firing
-	// VBA-gated rules (`VBA and any of(...)`) on PDF/archive/script/marker/decoded
-	// content (false positives). Markers are never VBA.
-	var vbaKeys map[[16]byte]struct{}
-	if len(res.VBAStreams) > 0 {
-		vbaKeys = make(map[[16]byte]struct{}, len(res.VBAStreams))
-		for _, vs := range res.VBAStreams {
-			vbaKeys[streamDedupKey(vs)] = struct{}{}
-		}
-	}
 	// PERF-36: each res.Streams entry's content key was hashed twice — once in the
 	// scan-dedup loop (extractScan.scan) and again in the feed-dedup loop below.
 	// Compute it once per stream here (index-aligned with res.Streams) and reuse it
@@ -1713,8 +1633,135 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	for i, stream := range res.Streams {
 		streamKeys[i] = streamDedupKey(stream)
 	}
-	x := &extractScan{s: s, seen: seen, deadline: deadline, res: &res, vbaKeys: vbaKeys, rules: rules,
+	x := &extractScan{s: s, seen: seen, deadline: deadline, res: &res, vbaKeys: vbaKeySet(&res), rules: rules,
 		generation: generation, meta: meta, matchSeen: matchSeen, out: out, incomplete: incomplete, completionErr: completionErr}
+	s.scanStreamLoop(x, &res, streamKeys, meta)
+	out, incomplete, completionErr = x.out, x.incomplete, x.completionErr
+	if x.oversizedRerouted > 0 {
+		s.logf("%d oversized extracted streams (> %dB threshold): scanned against big-file ruleset instead of full set", x.oversizedRerouted, s.bigFileThreshold)
+	}
+	// Drop denylisted rule names (public-ruleset demo/noise rules) before the
+	// synthetic feed matches are added, so MALWAREBAZAAR_*/URLHAUS_* are never
+	// affected by the rule denylist. Allowlist tags are applied once, by the
+	// response-tagging pass below, which covers YARA and feed hits alike.
+	out = filterDenied(out, generation.deny)
+	s.recordTopMatches(out, generation.topEpoch)
+	out, incomplete = s.appendReputationMatches(out, incomplete, profile, buf, &res, streamKeys, rawSeed, deadline)
+	out = s.applyResponseTags(out)
+	return finalScanVerdict(out, incomplete, completionErr, rawErr, meta, deadline)
+}
+
+// scanRawChannel scans the raw bytes first and applies the raw-failure and
+// marker-channel handling. A raw failure is returned as rawErr alongside nil
+// matches; the caller keeps going so hidden streams are not missed.
+func (s *Scanner) scanRawChannel(rawRules *yara.Rules, buf []byte, meta ScanMeta, profile EffortProfile) ([]Match, error) {
+	// Raw bytes first. A failure here is the scanner's verdict (propagated,
+	// fail-open at the server) — unchanged behaviour for non-documents. Over the
+	// big-file threshold, rawRules is the targeted set (see the gate above);
+	// otherwise it is the full set.
+	s.rawChannelScans.Add(1)
+	out, rawErr := s.scanOne(rawRules, buf, scanVars{filename: meta.Filename, extension: meta.Extension, fileType: meta.FileType}, profile.ScanTimeout)
+	// A raw-scan failure (timeout on a pathologically slow buffer, or a libyara
+	// error) must NOT short-circuit extraction: a hostile outer container can be
+	// engineered to blow the raw-scan budget while hiding a clear-signal dropper
+	// in a macro/embedded stream, and returning here would fail open and miss it.
+	// Instead drop the (absent) raw matches and continue to extraction + the
+	// reputation feeds below; the extracted streams are small and fast and run
+	// under whatever deadline remains (each extractScan.scan short-circuits when the
+	// shared budget is gone, so this can never spend more wall-clock). If nothing
+	// is recovered downstream the original error is returned at the end, so the
+	// non-document fail-open contract is unchanged.
+	if rawErr != nil {
+		s.rawScanErrs.Add(1)
+		s.logf("raw scan failed (%v); continuing to extraction so hidden streams are not missed", rawErr)
+		out = nil
+	}
+	// Phase 2 marker-channel: a PURE-marker rule must NOT fire on raw bytes (the
+	// literal is yarad-synthetic; a match here means an attacker planted it).
+	return filterMarkerChannel(out, false), rawErr
+}
+
+// newMatchSeen builds the dedup identity set once from the raw matches so the
+// stream loop can update it incrementally (O(N) total rather than O(N^2)). A
+// struct key instead of "namespace/rule" concatenation avoids allocating one
+// synthetic key string per match.
+func newMatchSeen(out []Match) map[matchKey]struct{} {
+	matchSeen := make(map[matchKey]struct{}, len(out)+16)
+	for i := range out {
+		matchSeen[matchKey{namespace: out[i].Namespace, rule: out[i].Rule}] = struct{}{}
+	}
+	return matchSeen
+}
+
+// buildExtractOptions derives the extractor options from the effort profile and
+// the archive-password candidates.
+func (s *Scanner) buildExtractOptions(meta ScanMeta, profile EffortProfile, extractDeadline time.Time) *extract.Options {
+	xopts := profile.ExtractOptions(extractDeadline)
+	if s.archivePW {
+		// Effective candidate list, ORDERED most-signal-first so the size cap drops
+		// the low-signal tail: per-message candidates (body-header passwords, then
+		// filename tokens) come BEFORE the process-constant base (defaults ∪
+		// wordlist). This way a large boot wordlist can't starve the per-message
+		// candidates out of the final capped list. Deduped + capped once at the end.
+		xopts.PWCandidates = capDedupCandidates(
+			meta.PWCandidates,             // highest signal: explicit body password
+			filenameTokens(meta.Filename), // next: password-in-name (capped)
+			s.archivePWDefaults,           // built-ins: survive the cap (small, high-value)
+			s.archivePWWordlist,           // lowest signal: trimmed first by the cap
+		)
+		xopts.ArchivePWEnabled = len(xopts.PWCandidates) > 0
+	}
+	return xopts
+}
+
+// extractionIncomplete records the extraction metrics and reports whether the
+// extraction left the verdict partial (deadline, panic or cap hit).
+func (s *Scanner) extractionIncomplete(res *extract.Result, extractDeadline time.Time) bool {
+	// Extractors stop between items once their deadline passes, so reaching it
+	// means members/blobs may have been left unextracted: the verdict is partial.
+	incomplete := !extractDeadline.IsZero() && !time.Now().Before(extractDeadline)
+	if incomplete {
+		s.logf("extraction budget exhausted; scan result is incomplete")
+	}
+	s.recordExtractMetrics(res)
+	// An extractor panic aborted extraction mid-way, so members may be missing:
+	// the verdict is partial (COR-05) and is marked incomplete, never cached or
+	// reported clean. res.Failed alone stays fail-open for mail: it also flags
+	// ordinary parse rejections of corrupt input (a non-OLE *.bin member, an
+	// unopenable OOXML zip) whose bytes the raw scan already covered, and its
+	// deadline cases are caught by the extraction-budget check above. CAPE
+	// admission fails on either via completionErr.
+	if res.Panicked {
+		incomplete = true
+	}
+	// COR-07b: an extraction cap stopped the walk with input left, so members
+	// past the cap were never scanned; the verdict is partial like a panic.
+	if len(res.CapHits) > 0 {
+		s.logf("extraction cap hit (%s); scan marked incomplete", strings.Join(res.CapHits, ","))
+		incomplete = true
+	}
+	return incomplete
+}
+
+// vbaKeySet identifies the genuine VBA macro-source streams (the extractor's
+// codes() output) by content hash, so the VBA external is set ONLY for those.
+// Previously every extracted stream scanned with VBA=true, over-firing
+// VBA-gated rules (`VBA and any of(...)`) on PDF/archive/script/marker/decoded
+// content (false positives). Markers are never VBA.
+func vbaKeySet(res *extract.Result) map[[16]byte]struct{} {
+	if len(res.VBAStreams) == 0 {
+		return nil
+	}
+	vbaKeys := make(map[[16]byte]struct{}, len(res.VBAStreams))
+	for _, vs := range res.VBAStreams {
+		vbaKeys[streamDedupKey(vs)] = struct{}{}
+	}
+	return vbaKeys
+}
+
+// scanStreamLoop drives the extracted streams, the renamed-container marker and
+// the out-of-band markers through x, stopping a loop once x reports stop.
+func (s *Scanner) scanStreamLoop(x *extractScan, res *extract.Result, streamKeys [][16]byte, meta ScanMeta) {
 	order := streamScanOrder(res.Streams, res.ContentStreams)
 	for _, i := range order {
 		if x.scan(res.Streams[i], streamKeys[i], false) {
@@ -1727,7 +1774,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 	// (OLE/OOXML/RTF/archive/LNK/MSI/OneNote named .txt/.jpg/.pdf/…) is a classic
 	// rename evasion. Emitted on the out-of-band marker channel so the rule fires
 	// zero-FP on the synthetic literal only (never on attacker-controlled bytes).
-	if d := extMismatch(res, meta.Extension); d != "" {
+	if d := extMismatch(*res, meta.Extension); d != "" {
 		s.exExtMismatch.Add(1)
 		mk := []byte(extMismatchMarkerPrefix + " " + d)
 		x.scan(mk, streamDedupKey(mk), true)
@@ -1744,38 +1791,38 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 			break
 		}
 	}
-	out, incomplete, completionErr = x.out, x.incomplete, x.completionErr
-	if x.oversizedRerouted > 0 {
-		s.logf("%d oversized extracted streams (> %dB threshold): scanned against big-file ruleset instead of full set", x.oversizedRerouted, s.bigFileThreshold)
+}
+
+// recordTopMatches records rule names for the top-matches counter
+// (observability via /version).
+func (s *Scanner) recordTopMatches(out []Match, epoch uint64) {
+	if len(out) == 0 {
+		return
 	}
-	// Drop denylisted rule names (public-ruleset demo/noise rules) before the
-	// synthetic feed matches are added, so MALWAREBAZAAR_*/URLHAUS_* are never
-	// affected by the rule denylist. Allowlist tags are applied once, by the
-	// response-tagging pass below, which covers YARA and feed hits alike.
-	out = filterDenied(out, generation.deny)
-	// Record rule names for the top-matches counter (observability via /version).
-	if len(out) > 0 {
-		names := make([]string, len(out))
-		for i, m := range out {
-			names[i] = m.Rule
-		}
-		s.topMatches.AddAt(generation.topEpoch, names)
+	names := make([]string, len(out))
+	for i, m := range out {
+		names[i] = m.Rule
 	}
+	s.topMatches.AddAt(epoch, names)
+}
+
+// appendReputationMatches appends the MalwareBazaar and URLhaus/ThreatFox feed
+// matches and folds their incompleteness into the running flag.
+func (s *Scanner) appendReputationMatches(out []Match, incomplete bool, profile EffortProfile, buf []byte, res *extract.Result, streamKeys [][16]byte, rawSeed [16]byte, deadline time.Time) ([]Match, bool) {
 	// MalwareBazaar identifies complete files, never MIME envelopes or derived
 	// streams. Keep both hashing and lookup behind the effort/checker gate.
 	if profile.ReputationFeeds && s.mbazaar != nil {
-		mbMatches, mbIncomplete := s.mbazaarMatches(buf, &res, deadline)
+		mbMatches, mbIncomplete := s.mbazaarMatches(buf, res, deadline)
 		out = append(out, mbMatches...)
 		incomplete = incomplete || mbIncomplete
 	}
 	// Reputation feeds: URLhaus, ThreatFox (see urlFeedMatches).
 	if profile.ReputationFeeds && (s.urlhaus != nil || s.threatfox != nil) {
-		ufMatches, ufIncomplete := s.urlFeedMatches(buf, &res, streamKeys, rawSeed, deadline)
+		ufMatches, ufIncomplete := s.urlFeedMatches(buf, res, streamKeys, rawSeed, deadline)
 		out = append(out, ufMatches...)
 		incomplete = incomplete || ufIncomplete
 	}
-	out = s.applyResponseTags(out)
-	return finalScanVerdict(out, incomplete, completionErr, rawErr, meta, deadline)
+	return out, incomplete
 }
 
 // scanSetup is the per-request configuration scanGeneration resolves before
