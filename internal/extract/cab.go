@@ -171,7 +171,7 @@ func unpackCab(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 // data was actually truncated by the cap (capped, i.e. bytes were discarded)
 // and the file's declared end lies beyond what was kept. A short or corrupt
 // folder, including one that ends exactly at the cap with nothing discarded,
-// is not a cap hit. Arithmetic is in uint64 since cbFile and uoffFolderStart
+// is not a cap hit. Arithmetic is in int64 since cbFile and uoffFolderStart
 // are uint32.
 func cabNoteMemberCap(res *Result, f cfFile, folderLen int, capped bool) {
 	if uint64(f.cbFile) > uint64(maxBytesPerMember) {
@@ -179,7 +179,7 @@ func cabNoteMemberCap(res *Result, f cfFile, folderLen int, capped bool) {
 		return
 	}
 	if capped &&
-		uint64(f.uoffFolderStart)+uint64(f.cbFile) > uint64(folderLen) {
+		int64(f.uoffFolderStart)+int64(f.cbFile) > int64(folderLen) {
 		res.stopHit("member-size")
 	}
 }
