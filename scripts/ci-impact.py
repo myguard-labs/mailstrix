@@ -109,6 +109,7 @@ RULES = {
         "docker/fetch-rules.sh",
         "docker/generate-rules.sh",
         "packaging/deb/rule_source_args_test.sh",
+        "ci/fetch_rules_family_denylist_test.sh",
     ],
     "filter": ["docker/filter-rules.py", "packaging/deb/filter_rules_test.sh"],
     "envkeys": [

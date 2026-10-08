@@ -351,6 +351,31 @@ for bad in $SLOW_RULE_DENYLIST; do
     done
 done
 
+# FP-FAMILY (2026-10-08): yaraify's auto-generated MULTI_Malware_Unknown_ForgeAuto_*
+# family (author Marjoriefort, `source = "forge_miss ..."`, ~440 rules, growing
+# daily) is built from Office/PDF boilerplate strings. 8 of 440 hit 38 of 405
+# benign PDF/Office files, including exefilter's clean "Word 2003 normal.doc"
+# (mailstrix#385). The other Marjoriefort rules had 0 benign hits and stay.
+# A name list cannot keep up with a daily generator, so prune the family by
+# rule-name pattern. yaraify ships one rule per file; the bundle guard still
+# refuses any multi-rule file, so a sibling can never be unloaded.
+FP_RULE_FAMILY_DENYLIST="_ForgeAuto_"
+for fam in $FP_RULE_FAMILY_DENYLIST; do
+    fam_dropped=0
+    for f in "$OUT"/yaraify-*; do
+        [ -f "$f" ] || continue
+        grep -qE "^[[:space:]]*(private[[:space:]]+|global[[:space:]]+)*rule[[:space:]]+[A-Za-z0-9_]*${fam}[A-Za-z0-9_]*([[:space:]{:]|\$)" "$f" || continue
+        n="$(grep -cE "^[[:space:]]*(private[[:space:]]+|global[[:space:]]+)*rule[[:space:]]" "$f" 2>/dev/null || echo 0)"
+        if [ "$n" -gt 1 ]; then
+            echo "fetch-rules: WARNING FP-FAMILY denylist: SKIP $(basename "$f") — declares $n rules; not removing the bundle" >&2
+            continue
+        fi
+        rm -f "$f"
+        fam_dropped=$((fam_dropped + 1))
+    done
+    echo "fetch-rules: FP-FAMILY denylist: dropped $fam_dropped yaraify rule(s) matching '$fam'"
+done
+
 # PERF-25 mail-profile post-pass: prune host/runtime-only rules per-rule across
 # EVERY fetched source file (in place). `full` skips this entirely. Runs after the
 # PERF-12 file-level denylist so a removed file isn't filtered needlessly.
