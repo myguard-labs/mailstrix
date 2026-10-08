@@ -166,13 +166,16 @@ rule Slow_Loop
 `
 
 // scanOne error path: a libyara timeout (reached via a pathologically slow
-// rule and a ~1.2s shared budget) must mark the verdict partial, record the
-// error, and keep sweeping (stop = false).
+// rule and a 1s per-stream budget) must mark the verdict partial, record the
+// error, and keep sweeping (stop = false). The budget comes from scanTimeout
+// with no shared deadline, so a slow runner cannot turn this into the
+// budget-exhausted path.
 func TestExtractScanScanOneError(t *testing.T) {
 	s, x := newExtractScan(t, extractScanSlowRule, &extract.Result{})
 	var logged []string
 	s.logf = func(f string, a ...any) { logged = append(logged, f) }
-	x.deadline = time.Now().Add(1500 * time.Millisecond)
+	x.deadline = time.Time{}
+	s.scanTimeout = time.Second
 	b := []byte("0123456789abcdef")
 	if x.scan(b, streamDedupKey(b), false) {
 		t.Fatal("stop = true on scanOne error, want false")
