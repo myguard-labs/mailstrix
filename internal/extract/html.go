@@ -161,35 +161,220 @@ func looksLikeMarkup(head []byte) bool {
 // scriptURIAttrs are the attribute names whose value is navigated/executed.
 var scriptURIAttrs = map[string]bool{"href": true, "src": true, "action": true, "formaction": true}
 
+// Bounds for the IE spaced/NUL entity pre-pass (ICAP-385-1b). The pre-pass
+// reads at most maxEntityPrepassIn bytes and never writes more than it read
+// (a normalised entity is never longer than its source), so the output is
+// bounded by maxEntityPrepassIn as well. One entity may span at most
+// maxSpacedEntity source bytes; longer candidates are left as-is.
+const (
+	maxEntityPrepassIn = 1 << 20
+	maxSpacedEntity    = 32
+)
+
+// isEntityPad reports bytes IE tolerates inside a numeric character reference.
+func isEntityPad(c byte) bool {
+	return c == 0 || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+}
+
+// normalizeSpacedEntities rewrites IE-style numeric character references that
+// are broken by whitespace/NUL (`& #1  1   8;`) into the canonical `&#118;`
+// form so the tokenizer decodes them. Only references that actually contained
+// padding are rewritten; malformed ones (no digits, no ';', over
+// maxSpacedEntity bytes) are left untouched. It returns buf itself (no
+// allocation) when nothing changed.
+func normalizeSpacedEntities(buf []byte) []byte {
+	if len(buf) > maxEntityPrepassIn {
+		buf = buf[:maxEntityPrepassIn]
+	}
+	var out []byte
+	last := 0
+	for i := 0; i < len(buf); i++ {
+		if buf[i] != '&' {
+			continue
+		}
+		end, canon, ok := parseSpacedEntity(buf, i)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make([]byte, 0, len(buf))
+		}
+		out = append(out, buf[last:i]...)
+		out = append(out, canon...)
+		last = end
+		i = end - 1
+	}
+	if out == nil {
+		return buf
+	}
+	return append(out, buf[last:]...)
+}
+
+// parseSpacedEntity parses a padded numeric reference starting at buf[i]=='&'.
+// ok is true only when at least one pad byte was skipped and the reference is
+// well formed.
+func parseSpacedEntity(buf []byte, i int) (end int, canon []byte, ok bool) {
+	lim := i + maxSpacedEntity
+	if lim > len(buf) {
+		lim = len(buf)
+	}
+	j, padded := i+1, false
+	skip := func() {
+		for j < lim && isEntityPad(buf[j]) {
+			j++
+			padded = true
+		}
+	}
+	skip()
+	if j >= lim || buf[j] != '#' {
+		return 0, nil, false
+	}
+	j++
+	skip()
+	hex := false
+	if j < lim && (buf[j] == 'x' || buf[j] == 'X') {
+		hex = true
+		j++
+	}
+	var digits []byte
+	for ; j < lim; j++ {
+		c := buf[j]
+		switch {
+		case isEntityPad(c):
+			padded = true
+		case c >= '0' && c <= '9', hex && (c|0x20 >= 'a' && c|0x20 <= 'f'):
+			digits = append(digits, c)
+		case c == ';':
+			if !padded || len(digits) == 0 {
+				return 0, nil, false
+			}
+			canon = append(canon, '&', '#')
+			if hex {
+				canon = append(canon, 'x')
+			}
+			canon = append(canon, digits...)
+			canon = append(canon, ';')
+			return j + 1, canon, true
+		default:
+			return 0, nil, false
+		}
+	}
+	return 0, nil, false
+}
+
+// rawAttrValues returns the raw (still entity-encoded) attribute values of a
+// start tag in source order, mirroring the tokenizer's attribute order.
+func rawAttrValues(raw []byte) [][]byte {
+	var vals [][]byte
+	i := 1
+	for i < len(raw) && !isHTMLSpace(raw[i]) && raw[i] != '/' && raw[i] != '>' {
+		i++ // tag name
+	}
+	for i < len(raw) {
+		for i < len(raw) && (isHTMLSpace(raw[i]) || raw[i] == '/') {
+			i++
+		}
+		if i >= len(raw) || raw[i] == '>' {
+			break
+		}
+		i++ // first name byte (may be '=')
+		for i < len(raw) && !isHTMLSpace(raw[i]) && raw[i] != '=' && raw[i] != '/' && raw[i] != '>' {
+			i++
+		}
+		for i < len(raw) && isHTMLSpace(raw[i]) {
+			i++
+		}
+		if i >= len(raw) || raw[i] != '=' {
+			vals = append(vals, nil)
+			continue
+		}
+		i++
+		for i < len(raw) && isHTMLSpace(raw[i]) {
+			i++
+		}
+		start := i
+		if i < len(raw) && (raw[i] == '"' || raw[i] == '\'') {
+			q := raw[i]
+			i++
+			start = i
+			for i < len(raw) && raw[i] != q {
+				i++
+			}
+			vals = append(vals, raw[start:i])
+			i++
+			continue
+		}
+		for i < len(raw) && !isHTMLSpace(raw[i]) && raw[i] != '>' {
+			i++
+		}
+		vals = append(vals, raw[start:i])
+	}
+	return vals
+}
+
+func isHTMLSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+}
+
 // hasScriptURIAttr reports whether any href/src/action/formaction attribute
 // of a start tag has a value that starts (after leading C0 controls and
 // space, ignoring ASCII tab/LF/CR anywhere, as browsers do) with javascript:
-// or vbscript: (case-insensitive). Tokenization, comments and raw-text
-// elements follow golang.org/x/net/html. The tokenizer decodes entities, so
-// entity-encoded schemes also match here.
-// ICAP-385-1b (OBFUSCATED marker) would compare the raw attribute source
-// against the decoded value at the match site below.
-// The caller passes the already-capped head; MaxBuf is bounded to len(buf).
+// or vbscript: (case-insensitive). See scanScriptURIAttr for the plain vs
+// obfuscated split.
 func hasScriptURIAttr(buf []byte, deadline time.Time) bool {
+	plain, obf := scanScriptURIAttr(buf, deadline)
+	return plain || obf
+}
+
+// scanScriptURIAttr scans start tags (tokenization, comments and raw-text
+// elements follow golang.org/x/net/html). plain is set when a script URI is
+// literally present in the source; obf when the scheme only appears after
+// entity decoding (raw attribute bytes do not start with it but the decoded
+// value does), including IE spaced/NUL entity forms normalised by the bounded
+// pre-pass. A link counts for exactly one of the two.
+// The caller passes the already-capped head; MaxBuf is bounded to len(buf).
+func scanScriptURIAttr(buf []byte, deadline time.Time) (plain, obf bool) {
+	buf = normalizeSpacedEntities(buf)
 	z := html.NewTokenizer(bytes.NewReader(buf))
 	z.SetMaxBuf(len(buf) + 1)
-	for n := 1; ; n++ {
+	for n := 1; !plain || !obf; n++ {
 		if n&0xff == 0 && expired(deadline) {
-			return false
+			return
 		}
 		switch z.Next() {
 		case html.ErrorToken:
-			return false
+			return
 		case html.StartTagToken, html.SelfClosingTagToken:
-			for more := true; more; {
+			// TagAttr unescapes in place, so snapshot the raw tag first;
+			// without '&' raw and decoded values are identical.
+			var raw []byte
+			if r := z.Raw(); bytes.IndexByte(r, '&') >= 0 {
+				raw = append([]byte(nil), r...)
+			}
+			var rawVals [][]byte
+			rawParsed := false
+			for idx, more := 0, true; more; idx++ {
 				var key, val []byte
 				key, val, more = z.TagAttr()
-				if scriptURIAttrs[string(key)] && isScriptURI(val) {
-					return true
+				if !scriptURIAttrs[string(key)] || !isScriptURI(val) {
+					continue
+				}
+				if raw == nil {
+					plain = true
+					continue
+				}
+				if !rawParsed {
+					rawVals, rawParsed = rawAttrValues(raw), true
+				}
+				if idx < len(rawVals) && !isScriptURI(rawVals[idx]) {
+					obf = true
+				} else {
+					plain = true
 				}
 			}
 		}
 	}
+	return
 }
 
 // isScriptURI reports whether v starts with javascript: or vbscript: after
@@ -250,8 +435,12 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 	}
 
 	// Signal 4: javascript:/vbscript: URI in a navigational attribute.
-	if hasScriptURIAttr(head, deadline) && len(res.Streams) < maxStreams {
+	plainURI, obfURI := scanScriptURIAttr(head, deadline)
+	if plainURI && len(res.Streams) < maxStreams {
 		res.Streams = append(res.Streams, []byte("HTML-SCRIPT-URI"))
+	}
+	if obfURI && len(res.Streams) < maxStreams {
+		res.Streams = append(res.Streams, []byte("HTML-SCRIPT-URI-OBFUSCATED"))
 	}
 
 	// Signal 3: scripted SVG. Only when an <svg> root is present AND it carries

@@ -752,3 +752,130 @@ func TestHTMLScriptURICapBoundary(t *testing.T) {
 		t.Error("attribute inside htmlScanCap must match")
 	}
 }
+
+// ICAP-385-1b: HTML-SCRIPT-URI-OBFUSCATED. Design: a link whose scheme is only
+// visible after decoding emits ONLY the OBFUSCATED marker (not the plain one);
+// a document with both kinds of link emits both.
+func TestHTMLScriptURIObfuscated(t *testing.T) {
+	obf := []string{
+		`<a href="ja&#118;ascript:alert(1)">x</a>`,
+		`<a href="ja&#x76;ascript:alert(1)">x</a>`,
+		`<a href="&#x6A;avascript:alert(1)">x</a>`,
+		`<a href="javascript&colon;alert(1)">x</a>`,
+		`<a href="java&Tab;script:alert(1)">x</a>`,
+		`<a href=ja&#118;ascript:1>x</a>`,
+		"<a href=\"ja& #1  1   8;ascript:alert(1)\">x</a>",
+		"<a href=\"ja&\x00#1\x001\x008;ascript:alert(1)\">x</a>",
+		"<a href=\"ja&#x7\x006;ascript:alert(1)\">x</a>",
+		`<a href="/">y</a><img src='vb&#115;cript:x'>`,
+	}
+	for _, in := range obf {
+		res := runHTML([]byte(in))
+		if !streamHas(res, "HTML-SCRIPT-URI-OBFUSCATED") {
+			t.Errorf("expected OBFUSCATED for %q", in)
+		}
+		if streamHas(res, "HTML-SCRIPT-URI") {
+			t.Errorf("OBFUSCATED link must not emit plain marker: %q", in)
+		}
+	}
+	both := runHTML([]byte(`<a href="javascript:1">a</a><a href="ja&#118;ascript:1">b</a>`))
+	if !streamHas(both, "HTML-SCRIPT-URI") || !streamHas(both, "HTML-SCRIPT-URI-OBFUSCATED") {
+		t.Error("mixed document must emit both markers")
+	}
+}
+
+func TestHTMLScriptURIObfuscatedNegative(t *testing.T) {
+	plain := []string{
+		`<a href="javascript:alert(1)">x</a>`,
+		`<a href="  JaVaScRiPt:alert(1)">x</a>`,
+		`<a href="/?a=1&amp;b=2" title="&#118;">x</a><a href=javascript:1>`,
+	}
+	for _, in := range plain {
+		res := runHTML([]byte(in))
+		if !streamHas(res, "HTML-SCRIPT-URI") || streamHas(res, "HTML-SCRIPT-URI-OBFUSCATED") {
+			t.Errorf("plain script URI must be non-OBFUSCATED: %q", in)
+		}
+	}
+	none := []string{
+		`<a href="https://example.com/?a=1&amp;b=2">x</a>`,
+		`<a href="https&#58;//example.com/">x</a>`,
+		`<a href="ht&#116;ps://example.com/">x</a>`,
+		`<a title="ja&#118;ascript:1" href="/">x</a>`,
+		// malformed spaced entities: no digits / no ';' / non-digit / bare '&'
+		`<a href="ja& #;ascript:1">x</a>`,
+		`<a href="ja& #118 ascript:1">x</a>`,
+		`<a href="ja& #11z;ascript:1">x</a>`,
+		`<a href="ja& ascript:1">x</a>`,
+	}
+	for _, in := range none {
+		res := runHTML([]byte(in))
+		if streamHas(res, "HTML-SCRIPT-URI") || streamHas(res, "HTML-SCRIPT-URI-OBFUSCATED") {
+			t.Errorf("expected no script-URI marker for %q", in)
+		}
+	}
+}
+
+func TestNormalizeSpacedEntities(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"a& #1  1   8;b", "a&#118;b"},
+		{"& #x 7 6;", "&#x76;"},
+		{"&\x00#\x0049;", "&#49;"},
+		{"&#118;", "&#118;"},       // canonical: untouched
+		{"& #;", "& #;"},           // no digits
+		{"& #12", "& #12"},         // unterminated
+		{"& #1z;", "& #1z;"},       // non-digit
+		{"&amp; & x", "&amp; & x"}, // not numeric
+		{"& #1;& #2;", "&#1;&#2;"}, // adjacent
+	}
+	for _, c := range cases {
+		if got := string(normalizeSpacedEntities([]byte(c.in))); got != c.want {
+			t.Errorf("normalize(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+	// No-change input returns the same slice (no allocation).
+	in := []byte("plain & text")
+	if out := normalizeSpacedEntities(in); &out[0] != &in[0] {
+		t.Error("unchanged input must not be copied")
+	}
+}
+
+func TestNormalizeSpacedEntityCaps(t *testing.T) {
+	// Span cap: an entity of exactly maxSpacedEntity bytes normalises,
+	// maxSpacedEntity+1 is left as-is.
+	mk := func(total int) string { // "& #" + zeros(pad) + "1;" == total bytes
+		return "& #" + strings.Repeat("0", total-5) + "1;"
+	}
+	if got := string(normalizeSpacedEntities([]byte(mk(maxSpacedEntity)))); !strings.HasPrefix(got, "&#0") {
+		t.Errorf("entity of exactly cap bytes must normalise, got %q", got)
+	}
+	over := mk(maxSpacedEntity + 1)
+	if got := string(normalizeSpacedEntities([]byte(over))); got != over {
+		t.Errorf("entity of cap+1 bytes must be left as-is, got %q", got)
+	}
+	// Input cap: an entity ending exactly at maxEntityPrepassIn is rewritten,
+	// one byte further is not; output is never longer than the capped input.
+	ent := "& #1;"
+	pad := strings.Repeat("a", maxEntityPrepassIn-len(ent))
+	at := normalizeSpacedEntities([]byte(pad + ent))
+	if !bytes.HasSuffix(at, []byte("&#1;")) || len(at) > maxEntityPrepassIn {
+		t.Errorf("entity ending at input cap must normalise within cap (len=%d)", len(at))
+	}
+	past := []byte(pad + "a" + ent)
+	out := normalizeSpacedEntities(past)
+	if len(out) != maxEntityPrepassIn || bytes.Contains(out, []byte("&#1;")) {
+		t.Errorf("input past cap must be truncated, entity untouched (len=%d)", len(out))
+	}
+}
+
+func TestRawAttrValues(t *testing.T) {
+	got := rawAttrValues([]byte(`<a x href = "v&#1;" y=u z title='q'/>`))
+	want := []string{"", "v&#1;", "u", "", "q"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d values %q want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if string(got[i]) != want[i] {
+			t.Errorf("val[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+}
