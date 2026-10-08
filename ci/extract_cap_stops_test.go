@@ -1184,7 +1184,7 @@ func capCabBlocks(files []capCabFile, blocks [][]byte, sizes []int, mszip bool) 
 	pos = coffData
 	for i, b := range blocks {
 		binary.LittleEndian.PutUint16(buf[pos+4:], uint16(len(b)&0xFFFF))
-		binary.LittleEndian.PutUint16(buf[pos+6:], uint16(sizes[i]))
+		binary.LittleEndian.PutUint16(buf[pos+6:], uint16(sizes[i]&0xFFFF))
 		copy(buf[pos+8:], b)
 		pos += 8 + len(b)
 	}
