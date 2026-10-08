@@ -24,7 +24,16 @@ if ! out=$(go tool cover -func="$profile" 2>&1); then
 	echo "go_coverage: unreadable profile: $profile" >&2
 	exit 2
 fi
-total=$(awk '$1 == "total:" { sub(/%$/, "", $NF); print $NF }' <<<"$out")
+if ! awk '$1 == "total:" { found = 1 } END { exit !found }' <<<"$out"; then
+	echo "go_coverage: no total in profile: $profile" >&2
+	exit 2
+fi
+# Exact total from the profile: `go tool cover -func` rounds to one decimal,
+# which would let 85.46% pass an 85.5 floor. -coverpkg repeats a block once
+# per test binary, so a block counts as covered when any entry hit it.
+total=$(awk 'NR > 1 && NF == 3 { n[$1] = $2; if ($3 > 0) c[$1] = 1 }
+	END { for (k in n) { s += n[k]; if (k in c) h += n[k] }
+		if (s > 0) printf "%.4f", 100 * h / s }' "$profile")
 if [[ ! $total =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
 	echo "go_coverage: no total in profile: $profile" >&2
 	exit 2

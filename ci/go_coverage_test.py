@@ -43,7 +43,7 @@ class GoCoverageTests(unittest.TestCase):
     def test_above_floor_passes(self):
         result = self.run_script(profile(3, 4), "50.0")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("75.0%", result.stdout)
+        self.assertIn("75.0000%", result.stdout)
 
     def test_exactly_at_floor_passes(self):
         result = self.run_script(profile(1, 2), "50.0")
@@ -53,6 +53,21 @@ class GoCoverageTests(unittest.TestCase):
         result = self.run_script(profile(1, 4), "50.0")
         self.assertEqual(result.returncode, 1)
         self.assertIn("below floor", result.stderr)
+
+    def test_rounded_total_does_not_pass_floor(self):
+        # 2/3 = 66.666...%; `go tool cover -func` shows 66.7%, which must not
+        # satisfy a 66.7 floor.
+        result = self.run_script(profile(2, 3), "66.7")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("below floor", result.stderr)
+
+    def test_repeated_blocks_count_once(self):
+        # -coverpkg emits one entry per test binary; a block hit by any binary
+        # is covered and is not double-counted.
+        content = profile(1, 2) + profile(0, 2).split("\n", 1)[1]
+        content += "example.com/m/p/f.go:3.11,3.14 1 5\n"
+        result = self.run_script(content, "100.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_just_below_floor_fails(self):
         result = self.run_script(profile(1, 3), "33.4")
