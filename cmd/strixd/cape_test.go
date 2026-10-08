@@ -83,3 +83,31 @@ func TestCAPEDaemonDrainBudget(t *testing.T) {
 		t.Fatal("CAPE scheduler drain budget missing")
 	}
 }
+
+func TestRedisMACKeyValidationEarlyRejection(t *testing.T) {
+	// Test that short Redis MAC key causes early exit 2 before rules loading.
+	t.Setenv("MAILSTRIX_REDIS_MAC_KEY", "a")
+	if got := cmdServe([]string{"-rules", "/nonexistent/fixture.yac"}); got != 2 {
+		t.Fatalf("short Redis MAC key not rejected early: exit=%d, want=2", got)
+	}
+	// Test that exactly 32 bytes is accepted (boundary: MinRedisMACKeyLen).
+	// We can only verify no early rejection here; flag validation will succeed.
+	key32 := "01234567890123456789012345678901"
+	if len(key32) != 32 {
+		t.Fatalf("test fixture key is not 32 bytes: len=%d", len(key32))
+	}
+	t.Setenv("MAILSTRIX_REDIS_MAC_KEY", key32)
+	// This test cannot verify success without a valid rules file,
+	// but it verifies the 32-byte key is accepted and doesn't cause the MAC error.
+	// The early rejection check passed if we get exit != 2 at this stage.
+	got := cmdServe([]string{"-rules", "/nonexistent/fixture.yac"})
+	if got == 2 {
+		t.Fatalf("32-byte Redis MAC key incorrectly rejected: exit=2")
+	}
+	// Unset is the negative case: current behavior should be preserved.
+	t.Setenv("MAILSTRIX_REDIS_MAC_KEY", "")
+	got = cmdServe([]string{"-rules", "/nonexistent/fixture.yac"})
+	if got == 2 {
+		t.Fatalf("unset Redis MAC key incorrectly rejected as validation error: exit=2")
+	}
+}
