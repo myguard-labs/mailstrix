@@ -87,11 +87,8 @@ func NewCache(cfg *Config, logf func(string, ...any)) Cache {
 			c.redis = rl
 			logf("redis verdict cache enabled (prefix=%s)", cfg.RedisPrefix)
 			// Warn if plaintext connection to a remote host.
-			opt, _ := redis.ParseURL(cfg.RedisURL)
-			if opt != nil {
-				if host, warn := redisPlaintextRemote(opt); warn {
-					logf("WARNING redis cache uses plaintext to non-loopback %s; use rediss:// for TLS", host)
-				}
+			if host, warn := redisPlaintextRemote(rl.rdb.Options()); warn {
+				logf("WARNING redis cache uses plaintext to non-loopback %s; use rediss:// for TLS", host)
 			}
 		}
 	}
