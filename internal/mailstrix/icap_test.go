@@ -23,7 +23,7 @@ func startTestICAPServer(t *testing.T, s *Server) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -44,7 +44,7 @@ func doICAP(t *testing.T, addr, req string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.WriteString(conn, req); err != nil {
 		t.Fatal(err)
@@ -544,7 +544,7 @@ func TestICAPPreviewContinue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		c, aerr := ln.Accept()
 		if aerr != nil {
@@ -557,7 +557,7 @@ func TestICAPPreviewContinue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
 
 	resHdr := "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n"
@@ -650,7 +650,7 @@ func TestICAPPreviewContinueOversizeBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		c, aerr := ln.Accept()
 		if aerr != nil {
@@ -663,7 +663,7 @@ func TestICAPPreviewContinueOversizeBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
 
 	resHdr := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"
@@ -866,7 +866,7 @@ func TestICAPConnCapRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	addr := ln.Addr().String()
 
 	// Drive the accept loop against the real acceptICAP (the same function
@@ -890,7 +890,7 @@ func TestICAPConnCapRefuses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		held = append(held, c)
 	}
 	// Wait for the server to have both slots taken.
@@ -907,7 +907,7 @@ func TestICAPConnCapRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c3.Close()
+	defer func() { _ = c3.Close() }()
 	_ = c3.SetDeadline(time.Now().Add(3 * time.Second))
 	var sb strings.Builder
 	if _, err := io.Copy(&sb, c3); err != nil {
@@ -933,7 +933,7 @@ func TestICAPSlowClientsDoNotBlockOthers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		// Send a partial request line and stall.
 		_, _ = io.WriteString(c, "OPTIONS icap://x/sc")
 	}
@@ -1115,7 +1115,7 @@ func TestICAPKeepAliveSurvivesIdle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	br := bufio.NewReader(conn)
 
@@ -1176,7 +1176,7 @@ func TestICAPShutdownDrainsRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	s.icapLn.Store(&ln)
 	go func() {
 		for {
@@ -1265,7 +1265,7 @@ func doICAPWithin(t *testing.T, addr, req string, d time.Duration) string {
 		t.Error(err)
 		return ""
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(d))
 	if _, err := io.WriteString(conn, req); err != nil {
 		t.Error(err)
@@ -1802,7 +1802,7 @@ func TestICAP100ContinueHasNoISTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	resHdr := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n"
 	req := "RESPMOD icap://" + addr + "/scan ICAP/1.0\r\nHost: " + addr + "\r\nAllow: 204\r\nPreview: 0\r\n" +

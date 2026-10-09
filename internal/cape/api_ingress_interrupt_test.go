@@ -54,7 +54,7 @@ func TestAPIIngressStalledBodyInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if _, err := c.Write([]byte(interruptHeaders("10") + "x")); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestAPIIngressSlowProgressingBodyAdmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if _, err := c.Write([]byte(interruptHeaders("4"))); err != nil {
 		t.Fatal(err)
 	}

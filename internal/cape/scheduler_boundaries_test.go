@@ -69,7 +69,7 @@ func TestSchedulerCleanupDeadlineAndOldGeneration(t *testing.T) {
 	var oldCalls, newCalls atomic.Int32
 	previousClient, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) {
 		oldCalls.Add(1)
-		fmt.Fprint(w, `{"data":"Task(s) ID(s) 41 has been deleted"}`)
+		_, _ = fmt.Fprint(w, `{"data":"Task(s) ID(s) 41 has been deleted"}`)
 	})
 	unused, cfg := fixture(t, func(w http.ResponseWriter, _ *http.Request) {
 		newCalls.Add(1)
@@ -121,7 +121,7 @@ func TestSchedulerDeleteMissingOrphanTimeoutNeverPurge(t *testing.T) {
 				case "missing":
 					w.WriteHeader(http.StatusNotFound)
 				case "orphan":
-					fmt.Fprint(w, `{"data":"orphaned"}`)
+					_, _ = fmt.Fprint(w, `{"data":"orphaned"}`)
 				case "timeout":
 					<-r.Context().Done()
 				}
@@ -145,7 +145,7 @@ func fetchingFixture(t *testing.T) (*Store, *fakeStoreClock, Job, *Report, TaskR
 	t.Helper()
 	digest := sha256.Sum256([]byte("report"))
 	c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"info":{"id":41,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}}}`, digest)
+		_, _ = fmt.Fprintf(w, `{"info":{"id":41,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}}}`, digest)
 	})
 	clock := newStoreClock()
 	s := testStore(t, storeConfig(t.TempDir()), clock)
@@ -271,7 +271,7 @@ func TestReportMapperMutationRejected(t *testing.T) {
 func TestSchedulerCancelledRunHarvestsOwnedOutcome(t *testing.T) {
 	c, _ := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		fmt.Fprint(w, success)
+		_, _ = fmt.Fprint(w, success)
 	})
 	s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
 	j := schedulerAdmission(t, s, c, "alpha", "shutdown")
@@ -299,7 +299,7 @@ func TestSchedulerLiveSubmissionTenantAndGlobalLimits(t *testing.T) {
 		count.Add(1)
 		select {
 		case <-release:
-			fmt.Fprint(w, success)
+			_, _ = fmt.Fprint(w, success)
 		case <-r.Context().Done():
 		}
 	})
@@ -348,7 +348,7 @@ func TestReportTransportIdentitySeal(t *testing.T) {
 func TestSchedulerShutdownStorageFailureRetainsPacket(t *testing.T) {
 	c, _ := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		fmt.Fprint(w, success)
+		_, _ = fmt.Fprint(w, success)
 	})
 	s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
 	j := schedulerAdmission(t, s, c, "alpha", "shutdown-storage")

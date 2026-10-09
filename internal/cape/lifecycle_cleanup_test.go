@@ -25,7 +25,7 @@ func TestMaintainRetriesCommittedSubmissionUnlink(t *testing.T) {
 				if r.Method == http.MethodPost {
 					posts.Add(1)
 					_, _ = io.Copy(io.Discard, r.Body)
-					fmt.Fprint(w, success)
+					_, _ = fmt.Fprint(w, success)
 					return
 				}
 				// Safe reads can remain unavailable without another submission.

@@ -88,7 +88,7 @@ func newCapeFlow(t *testing.T) *capeFlow {
 				f.submit(w, r, n)
 				return
 			}
-			fmt.Fprintf(w, `{"error":[],"errors":[],"data":{"task_ids":[%d]}}`, 40+n)
+			_, _ = fmt.Fprintf(w, `{"error":[],"errors":[],"data":{"task_ids":[%d]}}`, 40+n)
 		case strings.HasPrefix(r.URL.Path, "/apiv2/tasks/status/"):
 			if _, ok := taskRoute(w, r, "/apiv2/tasks/status/%d/"); !ok {
 				return
@@ -98,7 +98,7 @@ func newCapeFlow(t *testing.T) *capeFlow {
 				f.status(w, r)
 				return
 			}
-			fmt.Fprint(w, `{"error":false,"data":"reported"}`)
+			_, _ = fmt.Fprint(w, `{"error":false,"data":"reported"}`)
 		case strings.HasPrefix(r.URL.Path, "/apiv2/tasks/get/report/"):
 			id, ok := taskRoute(w, r, "/apiv2/tasks/get/report/%d/json/")
 			if !ok {
@@ -106,14 +106,14 @@ func newCapeFlow(t *testing.T) *capeFlow {
 			}
 			f.reports.Add(1)
 			digest := sha256.Sum256([]byte(flowAttachment))
-			fmt.Fprintf(w, `{"info":{"id":%d,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}},"signatures":[]}`, id, digest)
+			_, _ = fmt.Fprintf(w, `{"info":{"id":%d,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}},"signatures":[]}`, id, digest)
 		case strings.HasPrefix(r.URL.Path, "/apiv2/tasks/delete/"):
 			id, ok := taskRoute(w, r, "/apiv2/tasks/delete/%d/")
 			if !ok {
 				return
 			}
 			f.deletes.Add(1)
-			fmt.Fprintf(w, `{"data":"Task(s) ID(s) %d has been deleted"}`, id)
+			_, _ = fmt.Fprintf(w, `{"data":"Task(s) ID(s) %d has been deleted"}`, id)
 		default:
 			t.Errorf("unexpected remote request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -357,7 +357,7 @@ func TestIntegrationUncertainSubmission(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Length", "100")
-				fmt.Fprint(w, `{"data":`)
+				_, _ = fmt.Fprint(w, `{"data":`)
 			}
 			path := f.admit("alpha", 202)
 			schedulerRound(t, f.queue)
@@ -496,7 +496,7 @@ func TestIntegrationCancellation(t *testing.T) {
 				f.submit = func(w http.ResponseWriter, _ *http.Request, _ int32) {
 					close(received)
 					<-release
-					fmt.Fprint(w, success)
+					_, _ = fmt.Fprint(w, success)
 				}
 				live, results = schedulerDispatch(f.queue)
 				select {

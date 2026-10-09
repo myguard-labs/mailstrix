@@ -83,7 +83,7 @@ func TestActionableQueriesUseStateIndex(t *testing.T) {
 			}
 			plan.WriteString(detail)
 		}
-		rows.Close()
+		_ = rows.Close()
 		if !strings.Contains(plan.String(), "jobs_state_id") {
 			t.Fatalf("actionable query did not use jobs_state_id: %s", plan.String())
 		}

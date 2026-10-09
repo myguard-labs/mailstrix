@@ -101,13 +101,13 @@ func TestSchedulerReportAndCleanup(t *testing.T) {
 				switch {
 				case r.Method == http.MethodPost:
 					_, _ = io.Copy(io.Discard, r.Body)
-					fmt.Fprint(w, success)
+					_, _ = fmt.Fprint(w, success)
 				case strings.Contains(r.URL.Path, "/status/"):
-					fmt.Fprint(w, `{"error":false,"data":"reported"}`)
+					_, _ = fmt.Fprint(w, `{"error":false,"data":"reported"}`)
 				case strings.Contains(r.URL.Path, "/report/"):
-					fmt.Fprintf(w, `{"info":{"id":41,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}},"raw_secret_marker":"never_persist"}`, digest)
+					_, _ = fmt.Fprintf(w, `{"info":{"id":41,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}},"raw_secret_marker":"never_persist"}`, digest)
 				case strings.Contains(r.URL.Path, "/delete/"):
-					fmt.Fprint(w, `{"data":"Task(s) ID(s) 41 has been deleted"}`)
+					_, _ = fmt.Fprint(w, `{"data":"Task(s) ID(s) 41 has been deleted"}`)
 				default:
 					t.Error("unexpected request")
 				}
@@ -157,7 +157,7 @@ func TestSchedulerReportAndCleanup(t *testing.T) {
 
 func TestSchedulerBeginErrorNoPOST(t *testing.T) {
 	var posts atomic.Int32
-	c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) { posts.Add(1); fmt.Fprint(w, success) })
+	c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) { posts.Add(1); _, _ = fmt.Fprint(w, success) })
 	s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
 	j := schedulerAdmission(t, s, c, "alpha", "begin")
 	armed := false
@@ -190,7 +190,7 @@ func TestSchedulerBeginErrorNoPOST(t *testing.T) {
 
 func TestSchedulerRestartNoPOST(t *testing.T) {
 	var posts atomic.Int32
-	c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) { posts.Add(1); fmt.Fprint(w, success) })
+	c, _ := fixture(t, func(w http.ResponseWriter, _ *http.Request) { posts.Add(1); _, _ = fmt.Fprint(w, success) })
 	clock := newStoreClock()
 	cfg := storeConfig(t.TempDir())
 	s := testStore(t, cfg, clock)
@@ -221,7 +221,7 @@ func TestSchedulerLateCancellationAndOpenFailure(t *testing.T) {
 			c, _ := fixture(t, func(w http.ResponseWriter, r *http.Request) {
 				posts.Add(1)
 				_, _ = io.Copy(io.Discard, r.Body)
-				fmt.Fprint(w, success)
+				_, _ = fmt.Fprint(w, success)
 			})
 			s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
 			j := schedulerAdmission(t, s, c, "alpha", mode)
@@ -276,7 +276,7 @@ func TestSchedulerBudgetBackoffHintsAndRestart(t *testing.T) {
 		calls.Add(1)
 		if r.Method == http.MethodPost {
 			_, _ = io.Copy(io.Discard, r.Body)
-			fmt.Fprint(w, success)
+			_, _ = fmt.Fprint(w, success)
 			return
 		}
 		w.Header().Set("Retry-After", "120")
@@ -338,11 +338,11 @@ func TestSchedulerCallbackWakesUnthrottledPoll(t *testing.T) {
 			if _, copyErr := io.Copy(io.Discard, r.Body); copyErr != nil {
 				t.Error(copyErr)
 			}
-			fmt.Fprint(w, success)
+			_, _ = fmt.Fprint(w, success)
 			return
 		}
 		statusCalls.Add(1)
-		fmt.Fprint(w, `{"error":false,"data":"pending"}`)
+		_, _ = fmt.Fprint(w, `{"error":false,"data":"pending"}`)
 	})
 	clock := newStoreClock()
 	s := testStore(t, storeConfig(t.TempDir()), clock)
@@ -370,11 +370,11 @@ func TestSchedulerCallbackRetainsShorterRetryAfter(t *testing.T) {
 			if _, copyErr := io.Copy(io.Discard, r.Body); copyErr != nil {
 				t.Error(copyErr)
 			}
-			fmt.Fprint(w, success)
+			_, _ = fmt.Fprint(w, success)
 			return
 		}
 		statusCalls.Add(1)
-		fmt.Fprint(w, `{"error":false,"data":"pending"}`)
+		_, _ = fmt.Fprint(w, `{"error":false,"data":"pending"}`)
 	})
 	clock := newStoreClock()
 	s := testStore(t, storeConfig(t.TempDir()), clock)

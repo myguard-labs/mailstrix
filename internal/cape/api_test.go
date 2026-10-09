@@ -552,7 +552,7 @@ func TestAPIRepeatedContentEncodingTLS(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			if response.StatusCode != tc.want {
 				t.Fatalf("content encoding %s: status=%d want=%d", tc.name, response.StatusCode, tc.want)
 			}

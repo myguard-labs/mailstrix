@@ -517,7 +517,7 @@ func TestStoreProcessLockAndStartupRefusal(t *testing.T) {
 	cfg := storeConfig(t.TempDir())
 	s := testStore(t, cfg, newStoreClock())
 	if other, e := openStore(context.Background(), cfg, storeHooks{clock: newStoreClock(), capacity: testCapacity}); e == nil {
-		other.Close()
+		_ = other.Close()
 		t.Fatal("second owner acquired live store")
 	}
 	if e := s.Close(); e != nil {
@@ -594,7 +594,7 @@ func TestStoreSubmissionOutcomesAndVersions(t *testing.T) {
 				t.Fatal(e)
 			}
 			data, e := io.ReadAll(f)
-			f.Close()
+			_ = f.Close()
 			if e != nil || string(data) != "data" {
 				t.Fatal("owned payload changed")
 			}
@@ -812,7 +812,7 @@ func TestStoreCrashChild(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	a := enqueueBytes(t, s, "alpha", "crash")
 	if point == "submitting_committed" {
 		if _, e = s.BeginSubmission(context.Background(), "alpha", a.Job.ID, a.Job.Version); e != nil {
@@ -893,9 +893,9 @@ func TestStoreOrphanAndCleanupError(t *testing.T) {
 		t.Fatal(e)
 	}
 	f.Sync()
-	f.Close()
+	_ = f.Close()
 	s.spool.Sync()
-	s.Close()
+	_ = s.Close()
 	s = testStore(t, cfg, newStoreClock())
 	files, e := os.ReadDir(filepath.Join(cfg.Directory, "spool"))
 	if e != nil || len(files) != 0 {

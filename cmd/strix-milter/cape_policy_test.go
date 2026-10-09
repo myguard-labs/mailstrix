@@ -40,7 +40,7 @@ func TestCAPEMilterStartupPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer r.Close()
+			defer func() { _ = r.Close() }()
 			previousStderr := os.Stderr
 			os.Stderr = w
 			defer func() { os.Stderr = previousStderr; _ = w.Close() }()

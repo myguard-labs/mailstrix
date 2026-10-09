@@ -160,7 +160,7 @@ func TestCAPEDaemonPreTLSAcceptBound(t *testing.T) {
 	})
 	t.Run("over-cap connection is refused", func(t *testing.T) {
 		conn := dial()
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 		if _, err := conn.Read(make([]byte, 1)); err == nil {
 			t.Fatal("over-cap pre-TLS connection remained open")
@@ -252,7 +252,7 @@ func TestCAPEDaemonTLSConcreteConnAndAcceptLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer over.Close()
+	defer func() { _ = over.Close() }()
 	_ = over.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := over.Read(make([]byte, 1)); err == nil {
 		t.Fatal("post-response keep-alive connection permitted over-cap acceptance")
