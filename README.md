@@ -1101,7 +1101,7 @@ The [`contrib/rspamd/`](contrib/rspamd/) directory has everything the rspamd sid
   | `THREATFOX_IOC` | ThreatFox URL/domain IOC (options = the URLs) | `7.0` |
   | `STRIX_ALLOWLISTED` | allowlisted log-only hit (options = rule/feed details) | `0.0` |
   | `STRIX_CANARY` | canary/shadow hit (options = rule/feed details) | `0.0` |
-  | `STRIX_UNKNOWN` | degraded reply with no actionable match: unknown, not clean (option = `incomplete`/`error`/`busy`) | `0.0` |
+  | `STRIX_UNKNOWN` | degraded or failed scan with no actionable match: unknown, not clean (option = `incomplete`/`error`/`busy`/`transport`/`http`/`parse`/`malformed`/`unscheduled`) | `0.0` |
 
   Tiers stack, capped by the group `max_score`. The classifier lives in the
   plugin, so retuning is just an rspamd reload (no strixd rebuild).
