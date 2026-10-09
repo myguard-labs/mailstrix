@@ -246,6 +246,20 @@ class ImpactTests(unittest.TestCase):
                 with self.subTest(path=unrelated), self.assertRaises(ValueError):
                     impact.plan([unrelated])
 
+    def test_feed_lifecycle_helpers_and_feedrefresh_native_go_consumers(self):
+        for path in [
+            "ci/feed_lifecycle_helpers_test.go",
+            "internal/feedrefresh/feedrefresh.go",
+            "internal/feedrefresh/feedrefresh_test.go",
+        ]:
+            with self.subTest(path=path):
+                result = impact.plan([path])
+                self.assertTrue(result["go"])
+                self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/feed_lifecycle_helpers_test.py", "ci/unmapped_test.go"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_mime_attachment_native_go_consumer(self):
         path = "ci/mime_attachment_hash_test.go"
         result = impact.plan([path], False)

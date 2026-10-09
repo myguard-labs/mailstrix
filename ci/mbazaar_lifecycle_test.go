@@ -17,34 +17,6 @@ import (
 	"github.com/myguard-labs/mailstrix/internal/mbazaar"
 )
 
-type mbazaarTransport func(*http.Request) (*http.Response, error)
-
-func (f mbazaarTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func mbazaarUseTransport(t *testing.T, f mbazaarTransport) {
-	t.Helper()
-	previous := http.DefaultTransport
-	http.DefaultTransport = f
-	t.Cleanup(func() { http.DefaultTransport = previous })
-}
-
-type mbazaarBlockedBody struct {
-	io.Reader
-	started chan struct{}
-	release chan struct{}
-}
-
-func (b *mbazaarBlockedBody) Read(p []byte) (int, error) {
-	if b.started != nil {
-		close(b.started)
-		b.started = nil
-		<-b.release
-	}
-	return b.Reader.Read(p)
-}
-
-func (*mbazaarBlockedBody) Close() error { return nil }
-
 func mbazaarCSV(sample string) string {
 	return fmt.Sprintf("\"2024-01-01\",\"%x\",\"md5\"\n", sha256.Sum256([]byte(sample)))
 }
@@ -55,9 +27,9 @@ func TestMBazaarCloseJoinsRefresh(t *testing.T) {
 		csv := mbazaarCSV("completed before Close returns")
 		// Ignore cancellation while reading to model work (including persistence)
 		// that must finish before shutdown can relinquish ownership.
-		body := &mbazaarBlockedBody{Reader: strings.NewReader(csv), started: make(chan struct{}), release: make(chan struct{})}
+		body := &feedBlockedBody{Reader: strings.NewReader(csv), started: make(chan struct{}), release: make(chan struct{})}
 		started := body.started
-		mbazaarUseTransport(t, func(*http.Request) (*http.Response, error) {
+		feedUseTransport(t, func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
 		})
 		c := mbazaar.New("fixture-key", time.Hour, "https://feed.invalid/", cacheDir, func(string, ...any) {})
@@ -93,20 +65,6 @@ func TestMBazaarCloseJoinsRefresh(t *testing.T) {
 	})
 }
 
-type mbazaarCanceledBody struct {
-	ctx     context.Context
-	started chan struct{}
-	closed  bool
-}
-
-func (b *mbazaarCanceledBody) Read([]byte) (int, error) {
-	close(b.started)
-	<-b.ctx.Done()
-	return 0, b.ctx.Err()
-}
-
-func (b *mbazaarCanceledBody) Close() error { b.closed = true; return nil }
-
 func TestMBazaarCloseCancelsRequest(t *testing.T) {
 	for _, tc := range []struct {
 		phase    string
@@ -119,10 +77,10 @@ func TestMBazaarCloseCancelsRequest(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				started := make(chan struct{})
 				var request *http.Request
-				var body *mbazaarCanceledBody
+				var body *feedCanceledBody
 				loaded := make(chan struct{}, 1)
 				requests := 0
-				mbazaarUseTransport(t, func(r *http.Request) (*http.Response, error) {
+				feedUseTransport(t, func(r *http.Request) (*http.Response, error) {
 					request = r
 					requests++
 					if tc.periodic && requests == 1 {
@@ -133,7 +91,7 @@ func TestMBazaarCloseCancelsRequest(t *testing.T) {
 						<-r.Context().Done()
 						return nil, r.Context().Err()
 					}
-					body = &mbazaarCanceledBody{ctx: r.Context(), started: started}
+					body = &feedCanceledBody{ctx: r.Context(), started: started}
 					return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
 				})
 				cacheDir := t.TempDir()
@@ -178,7 +136,7 @@ func TestMBazaarRefreshFailureKeepsLastGood(t *testing.T) {
 				csv := mbazaarCSV("last good sample")
 				requests := 0
 				completed := make(chan struct{})
-				mbazaarUseTransport(t, func(*http.Request) (*http.Response, error) {
+				feedUseTransport(t, func(*http.Request) (*http.Response, error) {
 					requests++
 					status, data := http.StatusOK, csv
 					if requests > 1 {
@@ -229,7 +187,7 @@ func TestMBazaarCloseDisabledAndBeforeRefresh(t *testing.T) {
 		t.Fatal("empty key enabled the checker")
 	}
 	synctest.Test(t, func(t *testing.T) {
-		mbazaarUseTransport(t, func(r *http.Request) (*http.Response, error) {
+		feedUseTransport(t, func(r *http.Request) (*http.Response, error) {
 			<-r.Context().Done()
 			return nil, r.Context().Err()
 		})
@@ -246,7 +204,7 @@ func TestMBazaarInitialFailureRetries(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		requests := 0
 		completed := make(chan struct{})
-		mbazaarUseTransport(t, func(*http.Request) (*http.Response, error) {
+		feedUseTransport(t, func(*http.Request) (*http.Response, error) {
 			requests++
 			if requests == 1 {
 				return nil, errors.New("fixture feed unavailable")

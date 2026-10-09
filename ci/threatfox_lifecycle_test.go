@@ -16,51 +16,6 @@ import (
 	"github.com/myguard-labs/mailstrix/internal/threatfox"
 )
 
-type tfxTransport func(*http.Request) (*http.Response, error)
-
-func (f tfxTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func tfxUseTransport(t *testing.T, f tfxTransport) {
-	t.Helper()
-	previous := http.DefaultTransport
-	http.DefaultTransport = f
-	t.Cleanup(func() { http.DefaultTransport = previous })
-}
-
-// tfxBlockedBody ignores cancellation: it models in-flight work (parse and
-// cache persistence) that Close must wait for.
-type tfxBlockedBody struct {
-	io.Reader
-	started chan struct{}
-	release chan struct{}
-}
-
-func (b *tfxBlockedBody) Read(p []byte) (int, error) {
-	if b.started != nil {
-		close(b.started)
-		b.started = nil
-		<-b.release
-	}
-	return b.Reader.Read(p)
-}
-
-func (*tfxBlockedBody) Close() error { return nil }
-
-// tfxCanceledBody blocks until the request context is canceled.
-type tfxCanceledBody struct {
-	ctx     context.Context
-	started chan struct{}
-	closed  bool
-}
-
-func (b *tfxCanceledBody) Read([]byte) (int, error) {
-	close(b.started)
-	<-b.ctx.Done()
-	return 0, b.ctx.Err()
-}
-
-func (b *tfxCanceledBody) Close() error { b.closed = true; return nil }
-
 func tfxFeed(tag string) string {
 	return fmt.Sprintf("\"2024-01-01\",\"1\",\"http://%s.example/x\",\"url\"\n", tag)
 }
@@ -73,9 +28,9 @@ func TestThreatFoxCloseJoinsRefresh(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cacheDir := t.TempDir()
 		feed := tfxFeed("joined")
-		body := &tfxBlockedBody{Reader: strings.NewReader(feed), started: make(chan struct{}), release: make(chan struct{})}
+		body := &feedBlockedBody{Reader: strings.NewReader(feed), started: make(chan struct{}), release: make(chan struct{})}
 		started := body.started
-		tfxUseTransport(t, func(*http.Request) (*http.Response, error) {
+		feedUseTransport(t, func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
 		})
 		c := tfxNew(cacheDir, func(string, ...any) {})
@@ -122,10 +77,10 @@ func TestThreatFoxCloseCancelsRequest(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				started := make(chan struct{})
 				var request *http.Request
-				var body *tfxCanceledBody
+				var body *feedCanceledBody
 				loaded := make(chan struct{}, 1)
 				requests := 0
-				tfxUseTransport(t, func(r *http.Request) (*http.Response, error) {
+				feedUseTransport(t, func(r *http.Request) (*http.Response, error) {
 					request = r
 					requests++
 					if tc.periodic && requests == 1 {
@@ -136,7 +91,7 @@ func TestThreatFoxCloseCancelsRequest(t *testing.T) {
 						<-r.Context().Done()
 						return nil, r.Context().Err()
 					}
-					body = &tfxCanceledBody{ctx: r.Context(), started: started}
+					body = &feedCanceledBody{ctx: r.Context(), started: started}
 					return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
 				})
 				cacheDir := t.TempDir()
@@ -181,7 +136,7 @@ func TestThreatFoxCloseNilAndIdempotent(t *testing.T) {
 		t.Fatal("empty key enabled the checker")
 	}
 	synctest.Test(t, func(t *testing.T) {
-		tfxUseTransport(t, func(r *http.Request) (*http.Response, error) {
+		feedUseTransport(t, func(r *http.Request) (*http.Response, error) {
 			<-r.Context().Done()
 			return nil, r.Context().Err()
 		})
@@ -199,7 +154,7 @@ func TestThreatFoxCloseAfterSuccessfulRefresh(t *testing.T) {
 		feed := tfxFeed("ok")
 		requests := 0
 		loaded := make(chan struct{}, 4)
-		tfxUseTransport(t, func(*http.Request) (*http.Response, error) {
+		feedUseTransport(t, func(*http.Request) (*http.Response, error) {
 			requests++
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(feed)), Header: make(http.Header)}, nil
 		})
@@ -224,7 +179,7 @@ func TestThreatFoxCloseAfterSuccessfulRefresh(t *testing.T) {
 
 func TestThreatFoxRefreshFailureStillCounted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		tfxUseTransport(t, func(*http.Request) (*http.Response, error) {
+		feedUseTransport(t, func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("fixture feed unavailable")
 		})
 		failed := make(chan struct{}, 1)
