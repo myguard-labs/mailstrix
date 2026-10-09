@@ -2,6 +2,7 @@ package mailstrix
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -65,6 +66,10 @@ type fetchOptions struct {
 	// liveCount is the rule count of the running scanner (0 when none); it floors
 	// the count-drop baseline.
 	liveCount int
+	// extraSigningKeys are operator-supplied ADDITIONAL trusted manifest signing
+	// keys (MAILSTRIX_RULES_EXTRA_SIGNING_KEYS). The embedded keys are always
+	// trusted on top of these; this field cannot remove or override one.
+	extraSigningKeys []ed25519.PublicKey
 	// reload is called after both cache files have been installed; it must leave
 	// the active scanner unchanged on error and must not reacquire the cache lock.
 	reload func() error
@@ -79,7 +84,13 @@ type fetchOptions struct {
 //	ourLibyara the libyara version yarad links (empty disables the skew check)
 //
 // Order (each step keeps the current bundle on failure — fail to last-good):
-//  1. GET manifest. Network error => no change.
+//  1. GET manifest + its detached signature (manifestSigName). The signature
+//     must be a valid ed25519 signature over the exact manifest bytes under a
+//     trusted key (embedded, plus any operator-added key) or the update is
+//     refused before any manifest field is read. Network error => no change.
+//     An ALREADY-INSTALLED local manifest is never signature-checked, so an
+//     existing deployment keeps serving its cached bundle; it simply cannot be
+//     updated until the publisher signs.
 //  2. remote.Version <= local.Version  => up to date, nothing downloaded.
 //  3. remote.Libyara != ourLibyara     => refuse (skew), keep current.
 //  4. GET compiled.yac, verify size + sha256 against the manifest. Mismatch =>
@@ -98,6 +109,14 @@ type fetchOptions struct {
 // private copy.
 func FetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool) (FetchResult, error) {
 	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, fetchOptions{allowHTTP: allowHTTP})
+}
+
+// FetchRulesWithExtraKeys is FetchRules with operator-supplied ADDITIONAL
+// trusted manifest signing keys (MAILSTRIX_RULES_EXTRA_SIGNING_KEYS). The keys
+// compiled into the binary stay trusted regardless, so extra can only widen
+// the trust set, never replace it. Passing nil is identical to FetchRules.
+func FetchRulesWithExtraKeys(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, allowHTTP bool, extra []ed25519.PublicKey) (FetchResult, error) {
+	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, fetchOptions{allowHTTP: allowHTTP, extraSigningKeys: extra})
 }
 
 // maxRulesRedirects bounds the redirect chain of one rules request (a GitHub
@@ -216,7 +235,7 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	res.LocalVersion = local.Version
 	res.NewVersion = local.Version
 
-	remote, err := fetchManifest(ctx, hc, base+"/"+manifestName)
+	remote, err := fetchManifest(ctx, hc, base, rulesTrustedKeys(opts.extraSigningKeys))
 	if err != nil {
 		return res, fmt.Errorf("fetch manifest: %w", err)
 	}
@@ -437,12 +456,34 @@ func writeLocalManifest(path string, m RulesManifest) error {
 	return os.Rename(tmpName, path)
 }
 
-// fetchManifest GETs and decodes the remote manifest (size-capped).
-func fetchManifest(ctx context.Context, hc *http.Client, url string) (RulesManifest, error) {
+// fetchManifest GETs the remote manifest (size-capped), proves it was signed by
+// a trusted key, and only then decodes and field-validates it.
+//
+// base is the directory URL; the manifest and its detached signature are both
+// fetched from it. Verification runs over the EXACT received bytes, before the
+// JSON is parsed, so no field of an unverified manifest is ever acted upon and
+// no re-marshalled form is ever substituted for the signed bytes.
+//
+// A missing, empty, malformed or untrusted signature is a hard refusal: the
+// caller aborts the update and the installed bundle stays live. There is no
+// fail-open path here.
+func fetchManifest(ctx context.Context, hc *http.Client, base string, keys []ed25519.PublicKey) (RulesManifest, error) {
 	var m RulesManifest
-	body, err := httpGet(ctx, hc, url, 64<<10)
+	body, err := httpGet(ctx, hc, base+"/"+manifestName, 64<<10)
 	if err != nil {
 		return m, err
+	}
+	// Read one byte past the cap so an oversized signature response is REFUSED
+	// rather than silently truncated to something that might still decode.
+	sig, err := httpGet(ctx, hc, base+"/"+manifestSigName, maxManifestSigBytes+1)
+	if err != nil {
+		return m, fmt.Errorf("fetch manifest signature: %w", err)
+	}
+	if len(sig) > maxManifestSigBytes {
+		return m, fmt.Errorf("refusing update: rules manifest signature exceeds %d bytes", maxManifestSigBytes)
+	}
+	if err := verifyManifestSignature(body, string(sig), keys); err != nil {
+		return m, fmt.Errorf("refusing update: %w", err)
 	}
 	if err := json.Unmarshal(body, &m); err != nil {
 		return m, fmt.Errorf("decode manifest: %w", err)

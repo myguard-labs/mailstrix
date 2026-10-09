@@ -128,7 +128,7 @@ var contractFiles = map[string]bool{
 }
 
 var contractExtensions = map[string]map[string]bool{
-	"scripts":   {".sh": true},
+	"scripts":   {".sh": true, ".py": true},
 	"docker":    {".sh": true},
 	"packaging": {".sh": true, ".py": true, ".yaml": true, ".env": true, ".service": true, ".sysusers": true},
 }

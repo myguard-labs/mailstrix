@@ -70,7 +70,20 @@ func cmdFetchRules(args []string) int {
 	if *allowDrop {
 		ctx = mailstrix.WithAllowRuleCountDrop(ctx)
 	}
-	res, err := mailstrix.FetchRules(ctx, *url, *cacheDir, libyaraVersion, hc, *allowHTTP)
+	// Additional operator trust anchors are resolved (and loudly logged) before
+	// the fetch; a malformed key aborts instead of quietly narrowing trust to
+	// the embedded keys. The published manifest must carry a valid ed25519
+	// signature from one of these keys or the update is refused.
+	if err := cfg.ValidateRulesSigningKeys(); err != nil {
+		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
+		return 2
+	}
+	extraKeys, err := cfg.ExtraRulesSigningKeys()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
+		return 2
+	}
+	res, err := mailstrix.FetchRulesWithExtraKeys(ctx, *url, *cacheDir, libyaraVersion, hc, *allowHTTP, extraKeys)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
 		return 2

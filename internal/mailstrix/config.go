@@ -8,6 +8,7 @@
 package mailstrix
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
@@ -82,6 +83,16 @@ type Config struct {
 	// TLS). Off by default: rule fetches require https, and a redirect from https
 	// to http is refused even when this is set.
 	RulesAllowHTTP bool // MAILSTRIX_RULES_ALLOW_HTTP (default false)
+
+	// RulesExtraSigningKeys holds additional trusted rules-manifest signing
+	// public keys (raw 32-byte ed25519, base64, comma-separated). It is ADDITIVE
+	// ONLY: the keys compiled into the binary are always trusted and cannot be
+	// removed or overridden here. Empty by default. A malformed entry is a
+	// startup error, never a silent fallback to embedded-only trust, and a
+	// non-empty list is logged loudly at startup.
+	//
+	// There is deliberately no option to skip signature verification.
+	RulesExtraSigningKeys []string // MAILSTRIX_RULES_EXTRA_SIGNING_KEYS
 
 	// AllowRulesCountDrop (MAILSTRIX_RULES_ALLOW_COUNT_DROP, default off) installs
 	// a verified bundle whose rule count is zero or below half the current set.
@@ -253,20 +264,22 @@ func LoadConfig() *Config {
 		RulesFetchTimeout: envDur("MAILSTRIX_RULES_FETCH_TIMEOUT", 5*60),
 		RulesURL:          envStr("MAILSTRIX_RULES_URL", DefaultRulesURL),
 		RulesAllowHTTP:    envBool("MAILSTRIX_RULES_ALLOW_HTTP"),
-		ScanTimeout:       envDur("MAILSTRIX_SCAN_TIMEOUT", 8),
-		BigFileThreshold:  envInt64("MAILSTRIX_BIGFILE_THRESHOLD", 6*1024*1024),
-		BigFileRules:      strings.TrimSpace(os.Getenv("MAILSTRIX_BIGFILE_RULES")),
-		CacheTTL:          envDur("MAILSTRIX_CACHE_TTL", 3600),
-		CacheSize:         envInt("MAILSTRIX_CACHE_SIZE", 65536),
-		RedisURL:          strings.TrimSpace(os.Getenv("MAILSTRIX_REDIS_URL")),
-		RedisPrefix:       envStr("MAILSTRIX_REDIS_PREFIX", "yara:scan:"),
-		RedisMACKey:       envOrFile("MAILSTRIX_REDIS_MAC_KEY"),
-		Verbose:           envBool("MAILSTRIX_VERBOSE"),
-		LogStdout:         envBool("MAILSTRIX_LOG_STDOUT"),
-		MetricsAuth:       envBool("MAILSTRIX_METRICS_AUTH"),
-		Pprof:             envBool("MAILSTRIX_PPROF"),
-		Canary:            envBool("MAILSTRIX_CANARY"),
-		ArchivePW:         envBool("MAILSTRIX_ARCHIVE_PW"),
+
+		RulesExtraSigningKeys: envList(rulesExtraSigningKeysEnv),
+		ScanTimeout:           envDur("MAILSTRIX_SCAN_TIMEOUT", 8),
+		BigFileThreshold:      envInt64("MAILSTRIX_BIGFILE_THRESHOLD", 6*1024*1024),
+		BigFileRules:          strings.TrimSpace(os.Getenv("MAILSTRIX_BIGFILE_RULES")),
+		CacheTTL:              envDur("MAILSTRIX_CACHE_TTL", 3600),
+		CacheSize:             envInt("MAILSTRIX_CACHE_SIZE", 65536),
+		RedisURL:              strings.TrimSpace(os.Getenv("MAILSTRIX_REDIS_URL")),
+		RedisPrefix:           envStr("MAILSTRIX_REDIS_PREFIX", "yara:scan:"),
+		RedisMACKey:           envOrFile("MAILSTRIX_REDIS_MAC_KEY"),
+		Verbose:               envBool("MAILSTRIX_VERBOSE"),
+		LogStdout:             envBool("MAILSTRIX_LOG_STDOUT"),
+		MetricsAuth:           envBool("MAILSTRIX_METRICS_AUTH"),
+		Pprof:                 envBool("MAILSTRIX_PPROF"),
+		Canary:                envBool("MAILSTRIX_CANARY"),
+		ArchivePW:             envBool("MAILSTRIX_ARCHIVE_PW"),
 		// Wordlist is loaded ONLY when the feature is enabled — a default-OFF
 		// service must not touch (or read into memory) an operator-pointed file at
 		// boot. Gating here keeps the disabled path side-effect-free.
@@ -477,6 +490,32 @@ func (c *Config) ValidateRedisMAC() error {
 	return nil
 }
 
+// rulesExtraSigningKeysEnv names the additive rules-signing trust variable.
+const rulesExtraSigningKeysEnv = "MAILSTRIX_RULES_EXTRA_SIGNING_KEYS"
+
+// ExtraRulesSigningKeys returns the operator-supplied ADDITIONAL trusted
+// rules-manifest signing keys. The keys compiled into the binary are always
+// trusted on top of these and are not included here.
+//
+// A malformed entry is an error and the caller must refuse to start: returning
+// the embedded-only set instead would silently ignore trust the operator asked
+// for, which is exactly the failure this validation exists to prevent.
+func (c *Config) ExtraRulesSigningKeys() ([]ed25519.PublicKey, error) {
+	return parseRulesSigningKeys(c.RulesExtraSigningKeys)
+}
+
+// ValidateRulesSigningKeys fails closed on an unusable
+// MAILSTRIX_RULES_EXTRA_SIGNING_KEYS entry and, when the operator did supply
+// keys, logs the widened trust set loudly. Called once from startup.
+func (c *Config) ValidateRulesSigningKeys() error {
+	extra, err := parseRulesSigningKeys(c.RulesExtraSigningKeys)
+	if err != nil {
+		return err
+	}
+	logRulesSigningTrust(extra)
+	return nil
+}
+
 // ErrWildcardBind reports a wildcard ICAP/clamd TCP bind without opt-in.
 var ErrWildcardBind = errors.New("wildcard bind requires MAILSTRIX_ALLOW_WILDCARD_BIND=1")
 
@@ -581,6 +620,19 @@ func envSet(name, def string) map[string]struct{} {
 	for _, part := range strings.Split(v, ",") {
 		if p := strings.ToLower(strings.TrimSpace(part)); p != "" {
 			out[p] = struct{}{}
+		}
+	}
+	return out
+}
+
+// envList parses a comma-separated env var into a list, preserving case and
+// dropping empty entries. Unlike envSet it never lowercases, so it is safe for
+// case-sensitive values such as base64 keys.
+func envList(name string) []string {
+	var out []string
+	for _, part := range strings.Split(os.Getenv(name), ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
 		}
 	}
 	return out

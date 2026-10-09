@@ -60,7 +60,11 @@ RULES = {
     "python": ["tools/parity/*.py", "tools/parity/comparator-pins.json"],
     "prometheus": ["contrib/deploy/prometheus/*"],
     "dependencies": ["go.mod", "go.sum", "osv-scanner.toml"],
-    "workflows": [".github/*.yml", ".github/*.yaml"],
+    "workflows": [
+        ".github/*.yml",
+        ".github/*.yaml",
+        "ci/ci_rules_signing_secret_test.py",
+    ],
     "shell": ["*.sh", "contrib/sieve/strix-scan-wrapper"],
     "dockerfiles": ["*Dockerfile*", ".hadolint.yaml", "ci/ci_release_tag_test.py"],
     "scope": [
@@ -83,8 +87,14 @@ RULES = {
     ],
     "generate": [
         "ci/generate_rules_count_test.sh",
+        "ci/ci_rules_signing_secret_test.py",
         "docker/generate-rules*",
         "cmd/strixd/*",
+        # The publisher signs the manifest through cmd/rulessign, so a change
+        # there changes what gets published; internal/rulespin holds the pinned
+        # signing keys both the publisher and the client read.
+        "cmd/rulessign/*",
+        "internal/rulespin/*",
         "internal/mailstrix/*",
         "docker/Dockerfile*",
         "docker/fetch-rules.sh",

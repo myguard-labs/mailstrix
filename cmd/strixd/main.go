@@ -303,6 +303,12 @@ func cmdServe(args []string) (exitCode int) {
 		log.Printf("[mailstrix] %v", err)
 		return 2
 	}
+	// An unusable additional rules-signing key fails startup: continuing with
+	// embedded-only trust would silently ignore trust the operator configured.
+	if err := cfg.ValidateRulesSigningKeys(); err != nil {
+		log.Printf("[mailstrix] %v", err)
+		return 2
+	}
 
 	logf := func(format string, a ...any) { log.Printf("[mailstrix] "+format, a...) }
 

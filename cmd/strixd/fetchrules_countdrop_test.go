@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -29,9 +28,17 @@ func serveBundle(t *testing.T, n int) *httptest.Server {
 	}
 	sum := sha256.Sum256(b)
 	m := mailstrix.RulesManifest{Version: 2, Generated: "2026-06-18T00:00:00Z", Checksum: fmt.Sprintf("sha256:%x", sum), Libyara: firstNonEmpty(libyaraVersion, "4.5.2"), Size: int64(len(b))}
+	// Signed, and trusted through the operator-key configuration: these tests
+	// cover the count-drop gate, which sits BEHIND the signature gate.
+	trustCLISigningKey(t)
+	manifestBody, manifestSig := signedManifest(t, m)
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if filepath.Ext(r.URL.Path) == ".sig" {
+			_, _ = w.Write([]byte(manifestSig))
+			return
+		}
 		if filepath.Ext(r.URL.Path) == ".json" {
-			_ = json.NewEncoder(w).Encode(m)
+			_, _ = w.Write(manifestBody)
 			return
 		}
 		_, _ = w.Write(b)

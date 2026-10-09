@@ -22,6 +22,9 @@ cp "$here/generate-rules.sh" "$test_root/sandbox/project/docker/"
 export EVENTS="$test_root/events"
 export PATH="$test_root/bin:$PATH"
 export GH_TOKEN=fixture-not-a-credential
+# Throwaway non-credential: the `go` stub only checks that the publisher passes
+# the key through the ENVIRONMENT and never on a command line.
+export MAILSTRIX_RULES_SIGNING_KEY=fixture-not-a-signing-key
 
 cat >"$test_root/bin/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -84,6 +87,31 @@ case "${2:-}" in
         [ "${FAIL_PUBLISH:-0}" -eq 0 ] || exit 42
         ;;
 esac
+STUB
+
+# `go run ./cmd/rulessign` is stubbed: this harness covers the publisher's
+# orchestration (signature produced, uploaded, and ordered before the manifest).
+# The signing and verification crypto itself is covered by the Go unit tests in
+# cmd/rulessign and internal/mailstrix.
+cat >"$test_root/bin/go" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'go %s\n' "$*" >> "$EVENTS"
+[ -n "${MAILSTRIX_RULES_SIGNING_KEY:-}" ] || { printf 'rulessign: key missing from the environment\n' >&2; exit 2; }
+case " $* " in
+    *" -require-trusted "*) ;;
+    *) printf 'rulessign: publisher must pass -require-trusted\n' >&2; exit 2 ;;
+esac
+[ "${FAIL_SIGN:-0}" -eq 0 ] || exit 3
+out=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -out) out="$2"; shift ;;
+    esac
+    shift
+done
+[ -n "$out" ] || { printf 'rulessign: -out missing\n' >&2; exit 2; }
+printf 'ZmFrZS1zaWduYXR1cmUtZml4dHVyZQ==\n' > "$out"
 STUB
 
 cat >"$test_root/bin/curl" <<'STUB'
@@ -292,12 +320,16 @@ assert_success_event_order() {  # assert_success_event_order <case> <verify-coun
         esac
     done <"$EVENTS"
     [ "${lifecycle[0]:-}" = 'upload compiled.yac' ] || assert_event "$name: compiled.yac was not uploaded first"
-    [ "${lifecycle[1]:-}" = 'upload compiled.yac.manifest.json' ] || assert_event "$name: manifest was not uploaded after compiled.yac"
+    # The detached signature must land BEFORE the manifest it covers: during the
+    # rolling replacement window a client must never fetch a new manifest paired
+    # with the previous signature, which it would correctly refuse.
+    [ "${lifecycle[1]:-}" = 'upload compiled.yac.manifest.json.sig' ] || assert_event "$name: manifest signature was not uploaded before the manifest"
+    [ "${lifecycle[2]:-}" = 'upload compiled.yac.manifest.json' ] || assert_event "$name: manifest was not uploaded after its signature"
     for ((index = 0; index < verify_count; index++)); do
-        [[ "${lifecycle[index + 2]:-}" == verify\ * ]] || assert_event "$name: verifier ran before both uploads"
+        [[ "${lifecycle[index + 3]:-}" == verify\ * ]] || assert_event "$name: verifier ran before every upload"
     done
-    [ "${lifecycle[verify_count + 2]:-}" = 'notify strixd rules: rules-current v1 published' ] || assert_event "$name: success notification did not follow verification"
-    [ "${#lifecycle[@]}" -eq "$((verify_count + 3))" ] || assert_event "$name: unexpected lifecycle event count"
+    [ "${lifecycle[verify_count + 3]:-}" = 'notify strixd rules: rules-current v1 published' ] || assert_event "$name: success notification did not follow verification"
+    [ "${#lifecycle[@]}" -eq "$((verify_count + 4))" ] || assert_event "$name: unexpected lifecycle event count"
 }
 
 run_script_with_output() {  # run_script_with_output <stdout> <stderr> <env-assignment>...; assigns caller-local actual
@@ -370,7 +402,7 @@ assert_success_receipt_failure_is_receipt_stage() {
     grep -Fx 'notify strixd rules: receipt FAILED' "$EVENTS" >/dev/null || assert_event 'receipt-stage notification'
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'receipt-stage body'
     ! grep -F 'notify-body generate-rules.sh exited' "$EVENTS" || assert_event 'receipt-stage stale failure body'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'receipt-stage upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'receipt-stage upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'receipt-stage verifier count'
 }
 
@@ -382,7 +414,7 @@ assert_stdout_failure_is_receipt_stage() {
     assert_notification stdout-full receipt failed
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'stdout-full receipt-stage body'
     grep -F 'ERROR: failed to emit nightly receipt' "$test_root/log" >/dev/null || assert_event 'stdout-full fallback failure not diagnosed'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'stdout-full upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'stdout-full upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'stdout-full verifier count'
 }
 
@@ -468,7 +500,7 @@ assert_post_verify_preparation_is_receipt_stage() {
     assert_receipt receipt failed
     assert_notification post-verify-preparation receipt failed
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'post-verify preparation body'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'post-verify preparation upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'post-verify preparation upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'post-verify preparation verifier count'
 }
 
@@ -490,7 +522,7 @@ assert_success_receipt_signal_is_receipt_failure() {
     assert_receipt receipt failed
     assert_notification success-receipt-signal receipt failed
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'success receipt signal emitted conflicting receipts'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'success receipt signal upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'success receipt signal upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'success receipt signal verifier count'
 }
 
@@ -503,7 +535,7 @@ assert_receipt_stage_transition_defers_signal() {
     assert_notification receipt-boundary-signal receipt failed
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'receipt boundary reported completed verification as interrupted'
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'receipt boundary signal duplicated terminal receipt'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'receipt boundary signal upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'receipt boundary signal upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'receipt boundary signal verifier count'
 }
 
@@ -532,7 +564,7 @@ assert_verify_signal_reports_interruption() {
     assert_receipt verify failed
     assert_notification verify-signal verify failed
     grep -Fx 'notify-body rules-current v1 was published, but native verification was interrupted; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$EVENTS" >/dev/null || assert_event 'verify signal interruption wording'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 2 ] || assert_event 'verify signal upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'verify signal upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'verify signal verifier count'
 }
 
@@ -583,14 +615,14 @@ run_case() {  # run_case <name> <exit> <stage> <status> <verify-count> <uploads>
 # Positive, retry-boundary, and stage-error receipts. The last row proves the
 # documented publisher-only exception: a notification failure cannot mask a
 # successful publish or its receipt.
-run_case success 0 verify success 1 2 0 0 0 0
-run_case verify-retry 0 verify success 3 2 0 0 2 0
+run_case success 0 verify success 1 3 0 0 0 0
+run_case verify-retry 0 verify success 3 3 0 0 2 0
 run_case build-failure 41 build failed 0 0 1 0 0 0
 run_case publish-failure 42 publish failed 0 1 0 1 0 0
 grep -F 'notify-body generate-rules.sh exited 42 — rules-current may be partially updated.' "$EVENTS" >/dev/null || assert_event 'publish failure state wording'
-run_case verify-failure 1 verify failed 5 2 0 0 5 0
+run_case verify-failure 1 verify failed 5 3 0 0 5 0
 grep -Fx 'notify-body rules-current v1 was published, but native verification failed; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$EVENTS" >/dev/null || assert_event 'verify failure risk wording'
-run_case notify-failure-is-best-effort 0 verify success 1 2 0 0 0 1
+run_case notify-failure-is-best-effort 0 verify success 1 3 0 0 0 1
 assert_receipt_failure_preserves_stage_failure
 assert_release_probe_failure_is_publish
 assert_release_create_failure_is_publish_uncertain
@@ -638,4 +670,35 @@ assert_verify_signal_reports_interruption
 assert_success_notification_signal_stays_successful
 assert_failure_notification_signal_preserves_stage_exit
 assert_broken_receipt_notification_signal_preserves_stage_exit
+# The manifest signature is what makes a bundle installable: strixd refuses an
+# unsigned remote manifest. So an unset key or a failed signing run must stop
+# the run BEFORE any asset is published, rather than publish a bundle no client
+# would accept.
+assert_unsigned_publication_is_refused() {
+    local name="$1" actual
+    shift
+    run_script "$@"
+    [ "$actual" -eq 1 ] || assert_event "${name}: exit ${actual}, want 1"
+    assert_receipt build failed
+    [ "$(grep -Ec '^(create$|upload |verify )' "$EVENTS" || true)" -eq 0 ] \
+        || assert_event "${name}: an unsigned run reached publication"
+}
+
+assert_unsigned_publication_is_refused missing-signing-key MAILSTRIX_RULES_SIGNING_KEY=
+grep -F 'MAILSTRIX_RULES_SIGNING_KEY is not set' "$test_root/log" >/dev/null \
+    || assert_event 'missing signing key was not diagnosed'
+
+assert_unsigned_publication_is_refused signing-failure FAIL_SIGN=1
+grep -F 'signing the manifest failed' "$test_root/log" >/dev/null \
+    || assert_event 'signing failure was not diagnosed'
+
+# The key reaches the signer through the environment only; it must never appear
+# in a recorded command line.
+run_script
+grep -n 'fixture-not-a-signing-key' "$EVENTS" >/dev/null \
+    && assert_event 'the signing key appeared in a command line'
+grep -F 'go run ./cmd/rulessign -require-trusted' "$EVENTS" >/dev/null \
+    || assert_event 'the publisher did not invoke the signing helper'
+
+echo 'PASS: unsigned or failed-signing publication is refused before any asset upload'
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'
