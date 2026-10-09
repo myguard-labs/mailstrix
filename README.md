@@ -347,7 +347,14 @@ serving its bundle; it simply cannot be updated until the publisher signs.
 Publishing requires `MAILSTRIX_RULES_SIGNING_KEY` (an `ed25519` PKCS#8 PEM key)
 in the environment of `docker/generate-rules.sh`, which signs through
 `cmd/rulessign`. The key is never passed on a command line, and it must never be
-exposed to a `pull_request`-triggered CI job. The publisher signs with
+exposed to a `pull_request`-triggered CI job. The nightly cron run has no such
+environment, so when `MAILSTRIX_RULES_SIGNING_KEY` is unset the publisher falls
+back to `/etc/myguard-build-env`, where the operator installs the same key as a
+single base64 line `MAILSTRIX_RULES_SIGNING_KEY_B64=$(base64 -w0 key.pem)` in
+that root-owned mode-600 file (the PEM is multi-line; the build-env reader is
+not). An exported `MAILSTRIX_RULES_SIGNING_KEY` always wins. The publisher
+resolves and validates the key before building, so a missing or malformed one
+fails in seconds instead of after the rules build. The publisher signs with
 `-require-trusted`, so a key whose public half is not pinned in the binary
 aborts the run before any asset is uploaded rather than publishing a bundle
 every client would refuse. `rulessign -print-public` prints the base64 public

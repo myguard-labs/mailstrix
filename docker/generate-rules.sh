@@ -29,6 +29,17 @@
 # Required secret: MAILSTRIX_RULES_SIGNING_KEY — the ed25519 PKCS#8 PEM signing
 #   key, supplied through the ENVIRONMENT only (never argv). It must stay out of
 #   any pull_request-triggered CI job.
+#   The cron run has no such environment (the key is a GitHub Actions secret), so
+#   this script also resolves it from /etc/myguard-build-env. The PEM is
+#   multi-line and the build-env extractor is line-based, so build-env carries
+#   ONE base64 line instead:
+#     MAILSTRIX_RULES_SIGNING_KEY_B64=<base64 of the ed25519 PKCS#8 PEM>
+#   Install it as root, e.g.
+#     base64 -w0 key.pem   # paste the single line into /etc/myguard-build-env
+#   keeping the file root-owned and mode 600. An already-set
+#   MAILSTRIX_RULES_SIGNING_KEY wins and the build-env fallback is skipped, so
+#   CI and manual runs are unchanged. Neither value is ever printed, logged, or
+#   placed on a command line.
 # Env overrides: REPO (owner/name), TAG (default rules-current).
 #   Every documented rule-source build-arg is passed through to the Dockerfile
 #   when set in the environment: YARAFORGE_SET, YARAFORGE_URL, SIGBASE_REF,
@@ -197,6 +208,26 @@ die()  { note "ERROR: $*"; _FAILURE_EXIT=1; shout_fail "$*"; exit 1; }
 HERE="$(cd "$(dirname "$0")/.." && pwd)"   # canonical repo root for builds
 NOTIFY="${HERE}/../../tools/discord-notify.py"
 
+# The one reader of /etc/myguard-build-env. build-env is mode 600 root-only
+# (since 2026-07-26), so a plain `[ -r ]` test is FALSE for the cron user
+# (eilander) and the old sourcing block was skipped SILENTLY. Read it via
+# `sudo cat` (passwordless sudo on this host) and extract only the one requested
+# var, so an `export `-prefixed line still matches and no other secret enters the
+# environment. Tolerances: leading whitespace, an optional `export ` prefix,
+# surrounding single/double quotes, and a duplicate line (last one wins).
+#
+# The value is produced on stdout for command substitution ONLY: it must never be
+# passed as an argument, written to a file, or interpolated into a log line.
+# An unreadable or absent file yields the EMPTY value, never a run abort: under
+# `set -o pipefail` a bare `sudo … | sed` pipeline returns sudo's non-zero status,
+# so the assignment at the call site would trip the ERR trap and exit with the
+# generic "NOT updated" notice instead of the caller's actionable die message.
+build_env_value() {  # build_env_value <NAME>
+    { sudo -n cat /etc/myguard-build-env 2>/dev/null || true; } \
+        | sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1=//p" \
+        | tail -n1 | tr -d "\"'"
+}
+
 # gh needs a token with contents:write on the myguard-labs ORG to publish the
 # rolling release. The build user's default gh login (hosts.yml) carries the
 # personal GITHUB_API_TOKEN, which only has READ on org repos -> asset upload/
@@ -204,23 +235,55 @@ NOTIFY="${HERE}/../../tools/discord-notify.py"
 # org-owned fine-grained PAT lives in /etc/myguard-build-env as
 # GITHUB_ORG_LAB_TOKEN; export it as GH_TOKEN so every gh call here uses it
 # without disturbing the default login or GITHUB_API_TOKEN (lastversion's key).
-# build-env is mode 600 root-only (since 2026-07-26), so a plain `[ -r ]` test is
-# FALSE for the cron user (eilander) and the old sourcing block was skipped
-# SILENTLY -> GH_TOKEN unset -> gh fell back to the interactive hosts.yml login.
-# Read it via `sudo cat` (passwordless sudo on this host) and extract only the one
-# var, so an `export `-prefixed line still matches and no other secret enters the
-# environment. No token => die here: publishing is impossible without it, and
-# failing fast beats discovering it after a 55s docker build.
+# It is read through build_env_value above; see that helper for why `sudo cat` is
+# the only way the cron user sees the file. A silently skipped read left GH_TOKEN
+# unset and gh fell back to the interactive hosts.yml login. No token => die
+# here: publishing is impossible without it, and failing fast beats discovering
+# it after a 55s docker build.
 if [ -z "${GH_TOKEN:-}" ]; then
-    GH_TOKEN="$(sudo -n cat /etc/myguard-build-env 2>/dev/null \
-        | sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?GITHUB_ORG_LAB_TOKEN=//p' \
-        | tail -n1 | tr -d '"'"'"'' | tr -d "'")"
+    GH_TOKEN="$(build_env_value GITHUB_ORG_LAB_TOKEN)"
     export GH_TOKEN
 fi
 # Never let a stale/invalid ~/.config/gh/hosts.yml login serve as the fallback:
 # that token is currently invalid and 401s even on READS, which is what defeated
 # the version guard below. GH_TOKEN takes precedence over hosts.yml in gh.
 [ -n "${GH_TOKEN:-}" ] || die "GITHUB_ORG_LAB_TOKEN not readable from /etc/myguard-build-env; cannot publish"
+
+# Resolve the ed25519 manifest signing key HERE, beside GH_TOKEN, for exactly the
+# same reason: step 3b cannot publish without it, so failing now beats dying
+# after the ~55s docker build. cmd/rulessign reads MAILSTRIX_RULES_SIGNING_KEY
+# from the ENVIRONMENT, so an already-set value WINS and build-env is never
+# consulted — that is how CI and manual runs supply it today. The cron run has
+# no such environment, which is why the 00:00Z publication stopped updating the
+# rolling bundle: the key exists only as a GitHub Actions secret.
+#
+# build_env_value is line-based and a PEM is multi-line, so build-env stores one
+# base64 line (MAILSTRIX_RULES_SIGNING_KEY_B64) which is decoded in memory here.
+# Every diagnostic below names the VARIABLE and never any part of its value, so a
+# malformed key cannot be reconstructed from the cron log.
+if [ -z "${MAILSTRIX_RULES_SIGNING_KEY:-}" ]; then
+    command -v base64 >/dev/null 2>&1 \
+        || die "missing required tool: base64 (needed to decode MAILSTRIX_RULES_SIGNING_KEY_B64)"
+    # Strip whitespace: build_env_value keeps the line verbatim after `=`, and a
+    # stray trailing space would make `base64 -d` reject an otherwise valid key.
+    # Base64 of a PEM contains no whitespace, so this is lossless.
+    signing_key_b64="$(build_env_value MAILSTRIX_RULES_SIGNING_KEY_B64 | tr -d '[:space:]')"
+    [ -n "$signing_key_b64" ] \
+        || die "MAILSTRIX_RULES_SIGNING_KEY is not set and MAILSTRIX_RULES_SIGNING_KEY_B64 is not readable from /etc/myguard-build-env; refusing to publish an unsigned manifest that no client would install. Add one line MAILSTRIX_RULES_SIGNING_KEY_B64=\$(base64 -w0 key.pem) to /etc/myguard-build-env (root-owned, mode 600), or export MAILSTRIX_RULES_SIGNING_KEY for this run"
+    MAILSTRIX_RULES_SIGNING_KEY="$(printf '%s' "$signing_key_b64" | base64 -d 2>/dev/null)" \
+        || die "MAILSTRIX_RULES_SIGNING_KEY_B64 in /etc/myguard-build-env is not valid base64; re-install it as a single base64 -w0 line"
+    unset signing_key_b64
+    # Both PEM armour lines are required. base64 -d accepts any input whose
+    # length is a valid base64 length, so a truncated key can still decode — to a
+    # PEM PREFIX that keeps its BEGIN line and loses its END line. Checking both
+    # rejects that class here instead of after the docker build.
+    case "$MAILSTRIX_RULES_SIGNING_KEY" in
+        *"-----BEGIN "*"-----END "*) ;;
+        *) die "MAILSTRIX_RULES_SIGNING_KEY_B64 in /etc/myguard-build-env did not decode to a complete PEM (no '-----BEGIN ' / '-----END ' armour); re-install the ed25519 PKCS#8 PEM" ;;
+    esac
+    export MAILSTRIX_RULES_SIGNING_KEY
+fi
+
 WORK="$(mktemp -d)"
 
 for bin in docker gh jq sha256sum python3; do
@@ -364,6 +427,11 @@ fi
 # The key never touches argv: cmd/rulessign reads MAILSTRIX_RULES_SIGNING_KEY
 # from the environment. It signs the exact manifest bytes; nothing re-encodes
 # the JSON between signing and upload.
+#
+# Startup already resolved and validated the key (environment, else the
+# MAILSTRIX_RULES_SIGNING_KEY_B64 build-env fallback) and died if it could not,
+# so this refusal is defence in depth: it keeps the invariant local to the step
+# that depends on it rather than trusting a distant block.
 MANIFEST_SIG="${MANIFEST}.sig"
 [ -n "${MAILSTRIX_RULES_SIGNING_KEY:-}" ] \
     || die "MAILSTRIX_RULES_SIGNING_KEY is not set; refusing to publish an unsigned manifest that no client would install"

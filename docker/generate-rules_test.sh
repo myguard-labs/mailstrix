@@ -25,6 +25,14 @@ export GH_TOKEN=fixture-not-a-credential
 # Throwaway non-credential: the `go` stub only checks that the publisher passes
 # the key through the ENVIRONMENT and never on a command line.
 export MAILSTRIX_RULES_SIGNING_KEY=fixture-not-a-signing-key
+# The build-env fallback validates PEM armour, so its fixture must be PEM-SHAPED.
+# It is still an obvious non-credential: no key material, same sentinel body as
+# the environment fixture above, which the leak oracle greps for.
+FIXTURE_KEY_BODY='fixture-not-a-signing-key'
+FIXTURE_PEM="-----BEGIN PRIVATE KEY-----
+${FIXTURE_KEY_BODY}
+-----END PRIVATE KEY-----"
+FIXTURE_PEM_B64="$(printf '%s' "$FIXTURE_PEM" | base64 -w0)"
 
 cat >"$test_root/bin/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -106,6 +114,16 @@ cat >"$test_root/bin/go" <<'STUB'
 set -euo pipefail
 printf 'go %s\n' "$*" >> "$EVENTS"
 [ -n "${MAILSTRIX_RULES_SIGNING_KEY:-}" ] || { printf 'rulessign: key missing from the environment\n' >&2; exit 2; }
+# Record the SHAPE of the key the signer received — armour and line count — so a
+# test can prove the build-env fallback delivered a decoded multi-line PEM rather
+# than the raw base64 line. Shape only: the value itself is never emitted, which
+# is what the leak oracle depends on.
+case "$MAILSTRIX_RULES_SIGNING_KEY" in
+    *"-----BEGIN "*"-----END "*) key_armour=pem ;;
+    *) key_armour=raw ;;
+esac
+printf 'go-key %s %s\n' "$key_armour" \
+    "$(printf '%s\n' "$MAILSTRIX_RULES_SIGNING_KEY" | wc -l | tr -d '[:space:]')" >> "$EVENTS"
 case " $* " in
     *" -require-trusted "*) ;;
     *) printf 'rulessign: publisher must pass -require-trusted\n' >&2; exit 2 ;;
@@ -120,6 +138,28 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$out" ] || { printf 'rulessign: -out missing\n' >&2; exit 2; }
 printf 'ZmFrZS1zaWduYXR1cmUtZml4dHVyZQ==\n' > "$out"
+STUB
+
+# /etc/myguard-build-env is root-owned mode 600, so the publisher reads it with
+# passwordless `sudo -n cat`. The stub serves the file named by
+# BUILD_ENV_FIXTURE so each case controls the content, records that it was
+# consulted at all (the precedence oracle asserts ZERO reads when the key comes
+# from the environment), and fails exactly like the real file when the fixture is
+# absent or unreadable. It never echoes the content anywhere but stdout.
+cat >"$test_root/bin/sudo" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sudo-read %s\n' "$*" >> "$EVENTS"
+[ "${1:-}" = -n ] || { printf 'sudo: a password is required\n' >&2; exit 1; }
+[ "${2:-}" = cat ] && [ "${3:-}" = /etc/myguard-build-env ] || {
+    printf 'sudo: unexpected command: %s\n' "$*" >&2
+    exit 1
+}
+[ -n "${BUILD_ENV_FIXTURE:-}" ] && [ -r "$BUILD_ENV_FIXTURE" ] || {
+    printf 'cat: /etc/myguard-build-env: Permission denied\n' >&2
+    exit 1
+}
+exec cat "$BUILD_ENV_FIXTURE"
 STUB
 
 cat >"$test_root/bin/curl" <<'STUB'
@@ -746,5 +786,190 @@ assert_interrupted_publication 2 2 0 0
 # pair is NOT recoverable from the remote.
 assert_interrupted_publication 3 3 1 0
 
+# AUD-06c-f4: the 00:00Z cron run has no MAILSTRIX_RULES_SIGNING_KEY in its
+# environment (the key exists only as a GitHub Actions secret), so the publisher
+# resolves it from /etc/myguard-build-env. A PEM is multi-line and the build-env
+# reader is line-based, so build-env carries ONE base64 line,
+# MAILSTRIX_RULES_SIGNING_KEY_B64, decoded in memory before the docker build.
+
+write_build_env() {  # write_build_env <line>...; prints the fixture path
+    local path="$test_root/build-env"
+    : >"$path"
+    local line
+    for line in "$@"; do
+        printf '%s\n' "$line" >>"$path"
+    done
+    printf '%s' "$path"
+}
+
+# The hygiene oracle. Neither the decoded PEM body nor the base64 line may appear
+# in the cron log or in any recorded command line, for ANY outcome: a diagnostic
+# is allowed to name the variable, never to quote its value.
+assert_no_key_leak() {  # assert_no_key_leak <case> <sentinel>...
+    local name="$1" sentinel sink
+    shift
+    for sentinel in "$@"; do
+        for sink in "$EVENTS" "$test_root/log"; do
+            ! grep -F -- "$sentinel" "$sink" >/dev/null \
+                || assert_event "${name}: key material leaked into $(basename "$sink")"
+        done
+    done
+}
+
+# POSITIVE: no key in the environment, a valid base64 line in build-env. The run
+# must succeed with the SAME receipts, ordering and notification as the plain
+# `success` case, and the signer must receive the DECODED three-line PEM.
+assert_build_env_key_publishes() {  # assert_build_env_key_publishes <case> <line>...
+    local name="$1" fixture actual
+    shift
+    fixture="$(write_build_env "$@")"
+    run_script -u MAILSTRIX_RULES_SIGNING_KEY "BUILD_ENV_FIXTURE=$fixture"
+    [ "$actual" -eq 0 ] || { cat "$test_root/log" >&2; assert_event "${name}: exit ${actual}, want 0"; }
+    [ "$(grep -c '^sudo-read -n cat /etc/myguard-build-env$' "$EVENTS" || true)" -eq 1 ] \
+        || assert_event "${name}: build-env was not read exactly once"
+    # The discriminating assertion: `pem 3` can only come from a decoded PEM.
+    # Exporting the raw base64 instead yields `raw 1`.
+    grep -Fx 'go-key pem 3' "$EVENTS" >/dev/null \
+        || assert_event "${name}: the signer did not receive the decoded multi-line PEM"
+    assert_receipt verify success
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event "${name}: upload count"
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event "${name}: verifier count"
+    assert_verifier_contract "$name" 1
+    assert_notification "$name" verify success
+    assert_success_event_order "$name" 1
+    assert_success_notification_body "$name" 1
+    assert_no_key_leak "$name" "$FIXTURE_KEY_BODY" "$FIXTURE_PEM_B64"
+}
+
+assert_build_env_key_publishes build-env-key "MAILSTRIX_RULES_SIGNING_KEY_B64=${FIXTURE_PEM_B64}"
+# BOUNDARY: the same tolerances the GITHUB_ORG_LAB_TOKEN extractor has — an
+# `export ` prefix, leading/trailing whitespace, surrounding quotes, and a
+# duplicate line where the LAST one wins. The decoy value would not decode to a
+# PEM, so a first-match extractor fails the armour check instead of publishing.
+assert_build_env_key_publishes build-env-key-export \
+    "export MAILSTRIX_RULES_SIGNING_KEY_B64=${FIXTURE_PEM_B64}"
+assert_build_env_key_publishes build-env-key-quoted \
+    "  export  MAILSTRIX_RULES_SIGNING_KEY_B64=\"${FIXTURE_PEM_B64}\"  "
+assert_build_env_key_publishes build-env-key-single-quoted \
+    "MAILSTRIX_RULES_SIGNING_KEY_B64='${FIXTURE_PEM_B64}'"
+assert_build_env_key_publishes build-env-key-last-wins \
+    "MAILSTRIX_RULES_SIGNING_KEY_B64=$(printf 'decoy-not-a-pem' | base64 -w0)" \
+    "MAILSTRIX_RULES_SIGNING_KEY_B64=${FIXTURE_PEM_B64}" \
+    'GITHUB_ORG_LAB_TOKEN=fixture-not-a-credential'
+
+# ERROR/MALFORMED: every bad build-env state must fail fast — before the docker
+# build, any release mutation or the verifier — and must still produce exactly
+# one build-stage receipt and alert. The key is resolved at startup, so `count`
+# (the in-image rule check) must not appear either.
+assert_build_env_key_refused() {  # assert_build_env_key_refused <case> <diagnostic> [line]...
+    local name="$1" diagnostic="$2" fixture actual
+    shift 2
+    fixture="$(write_build_env "$@")"
+    run_script -u MAILSTRIX_RULES_SIGNING_KEY "BUILD_ENV_FIXTURE=$fixture"
+    [ "$actual" -eq 1 ] || assert_event "${name}: exit ${actual}, want 1"
+    assert_receipt build failed
+    assert_notification "$name" build failed
+    [ "$(grep -Ec '^(create$|upload |verify |count |go )' "$EVENTS" || true)" -eq 0 ] \
+        || assert_event "${name}: an unresolved signing key reached the build or publication"
+    grep -F -- "$diagnostic" "$test_root/log" >/dev/null \
+        || assert_event "${name}: missing diagnostic: ${diagnostic}"
+    assert_no_key_leak "$name" "$FIXTURE_KEY_BODY" "$FIXTURE_PEM_B64"
+}
+
+# Absent entirely: the actual production failure this fixes. The message must
+# name both variables and the file so the operator can act on the cron log alone.
+assert_build_env_key_refused build-env-key-absent \
+    'MAILSTRIX_RULES_SIGNING_KEY is not set and MAILSTRIX_RULES_SIGNING_KEY_B64 is not readable from /etc/myguard-build-env' \
+    'GITHUB_ORG_LAB_TOKEN=fixture-not-a-credential'
+# shellcheck disable=SC2016  # the $(...) is the literal install recipe in the diagnostic
+grep -F 'MAILSTRIX_RULES_SIGNING_KEY_B64=$(base64 -w0 key.pem)' "$test_root/log" >/dev/null \
+    || assert_event 'build-env-key-absent: diagnostic is not actionable'
+# Present but empty is indistinguishable from absent, and must not be silently
+# treated as a key.
+assert_build_env_key_refused build-env-key-empty \
+    'MAILSTRIX_RULES_SIGNING_KEY is not set and MAILSTRIX_RULES_SIGNING_KEY_B64 is not readable' \
+    'MAILSTRIX_RULES_SIGNING_KEY_B64='
+# Not base64 at all.
+assert_build_env_key_refused build-env-key-not-base64 \
+    'MAILSTRIX_RULES_SIGNING_KEY_B64 in /etc/myguard-build-env is not valid base64' \
+    'MAILSTRIX_RULES_SIGNING_KEY_B64=****not-base64****'
+# Truncated to a length base64 cannot decode.
+assert_build_env_key_refused build-env-key-truncated \
+    'MAILSTRIX_RULES_SIGNING_KEY_B64 in /etc/myguard-build-env is not valid base64' \
+    "MAILSTRIX_RULES_SIGNING_KEY_B64=${FIXTURE_PEM_B64:0:17}"
+# Valid base64 of something that is not a PEM.
+assert_build_env_key_refused build-env-key-not-pem \
+    "did not decode to a complete PEM (no '-----BEGIN ' / '-----END ' armour)" \
+    "MAILSTRIX_RULES_SIGNING_KEY_B64=$(printf 'not-a-pem-at-all' | base64 -w0)"
+# Valid base64 of a TRUNCATED PEM: it keeps the BEGIN line and loses the END
+# line, which is the class a BEGIN-only armour check accepts. base64 -d decodes
+# it happily, so only the armour pair rejects it.
+assert_build_env_key_refused build-env-key-headless-pem \
+    "did not decode to a complete PEM (no '-----BEGIN ' / '-----END ' armour)" \
+    "MAILSTRIX_RULES_SIGNING_KEY_B64=$(printf '%s' "${FIXTURE_PEM%-----END*}" | base64 -w0)"
+
+# PRECEDENCE: an environment-provided key is used VERBATIM and build-env is never
+# consulted. That is how CI and manual runs work, so the fallback must not be
+# able to override or re-validate them — note the environment fixture is NOT
+# PEM-shaped and still publishes.
+assert_environment_key_wins() {
+    local fixture actual
+    fixture="$(write_build_env "MAILSTRIX_RULES_SIGNING_KEY_B64=${FIXTURE_PEM_B64}")"
+    run_script "BUILD_ENV_FIXTURE=$fixture"
+    [ "$actual" -eq 0 ] || { cat "$test_root/log" >&2; assert_event "environment-key-wins: exit ${actual}, want 0"; }
+    [ "$(grep -c '^sudo-read ' "$EVENTS" || true)" -eq 0 ] \
+        || assert_event 'environment-key-wins: build-env was consulted despite an environment key'
+    grep -Fx 'go-key raw 1' "$EVENTS" >/dev/null \
+        || assert_event 'environment-key-wins: the environment key was not passed through verbatim'
+    assert_receipt verify success
+    assert_no_key_leak environment-key-wins "$FIXTURE_KEY_BODY" "$FIXTURE_PEM_B64"
+}
+assert_environment_key_wins
+
+# GH_TOKEN now shares the single build-env extractor, so its behaviour needs its
+# own coverage: the same tolerances must still resolve it, and a build-env with
+# no token line must still die before the build.
+assert_build_env_token_resolves() {
+    local fixture actual
+    fixture="$(write_build_env '  export GITHUB_ORG_LAB_TOKEN="fixture-not-a-credential"' \
+        "MAILSTRIX_RULES_SIGNING_KEY_B64=${FIXTURE_PEM_B64}")"
+    run_script -u GH_TOKEN -u MAILSTRIX_RULES_SIGNING_KEY "BUILD_ENV_FIXTURE=$fixture"
+    [ "$actual" -eq 0 ] || { cat "$test_root/log" >&2; assert_event "build-env-token: exit ${actual}, want 0"; }
+    [ "$(grep -c '^sudo-read -n cat /etc/myguard-build-env$' "$EVENTS" || true)" -eq 2 ] \
+        || assert_event 'build-env-token: expected one build-env read per secret'
+    assert_receipt verify success
+    assert_no_key_leak build-env-token "$FIXTURE_KEY_BODY" "$FIXTURE_PEM_B64" fixture-not-a-credential
+}
+assert_build_env_token_resolves
+
+assert_missing_build_env_token_dies() {
+    local fixture actual
+    fixture="$(write_build_env "MAILSTRIX_RULES_SIGNING_KEY_B64=${FIXTURE_PEM_B64}")"
+    run_script -u GH_TOKEN "BUILD_ENV_FIXTURE=$fixture"
+    [ "$actual" -eq 1 ] || assert_event "missing-build-env-token: exit ${actual}, want 1"
+    assert_receipt build failed
+    assert_notification missing-build-env-token build failed
+    grep -F 'GITHUB_ORG_LAB_TOKEN not readable from /etc/myguard-build-env' "$test_root/log" >/dev/null \
+        || assert_event 'missing-build-env-token: diagnostic changed'
+    [ "$(grep -Ec '^(create$|upload |verify |count |go )' "$EVENTS" || true)" -eq 0 ] \
+        || assert_event 'missing-build-env-token: a tokenless run reached the build or publication'
+}
+assert_missing_build_env_token_dies
+
+# An unreadable/absent build-env must behave exactly like a missing value rather
+# than aborting on sudo's non-zero exit inside the extractor pipeline.
+assert_unreadable_build_env_is_a_missing_value() {
+    local actual
+    run_script -u MAILSTRIX_RULES_SIGNING_KEY
+    [ "$actual" -eq 1 ] || assert_event "unreadable-build-env: exit ${actual}, want 1"
+    assert_receipt build failed
+    grep -F 'MAILSTRIX_RULES_SIGNING_KEY is not set and MAILSTRIX_RULES_SIGNING_KEY_B64 is not readable' "$test_root/log" >/dev/null \
+        || assert_event 'unreadable-build-env: diagnostic changed'
+    [ "$(grep -c '^sudo-read ' "$EVENTS" || true)" -eq 1 ] \
+        || assert_event 'unreadable-build-env: build-env read count'
+}
+assert_unreadable_build_env_is_a_missing_value
+
+echo 'PASS: the signing key resolves from the environment or the build-env base64 fallback without leaking'
 echo 'PASS: unsigned or failed-signing publication is refused before any asset upload'
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'
