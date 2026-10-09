@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -14,13 +15,21 @@ import (
 // 32-byte ed25519 public key. Keys() panics on a bad entry, so this test is
 // what keeps that panic from ever reaching a release.
 func TestKeysAreWellFormed(t *testing.T) {
-	const pinned = "94jKmUKdYEua82fm1WoQsoHQNLTvjdtyz5MueBwhl7w="
 	encoded := KeysBase64()
 	if len(encoded) == 0 {
 		t.Fatal("the pin list is empty: the binary would trust nothing")
 	}
-	if encoded[0] != pinned {
-		t.Errorf("first pinned key = %q, want the decided publication key %q", encoded[0], pinned)
+	// A rotation is a deliberate act, so it updates wantPinned in the same
+	// commit as keysB64. That makes any drift -- a dropped key, an extra key,
+	// or a reordering -- fail here instead of shipping silently.
+	if len(encoded) != len(wantPinned) {
+		t.Fatalf("pin list has %d entries, want %d (%v); update wantPinned in the same commit as keysB64",
+			len(encoded), len(wantPinned), encoded)
+	}
+	for i, want := range wantPinned {
+		if encoded[i] != want {
+			t.Errorf("pinned key %d (trust order) = %q, want %q", i, encoded[i], want)
+		}
 	}
 	keys := Keys()
 	if len(keys) != len(encoded) {
@@ -124,5 +133,91 @@ func TestMustParseAllPanicsOnCorruptPin(t *testing.T) {
 func TestMustParseAllEmptyListIsNotAPanic(t *testing.T) {
 	if got := MustParseAll(nil); len(got) != 0 {
 		t.Fatalf("MustParseAll(nil) = %d keys, want 0", len(got))
+	}
+}
+
+// wantPinned is the shipped pin list this package must contain, in trust order.
+// These are PUBLIC keys; no private half of either is in this repository.
+var wantPinned = []string{
+	// Retired: never signed a published bundle and cannot sign one. Kept until
+	// a later release, so removing it early fails TestRetiredKeyIsStillPinned.
+	retiredPinB64,
+	// Pre-published successor: the key publication actually signs with.
+	successorPinB64,
+}
+
+const (
+	retiredPinB64   = "94jKmUKdYEua82fm1WoQsoHQNLTvjdtyz5MueBwhl7w="
+	successorPinB64 = "Iyo+xDtE5R1bpghpOT6p7JUc/gR94KSAqohsYp4Zfas="
+)
+
+// TestSuccessorKeyIsPinned is the point of the rotation: the successor must be
+// compiled in BEFORE publication switches to it, or every already-deployed
+// binary rejects the first bundle signed with the new key. Silently dropping
+// the entry from keysB64 fails here.
+func TestSuccessorKeyIsPinned(t *testing.T) {
+	encoded := KeysBase64()
+	if !slices.Contains(encoded, successorPinB64) {
+		t.Fatalf("the successor signing key is not pinned; deployed binaries would reject bundles signed with it (pin = %v)", encoded)
+	}
+	k, err := Parse(successorPinB64)
+	if err != nil {
+		t.Fatalf("the successor key does not parse: %v", err)
+	}
+	if len(k) != ed25519.PublicKeySize {
+		t.Errorf("the successor key is %d bytes, want %d", len(k), ed25519.PublicKeySize)
+	}
+	// Keys() must expose it too: KeysBase64 and Keys must not disagree.
+	if !slices.ContainsFunc(Keys(), func(p ed25519.PublicKey) bool { return p.Equal(k) }) {
+		t.Error("the successor key is in KeysBase64 but not in Keys()")
+	}
+}
+
+// TestRetiredKeyIsStillPinned: the retired entry stays until a later release
+// drops it deliberately. Removing it in the same change that adds the successor
+// would be an undeclared trust narrowing, so it fails here.
+func TestRetiredKeyIsStillPinned(t *testing.T) {
+	encoded := KeysBase64()
+	if !slices.Contains(encoded, retiredPinB64) {
+		t.Fatalf("the retired signing key was dropped early; retire it in its own release (pin = %v)", encoded)
+	}
+	k, err := Parse(retiredPinB64)
+	if err != nil {
+		t.Fatalf("the retired key does not parse: %v", err)
+	}
+	if !slices.ContainsFunc(Keys(), func(p ed25519.PublicKey) bool { return p.Equal(k) }) {
+		t.Error("the retired key is in KeysBase64 but not in Keys()")
+	}
+}
+
+// TestPinIsInTrustOrder: order is load-bearing (callers try keys in order and
+// internal/mailstrix asserts the pin occupies the leading trust positions), so
+// a swap must fail even though the set would be unchanged.
+func TestPinIsInTrustOrder(t *testing.T) {
+	encoded := KeysBase64()
+	retired := slices.Index(encoded, retiredPinB64)
+	successor := slices.Index(encoded, successorPinB64)
+	if retired < 0 || successor < 0 {
+		t.Fatalf("both keys must be pinned; got retired at %d, successor at %d", retired, successor)
+	}
+	if retired >= successor {
+		t.Errorf("retired key is at %d and successor at %d; the retired key must come first", retired, successor)
+	}
+}
+
+// TestPinHoldsNoTestKey is the negative control for the shipped list: the
+// deterministic fixture keys used elsewhere in this repo must never appear in
+// it. internal/mailstrix TestEmbeddedKeysComeFromThePinAndHoldNoTestKey makes
+// the same guarantee at the trust floor; this keeps it true in the leaf package
+// that defines the pin, where a bad paste would land first.
+func TestPinHoldsNoTestKey(t *testing.T) {
+	for _, seed := range []byte{0x11, 0x22, 0x33, 0x44} {
+		priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+		// An ed25519 private key is seed||public, so the trailing 32 bytes are
+		// the public key.
+		pub := ed25519.PublicKey(priv[ed25519.SeedSize:])
+		if slices.Contains(KeysBase64(), base64.StdEncoding.EncodeToString(pub)) {
+			t.Errorf("a TEST key (seed %#x) is in the shipped pin; a test key must never ship", seed)
+		}
 	}
 }

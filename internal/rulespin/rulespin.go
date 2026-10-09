@@ -17,21 +17,25 @@ import (
 	"strings"
 )
 
-// keysB64 pins the rules-manifest signing public keys, in trust order: the key
-// currently used to publish, then the pre-published successor used for
-// rotation.
+// keysB64 pins the rules-manifest signing public keys, in trust order. Trust is
+// additive: a binary accepts a bundle signed by ANY entry, which is what lets a
+// successor key ship before publication switches to it.
 //
-// Rotation procedure: append the successor's public key as a second entry and
-// ship that build FIRST, so deployed binaries already trust the new key before
+// Rotation procedure: append the successor's public key as a new entry and ship
+// that build FIRST, so deployed binaries already trust the new key before
 // publication switches to it. Once publication has switched, the retired key is
-// dropped in a later release. Nothing assumes the list has exactly one entry,
-// so adding the successor is a one-line change.
+// dropped in a later release. Nothing assumes a particular list length.
 //
 // Values are the raw 32-byte ed25519 public key, base64 (standard alphabet).
+// Public keys only: no private key, PEM or seed ever belongs in this repo.
 var keysB64 = []string{
-	// current (published 2026-10-09)
+	// Retired, and never actually used: this key has signed no published
+	// bundle, and its private half exists only in a write-only CI secret that
+	// no workflow reads, so it cannot sign one. Kept until a later release.
 	"94jKmUKdYEua82fm1WoQsoHQNLTvjdtyz5MueBwhl7w=",
-	// next (rotation slot): add the successor public key here.
+	// Successor (rotation slot): the key publication actually signs with. Its
+	// private half is held on the build host and is never in this repo.
+	"Iyo+xDtE5R1bpghpOT6p7JUc/gR94KSAqohsYp4Zfas=",
 }
 
 // ErrKey reports a signing public key that is not a usable ed25519 key.
