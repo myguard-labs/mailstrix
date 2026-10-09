@@ -17,7 +17,7 @@
 //	  rulessign -manifest compiled.yac.manifest.json -out compiled.yac.manifest.json.sig
 //
 //	# Print the base64 public key, to confirm it matches the pin compiled
-//	# into the binary (internal/mailstrix/rulessig.go rulesSigningKeysB64):
+//	# into the binary (internal/rulespin keysB64):
 //	MAILSTRIX_RULES_SIGNING_KEY="$(cat key.pem)" rulessign -print-public
 //
 // This is a host-side release tool. It is pure Go stdlib and links no libyara.

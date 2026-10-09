@@ -73,6 +73,79 @@ def called_workflows(document):
     return called
 
 
+def mentions_secret(text):
+    """Whether ``text`` names the signing secret, in any letter case.
+
+    GitHub matches secret names case-insensitively, so
+    ``secrets.mailstrix_rules_signing_key`` resolves to the same value as the
+    uppercase spelling. A case-sensitive ``SECRET in text`` search would let a
+    lowercase reference slip past the pull-request exclusion checks.
+    """
+    return SECRET.casefold() in text.casefold()
+
+
+# Every valid GitHub spelling of the signing-key secret expression. GitHub
+# accepts the dotted and the bracket property form, tolerates arbitrary
+# whitespace inside ``${{ }}``, and matches context names case-insensitively,
+# so a narrow literal search for "${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}"
+# would miss a workflow that leaks the key under any other spelling.
+SECRET_EXPRESSION = re.compile(
+    r"\$\{\{\s*secrets\s*"
+    r"(?:\.\s*" + SECRET + r"\b"
+    r"|\[\s*(?P<quote>['\"])" + SECRET + r"(?P=quote)\s*\])"
+    r"\s*\}\}",
+    re.IGNORECASE,
+)
+
+
+def run_bodies(document):
+    """Every ``run:`` scalar in a workflow document, at any nesting depth.
+
+    Read from the PARSED document rather than matching line prefixes: a
+    ``run: |`` block's own lines do not start with ``run:``, so a prefix
+    heuristic accepts the very thing this guard exists to forbid --
+    ``go run ./cmd/rulessign ... "${{ secrets.<key> }}"`` indented inside a
+    block scalar. Walking the document reaches ``run`` wherever it is legal:
+    a job step, a composite action's ``steps``, or any nested mapping.
+    """
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "run" and isinstance(value, str):
+                    found.append(value)
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(document)
+    return found
+
+
+def argv_leaks(document):
+    """``run:`` bodies that interpolate the signing-key secret into a command.
+
+    Returns the offending lines, so a failure names them instead of dumping
+    the workflow. An ``env:`` mapping value is the sanctioned route and is
+    deliberately NOT reported: only a ``run`` body puts the key in argv.
+    """
+    leaks = []
+    for body in run_bodies(document):
+        if not SECRET_EXPRESSION.search(body):
+            continue
+        lines = [
+            line.strip()
+            for line in body.splitlines()
+            if SECRET_EXPRESSION.search(line)
+        ]
+        # A ``${{ ... }}`` expression may itself be split across lines; fall
+        # back to the collapsed body so such a leak is still reported.
+        leaks.extend(lines or [" ".join(body.split())[:160]])
+    return leaks
+
+
 def pr_reachable(found):
     """Names of workflows reachable from a pull-request event, transitively."""
     reachable = {
@@ -115,7 +188,7 @@ class RulesSigningSecretTest(unittest.TestCase):
                     for number, line in enumerate(
                         self.found[name][0].splitlines(), start=1
                     )
-                    if SECRET in line
+                    if mentions_secret(line)
                 ]
                 self.assertEqual(
                     hits,
@@ -130,23 +203,32 @@ class RulesSigningSecretTest(unittest.TestCase):
             if "pull_request_target" in triggers(doc):
                 with self.subTest(workflow=name):
                     self.assertFalse(
-                        SECRET in text, f"{name} exposes {SECRET}"
+                        mentions_secret(text), f"{name} exposes {SECRET}"
                     )
+
+    def test_run_bodies_are_discovered(self):
+        """Guard the guard: the ``run:`` walker must find real shell steps.
+
+        Without this, a broken walker would make the argv assertion below
+        pass vacuously over an empty list of run bodies.
+        """
+        bodies = [
+            body
+            for _name, (_text, doc) in self.found.items()
+            for body in run_bodies(doc)
+        ]
+        self.assertTrue(bodies, "no run: bodies were discovered in any workflow")
 
     def test_signing_key_is_read_from_the_environment_only(self):
         """Any workflow that does use the secret must not put it in argv."""
-        for name, (text, _doc) in sorted(self.found.items()):
-            if SECRET not in text:
-                continue
+        for name, (_text, doc) in sorted(self.found.items()):
             with self.subTest(workflow=name):
-                for line in text.splitlines():
-                    if f"secrets.{SECRET}" not in line:
-                        continue
-                    stripped = line.strip()
-                    self.assertFalse(
-                        stripped.startswith("run:") or " rulessign" in stripped,
-                        f"{name} passes {SECRET} on a command line: {stripped}",
-                    )
+                self.assertEqual(
+                    argv_leaks(doc),
+                    [],
+                    f"{name} passes {SECRET} on a command line; the signing "
+                    f"key may only reach a step through an env: mapping",
+                )
 
     def test_publisher_signs_and_reads_the_key_from_the_environment(self):
         """The real publisher must sign, and must not take the key via argv."""
@@ -216,6 +298,229 @@ class CalledWorkflowsTest(unittest.TestCase):
             "  c:\n    runs-on: ubuntu-latest\n"
         )
         self.assertEqual(self.parse(body), {"ci.yml", "build-binaries.yaml"})
+
+
+class ArgvLeakTest(unittest.TestCase):
+    """The argv guard must refuse every spelling that reaches a command line.
+
+    The earlier version of this check tested ``line.strip().startswith("run:")``
+    or ``" rulessign" in line``, which ACCEPTED
+    ``go run ./cmd/rulessign -manifest m.json "${{ secrets.<key> }}"`` indented
+    inside a ``run: |`` block: the line does not start with ``run:`` and
+    ``./cmd/rulessign`` has no space before ``rulessign``. Each case below is a
+    synthetic fixture; none of them edits a real workflow.
+    """
+
+    def leaks(self, body):
+        return argv_leaks(yaml.safe_load(body))
+
+    def workflow(self, command):
+        """A minimal workflow whose single step runs ``command``."""
+        return (
+            "on: push\n"
+            "jobs:\n"
+            "  publish:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: |\n"
+            "          set -euo pipefail\n"
+            f"          {command}\n"
+        )
+
+    def test_refuses_the_exact_block_scalar_bypass(self):
+        """The literal line the old prefix heuristic accepted."""
+        command = (
+            'go run ./cmd/rulessign -manifest m.json '
+            '"${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}"'
+        )
+        self.assertEqual(
+            self.leaks(self.workflow(command)),
+            [command],
+            "the block-scalar argv bypass must be refused",
+        )
+
+    def test_refuses_every_expression_spelling(self):
+        for name, expression in {
+            "dotted": "${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}",
+            "no spaces": "${{secrets.MAILSTRIX_RULES_SIGNING_KEY}}",
+            "wide spaces": "${{   secrets.MAILSTRIX_RULES_SIGNING_KEY   }}",
+            "single-quoted bracket": (
+                "${{ secrets['MAILSTRIX_RULES_SIGNING_KEY'] }}"
+            ),
+            "double-quoted bracket": (
+                '${{ secrets["MAILSTRIX_RULES_SIGNING_KEY"] }}'
+            ),
+            "bracket no spaces": (
+                "${{secrets['MAILSTRIX_RULES_SIGNING_KEY']}}"
+            ),
+            "lowercase context": "${{ secrets.mailstrix_rules_signing_key }}",
+        }.items():
+            with self.subTest(spelling=name):
+                command = f'rulessign -key "{expression}"'
+                self.assertEqual(
+                    self.leaks(self.workflow(command)),
+                    [command],
+                    f"the {name} spelling escaped the argv guard",
+                )
+
+    def test_refuses_an_expression_split_across_lines(self):
+        body = (
+            "on: push\n"
+            "jobs:\n"
+            "  publish:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: |\n"
+            "          rulessign -key \"${{\n"
+            "            secrets.MAILSTRIX_RULES_SIGNING_KEY }}\"\n"
+        )
+        self.assertNotEqual(
+            self.leaks(body), [], "a multi-line expression must still be caught"
+        )
+
+    def test_refuses_a_leak_in_a_composite_or_nested_step(self):
+        for name, body in {
+            "composite action": (
+                "runs:\n"
+                "  using: composite\n"
+                "  steps:\n"
+                "    - run: rulessign "
+                '"${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}"\n'
+                "      shell: bash\n"
+            ),
+            "matrix job step": (
+                "on: push\n"
+                "jobs:\n"
+                "  a:\n"
+                "    strategy:\n"
+                "      matrix:\n"
+                "        os: [ubuntu-latest]\n"
+                "    steps:\n"
+                "      - run: echo "
+                '"${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}"\n'
+            ),
+        }.items():
+            with self.subTest(shape=name):
+                self.assertNotEqual(
+                    self.leaks(body), [], f"a leak in a {name} escaped the guard"
+                )
+
+    def test_allows_the_secret_in_an_env_mapping(self):
+        """The sanctioned route: the key reaches the tool through env:."""
+        for name, body in {
+            "step env": (
+                "on: push\n"
+                "jobs:\n"
+                "  publish:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: rulessign -manifest m.json -out m.json.sig\n"
+                "        env:\n"
+                "          MAILSTRIX_RULES_SIGNING_KEY: "
+                "${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}\n"
+            ),
+            "job env": (
+                "on: push\n"
+                "jobs:\n"
+                "  publish:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      MAILSTRIX_RULES_SIGNING_KEY: "
+                "${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}\n"
+                "    steps:\n"
+                "      - run: rulessign -manifest m.json -out m.json.sig\n"
+            ),
+            "bracket form in env": (
+                "on: push\n"
+                "jobs:\n"
+                "  publish:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      MAILSTRIX_RULES_SIGNING_KEY: "
+                "${{ secrets['MAILSTRIX_RULES_SIGNING_KEY'] }}\n"
+                "    steps:\n"
+                "      - run: rulessign -manifest m.json -out m.json.sig\n"
+            ),
+        }.items():
+            with self.subTest(route=name):
+                self.assertEqual(
+                    self.leaks(body), [], f"the {name} route must stay legal"
+                )
+
+    def test_allows_unrelated_secrets_and_similar_names(self):
+        for name, expression in {
+            "other secret": "${{ secrets.GITHUB_TOKEN }}",
+            "longer name": "${{ secrets.MAILSTRIX_RULES_SIGNING_KEY_OLD }}",
+            "not a secret context": "${{ env.MAILSTRIX_RULES_SIGNING_KEY }}",
+            "plain shell variable": "$MAILSTRIX_RULES_SIGNING_KEY",
+        }.items():
+            with self.subTest(expression=name):
+                self.assertEqual(
+                    self.leaks(self.workflow(f'rulessign -key "{expression}"')),
+                    [],
+                    f"{name} must not be reported as a signing-key leak",
+                )
+
+    def test_run_bodies_walks_every_nesting_shape(self):
+        body = (
+            "on: push\n"
+            "jobs:\n"
+            "  a:\n"
+            "    steps:\n"
+            "      - run: one\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - run: two\n"
+            "  b:\n"
+            "    steps:\n"
+            "      - run: three\n"
+        )
+        self.assertEqual(
+            sorted(run_bodies(yaml.safe_load(body))), ["one", "three", "two"]
+        )
+
+    def test_run_bodies_ignores_non_scalar_and_absent_run(self):
+        for name, body in {
+            "run is a mapping": "jobs:\n  a:\n    steps:\n      - run:\n          x: y\n",
+            "run is a list": "jobs:\n  a:\n    steps:\n      - run:\n          - x\n",
+            "no run anywhere": "on: push\njobs:\n  a:\n    uses: ./.github/workflows/ci.yml\n",
+            "empty document": "{}\n",
+        }.items():
+            with self.subTest(shape=name):
+                self.assertEqual(
+                    run_bodies(yaml.safe_load(body)), [], f"{name} was wrongly collected"
+                )
+
+
+class MentionsSecretTest(unittest.TestCase):
+    """The pull-request exclusion checks must be case-insensitive.
+
+    GitHub resolves ``secrets.mailstrix_rules_signing_key`` to the same value
+    as the uppercase spelling, so a case-sensitive substring search would let a
+    pull_request_target workflow request the signing key undetected.
+    """
+
+    def test_matches_every_letter_case(self):
+        for name, text in {
+            "upper": "env:\n  K: ${{ secrets.MAILSTRIX_RULES_SIGNING_KEY }}\n",
+            "lower": "env:\n  K: ${{ secrets.mailstrix_rules_signing_key }}\n",
+            "mixed": "env:\n  K: ${{ secrets.Mailstrix_Rules_Signing_Key }}\n",
+            "bracket lower": "env:\n  K: ${{ secrets['mailstrix_rules_signing_key'] }}\n",
+        }.items():
+            with self.subTest(case=name):
+                self.assertTrue(
+                    mentions_secret(text), f"the {name} spelling was missed"
+                )
+
+    def test_ignores_unrelated_text(self):
+        for name, text in {
+            "other secret": "env:\n  K: ${{ secrets.GITHUB_TOKEN }}\n",
+            "empty": "",
+            "partial name": "env:\n  K: ${{ secrets.MAILSTRIX_RULES }}\n",
+        }.items():
+            with self.subTest(case=name):
+                self.assertFalse(
+                    mentions_secret(text), f"{name} was wrongly matched"
+                )
 
 
 if __name__ == "__main__":
