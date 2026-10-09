@@ -85,6 +85,14 @@ case "${2:-}" in
             kill -TERM "$(cat "${EVENTS}.signal-target")"
         fi
         [ "${FAIL_PUBLISH:-0}" -eq 0 ] || exit 42
+        # FAIL_PUBLISH_AT=<n> fails only the nth upload; the failed upload does
+        # not reach the simulated remote (${EVENTS}.remote), a successful one does.
+        n=$(( $(cat "${EVENTS}.upload-n" 2>/dev/null || echo 0) + 1 ))
+        printf '%s\n' "$n" >"${EVENTS}.upload-n"
+        [ "${FAIL_PUBLISH_AT:-0}" -ne "$n" ] || exit 42
+        if [ -d "${EVENTS}.remote" ]; then
+            cp "${!#}" "${EVENTS}.remote/$(basename "${!#}")"
+        fi
         ;;
 esac
 STUB
@@ -336,7 +344,7 @@ run_script_with_output() {  # run_script_with_output <stdout> <stderr> <env-assi
     local stdout="$1" stderr="$2" runner_pid
     shift 2
     : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target" "${EVENTS}.manifest"
+    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target" "${EVENTS}.manifest" "${EVENTS}.upload-n"
     (
         if [ "$stdout" = "$stderr" ]; then
             exec >"$stdout" 2>&1
@@ -699,6 +707,44 @@ grep -n 'fixture-not-a-signing-key' "$EVENTS" >/dev/null \
     && assert_event 'the signing key appeared in a command line'
 grep -F 'go run ./cmd/rulessign -require-trusted' "$EVENTS" >/dev/null \
     || assert_event 'the publisher did not invoke the signing helper'
+
+# AUD-06c-f2: the rolling release has no atomic activation (assets are clobbered
+# one by one), so an interrupted publication cannot leave the previously
+# published pair verifiable: the first clobbered asset already breaks it. This
+# pins the real behaviour: the run fails closed as publish/uncertain, the
+# verifier never runs, and the remote state at the interruption is exactly the
+# documented signature-first window (never a new manifest with an old signature).
+assert_interrupted_publication() {  # assert_interrupted_publication <fail-at> <uploads> <sig-new:0|1> <manifest-new:0|1>
+    local at="$1" uploads="$2" sig_new="$3" man_new="$4" actual remote="${EVENTS}.remote"
+    rm -rf "${remote:?}"
+    mkdir "$remote"
+    printf 'OLD-SIG\n' >"$remote/compiled.yac.manifest.json.sig"
+    printf 'OLD-MANIFEST\n' >"$remote/compiled.yac.manifest.json"
+    run_script FAIL_PUBLISH_AT="$at"
+    [ "$actual" -eq 42 ] || assert_event "interrupted@$at: exit $actual, want 42"
+    assert_receipt publish failed
+    assert_notification "interrupted@$at" publish failed
+    grep -F 'notify-body generate-rules.sh exited 42 — rules-current may be partially updated.' "$EVENTS" >/dev/null || assert_event "interrupted@$at: uncertain state wording"
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq "$uploads" ] || assert_event "interrupted@$at: upload count"
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 0 ] || assert_event "interrupted@$at: verifier ran"
+    if [ "$sig_new" -eq 1 ]; then
+        ! grep -Fx OLD-SIG "$remote/compiled.yac.manifest.json.sig" >/dev/null || assert_event "interrupted@$at: signature was not replaced"
+    else
+        grep -Fx OLD-SIG "$remote/compiled.yac.manifest.json.sig" >/dev/null || assert_event "interrupted@$at: signature replaced too early"
+    fi
+    if [ "$man_new" -eq 1 ]; then
+        ! grep -Fx OLD-MANIFEST "$remote/compiled.yac.manifest.json" >/dev/null || assert_event "interrupted@$at: manifest was not replaced"
+    else
+        grep -Fx OLD-MANIFEST "$remote/compiled.yac.manifest.json" >/dev/null || assert_event "interrupted@$at: manifest replaced too early"
+    fi
+    rm -rf "${remote:?}"
+}
+# Failure at the 2nd (signature) upload: only the bundle was replaced.
+assert_interrupted_publication 2 2 0 0
+# Failure at the 3rd (manifest) upload: new signature over the old manifest, so
+# the pair does not verify and a consumer refuses (fail closed); the previous
+# pair is NOT recoverable from the remote.
+assert_interrupted_publication 3 3 1 0
 
 echo 'PASS: unsigned or failed-signing publication is refused before any asset upload'
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'
