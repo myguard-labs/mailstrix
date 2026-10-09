@@ -603,7 +603,7 @@ func TestListenOnUnixSocketAndChmod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listenOn: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	fi, err := os.Stat(sock)
 	if err != nil {
@@ -622,7 +622,7 @@ func TestListenOnRefusesLiveUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -828,7 +828,7 @@ func TestLimitListenerCapsConcurrentConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer base.Close()
+	defer func() { _ = base.Close() }()
 
 	ln := limitListener(base, 2)
 	accepted := make(chan net.Conn, 8)
@@ -940,7 +940,7 @@ func TestServerListenerAppliesTheConnectionCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer base.Close()
+	defer func() { _ = base.Close() }()
 
 	cfg := baseCfg("http://127.0.0.1:1")
 	cfg.maxConns = 3
@@ -958,7 +958,7 @@ func TestEffectiveCapReportsZeroForAnUncappedListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer base.Close()
+	defer func() { _ = base.Close() }()
 	if got := effectiveCap(base); got != 0 {
 		t.Fatalf("effectiveCap(uncapped) = %d, want 0", got)
 	}

@@ -410,7 +410,7 @@ func TestCredentialMaximumLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer accepted.Close()
+	defer func() { _ = accepted.Close() }()
 	status, err := accepted.Status(context.Background(), owned())
 	if err != nil || status != "pending" || calls.Load() != 1 {
 		t.Fatalf("4096-byte token rejected: status=%q calls=%d err=%v", status, calls.Load(), err)
@@ -428,7 +428,7 @@ func TestCredentialProviderDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cooperative.Close()
+	defer func() { _ = cooperative.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	result, err := cooperative.Submit(ctx, source("x"), 1, marker)
@@ -1130,7 +1130,7 @@ func TestPinnedDestinationWithoutDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pinned.Close()
+	defer func() { _ = pinned.Close() }()
 	status, err := pinned.Status(context.Background(), owned())
 	if err != nil || status != "pending" {
 		t.Fatalf("pinned destination failed: %v", err)
@@ -1151,7 +1151,7 @@ func TestConnectionFailureIsUncertain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer failed.Close()
+	defer func() { _ = failed.Close() }()
 	result, err := failed.Submit(context.Background(), source("x"), 1, marker)
 	assertCode(t, err, Transport)
 	if result.NoBytesSent || !result.UnknownDebt {

@@ -64,7 +64,7 @@ func bridgeRequest(t *testing.T, cfg CallbackConfig, e callbackEvent, body []byt
 	// Independent bridge-side encoding: do not use the receiver's MAC helper.
 	digest := sha256.Sum256(body)
 	mac := hmac.New(sha256.New, cfg.Keys[0].Secret)
-	fmt.Fprintf(mac, "mailstrix-cape-v1\nPOST\n/v1/cape/events\n%s\n%s\n%x", stamp, e.EventID, digest)
+	_, _ = fmt.Fprintf(mac, "mailstrix-cape-v1\nPOST\n/v1/cape/events\n%s\n%s\n%x", stamp, e.EventID, digest)
 	r.Header.Set("X-Cape-Signature", hex.EncodeToString(mac.Sum(nil)))
 	return r
 }
@@ -281,7 +281,7 @@ func TestCallbackRateCapsClockTerminal(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer tx.Rollback()
+				defer func() { _ = tx.Rollback() }()
 				for i := 1; i <= n; i++ {
 					if _, err = tx.Exec("INSERT INTO cape_events VALUES(?,?,?,?,?)", fmt.Sprintf("%032x", i), tenant, "other", c.Now().UnixNano(), c.Now().Add(11*time.Minute).UnixNano()); err != nil {
 						t.Fatal(err)
@@ -356,7 +356,7 @@ func TestCallbackRotationTLS(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = io.Copy(io.Discard, response.Body)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil || response.StatusCode != 202 {
 			t.Fatal("TLS bridge did not accept rotated key", err, response.StatusCode)
 		}
@@ -685,7 +685,7 @@ func TestCallbackRepeatedEncodingTLS(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = io.Copy(io.Discard, response.Body)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil {
 			t.Fatal(err)
 		}

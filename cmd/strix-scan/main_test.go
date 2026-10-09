@@ -42,7 +42,7 @@ func fakeStrixd(t *testing.T, gotToken, gotName *string) *httptest.Server {
 }
 
 func readAll(r *http.Request) ([]byte, error) {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	buf := make([]byte, r.ContentLength)
 	n, _ := r.Body.Read(buf)
 	return buf[:n], nil
@@ -240,7 +240,7 @@ func TestStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = w.WriteString(eicar)
-	w.Close()
+	_ = w.Close()
 	origIn := os.Stdin
 	os.Stdin = r
 	defer func() { os.Stdin = origIn }()
@@ -270,7 +270,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	orig := os.Stdout
 	os.Stdout = w
 	fn()
-	w.Close()
+	_ = w.Close()
 	os.Stdout = orig
 	out, _ := readAllReader(r)
 	return out

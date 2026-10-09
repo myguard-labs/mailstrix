@@ -62,13 +62,13 @@ func TestIntegrationReportAvailability(t *testing.T) {
 					if files != 1 {
 						t.Errorf("remote files=%d, want 1", files)
 					}
-					fmt.Fprint(w, success)
+					_, _ = fmt.Fprint(w, success)
 				case "/apiv2/tasks/status/41/":
 					statuses.Add(1)
-					fmt.Fprint(w, `{"error":false,"data":"reported"}`)
+					_, _ = fmt.Fprint(w, `{"error":false,"data":"reported"}`)
 				case "/apiv2/tasks/get/report/41/json/":
 					if reports.Add(1) > 1 {
-						fmt.Fprintf(w, `{"info":{"id":41,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}},"signatures":[]}`, digest)
+						_, _ = fmt.Fprintf(w, `{"info":{"id":41,"category":"file"},"target":{"category":"file","file":{"sha256":"%x"}},"signatures":[]}`, digest)
 						return
 					}
 					if mode == "missing" {
@@ -76,16 +76,16 @@ func TestIntegrationReportAvailability(t *testing.T) {
 						return
 					}
 					if mode == "oversized" {
-						fmt.Fprint(w, strings.Repeat(" ", MaxReport+1))
+						_, _ = fmt.Fprint(w, strings.Repeat(" ", MaxReport+1))
 						return
 					}
 					if mode == "transport" {
 						w.Header().Set("Content-Length", "100")
-						fmt.Fprint(w, "{")
+						_, _ = fmt.Fprint(w, "{")
 						return
 					}
 					if mode == "malformed" {
-						fmt.Fprint(w, `{"info":`)
+						_, _ = fmt.Fprint(w, `{"info":`)
 						return
 					}
 					id, hash := 41, fmt.Sprintf("%x", digest)
@@ -95,7 +95,7 @@ func TestIntegrationReportAvailability(t *testing.T) {
 					if mode == "wrong_hash" {
 						hash = strings.Repeat("0", 64)
 					}
-					fmt.Fprintf(w, `{"info":{"id":%d,"category":"file"},"target":{"category":"file","file":{"sha256":"%s"}},"signatures":[]}`, id, hash)
+					_, _ = fmt.Fprintf(w, `{"info":{"id":%d,"category":"file"},"target":{"category":"file","file":{"sha256":"%s"}},"signatures":[]}`, id, hash)
 				default:
 					t.Errorf("unexpected remote route %s", r.URL.Path)
 					w.WriteHeader(http.StatusNotFound)

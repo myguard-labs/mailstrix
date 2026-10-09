@@ -70,22 +70,27 @@ func TestActionableQueriesUseStateIndex(t *testing.T) {
 		"EXPLAIN QUERY PLAN SELECT document FROM jobs WHERE state IN ('completed','cancelled','expired','failed') AND id>'' ORDER BY id LIMIT 256",
 		"EXPLAIN QUERY PLAN SELECT document FROM jobs WHERE state IN ('queued','remote_pending','fetching','completed','failed','expired','cancelled') AND id>'' ORDER BY id LIMIT 256",
 	} {
-		rows, err := s.db.Query(query)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var plan strings.Builder
-		for rows.Next() {
-			var id, parent, unused int
-			var detail string
-			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+		func() {
+			rows, err := s.db.Query(query)
+			if err != nil {
 				t.Fatal(err)
 			}
-			plan.WriteString(detail)
-		}
-		rows.Close()
-		if !strings.Contains(plan.String(), "jobs_state_id") {
-			t.Fatalf("actionable query did not use jobs_state_id: %s", plan.String())
-		}
+			defer func() { _ = rows.Close() }()
+			var plan strings.Builder
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				plan.WriteString(detail)
+			}
+			if e := rows.Err(); e != nil {
+				t.Fatal(e)
+			}
+			if !strings.Contains(plan.String(), "jobs_state_id") {
+				t.Fatalf("actionable query did not use jobs_state_id: %s", plan.String())
+			}
+		}()
 	}
 }

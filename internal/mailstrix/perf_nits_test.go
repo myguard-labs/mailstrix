@@ -25,7 +25,7 @@ func startFakeRedis(t *testing.T, val string) *fakeRedis {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	f := &fakeRedis{addr: ln.Addr().String(), val: val}
 	go func() {
 		for {
@@ -40,7 +40,7 @@ func startFakeRedis(t *testing.T, val string) *fakeRedis {
 }
 
 func (f *fakeRedis) serve(c net.Conn) {
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	r := bufio.NewReader(c)
 	for {
 		line, err := r.ReadString('\n')
@@ -64,15 +64,15 @@ func (f *fakeRedis) serve(c net.Conn) {
 		}
 		switch strings.ToUpper(args[0]) {
 		case "HELLO":
-			fmt.Fprint(c, "-ERR unknown command\r\n")
+			_, _ = fmt.Fprint(c, "-ERR unknown command\r\n")
 		case "GET":
 			f.gets.Add(1)
-			fmt.Fprintf(c, "$%d\r\n%s\r\n", len(f.val), f.val)
+			_, _ = fmt.Fprintf(c, "$%d\r\n%s\r\n", len(f.val), f.val)
 		case "SET":
 			f.sets.Add(1)
-			fmt.Fprint(c, "+OK\r\n")
+			_, _ = fmt.Fprint(c, "+OK\r\n")
 		default:
-			fmt.Fprint(c, "+OK\r\n")
+			_, _ = fmt.Fprint(c, "+OK\r\n")
 		}
 	}
 }

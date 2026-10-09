@@ -211,7 +211,7 @@ func TestLifecycleCancelStagingWriter(t *testing.T) {
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(body.release) }) }
 	defer release()
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	done := make(chan error, 1)
 	go func() { _, err := s.Enqueue(ctx, storeRequest("alpha"), body); done <- err }()
 	select {
