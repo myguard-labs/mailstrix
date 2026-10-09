@@ -19,9 +19,9 @@ import (
 )
 
 // Throwaway keypairs generated from fixed seeds so failures are reproducible.
-// These are TEST keys only: none of them is ever added to rulesSigningKeysB64,
-// and TestPinnedRulesSigningKeysAreWellFormed proves the shipped list does not
-// contain them.
+// These are TEST keys only: none of them is ever added to the shipped pin in
+// internal/rulespin (keysB64), and TestEmbeddedKeysComeFromThePinAndHoldNoTestKey
+// proves the shipped list does not contain them.
 var (
 	testRulesSigningPriv = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x11}, ed25519.SeedSize))
 	// An ed25519 private key is seed||public, so the trailing 32 bytes ARE the
