@@ -2,7 +2,7 @@
   <a href="https://mailstrix.com"><img src=".github/mailstrix.webp" alt="Mailstrix — the owl that finds malware hiding in your mail" width="100%"></a>
 </p>
 
-# strixd — YARA malware scanning for mail and ICAP
+# Mailstrix — YARA malware scanning for mail, ICAP and clamd
 
 **Mailstrix is the owl that finds malware hiding in your mail.** It takes hostile
 attachments apart — unwrapping OLE2/OOXML, VBA, RTF objects, PDFs, archives and
@@ -19,7 +19,7 @@ Dovecot Sieve, or standalone.
 attachment) on `POST /scan`; it runs compiled YARA rules over it
 and tells you which ones matched. It ships as a ready-to-run Docker image with
 an initial rules bundle — see **[Quick start](#quick-start)** below or pull it
-straight from **[Docker Hub](https://hub.docker.com/r/myguard-labs/mailstrix)**.
+straight from **[Docker Hub](https://hub.docker.com/r/eilandert/mailstrix)**.
 
 **Why YARA, in one paragraph.** YARA is the rule engine malware analysts use to
 recognise *families* of malicious files — booby-trapped Office docs, packed
@@ -92,7 +92,8 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
   RTF `\objdata`, OLE Package (`Ole10Native`), MSI, Outlook `.msg`, TNEF
   (`winmail.dat`), OneNote `.one`, PDF (FlateDecode streams), `.lnk` shortcuts,
   VBE/JSE encoded scripts, and nested archives (zip/7z/rar/gz/tar.gz/cab, recursive)
-  — then scans each.
+  — then scans each. A part that is itself a message is **walked as MIME**, so
+  attachments inside a forwarded or `message/rfc822` carrier are unpacked too.
 - **Deobfuscates before matching** — decodes long base64/hex runs, undoes
   `StrReverse`, and folds the olevba string set (`Chr`/`ChrW` concat,
   `Replace()`, `Array() Xor k`, `Environ`, Dridex `DridexUrlDecode`) to
@@ -115,10 +116,18 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Analyses carved executables** — PE/ELF structural checks on embedded/decoded
   binaries (section entropy / packing, overlay, .NET, anomalies), plus base64-PE
   carving that re-aligns a padded `MZ` header so the `pe` rules fire.
-- **Ships its own heuristic rules** — an mraptor-style autoexec∧write∧execute
-  rule, olevba suspicious-keyword / VBA-shellcode-API heuristics, LOLBin / WMI /
+- **Ships 100+ of its own rules** — [`docker/local-rules/`](docker/local-rules/)
+  scores the structural evidence extraction surfaces, so a sample with no public
+  signature still has something to hit: weight-of-evidence maldoc scoring,
+  `oleid`/`oletimes`/`pdfid` parity indicators, XLM dropper shapes,
+  macro-less execution carriers, HTML/SVG smuggling, PowerShell/VBS/JScript
+  dropper families, polyglot and renamed-container evasion, and carved-PE
+  structure — full inventory under
+  [What Mailstrix detects on its own](#what-mailstrix-detects-on-its-own).
+  Among them: an mraptor-style autoexec∧write∧execute rule, olevba suspicious-keyword / VBA-shellcode-API heuristics, LOLBin / WMI /
   PowerShell / anti-analysis intent rules, HTML-smuggling (`data:` URI, embedded
-  SVG) detection, and a position-independent-shellcode `GetEIP` prologue rule.
+  SVG, `javascript:`/`vbscript:` and entity-hidden script URIs) detection, and a
+  position-independent-shellcode `GetEIP` prologue rule.
 - **Scales effort under load** — a single 1–10 effort dial (`MAILSTRIX_EFFORT`)
   scales decode depth, XLM/PDF clamps, feeds and scan timeout; `auto` sheds a
   level at a time as the admission gate fills and climbs back as it drains.
@@ -135,15 +144,35 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Canary mode** — `MAILSTRIX_CANARY=1` returns hits as log-only metadata so
   integrations can observe rule/feed behaviour without scoring or blocking mail.
 - **Caches verdicts** — `SHA256(body)` → matches (LRU+TTL), plus request
-  coalescing and an optional shared Redis/Valkey L2, for a high-volume firehose.
+  coalescing and an optional shared Redis/Valkey L2 for a high-volume firehose.
+  The L2 can be integrity-protected with `MAILSTRIX_REDIS_MAC_KEY`: an
+  HMAC-SHA256 bound to the Redis key, so a tampered or un-MACed value, or a valid
+  value lifted to a different key, is treated as a cache miss instead of a trusted
+  verdict. The MAC carries no nonce or counter, so it does not make an entry fresh
+  — a stale value restored under its own key still verifies.
 - **Fails open, always** — a scan error, timeout, or libyara panic is reported
   as "no match"; a broken scanner never blocks mail. Bounded concurrency,
   per-scan timeout, body cap, graceful drain on SIGTERM.
-- **Updatable rules without a rebuild** — `strixd fetch-rules` pulls a
-  version-matched, sha256-verified compiled bundle into a cache; SIGHUP reloads.
+- **Updatable rules without a rebuild, origin-checked** — `strixd fetch-rules`
+  pulls a version-matched compiled bundle into a cache; SIGHUP reloads it. The
+  remote manifest must carry a valid **ed25519 signature** from a trusted public
+  key — one **pinned into the binary** (`internal/rulespin`), plus any the operator
+  adds through `MAILSTRIX_RULES_EXTRA_SIGNING_KEYS`, which is additive and cannot
+  remove a pinned key. Otherwise the update is refused, so a tampered, truncated or
+  untrusted-key manifest never reaches the compiler. There is no switch to turn
+  verification off ([details](#rules-manifest-signature)).
 - **CLI tools** — `strixd scan` (local triage), `strixd extract` (dump what a
   container carves), `strixd check-rules`, `strixd info`; and `strix-scan`, a tiny
   CGO-free client for a Dovecot/Sieve box ([`contrib/sieve/`](contrib/sieve/)).
+- **Optional CAPE detonation adapter (report-only)** — a separate, disabled-by-default
+  HTTPS listener (`MAILSTRIX_CAPE_CONFIG_FILE`) can submit an attachment to a
+  [CAPEv2](https://github.com/kevoreilly/CAPEv2) sandbox and poll its report. It
+  is deliberately **not** in the delivery path: `MAILSTRIX_CAPE_POLICY` accepts
+  only `static-only`, so mail always follows the static verdict and a pending
+  detonation never holds, quarantines or tempfails a message. No automatic
+  submission, no enforcement, no callback bridge
+  ([configuration](internal/mailstrix/CAPE.md),
+  [operator guide](internal/mailstrix/CAPE-OPERATIONS.md)).
 - **Observable** — `/health`, `/ready`, `/version`, Prometheus `/metrics`
   (scans, matches, cache, per-extractor counters, rule staleness).
 
@@ -732,7 +761,8 @@ attachments, which is common in mail (bulk campaigns, MTA retries, one body to N
 recipients). Without it each scanner instance maintains its own in-process LRU
 only.
 Set `MAILSTRIX_REDIS_MAC_KEY` (>= 32 bytes) to authenticate L2 values with an
-HMAC bound to the Redis key; tampered, replayed or un-MACed values are cache misses.
+HMAC bound to the Redis key; tampered, un-MACed, or cross-key-reused values are
+cache misses. The MAC is not a freshness check.
 
 | Profile | `MAILSTRIX_MAX_CONCURRENT` | `MAILSTRIX_MAX_BODY` | `mem_limit` | Redis | Expected p95 | RPS capacity |
 |---------|------------------------|------------------|-------------|-------|-------------|-------------|
@@ -905,11 +935,27 @@ rules), merging and de-duplicating matches:
   manifest is already charged as a raw member. This is limited metadata
   enrichment, with no filesystem unpacking or execution and
   no new payload-extraction guarantee. Raw scanning still runs.
-- **Static decode pass** — over the raw body and every extracted stream, the
+- **Multi-stage decode pass** — over the raw body and every extracted stream,
   long base64/hex runs are decoded and any whole-buffer reverse (VBA
-  `StrReverse`) is undone, then the decoded blobs are re-scanned. This is
-  **single-layer** only — a decoded blob is not decoded again (depth cap 1) and
-  no VBA/XLM is *executed*; multi-stage unpacking stays with `olevba`.
+  `StrReverse`) is undone, then the decoded blobs are re-scanned. The pass is
+  **recursive**: a decoded blob is fed back through the decoders, up to
+  `maxDecodeDepth = 4` ([`internal/extract/decode.go`](internal/extract/decode.go)),
+  so a Dridex-style 2+-layer payload is unwound rather than only its outer
+  wrapper. Depth is one of the caps the [effort dial](#sizing-profiles) scales.
+  No VBA is *executed* on this path — the bounded XLM emulator is the only
+  evaluator, and full VBA emulation stays out of scope.
+- **HTML carriers** — plain HTML and HTML-ish parts are checked for smuggled
+  containers and script-bearing URIs: a `data:` URI container
+  (`HTML_DataURI_Container`), a base64 payload embedded in `<svg>`
+  (`SVG_Embedded_Payload`), and `javascript:`/`vbscript:` URIs in HTML
+  attributes — surfaced as an `HTML-SCRIPT-URI` marker, or
+  `HTML-SCRIPT-URI-OBFUSCATED` when the scheme was hidden behind HTML entity
+  encoding (`HTML_Script_URI` / `HTML_Script_URI_Obfuscated`).
+- **MIME walk** — a part handed over as a whole message is walked as MIME:
+  strixd splits it into parts, decodes the transfer encoding and routes each
+  attachment back through the extractors above, so a carrier nested in a
+  forwarded or `message/rfc822` part is unwrapped rather than scanned as one
+  opaque blob ([`internal/extract/mime.go`](internal/extract/mime.go)).
 - **VBA string folding** — the olevba constant-fold set is reassembled in
   cleartext so keyword/IOC rules see the payload: `Chr`/`ChrW` concat,
   `Replace("s","o","n")`, `Array(...) Xor k`, `StrReverse("literal")`,
@@ -936,6 +982,158 @@ strixd without Python, oletools or olefy. The optional
 [`rspamd-olefy`](https://github.com/eilandert/rspamd-olefy) integration is a
 separate scorer; it is not required for these features. These bounded heuristics
 do not provide full VBA emulation or a guarantee of oletools parity.
+
+## What Mailstrix detects on its own
+
+The public rule sets catch *known* samples. On top of them Mailstrix ships
+**over 100 rules of its own** in [`docker/local-rules/`](docker/local-rules/),
+baked into every image. That directory is the source of truth for the local
+pack; `strixd check-rules` reports the rule count of the **whole** compiled
+bundle (local rules plus every public source). They score
+the structural evidence the extractors surface — the markers and cleartext that
+only exist *because* a carrier was taken apart — so a brand-new sample with no
+public signature still has something to hit.
+
+A CI parity check ([`internal/extract/parity_doc_test.go`](internal/extract/parity_doc_test.go))
+asserts that every marker in the extractor contract has a scoring rule and that
+the inventory is exhaustive, so a new marker cannot ship unscored.
+
+### Office macros and maldoc behaviour
+
+| Rule | Catches |
+| --- | --- |
+| `Maldoc_AutoExec_Write_Execute` | auto-exec ∧ file-write ∧ execute (mraptor-style) |
+| `Maldoc_Suspicious_VBA_Keywords` | olevba-style suspicious-keyword count heuristic |
+| `Maldoc_VBA_Shellcode_API` | `Declare` of a Win32 API plus a process-injection primitive |
+| `Maldoc_UserForm_Payload` | payload strings hidden in VBA UserForm control data |
+| `Maldoc_DocProps_Payload` | payload strings in document properties / custom XML |
+| `VBA_Stomped` | p-code present, decompressed source missing or trivial |
+| `VBA_Environ_Probe` | `Environ()` probing, including obfuscation-folded |
+| `Maldoc_AntiAnalysis_Evasion` | two or more anti-analysis / sandbox-evasion primitives |
+| `PPT_VBA_Macro` | legacy `.ppt`/`.pps` with an embedded VBA project |
+| `Maldoc_Behavior_Score`, `_High` | **weight of evidence** — 3+ (or 5+) independent low-confidence structural markers co-occurring, so a document that trips nothing individually damning still scores |
+
+### OLE2 / CFB structure (`oleid`, `oletimes`, `olemeta` parity)
+
+| Rule | Catches |
+| --- | --- |
+| `OLEID_ObjectPool`, `OLEID_Flash` | embedded OLE objects; embedded Shockwave Flash |
+| `OLE2_ExtraData` | payload stapled past the last FAT-allocated sector |
+| `OLE_Doc_Security` | `SummaryInformation` DOC_SECURITY flag (password / read-only) |
+| `Document_DigitalSignature` | a digital-signature storage (stacks with macros) |
+| `OLETimes_FutureStamp`, `_SyntheticStamps` | a directory entry stamped in the future; many entries sharing one fabricated timestamp |
+| `OLE_Meta_Template_Injection` | `SummaryInformation` Template pointing at a remote `http(s)`/UNC path (T1221) |
+| `OLE_Meta_AppName_Equation` | authoring AppName is Equation Editor (EQNEDT32 vector) |
+| `OLE_Meta_FreshDoc_Stomp` | RevNumber 0/1 with zero total editing time (fresh or stomped) |
+| `Encrypted_Document`, `Encrypted_XOR_Obfuscation` | RC4/AES encryption; reversible XOR `FILEPASS` obfuscation |
+| `DefaultPW_Decrypted` | BIFF8 workbook unlocked with the `VelvetSweatshop` default password |
+| `OLEID_OOXML_VBA_Present`, `_ExternalRel`, `_DDE`, `_XLM_Present` | `oleid2` presence indicators for OOXML |
+
+### Excel 4.0 (XLM) macros
+
+| Rule | Catches |
+| --- | --- |
+| `XLM_Hidden_Macrosheet` | a hidden or very-hidden macrosheet |
+| `XLM_Dangerous_Function` | `EXEC`/`CALL`/`REGISTER`/`FOPEN`/`FWRITE`/`HALT` |
+| `XLM_AutoOpen_Dropper` | `Auto_Open`/`Auto_Close` plus a hidden sheet or code-exec call |
+| `XLM_Hidden_Dangerous_Dropper` | both at once — the classic XLM dropper shape |
+| `XLM_Emulator_Deep_Exec` | `CALL` reached only through a loop or branch, i.e. control-flow evasion the **bounded emulator** had to execute to see |
+
+### Macro-less Office execution
+
+| Rule | Catches |
+| --- | --- |
+| `Maldoc_DDE_Field`, `RTF_DDE_Field` | `DDE`/`DDEAUTO` field instructions in OOXML and RTF |
+| `SLK_DDE_Command`, `CSV_DDE_Command`, `XLSB_DDE_SupBook` | DDE command execution via SYLK cells, CSV / Excel-2003-XML cells, and XLSB external-link supporting books |
+| `OOXML_Remote_Template` | external relationship to a remote URI (template injection, T1221) |
+| `OOXML_MHTML_Scheme` | `mhtml:` / `!x-usc:` MSHTML scheme (CVE-2021-40444) |
+| `RTF_ObjUpdate` | `\objupdate` auto-fetch (CVE-2017-0199 vector) |
+| `OLE2Link_URL_Moniker` | embedded OLE2Link URL moniker (CVE-2017-0199 auto-load) |
+| `Exploit_EquationEditor`, `_MTEF` | Equation Editor object; with MTEF bytecode (CVE-2017-11882 / CVE-2018-0802) |
+| `OLE_ShellExplorer_CLSID` | Shell.Explorer CLSID `{EAB22AC3-…}` (CVE-2026-21509 IE WebBrowser lure) |
+| `VSTO_Remote_Codebase` | `.vsto` ClickOnce add-in with a remote `codebase` (T1137.006) |
+| `SettingContent_DeepLink_EncodedPowerShell` | `.settingcontent-ms` DeepLink launching encoded PowerShell |
+| `XLL_AddIn` | an emailed `.xll` — a PE DLL exporting `xlAutoOpen`, which runs on load with **no macro prompt** |
+
+### PDF (`pdfid` parity)
+
+`PDF_OpenAction_JS`, `PDF_Additional_Actions`, `PDF_Launch_Action`,
+`PDF_EmbeddedFile`, `PDF_JBIG2` (CVE-2009-3459), `PDF_HexObfuscatedName`
+(`#XX` name-escape evasion) and `PDF_ObjStm` (objects hidden in an object
+stream).
+
+### HTML and SVG smuggling
+
+| Rule | Catches |
+| --- | --- |
+| `HTML_Smuggling_Blob` | script reassembling a Blob / object-URL and force-downloading it |
+| `HTML_Smuggling_DataURI` | force-downloaded base64 `data:` URI payload |
+| `HTML_DataURI_Container` | a `data:` URI decoding to `PK`/OLE2/`MZ`/`%PDF` with no download attribute |
+| `SVG_Scripted` | `<svg>` root carrying `<script>` / `onload` / `<foreignObject>` |
+| `SVG_Embedded_Payload` | `<image href>` base64 decoding to a container magic — a smuggled dropper, not raster art |
+| `HTML_Script_URI`, `_Obfuscated` | `javascript:`/`vbscript:` in `href`/`src`/`action`/`formaction`, and the same scheme visible **only after HTML-entity decoding** (`&#118;`, `&#x76;`, IE spaced/NUL entities) |
+
+### Script droppers — PowerShell, VBS, JScript, batch
+
+This is where a fresh campaign usually lands first, so the set is deliberately
+behavioural rather than hash-based:
+
+- **PowerShell** — `PS1_IEX_IRM_DownloadCradle` (`iex(irm …)`),
+  `PS1_Curl_Rundll32_PNG_Loader` (download a `.png`, run it as a DLL via
+  `rundll32 file.png,export`), `PS1_RandomName_Temp_Download_Exec_Delete`,
+  `PS1_Defender_Exclusion_Cleanup_Loader` (run, then remove its own Defender
+  exclusion and self-delete), `PS1_Despaced_Assembly_Load_Loader`,
+  `PS1_ControlFlowFlatten_CharSurgery` (a `while`/`switch` state machine plus
+  `.Insert` char surgery), `PS1_DotNet_LOLBin_Killer_Loader` (kills
+  `aspnet_compiler`/`AddInProcess` to prep an inject — AsyncRAT/DcRat),
+  `PS1_PSCredential_Password_Spray`, and `PowerShell_Abuse_Flags`.
+- **VBScript** — `VBS_GetObject_Scriptlet_SelfDelete`,
+  `VBS_WScriptShell_Run_TempBat_Hidden`, `VBS_CustomBase64_MSXML_ExecuteGlobal`,
+  `VBS_CharCode_Split_Dropper`, `VBS_ArrayScatter_OffsetTable_Dropper`,
+  `VBS_Sibling_Exe_Hidden_Launcher`.
+- **JScript** — `JS_Obfusc_StringConcat_Accumulate`,
+  `JS_Dropper_CharCodeArray_ActiveX`, `JS_Dropper_XorArray_ActiveX`.
+- **Batch / LOLBin** — `BAT_Dropper_Curl_Execute`, `LOLBins_Invocation`,
+  `WMI_Process_Spawn` (`Win32_Process.Create`),
+  `Script_MSIExec_Remote_Package_Silent` (including Unicode-homoglyph
+  `-Package` evasion), and `AnyDesk_Unattended_Access_Abuse` (a batch that
+  silently sets an AnyDesk unattended-access password — RMM-abuse remote
+  access).
+- **Stacked obfuscation** — `Multilayer_Encoded_Payload` fires on 3+ nested
+  decode layers, which is itself the signal.
+
+### Carved executables and file-type confusion
+
+| Rule | Catches |
+| --- | --- |
+| `PE_Section_Packed` / `PE_Section_High_Entropy` | section entropy ≥ 7.2 / ≥ 7.0 |
+| `PE_Overlay` | data appended past the last section |
+| `PE_Virtual_Section` | `SizeOfRawData=0`, `VirtualSize>0` (FormBook `.ndata` / hollowing) |
+| `PE_DotNet`, `PE_Anomaly` | a CLR data directory; structural header anomalies |
+| `ELF_Executable` | a valid ELF executable inside a mail container |
+| `Base64_Stuffed_PE` | a whole PE base64'd into a document text field with a pad so `MZ` misses offset 0 — decoded, re-aligned and carved so the `pe` rules fire |
+| `Polyglot_PE_ZIP` | one buffer that is **both** a valid PE and a valid ZIP: the gateway parses the ZIP, the endpoint runs the PE |
+| `Renamed_Container` | the real parsed type (OLE/OOXML/RTF/archive/LNK/MSI/OneNote) contradicts a benign-looking extension — driven by the *extracted* type, not a magic-byte grep |
+| `Shellcode_GetEIP` | position-independent shellcode prologues (`E8 00000000`+`pop`, Didier-Stevens `fnstenv`) in a non-PE blob |
+| `CanonStager_SideLoad_Loader` | CANONSTAGER DLL side-loading shellcode stager (PRC-Nexus / SOGU.SEC / PlugX) |
+| `Node_RAT_Webpack_Bundle` | webpack-bundled Node.js RAT: `child_process`+`axios`+`form-data` shims, `execSync`, scheme-split C2 |
+
+### Password-protected archives
+
+`Archive_Encrypted` flags a password-protected zip/rar/7z member — a payload the
+scanner cannot see. With `MAILSTRIX_ARCHIVE_PW=1`, candidate passwords scraped
+from the mail subject and body (plus an optional wordlist) are tried; a recovered
+member is scanned separately and raises `Archive_Decrypted`, because **a password
+supplied in the mail body is itself the evasion tell**.
+
+### How matches are reported
+
+Matches surface under tiered symbols — `STRIX_MALWARE`, `STRIX_EXPLOIT`,
+`STRIX_PHISHING`, `STRIX_SUSPICIOUS` and bare `STRIX` — so a confident family hit
+scores differently from a structural suspicion; the
+[rspamd plugin](contrib/rspamd/) maps each tier to its own weight. Reputation
+hits report separately as `URLHAUS_MALWARE_URL` / `_HOST` / `_DEOBF`,
+`MALWAREBAZAAR_MALWARE` and `THREATFOX_IOC_URL` / `_DOMAIN`.
 
 ## abuse.ch feeds (optional)
 
@@ -1197,100 +1395,49 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 ## Status & roadmap
 
-### Already in
+The capability surface is documented in the
+sections above rather than duplicated here as a changelog — see
+[Exactly what it does](#exactly-what-it-does) for the summary,
+[How it reads documents](#how-it-reads-documents) for the extraction chain,
+[What Mailstrix detects on its own](#what-mailstrix-detects-on-its-own) for the
+local rule pack, and the per-interface sections for
+[ICAP](#icap-mode-optional), [clamd](#clamd-stream-mode-optional),
+[`strix-scan`](#thin-client-for-dovecot--sieve-strix-scan) and
+[`strix-milter`](#milter-for-postfix--sendmail-strix-milter). Release history is
+on the [releases page](https://github.com/myguard-labs/mailstrix/releases).
 
-- [x] Out-of-process Go scanner over HTTP (`/scan`); rspamd never blocks on libyara
-- [x] Compiled public rules from YARA-Forge, signature-base, ANY.RUN, Didier,
-  bartblaze, InQuest, CAPEv2 and YARAify; rolling `rules-current` updates are
-  independent of tagged binary releases
-- [x] libyara modules `pe`/`elf`/`macho`/`dotnet`/`hash`/`math`/`dex` (no magic/cuckoo)
-- [x] `/health`, `/ready`, `/version`, `/metrics` (Prometheus); graceful drain on SIGTERM
-- [x] Verdict cache (LRU+TTL) + request coalescing; optional Redis/Valkey L2 with circuit breaker
-- [x] Fail-open everywhere; concurrency gate, admission gate, per-request scan deadline, body cap
-- [x] Hot-path hygiene: body hashed once per scan (cache key + dedup + reputation share it), pooled `yara.Scanner` reuse, per-fold/carve 1 MiB input clamps, panic-safe scan coalescing, clean feed-goroutine shutdown
-- [x] `/debug/pprof` (token-gated) + `docker/pprof-capture.sh` baseline harness
-- [x] OLE2/OOXML macro decompression (MS-OVBA) → scans raw **and** decompressed VBA, `VBA` external var
-- [x] Container extraction: RTF `\objdata`, OLE Package, MSI, Outlook `.msg`, TNEF (`winmail.dat`), OneNote, PDF, `.lnk`, VBE/JSE, nested archives — **recursively**: a carrier carved out of another (a PDF inside a `.msg` attachment, an Office macro inside an archive member, a `.vbe` inside an OLE Package) is routed back through the matching extractor under one shared depth/byte budget, not scanned only as raw bytes
-- [x] Local heuristic `Maldoc_AutoExec_Write_Execute` (mraptor-style autoexec∧write∧execute), baked from `docker/local-rules/`
-- [x] Local heuristics `Maldoc_Suspicious_VBA_Keywords` (olevba count heuristic) + `Maldoc_VBA_Shellcode_API` (Declare+injection-API)
-- [x] Position-independent shellcode `GetEIP` prologue (`Shellcode_GetEIP`): call/pop (`E8 00000000` + pop) and Didier-Stevens `fnstenv` stubs in a non-PE blob/attachment, gated `not uint16(0)==0x5A4D` (zero benign-PE FP)
-- [x] OOXML external-relationship scan (`*/_rels/*.rels`) → `OOXML_Remote_Template` rule (remote-template injection, T1221)
-- [x] VSTO/ClickOnce add-in manifest (`.vsto`) with a remote `http(s)` `codebase` → `VSTO_Remote_Codebase` rule (Office add-in side-load download-exec, T1137.006); gated on the VSTO namespace + `<assemblyIdentity` (zero benign-ClickOnce FP)
-- [x] Static single-layer decode pass (base64/hex/`StrReverse`) over raw + extracted streams, re-scanned (depth cap 1)
-- [x] Base64-PE carving: a decoded blob whose MZ header is pushed to a non-zero offset by a leading pad (the `pe` module anchors on MZ@0) is re-aligned and carved into an MZ@0 child for the pe rules, plus a `BASE64-PE-CARVE` marker (`Base64_Stuffed_PE` rule); validated through `e_lfanew` (zero-FP)
-- [x] VBA string folding: `Chr`/`Replace`/`Array Xor`/`StrReverse("lit")`/`Environ`→marker + **Dridex** (`DridexUrlDecode`); per-fold input clamp
-- [x] oleid structural indicators: `OLEID-OBJECTPOOL` (embedded OLE objects) + `OLEID-FLASH` (SWF) markers → `oleid_indicators.yara`
-- [x] oleid DOC_SECURITY: `SummaryInformation` PIDSI 0x13 bitfield → `OLE-DOC-SECURITY-<n>` marker + `OLE_Doc_Security` rule
-- [x] CFB extra-data carve: non-zero payload appended past the last FAT-allocated sector → `OLE2-EXTRA-DATA` marker + trailing blob carved for content rules
-- [x] Filename/extension externals (name-keyed rules) via `X-MAILSTRIX-Filename`
-- [x] URL defang + URLhaus URL/host lookup; MalwareBazaar attachment-hash lookup (cached feeds, fail-open)
-- [x] `MAILSTRIX_RULE_DENYLIST` (drop) + `MAILSTRIX_RULE_ALLOWLIST` (log-only)
-- [x] Tiered scoring (`STRIX_MALWARE`/`_EXPLOIT`/`_PHISHING`/`STRIX`/`_SUSPICIOUS` + `URLHAUS_MALWARE_URL`)
-- [x] SIGHUP rule reload (atomic swap, keeps old rules on a bad edit); `fetch-rules` out-of-image updates
-- [x] `strix-scan` lean CGO-free Sieve/LDA client ([`contrib/sieve/`](contrib/sieve/))
-- [x] **`strix-milter` lean CGO-free Postfix/Sendmail milter** — buffers each message, POSTs it to strixd, stamps `X-Mailstrix-Status`/`-Rules`/`-Family`; **always accepts** (the MTA's `milter_header_checks` turns the verdict into policy), so a scanner outage can never block mail ([milter](#milter-for-postfix--sendmail-strix-milter))
-- [x] UserForm hidden-string extraction (carves payload strings from VBA UserForm `o`/`f`/`\x03VBFrame` OLE2 streams; `Maldoc_UserForm_Payload` rule)
-- [x] Document-properties string extraction (OOXML `docProps/`, `customXml/`, `word/settings.xml` docVars; OLE2 `\x05SummaryInformation`; `Maldoc_DocProps_Payload` rule)
-- [x] PE/ELF structural analysis of carved/embedded binaries (`saferwall/pe`, fail-open): section entropy (`PE-SECTION-PACKED` ≥7.2 / `-HIGH-ENTROPY` ≥7.0), `PE-OVERLAY`, `PE-VIRTUAL-SECTION` (FormBook `.ndata`), `PE-DOTNET` (CLR), `PE-ANOMALY`; header-validated `ELF-EXECUTABLE` → `pe_structural.yara`
-- [x] OLE structured metadata (typed MS-OLEPS property-set parse): `OLE-META-TEMPLATE-INJECTION` (remote Template, T1221), `OLE-META-APPNAME-EQUATION` (CVE-2017-11882 EQNEDT32), `OLE-META-REVISION-ZERO`+`-EDITTIME-ZERO` (fresh/VBA-stomp) → `ole_meta.yara`
-- [x] HTML smuggling: container `data:` URI in plain HTML (`HTML_DataURI_Container`), `<svg>`-embedded base64 container payload (`SVG_Embedded_Payload`), OOXML `mhtml:`/`!x-usc:` external-rel scheme (`OOXML_MHTML_Scheme`, CVE-2021-40444)
-- [x] Webpack-bundled Node.js RAT (`Node_RAT_Webpack_Bundle`): child_process+axios+form-data require shims + `execSync` + scheme-hidden `"http://".concat(` C2 upload
-- [x] Legacy-encryption markers (`ENCRYPTION-RC4` from Word FibBase fEncrypted + PPT EncryptedSummary); Shell.Explorer CLSID content rule (`OLE_ShellExplorer_CLSID`, CVE-2026-21509)
-- [x] abuse.ch reputation feeds: URLhaus, MalwareBazaar hash, **ThreatFox** IOC (url/domain) (cached, fail-open)
-- [x] Curated CAPEv2 family rules (Guloader/Formbook/AgentTesla/Obfuscar) as an 8th rule source; build-time `SLOW_RULE_DENYLIST` with a bundle guard (never unloads a shared multi-rule file)
-- [x] Distroless, non-root, read-only rootfs (~100 MB)
-- [x] **ICAP server** (RFC 3507) — optional `MAILSTRIX_ICAP_ADDR` listener; REQMOD+RESPMOD; shares engine, cache, and concurrency gate with `/scan`; ISTag tracks ruleset fingerprint; fail-open on scan error; `icap_*` Prometheus counters
-- [x] **Batch echo-redirect dropper carving** — reconstructs VBS/JS/PS1 payloads hidden inside `.bat` echo-redirect droppers (`>"FILE" ( echo … )` / `>>"FILE" echo …`) so existing script keyword rules reach the plaintext; caret-escape unescaping; shared budget/depth bounds; self-gating prefilter (no cost on non-batch input)
-- [x] **JAR / APK member unpacking** — a zip carrying only `META-INF/MANIFEST.MF` (Java `.jar` / Android `.apk`: Adwind/jRAT/STRRAT mail vectors) is now member-unpacked as a plain archive, so its `.class`/`.dex`/nested-jar payloads are scanned instead of being mistaken for an Office document and routed to the macro path; genuine OOXML/ODF (which always carry `[Content_Types].xml`/`mimetype`/`word|xl|ppt/`) are unaffected — zero body-text FP
+### Open
 
-### Planned
+- [ ] **Batch `/scan` endpoint** — collapse N per-part round-trips into one request.
+- [ ] **TLSH fuzzy hashing** — `glaslos/tlsh` plus MalwareBazaar `get_tlsh`
+  family lookup (distance < 30 ≈ same family). Blocked on a labelled corpus to
+  FP-tune against; shipping it untuned would cost more than it catches.
+- [ ] **FP auto-tuning** — derive the rule denylist from the rspamd ham corpus
+  instead of the three hand-curated entries.
+- [ ] **CHM extraction** — `.chm` help-file carriers.
+- [ ] **Sample-gated legacy XLM/BIFF edge cases** — CSV-DDE-XLSB `sbt=1`,
+  per-`funcid` `ptgFunc` arity, BIFF `CONTINUE` reassembly. Each needs a real
+  sample before it is worth the parser risk.
 
-- [x] OOXML remote-template injection (`*/_rels/*.rels` external-relationship scan + `OOXML_Remote_Template` rule)
-- [x] OOXML DDE/DDEAUTO field detection (`word/document.xml` field-instruction scan + `Maldoc_DDE_Field` rule)
-- [x] Intent rules (`intent.yara`): LOLBin invocation, WMI `Win32_Process.Create`, PowerShell abuse flags, anti-analysis/evasion
-- [x] XLM hidden-macrosheet detection (OOXML veryHidden+macrosheets, legacy xls BIFF BOUNDSHEET)
-- [x] VBA stomping detection (p-code vs. source heuristic; `VBA_Stomped` rule via `vba_stomping.yara`)
-- [x] Equation Editor exploit detection (`equation_editor.yara`): OLE2 with Equation Native/CLSID + MTEF bytecode
+### Known limits
 
-- [x] VBA string folds at `olevba` parity: `Chr`/`Replace`/`Array Xor`/`StrReverse("lit")`/`Environ`→marker + **Dridex** `DridexUrlDecode`
-- [x] `oleid` structural indicators: embedded-OLE `ObjectPool` + Flash/SWF markers
-- [x] **Multi-stage deobfuscation** — bounded recursive decode (depth ~4) so a 2+-layer payload (Dridex-style) is unwound, not just the first layer; now **leads** `olevba` (single-pass)
-- [x] **BIFF8/`.xlsb`/SLK XLM folding** — static `ptg`-token string reassembly for legacy/binary/SLK macrosheets (OOXML `.xlsm` already folds), fuzz-gated; plus a **bounded XLM emulator** (control flow + iterative cell eval, five runaway fuses) for cell-ref/`SET.VALUE`/`GOTO` resolution
-- [x] **PDF action/JS triage** — `/OpenAction`+`/JS`, `/AA`, `/Launch`, `/EmbeddedFile`, `/JBIG2Decode`, hex-name de-obfuscation markers (oletools has no PDF triage; this leads it)
-- [x] CFB orphan/timestamp indicators (`oledir`/`oletimes`: unreferenced dir entries carved + scanned, FILETIME anomalies)
-- [x] Encryption-type + digital-signature markers (`ENCRYPTION-<RC4|XOR|AES>`, `DIGITAL-SIGNATURE`); plus default-password decryption (VelvetSweatshop XOR, BIFF8 RC4, OOXML agile/standard AES) so encrypted-but-default payloads are decrypted and re-scanned
-- [x] Parse-robustness hardening (CFB block-bounds / chain-loop / recursion / module-count guards; `oleparse` decompress-bomb 32 MiB cap + 4096-module guard; pathological-input fuzz)
-- [x] `olevba`-parity CI check (`internal/extract/parity_doc_test.go` asserts every CONTRACT marker has a scoring rule and that the inventory is exhaustive)
+- **No full VBA emulation.** String folding and a bounded XLM emulator are
+  deliberate stopping points; ViperMonkey-style interpretation and p-code
+  disassembly are out of scope. The bounded heuristics do not promise oletools
+  parity.
+- **Encryption that is not default-keyed is flagged, not cracked** —
+  VelvetSweatshop XOR, BIFF8 RC4 and OOXML agile/standard AES are unlocked and
+  re-scanned; anything else raises `Encrypted_Document` and is scanned raw.
+- **CAPE detonation is report-only by design.** `MAILSTRIX_CAPE_POLICY` accepts
+  only `static-only`; a sandbox verdict never gates delivery.
 
-**Performance / operations**
+### Out of scope
 
-- [x] **Effort tiers** — config + resolution + cache key + profile struct (EFFORT-1), `MAILSTRIX_EFFORT=auto` from admission-gate pressure (EFFORT-2), the rspamd plugin setting `X-MAILSTRIX-Effort` from the sender's prior score / auth-failure symbols (EFFORT-3, opt-in via `effort_enabled`), and EFFORT-4 wiring each extraction/scan cap (decode depth, XLM/PDF clamps, reputation feeds, scan timeout) to the resolved profile so the dial actually scales work
-- [ ] Batch `/scan` endpoint (collapse N part round-trips)
-
-- [x] ThreatFox IOC feed (domains/URLs)
-- [x] PE-overlay bytes (`PE-OVERLAY` via PE structural analysis)
-- [x] Known-bad-CLSID content rule (`EAB22AC3-30C1-11CF-A7EB-0000C05BAE0B` Shell.Explorer, CVE-2026-21509)
-
-**Other planned (open roadmap)**
-
-- [x] **Password-protected archives** — opt-in `MAILSTRIX_ARCHIVE_PW=1` decrypts password-protected zip (ZipCrypto + WinZip-AES), 7z, and rar members using candidate passwords scraped from the mail plus an optional wordlist, then scans the recovered payload (see [`MAILSTRIX_ARCHIVE_PW`](#env-vars))
-- [ ] **TLSH fuzzy hashing** — `glaslos/tlsh` + MalwareBazaar `get_tlsh` family lookup (distance <30 = same family); needs a labelled corpus to FP-tune
-- [ ] **FP auto-tuning** — derive the empirical rule denylist from the rspamd ham corpus instead of the 3 hand-curated entries
-- [x] ~~Batch `.bat` echo-redirect dropper carving~~ — shipped (see above)
-- [x] ~~JAR / APK member unpacking (`META-INF/`-only zip no longer mis-classified as Office)~~ — shipped (see above)
-- [x] MSIX manifest fields: bounded metadata enrichment in existing ZIP walkers
-  (see above); payload extraction remains limited to existing archive behavior
-- [x] Windows launcher fields: bounded Internet Shortcut and settings XML
-  enrichment, including nested carriers (see above)
-- [ ] CHM extraction
-- [x] BIFF8 macrosheet shared-formula (`SHRFMLA`) resolution for `ptgExp`
-  references, bounded by the parser's table and formula-size limits
-- [ ] Sample-gated legacy XLM/BIFF edge cases (CSV-DDE-XLSB `sbt=1`, per-funcid `ptgFunc` arity, BIFF CONTINUE reassembly)
-
-> Disk-image (ISO/UDF/`.dmg`/`.pkg`), Android `.apk`, full VBA emulation
-> (ViperMonkey), P-code disasm, and extractor seccomp sandboxing are intentionally
-> **out of scope** — not a realistic executable mail vector / over-engineered for
-> an MTA pipe. iOS has no executable email vector either.
+Disk images (ISO/UDF/`.dmg`/`.pkg`), full VBA emulation (ViperMonkey), p-code
+disassembly, and extractor seccomp sandboxing are intentionally excluded — not a
+realistic executable mail vector, or over-engineered for an MTA pipe. Android
+`.apk` and Java `.jar` members *are* unpacked as archives, but Android-specific
+analysis is not attempted. iOS has no executable email vector.
 
 ## See also
 
@@ -1304,8 +1451,9 @@ sha256sum -c SHA256SUMS --ignore-missing
 - **[SpamAssassin plugin](contrib/spamassassin/)** — scan each message through strixd and score a YARA match.
 - **[Dovecot/Sieve example](contrib/sieve/)** — quarantine a match with the `strix-scan` client.
 - **[Milter for Postfix / Sendmail](#milter-for-postfix--sendmail-strix-milter)** — stamp a verdict header with `strix-milter` and let `milter_header_checks` act on it.
-- **Article:** [YARA malware scanning in rspamd](https://deb.myguard.nl/articles/yara-malware-scanning-mailstrix/) — the why and how, on deb.myguard.nl.
-- **Docker Hub:** [`myguard-labs/mailstrix`](https://hub.docker.com/r/myguard-labs/mailstrix).
+- **Article:** [Mailstrix: YARA malware scanning for mail](https://deb.myguard.nl/articles/yara-malware-scanning-mailstrix/) — the why and how, on deb.myguard.nl.
+- **Docker Hub:** [`eilandert/mailstrix`](https://hub.docker.com/r/eilandert/mailstrix)
+  (`:latest` = newest release, `:testing` = current `main`).
 
 ## License
 
