@@ -977,7 +977,7 @@ Refused connections are counted in the `icap_conn_refused_total` metric.
 |---------|--------------|
 | Clean (no actionable match) + `Allow: 204` sent by proxy | `204 No Modification` (proxy serves original) |
 | Clean (no actionable match), no `Allow: 204` | `200 OK` echoing the original headers and body unchanged |
-| Infected (≥1 actionable match) | `200 OK` with a replacement `403 Forbidden` body. `X-Infection-Found` and the body name the **first** actionable rule; `X-Violations-Found` carries the count |
+| Infected (≥1 actionable match) | `200 OK` with a replacement `403 Forbidden` body. `X-Infection-Found` and the body name the **first** actionable rule; `X-Violations-Found` carries the count followed by, per violation, four TAB-led continuation lines (Filename `-`, rule name, ProblemID `0`, Resolution `2`; draft-stecher-icap-subid-00 §3.4), control characters stripped and each value bounded to 256 bytes; at most 16 violations are listed and the count equals the number listed, so the header block stays bounded |
 | Log-only matches only (allowlisted, canary, `MAILSTRIX_SCAN_*` markers) | treated as clean: they never block |
 | No complete verdict (scan error, incomplete or degraded scan) | `500 Server Error`, never `204` clean |
 | No scan slot free in time | `503 Service Unavailable` |
