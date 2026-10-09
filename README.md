@@ -321,6 +321,39 @@ refused even with the opt-in. The base URL must not contain userinfo
 (credentials), query parameters, or fragments; these are refused to prevent
 credential leaks and broken asset URL construction.
 
+#### Rules-manifest signature
+
+A remote manifest must carry a valid `ed25519` signature or the update is
+refused and the running rules stay loaded. The publisher writes a detached
+`compiled.yac.manifest.json.sig` beside the manifest: base64 of the raw 64-byte
+signature over the **exact** manifest bytes. strixd verifies it against the
+public key(s) compiled into the binary before reading a single manifest field,
+so an unsigned, truncated, tampered or untrusted-key manifest never reaches the
+update logic. Verification uses the Go standard library only.
+
+Two embedded key slots (current, then a pre-published successor) allow rotation
+without an unsigned window: ship the build that trusts the successor first, then
+switch publication to it. `-require-trusted` only proves the key matches the pin
+in the *publisher's* checkout; it cannot speak for binaries already deployed, so
+the trusting build must reach clients before publication switches keys. `MAILSTRIX_RULES_EXTRA_SIGNING_KEYS` can add further
+trust anchors for an operator who signs their own mirror; it can never remove an
+embedded key, and there is deliberately no switch to skip verification.
+
+A manifest **already installed in the cache** is not signature-checked — it is
+trusted on its recorded checksum against the cached bytes, as before. An
+existing deployment that was seeded before signing existed therefore keeps
+serving its bundle; it simply cannot be updated until the publisher signs.
+
+Publishing requires `MAILSTRIX_RULES_SIGNING_KEY` (an `ed25519` PKCS#8 PEM key)
+in the environment of `docker/generate-rules.sh`, which signs through
+`cmd/rulessign`. The key is never passed on a command line, and it must never be
+exposed to a `pull_request`-triggered CI job. The publisher signs with
+`-require-trusted`, so a key whose public half is not pinned in the binary
+aborts the run before any asset is uploaded rather than publishing a bundle
+every client would refuse. `rulessign -print-public` prints the base64 public
+key to compare against the pin, which lives in `internal/rulespin` — a
+stdlib-only package, so the signer builds on a host without libyara.
+
 A bundle is refused when the rules actually loaded from the verified download
 number zero, or fall below 50% of the installed bundle's rule count (exactly 50%
 is accepted; a first install is refused only at zero). The manifest `rules`
@@ -625,6 +658,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_RULES_FETCH_TIMEOUT` | `300` | seconds; shared deadline for automatic update network and cache-lock waits |
 | `MAILSTRIX_RULES_URL` | GitHub `rules-current` release | public bundle/manifest directory override for daemon polling and `fetch-rules` |
 | `MAILSTRIX_RULES_ALLOW_HTTP` | off | permit a plain-`http` `MAILSTRIX_RULES_URL`; `https` is required otherwise, and `https`-to-`http` redirects are always refused |
+| `MAILSTRIX_RULES_EXTRA_SIGNING_KEYS` | — | comma-separated extra trusted rules-manifest signing public keys (raw 32-byte ed25519, base64). **Additive only:** the keys built into the binary stay trusted and cannot be removed. A malformed entry fails startup; a configured key is logged loudly. There is no way to disable signature verification |
 | `MAILSTRIX_SCAN_TIMEOUT` | `8` (s) | per-request libyara budget (raw + all extracted streams share it) |
 | `MAILSTRIX_BACKEND_TIMEOUT` | `1` (s) | how long to wait for an admission / scan slot |
 | `MAILSTRIX_MAX_CONCURRENT` | `auto` (CPU count) | max concurrent libyara scans (CPU gate) |

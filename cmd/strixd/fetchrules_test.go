@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -39,9 +38,19 @@ func TestVerifyRulesFreshCacheReceipt(t *testing.T) {
 	}
 	sum := sha256.Sum256(b)
 	m := mailstrix.RulesManifest{Version: 7, Generated: "2026-06-18T00:00:00Z", Checksum: fmt.Sprintf("sha256:%x", sum), Libyara: "4.5.2", Size: int64(len(b))}
+	// The manifest must be signed or the update is refused; trust the
+	// throwaway key through the supported operator-key configuration.
+	trustCLISigningKey(t)
+	manifestBody, manifestSig := signedManifest(t, m)
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if filepath.Ext(r.URL.Path) == ".sig" {
+			if _, err := w.Write([]byte(manifestSig)); err != nil {
+				return
+			}
+			return
+		}
 		if filepath.Ext(r.URL.Path) == ".json" {
-			if err := json.NewEncoder(w).Encode(m); err != nil {
+			if _, err := w.Write(manifestBody); err != nil {
 				return
 			}
 			return

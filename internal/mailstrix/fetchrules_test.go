@@ -60,6 +60,12 @@ func rulesHandler(yac []byte, ver int, libyara, badSum, generated string) *http.
 	mb, _ := json.Marshal(m)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/"+manifestName, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mb) })
+	// The rules updater refuses any remote manifest without a valid detached
+	// signature, so the fixture publishes one exactly as generate-rules.sh
+	// does: base64 of the raw ed25519 signature over the served bytes. The
+	// test key is trusted via TestMain, never by the shipped key list.
+	sig := signTestManifest(mb)
+	mux.HandleFunc("/"+manifestSigName, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(sig)) })
 	mux.HandleFunc("/"+cachedRulesName, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(yac) })
 	return mux
 }
@@ -332,8 +338,9 @@ func TestFetchRulesHTTPSBase(t *testing.T) {
 	if err != nil || !res.Updated || res.NewVersion != 2 {
 		t.Fatalf("https base: res=%+v err=%v", res, err)
 	}
-	if hits.Load() != 2 {
-		t.Fatalf("hits=%d, want manifest+bundle", hits.Load())
+	// manifest + its detached signature + bundle.
+	if hits.Load() != 3 {
+		t.Fatalf("hits=%d, want manifest+signature+bundle", hits.Load())
 	}
 	if hc.CheckRedirect != nil {
 		t.Fatal("caller client was mutated")
@@ -361,12 +368,13 @@ func TestFetchRulesFollowsHTTPSRedirect(t *testing.T) {
 	if err != nil || !res.Updated || res.NewVersion != 3 {
 		t.Fatalf("https->https redirect: res=%+v err=%v", res, err)
 	}
-	if frontHits.Load() != 2 || storeHits.Load() != 2 {
-		t.Fatalf("front=%d store=%d, want 2 each", frontHits.Load(), storeHits.Load())
+	// manifest + signature + bundle, each redirected once.
+	if frontHits.Load() != 3 || storeHits.Load() != 3 {
+		t.Fatalf("front=%d store=%d, want 3 each", frontHits.Load(), storeHits.Load())
 	}
 	// The caller's own policy still runs (composed, not replaced).
-	if vetoes.Load() != 2 {
-		t.Fatalf("caller CheckRedirect calls=%d, want 2", vetoes.Load())
+	if vetoes.Load() != 3 {
+		t.Fatalf("caller CheckRedirect calls=%d, want 3", vetoes.Load())
 	}
 }
 

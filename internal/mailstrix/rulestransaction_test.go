@@ -3,7 +3,6 @@ package mailstrix
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,9 +22,16 @@ func TestFetchRulesDelayedDownloadCannotReplaceNewerInstall(t *testing.T) {
 	m := RulesManifest{Version: 2, Generated: "2026-06-18T00:00:00Z", Checksum: fmt.Sprintf("sha256:%x", sum), Libyara: "4.5.2", Size: int64(len(oldBytes))}
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
+	manifestBody, manifestSig := signedManifestBody(t, m)
 	oldSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, manifestSigName) {
+			if _, err := w.Write([]byte(manifestSig)); err != nil {
+				return
+			}
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, ".json") {
-			if err := json.NewEncoder(w).Encode(m); err != nil {
+			if _, err := w.Write(manifestBody); err != nil {
 				return
 			}
 			return

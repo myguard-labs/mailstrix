@@ -2,6 +2,7 @@ package mailstrix
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- poll-interval jitter only, not security-relevant randomness
@@ -51,6 +52,10 @@ type RulesUpdater struct {
 	flush           func()
 	snapshotRefresh time.Time
 	afterFetch      func() // test scheduling seam after the cache transaction releases
+	// extraSigningKeys are the operator-supplied ADDITIONAL trusted
+	// rules-manifest signing keys, resolved once at construction so a
+	// malformed key fails startup instead of every poll.
+	extraSigningKeys []ed25519.PublicKey
 }
 
 // SetRulesUpdater connects update telemetry before the server starts listening.
@@ -71,7 +76,11 @@ func NewRulesUpdater(cfg *Config, scanner *Scanner, libyara string, flush func()
 	// Poll's configured context bounds network and lock acquisition. Native
 	// libyara load/reload calls cannot be safely preempted once entered, so the
 	// client must not impose a second, shorter transport timeout.
-	u := &RulesUpdater{cfg: cfg, scanner: scanner, enabled: cfg.RulesPollInterval > 0, libyara: libyara, flush: flush, client: &http.Client{}}
+	extra, err := parseRulesSigningKeys(cfg.RulesExtraSigningKeys)
+	if err != nil {
+		return nil, err
+	}
+	u := &RulesUpdater{cfg: cfg, extraSigningKeys: extra, scanner: scanner, enabled: cfg.RulesPollInterval > 0, libyara: libyara, flush: flush, client: &http.Client{}}
 	u.state.Enabled = u.enabled
 	if loaded := scanner.loadedManifest.Load(); loaded != nil {
 		u.state.CachedVersion, u.state.LoadedVersion = loaded.Version, loaded.Version
@@ -144,7 +153,7 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 	if u.cfg.AllowRulesCountDrop {
 		fetchCtx = WithAllowRuleCountDrop(ctx)
 	}
-	res, err := fetchRules(fetchCtx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, fetchOptions{allowHTTP: u.cfg.RulesAllowHTTP, minimumVersion: minimumVersion, liveCount: int(u.scanner.RuleCount()), reload: reload})
+	res, err := fetchRules(fetchCtx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, fetchOptions{allowHTTP: u.cfg.RulesAllowHTTP, minimumVersion: minimumVersion, liveCount: int(u.scanner.RuleCount()), reload: reload, extraSigningKeys: u.extraSigningKeys})
 	observedCached, observedLoaded := res.NewVersion, 0
 	if res.Updated {
 		// fetchRules returns only after the same locked transaction installed and

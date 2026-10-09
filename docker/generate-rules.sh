@@ -19,7 +19,16 @@
 #   rules      rule count (sanity / display)
 #   size       .yac size in bytes (sanity)
 #
-# Requirements: docker (buildx), gh (authenticated), jq, sha256sum.
+# Detached signature (compiled.yac.manifest.json.sig), published beside it:
+#   base64 of the raw 64-byte ed25519 signature over the exact manifest bytes.
+#   strixd verifies it against the public key(s) compiled into the binary and
+#   refuses an unsigned, malformed or untrusted manifest, so publication without
+#   a signature produces a bundle no client will install.
+#
+# Requirements: docker (buildx), gh (authenticated), jq, sha256sum, go.
+# Required secret: MAILSTRIX_RULES_SIGNING_KEY — the ed25519 PKCS#8 PEM signing
+#   key, supplied through the ENVIRONMENT only (never argv). It must stay out of
+#   any pull_request-triggered CI job.
 # Env overrides: REPO (owner/name), TAG (default rules-current).
 #   Every documented rule-source build-arg is passed through to the Dockerfile
 #   when set in the environment: YARAFORGE_SET, YARAFORGE_URL, SIGBASE_REF,
@@ -347,6 +356,25 @@ else
         > "$MANIFEST"
 fi
 
+# 3b) Sign the manifest. strixd refuses any remote manifest without a valid
+# ed25519 signature from a key compiled into the binary, so an unsigned
+# publication would be rejected by every client (and by the post-publish
+# verification below). Fail here rather than publish an uninstallable bundle.
+#
+# The key never touches argv: cmd/rulessign reads MAILSTRIX_RULES_SIGNING_KEY
+# from the environment. It signs the exact manifest bytes; nothing re-encodes
+# the JSON between signing and upload.
+MANIFEST_SIG="${MANIFEST}.sig"
+[ -n "${MAILSTRIX_RULES_SIGNING_KEY:-}" ] \
+    || die "MAILSTRIX_RULES_SIGNING_KEY is not set; refusing to publish an unsigned manifest that no client would install"
+# -require-trusted: refuse to sign with a key whose public half is not pinned in
+# the client binary. Without it a rotated or wrong key would publish a perfectly
+# valid signature that every deployed strixd refuses, i.e. a silently dead
+# updater discovered only by users.
+( cd "$HERE" && go run ./cmd/rulessign -require-trusted -manifest "$MANIFEST" -out "$MANIFEST_SIG" ) \
+    || die "signing the manifest failed; refusing to publish an unsigned manifest"
+[ -s "$MANIFEST_SIG" ] || die "manifest signature is empty; refusing to publish"
+
 note "version ${PREV} -> ${VERSION}, libyara ${LIBYARA}, size ${SIZE}, sha256 ${SUM:0:12}…"
 
 # 4) Publish to the rolling release (create once if absent), clobbering assets.
@@ -366,6 +394,10 @@ fi
 # Publish the manifest last. During the rolling asset replacement window an
 # older manifest can describe the new bytes; consumers reject and retry later.
 gh release upload "$TAG" --repo "$REPO" --clobber "$YAC"
+# The signature goes up BEFORE the manifest it covers: during the rolling
+# replacement window a client must never see a new manifest paired with the
+# previous signature, which it would (correctly) refuse.
+gh release upload "$TAG" --repo "$REPO" --clobber "$MANIFEST_SIG"
 gh release upload "$TAG" --repo "$REPO" --clobber "$MANIFEST"
 PUBLISH_STATE=published
 
@@ -390,7 +422,7 @@ done
 [ "$verified" -eq 1 ] \
     || die "$(published_verify_notice failed)"
 
-note "published ${TAG}: compiled.yac (v${VERSION}) + manifest"
+note "published ${TAG}: compiled.yac (v${VERSION}) + signed manifest"
 
 # Prepare the success notification before the terminal receipt. The notification
 # delivery itself remains best-effort, so no fallible work follows that receipt.

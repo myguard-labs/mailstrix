@@ -124,6 +124,7 @@ func TestChangedScopeExplicitMappings(t *testing.T) {
 		{"testdata", []string{"internal/verdict/testdata/a.eml"}, "example.com/m/internal/verdict", false},
 		{"deleted-package", []string{"internal/gone/a.go"}, "", true},
 		{"unknown-script", []string{"scripts/unknown.go"}, "", true},
+		{"script-python-contract", []string{"scripts/ci-impact.py"}, "", false},
 		{"unknown-ci-input", []string{"ci/unknown.txt"}, "", true},
 		{"unknown-workflow-code", []string{".github/unknown.go"}, "", true},
 		{"mixed-unknown", []string{"internal/verdict/a.go", "unknown.txt"}, "", true},

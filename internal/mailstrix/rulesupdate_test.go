@@ -394,15 +394,23 @@ func TestFetchRulesRejectsMalformedManifestAndInterruptedDownload(t *testing.T) 
 			case "version":
 				m.Version = 0
 			}
+			// Each malformed-FIELD case must still be correctly SIGNED, or it
+			// would be refused by the signature gate and stop exercising the
+			// field validation it exists to cover.
+			manifestBody := []byte("{")
+			if mode != "json" {
+				manifestBody, _ = signedManifestBody(t, m)
+			}
+			manifestSig := signTestManifest(manifestBody)
 			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasSuffix(r.URL.Path, ".json") {
-					if mode == "json" {
-						if _, err := w.Write([]byte("{")); err != nil {
-							return
-						}
+				if strings.HasSuffix(r.URL.Path, manifestSigName) {
+					if _, err := w.Write([]byte(manifestSig)); err != nil {
 						return
 					}
-					if err := json.NewEncoder(w).Encode(m); err != nil {
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, ".json") {
+					if _, err := w.Write(manifestBody); err != nil {
 						return
 					}
 					return
