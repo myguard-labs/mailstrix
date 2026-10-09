@@ -665,132 +665,159 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 		return
 	}
 	if err != nil {
-		// The reader won't open. This is either a header-encrypted 7z (the file
-		// list itself is AES-wrapped) or plain corruption. With candidates, try to
-		// crack — success means it was header-encrypted; otherwise classify via the
-		// (best-effort) error text so a clearly-encrypted error still marks.
-		res.IsArchive = true
-		if len(pwc) > 0 {
-			// Header-encrypted: no specific trigger member (the whole listing is
-			// hidden), so verify against any member — targetIdx -1.
-			pw, dictCap := crack7zPassword(buf, -1, pwc, b, deadline)
-			if pw != "" {
-				dr, odc := open7zReader(buf, pw)
-				dictCap = dictCap || odc
-				if dr != nil {
-					// Emit members first; mark decrypted only if ≥1 payload landed, so
-					// a maxStreams cap can't sacrifice the dropper for the marker.
-					if emit7zMembers(dr, res, b, depth, deadline) {
-						markDecryptedArchive(res)
-					} else {
-						markEncryptedArchive(res)
-					}
-					return
-				}
-			}
-			if dictCap {
-				// AUD-17e: the (decrypted) header or member needs more LZMA dictionary
-				// than lzmaDictCeiling: an incomplete scan, same as the plain path.
-				res.stopHit("lzma-dict")
-			}
-			// Candidates were tried and none worked. A NewReader failure on a valid 7z
-			// (magic already matched by the dispatcher) is overwhelmingly a header-
-			// encrypted archive whose listing we couldn't read — preserve the encrypted
-			// signal even though the generic parse error doesn't say "password".
-			markEncryptedArchive(res)
-			return
-		}
-		if isEncryptedErr(err) {
-			markEncryptedArchive(res)
-		}
+		handle7zOpenErr(err, buf, pwc, res, b, depth, deadline)
 		return
 	}
 	res.IsArchive = true
-	// dec is a lazily-cracked password reader, built the first time a member fails
-	// to read and candidates are available; one password serves every member.
-	var dec *sevenzip.Reader
-	decTried := false
-	tryCrackOnce := func(targetIdx int) {
-		if !decTried {
-			decTried = true // crack once; a failed crack is not retried per member
-			// Validate the password against the member that actually failed the
-			// plaintext read (the encrypted one), not a sibling plaintext member.
-			pw, dictCap := crack7zPassword(buf, targetIdx, pwc, b, deadline)
-			if pw != "" {
-				var odc bool
-				dec, odc = open7zReader(buf, pw)
-				dictCap = dictCap || odc
-			}
-			if dictCap {
-				res.stopHit("lzma-dict") // AUD-17e
-			}
-		}
-	}
+	w := &sevenzipWalk{buf: buf, pwc: pwc, res: res, b: b, depth: depth, deadline: deadline}
 	for i, f := range zr.File {
 		if b.spent() || len(res.Streams) >= maxStreams || expired(deadline) {
 			archiveCapHit(res, b)
 			break
 		}
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		if f.UncompressedSize > maxBytesPerMember {
-			res.stopHit("member-size") // AUD-01
-			continue
-		}
-		// Attempt the plaintext read first. ok=false means Open/Read failed — for a
-		// content-encrypted member the decrypt garbage trips the decompressor, which
-		// is indistinguishable from corruption here, so on !ok with candidates we
-		// fall through to a password crack. An empty member reads ok (empty plaintext)
-		// and must NOT be mistaken for encryption.
-		// A8: the plaintext member read is LZMA over attacker-authored bytes — the same
-		// uncancellable decoder as the decrypt path. Pool it. A stall/refusal drops this
-		// member only (counted in plainDropped) and the walk moves on; it must not abort
-		// the archive, or one crafted member would suppress every member after it.
-		plain, ran := boundedPlain7zMember(f, deadline)
-		if !ran {
-			continue
-		}
-		if plain.capStop {
-			res.stopHit("lzma-dict") // AUD-17: member needs more LZMA dictionary than lzmaDictCeiling
-			continue
-		}
-		if data, ok := plain.data, plain.ok; ok {
-			emitMember(data, res, b, depth, deadline)
-			continue
-		}
-		if len(pwc) == 0 {
-			// No candidates: an unreadable member might be encrypted or corrupt. The
-			// pre-feature behaviour marked encrypted only on an isEncryptedErr Open;
-			// preserve that conservative signal by re-checking the Open error.
-			//
-			// This Open re-enters sevenzip on hostile bytes, so it is pooled like every
-			// other decoder entry point (A8) — calling it bare here would reopen exactly
-			// the hole the bounded read above closes. A stall/refusal just means we could
-			// not classify the member: skip it (the read already failed).
-			if encrypted, ok := runBoundedPlain(deadline, func() bool {
-				rc, oerr := f.Open()
-				if rc != nil {
-					_ = rc.Close() // we only want the error; don't leak the reader
-				}
-				return isEncryptedErr(oerr)
-			}); ok && encrypted {
-				markEncryptedArchive(res)
+		w.member(i, f)
+	}
+}
+
+// sevenzipWalk carries the per-archive state of the member loop. dec is a
+// lazily-cracked password reader, built the first time a member fails to read
+// and candidates are available; one password serves every member.
+type sevenzipWalk struct {
+	buf      []byte
+	pwc      []string
+	res      *Result
+	b        *archiveBudget
+	depth    int
+	deadline time.Time
+	dec      *sevenzip.Reader
+	decTried bool
+}
+
+// crackOnce cracks the archive password at most once (a failed crack is not
+// retried per member), validating against the member that failed the plaintext
+// read (the encrypted one), not a sibling plaintext member.
+func (w *sevenzipWalk) crackOnce(targetIdx int) {
+	if w.decTried {
+		return
+	}
+	w.decTried = true
+	pw, dictCap := crack7zPassword(w.buf, targetIdx, w.pwc, w.b, w.deadline)
+	if pw != "" {
+		var odc bool
+		w.dec, odc = open7zReader(w.buf, pw)
+		dictCap = dictCap || odc
+	}
+	if dictCap {
+		w.res.stopHit("lzma-dict") // AUD-17e
+	}
+}
+
+// member handles one 7z entry: size cap, plaintext read, lzma-dict stop and the
+// encrypted-member crack path. Split out of unpack7z (AUD-17d).
+func (w *sevenzipWalk) member(i int, f *sevenzip.File) {
+	res, b, depth, deadline, pwc := w.res, w.b, w.depth, w.deadline, w.pwc
+	if f.FileInfo().IsDir() {
+		return
+	}
+	if f.UncompressedSize > maxBytesPerMember {
+		res.stopHit("member-size") // AUD-01
+		return
+	}
+	// Attempt the plaintext read first. ok=false means Open/Read failed — for a
+	// content-encrypted member the decrypt garbage trips the decompressor, which
+	// is indistinguishable from corruption here, so on !ok with candidates we
+	// fall through to a password crack. An empty member reads ok (empty plaintext)
+	// and must NOT be mistaken for encryption.
+	// A8: the plaintext member read is LZMA over attacker-authored bytes — the same
+	// uncancellable decoder as the decrypt path. Pool it. A stall/refusal drops this
+	// member only (counted in plainDropped) and the walk moves on; it must not abort
+	// the archive, or one crafted member would suppress every member after it.
+	plain, ran := boundedPlain7zMember(f, deadline)
+	if !ran {
+		return
+	}
+	if plain.capStop {
+		res.stopHit("lzma-dict") // AUD-17: member needs more LZMA dictionary than lzmaDictCeiling
+		return
+	}
+	if data, ok := plain.data, plain.ok; ok {
+		emitMember(data, res, b, depth, deadline)
+		return
+	}
+	if len(pwc) == 0 {
+		// No candidates: an unreadable member might be encrypted or corrupt. The
+		// pre-feature behaviour marked encrypted only on an isEncryptedErr Open;
+		// preserve that conservative signal by re-checking the Open error.
+		//
+		// This Open re-enters sevenzip on hostile bytes, so it is pooled like every
+		// other decoder entry point (A8) — calling it bare here would reopen exactly
+		// the hole the bounded read above closes. A stall/refusal just means we could
+		// not classify the member: skip it (the read already failed).
+		if encrypted, ok := runBoundedPlain(deadline, func() bool {
+			rc, oerr := f.Open()
+			if rc != nil {
+				_ = rc.Close() // we only want the error; don't leak the reader
 			}
-			continue
-		}
-		tryCrackOnce(i)
-		if dec == nil {
-			markEncryptedArchive(res)
-			continue
-		}
-		if data, ok := boundedDecrypted7zMember(dec.File, i, b, res, deadline); ok {
-			// Payload before marker so a maxStreams cap can't drop the dropper.
-			emitMember(data, res, b, depth, deadline)
-			markDecryptedArchive(res)
-		} else {
+			return isEncryptedErr(oerr)
+		}); ok && encrypted {
 			markEncryptedArchive(res)
 		}
+		return
+	}
+	w.crackOnce(i)
+	if w.dec == nil {
+		markEncryptedArchive(res)
+		return
+	}
+	if data, ok := boundedDecrypted7zMember(w.dec.File, i, b, res, deadline); ok {
+		// Payload before marker so a maxStreams cap can't drop the dropper.
+		emitMember(data, res, b, depth, deadline)
+		markDecryptedArchive(res)
+	} else {
+		markEncryptedArchive(res)
+	}
+}
+
+// handle7zOpenErr classifies a 7z whose reader would not open (header-encrypted
+// or corrupt) and records the matching signals. Split out of unpack7z (AUD-17d).
+func handle7zOpenErr(err error, buf []byte, pwc []string, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+	// The reader won't open. This is either a header-encrypted 7z (the file
+	// list itself is AES-wrapped) or plain corruption. With candidates, try to
+	// crack — success means it was header-encrypted; otherwise classify via the
+	// (best-effort) error text so a clearly-encrypted error still marks.
+	res.IsArchive = true
+	if len(pwc) > 0 {
+		// Header-encrypted: no specific trigger member (the whole listing is
+		// hidden), so verify against any member — targetIdx -1.
+		pw, dictCap := crack7zPassword(buf, -1, pwc, b, deadline)
+		if pw != "" {
+			dr, odc := open7zReader(buf, pw)
+			dictCap = dictCap || odc
+			if dr != nil {
+				// Emit members first; mark decrypted only if ≥1 payload landed, so
+				// a maxStreams cap can't sacrifice the dropper for the marker.
+				if emit7zMembers(dr, res, b, depth, deadline) {
+					markDecryptedArchive(res)
+				} else {
+					markEncryptedArchive(res)
+				}
+				return
+			}
+		}
+		if dictCap {
+			// AUD-17e: the (decrypted) header or member needs more LZMA dictionary
+			// than lzmaDictCeiling: an incomplete scan, same as the plain path.
+			res.stopHit("lzma-dict")
+		}
+		// Candidates were tried and none worked. A NewReader failure on a valid 7z
+		// (magic already matched by the dispatcher) is overwhelmingly a header-
+		// encrypted archive whose listing we couldn't read — preserve the encrypted
+		// signal even though the generic parse error doesn't say "password".
+		markEncryptedArchive(res)
+		return
+	}
+	if isEncryptedErr(err) {
+		markEncryptedArchive(res)
 	}
 }
 

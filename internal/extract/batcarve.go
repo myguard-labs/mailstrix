@@ -85,7 +85,7 @@ func fromBatchDropper(buf []byte, res *Result, b *archiveBudget, depth int, dead
 func batchWouldCarve(buf []byte) bool {
 	// Ignore truncated flag: this function is a pure check for depth gating,
 	// so it doesn't report incompleteness.
-	files, _ := carveBatchFiles(buf)
+	files, _, _ := carveBatchScan(buf, true)
 	for _, data := range files {
 		if len(data) >= minMemberBytes {
 			return true
@@ -100,8 +100,18 @@ func batchWouldCarve(buf []byte) bool {
 // a per-file join was clamped at maxBytesPerMember or the accumulation cap
 // stopped parsing early.
 func carveBatchFiles(buf []byte) ([][]byte, bool) {
+	files, truncated, _ := carveBatchScan(buf, false)
+	return files, truncated
+}
+
+// carveBatchScan is the single echo-redirect parser. With probe=true it stops
+// as soon as any one file has accumulated at least minMemberBytes and returns
+// just that file (enough for batchWouldCarve's yes/no); the file only grows, so
+// the early answer equals the full-parse answer. consumed is the number of input
+// bytes parsed (observability for the early-exit test).
+func carveBatchScan(buf []byte, probe bool) ([][]byte, bool, int) {
 	if !looksLikeBatch(buf) {
-		return nil, false
+		return nil, false, 0
 	}
 
 	// ── Parse echo-redirect blocks ────────────────────────────────────────────
@@ -122,6 +132,7 @@ func carveBatchFiles(buf []byte) ([][]byte, bool) {
 	type dropped struct {
 		name  string
 		lines [][]byte
+		size  int // joined length so far (lines plus CRLF separators)
 	}
 
 	var files []dropped
@@ -141,6 +152,7 @@ func carveBatchFiles(buf []byte) ([][]byte, bool) {
 	blocksEmitted := 0
 	accum := 0         // cumulative reconstructed bytes accumulated so far (cap guard)
 	truncated := false // set when join clamps or accumulation cap stops parsing
+	found := -1        // probe mode: index of a file that reached minMemberBytes
 
 	// addLine appends a reconstructed (caret-unescaped) line to a file, accounting
 	// it against the shared accumulation cap. Returns false once the cap is hit so
@@ -150,8 +162,15 @@ func carveBatchFiles(buf []byte) ([][]byte, bool) {
 			truncated = true
 			return false
 		}
+		if len(files[idx].lines) > 0 {
+			files[idx].size += 2 // CRLF separator
+		}
 		files[idx].lines = append(files[idx].lines, text)
+		files[idx].size += len(text)
 		accum += len(text)
+		if probe && files[idx].size >= minMemberBytes {
+			found = idx
+		}
 		return true
 	}
 
@@ -159,7 +178,7 @@ func carveBatchFiles(buf []byte) ([][]byte, bool) {
 	inBlock := false
 	blockTarget := -1
 
-	for len(linesBuf) > 0 && blocksEmitted < maxBatchBlocks {
+	for len(linesBuf) > 0 && blocksEmitted < maxBatchBlocks && found < 0 {
 		// Extract next line (LF or CRLF terminated).
 		var line []byte
 		if lf := bytes.IndexByte(linesBuf, '\n'); lf >= 0 {
@@ -237,7 +256,11 @@ func carveBatchFiles(buf []byte) ([][]byte, bool) {
 		}
 	}
 
+	consumed := len(buf) - len(linesBuf)
 	var out [][]byte
+	if found >= 0 {
+		return [][]byte{bytes.Join(files[found].lines, []byte("\r\n"))}, truncated, consumed
+	}
 	for i := range files {
 		if len(files[i].lines) == 0 {
 			continue
@@ -249,7 +272,7 @@ func carveBatchFiles(buf []byte) ([][]byte, bool) {
 		}
 		out = append(out, data)
 	}
-	return out, truncated
+	return out, truncated, consumed
 }
 
 // parseRedirectLine parses the part of a redirect line AFTER the leading > or >>

@@ -365,7 +365,7 @@ type Result struct {
 
 	// CapHits names each extraction cap that stopped the walk while input was
 	// left (COR-07b): "streams", "archive-budget", "zip-entries", "rtf-objects",
-	// "pdf-streams", "member-size", "depth", "mime-depth" or "mime-parts", each
+	// "pdf-streams", "member-size", "lzma-dict", "depth", "mime-depth" or "mime-parts", each
 	// at most once, in first-hit order. finalizeStreams
 	// emits one EXTRACT-CAP-HIT marker per kind, and the scanner treats any
 	// hit as an incomplete scan, so a capped walk is never cached as clean.
