@@ -96,7 +96,7 @@ func logInterruptFailure(err error) {
 func (h *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Body != nil {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 	}
 	if h == nil || !h.cfg.Enabled {
 		apiError(w, http.StatusServiceUnavailable, "unavailable")

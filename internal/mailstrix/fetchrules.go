@@ -486,7 +486,7 @@ func downloadToTemp(ctx context.Context, hc *http.Client, url, dir string, size 
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("status %d", resp.StatusCode)
 	}
@@ -534,7 +534,7 @@ func verifyBundle(path string, m RulesManifest) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return err
@@ -555,7 +555,7 @@ func httpGet(ctx context.Context, hc *http.Client, url string, cap int64) ([]byt
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}

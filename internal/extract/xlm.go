@@ -99,7 +99,7 @@ func fromOOXMLXLM(idx map[string]*zip.File, hasMacrosheet bool, out *[][]byte, d
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(rc, maxBytesWorkbookXML))
-	rc.Close() // #nosec G104 -- zip entry close; error is unrecoverable here
+	_ = rc.Close() // zip entry close; error is unrecoverable here
 	if err != nil || len(raw) == 0 {
 		return
 	}

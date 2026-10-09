@@ -211,7 +211,7 @@ func (s *Server) logBadEncapsulatedICAP(method string, encErr error) {
 }
 
 func (s *Server) serveICAPConn(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	br := bufio.NewReader(conn)
 	for {
 		// Three deadlines, because "idle", "sending a head" and "sending a body"

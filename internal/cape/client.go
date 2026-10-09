@@ -355,7 +355,7 @@ func (c *Client) do(req *http.Request, limit int64) ([]byte, error) {
 		}
 		return nil, &Error{Code: Transport}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	statusErr := classifyHTTP(resp)
 	encodingValid := validContentEncoding(resp.Header)
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit+1))

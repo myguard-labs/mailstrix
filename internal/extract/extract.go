@@ -1230,7 +1230,7 @@ func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			continue
 		}
 		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesPerRels))
-		rc.Close() // #nosec G104 -- zip entry close; error is unrecoverable here
+		_ = rc.Close() // zip entry close; error is unrecoverable here
 		if err != nil || len(raw) == 0 {
 			continue
 		}
@@ -1397,7 +1397,7 @@ func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			continue
 		}
 		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesPerDocXML))
-		rc.Close() // #nosec G104 -- zip entry close; error is unrecoverable here
+		_ = rc.Close() // zip entry close; error is unrecoverable here
 		if err != nil || len(raw) == 0 {
 			continue
 		}
@@ -1543,7 +1543,7 @@ func readZipEntry(f *zip.File) []byte {
 	if err != nil {
 		return nil
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	var b bytes.Buffer
 	// PERF-40: pre-size from the declared uncompressed size, clamped to the hard
 	// cap and the anti-amplification hint, so the common (honest, modest) entry
