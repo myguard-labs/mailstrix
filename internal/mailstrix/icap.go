@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/myguard-labs/mailstrix/internal/verdict"
 )
@@ -865,6 +866,45 @@ func icapWriteEcho(w io.Writer, fp string, e icapEcho, body []byte) error {
 	return err
 }
 
+// icapViolationMax bounds each per-violation value in X-Violations-Found.
+const icapViolationMax = 256
+
+// icapHeaderValue makes v safe for one ICAP header continuation line: control
+// characters (CR, LF, NUL, DEL, ...) are dropped, the result is bounded to
+// icapViolationMax bytes on a rune boundary, and an empty value becomes "-".
+func icapHeaderValue(v string) string {
+	var sb strings.Builder
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == utf8.RuneError {
+			continue
+		}
+		if sb.Len()+utf8.RuneLen(r) > icapViolationMax {
+			break
+		}
+		sb.WriteRune(r)
+	}
+	if sb.Len() == 0 {
+		return "-"
+	}
+	return sb.String()
+}
+
+// icapViolationLines renders the draft-stecher-icap-subid-00 section 3.4
+// continuation lines that follow "X-Violations-Found: N": for each violation a
+// TAB-led Filename, ThreatDescription, ProblemID and Resolution line. The
+// scanned object has no filename at this layer, so Filename is "-"; ProblemID
+// is 0 and Resolution is 2 (blocked), matching X-Infection-Found.
+func icapViolationLines(matches []Match) string {
+	var sb strings.Builder
+	for _, m := range matches {
+		sb.WriteString("\t" + icapHeaderValue("") + "\r\n")
+		sb.WriteString("\t" + icapHeaderValue(m.Rule) + "\r\n")
+		sb.WriteString("\t0\r\n")
+		sb.WriteString("\t2\r\n")
+	}
+	return sb.String()
+}
+
 // icapWriteInfected sends an ICAP 200 OK with a 403 Forbidden replacement body.
 func icapWriteInfected(w io.Writer, fp string, matches []Match) error {
 	threat := matches[0].Rule
@@ -880,6 +920,7 @@ func icapWriteInfected(w io.Writer, fp string, matches []Match) error {
 	sb.WriteString("ISTag: " + icapISTag(fp) + "\r\n")
 	sb.WriteString("X-Infection-Found: Type=0; Resolution=2; Threat=" + threat + ";\r\n")
 	sb.WriteString(fmt.Sprintf("X-Violations-Found: %d\r\n", len(matches)))
+	sb.WriteString(icapViolationLines(matches))
 	sb.WriteString(fmt.Sprintf("Encapsulated: res-hdr=0, res-body=%d\r\n", len(resHdr)))
 	sb.WriteString("\r\n")
 	sb.WriteString(resHdr)
