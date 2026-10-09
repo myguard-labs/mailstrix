@@ -146,17 +146,21 @@ be scaled, restarted, or reload its rules on its own. Same shape as the
 - **Caches verdicts** — `SHA256(body)` → matches (LRU+TTL), plus request
   coalescing and an optional shared Redis/Valkey L2 for a high-volume firehose.
   The L2 can be integrity-protected with `MAILSTRIX_REDIS_MAC_KEY`: an
-  HMAC-SHA256 bound to the Redis key, so a tampered, replayed or un-MACed value
-  is treated as a cache miss instead of a trusted verdict.
+  HMAC-SHA256 bound to the Redis key, so a tampered or un-MACed value, or a valid
+  value lifted to a different key, is treated as a cache miss instead of a trusted
+  verdict. The MAC carries no nonce or counter, so it does not make an entry fresh
+  — a stale value restored under its own key still verifies.
 - **Fails open, always** — a scan error, timeout, or libyara panic is reported
   as "no match"; a broken scanner never blocks mail. Bounded concurrency,
   per-scan timeout, body cap, graceful drain on SIGTERM.
 - **Updatable rules without a rebuild, origin-checked** — `strixd fetch-rules`
   pulls a version-matched compiled bundle into a cache; SIGHUP reloads it. The
-  remote manifest must carry a valid **ed25519 signature** from a public key
-  **pinned into the binary** (`internal/rulespin`) or the update is refused, so a
-  tampered, truncated or foreign-key manifest never reaches the compiler. There
-  is no switch to turn verification off ([details](#rules-manifest-signature)).
+  remote manifest must carry a valid **ed25519 signature** from a trusted public
+  key — one **pinned into the binary** (`internal/rulespin`), plus any the operator
+  adds through `MAILSTRIX_RULES_EXTRA_SIGNING_KEYS`, which is additive and cannot
+  remove a pinned key. Otherwise the update is refused, so a tampered, truncated or
+  untrusted-key manifest never reaches the compiler. There is no switch to turn
+  verification off ([details](#rules-manifest-signature)).
 - **CLI tools** — `strixd scan` (local triage), `strixd extract` (dump what a
   container carves), `strixd check-rules`, `strixd info`; and `strix-scan`, a tiny
   CGO-free client for a Dovecot/Sieve box ([`contrib/sieve/`](contrib/sieve/)).
@@ -757,7 +761,8 @@ attachments, which is common in mail (bulk campaigns, MTA retries, one body to N
 recipients). Without it each scanner instance maintains its own in-process LRU
 only.
 Set `MAILSTRIX_REDIS_MAC_KEY` (>= 32 bytes) to authenticate L2 values with an
-HMAC bound to the Redis key; tampered, replayed or un-MACed values are cache misses.
+HMAC bound to the Redis key; tampered, un-MACed, or cross-key-reused values are
+cache misses. The MAC is not a freshness check.
 
 | Profile | `MAILSTRIX_MAX_CONCURRENT` | `MAILSTRIX_MAX_BODY` | `mem_limit` | Redis | Expected p95 | RPS capacity |
 |---------|------------------------|------------------|-------------|-------|-------------|-------------|
