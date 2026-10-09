@@ -869,6 +869,13 @@ func icapWriteEcho(w io.Writer, fp string, e icapEcho, body []byte) error {
 // icapViolationMax bounds each per-violation value in X-Violations-Found.
 const icapViolationMax = 256
 
+// icapViolationsMaxListed caps how many violations X-Violations-Found lists.
+// A hostile file can match hundreds of rules; an unbounded block would exceed
+// ICAP client header limits (e.g. Squid reply_header_max_size) and turn a block
+// into a client error. The count equals the groups listed (N groups follow N);
+// the first listed violation is the X-Infection-Found threat.
+const icapViolationsMaxListed = 16
+
 // icapHeaderValue makes v safe for one ICAP header continuation line: control
 // characters (CR, LF, NUL, DEL, ...) are dropped, the result is bounded to
 // icapViolationMax bytes on a rune boundary, and an empty value becomes "-".
@@ -919,8 +926,12 @@ func icapWriteInfected(w io.Writer, fp string, matches []Match) error {
 	sb.WriteString(icapProtoVersion + " 200 OK\r\n")
 	sb.WriteString("ISTag: " + icapISTag(fp) + "\r\n")
 	sb.WriteString("X-Infection-Found: Type=0; Resolution=2; Threat=" + threat + ";\r\n")
-	sb.WriteString(fmt.Sprintf("X-Violations-Found: %d\r\n", len(matches)))
-	sb.WriteString(icapViolationLines(matches))
+	listed := matches
+	if len(listed) > icapViolationsMaxListed {
+		listed = listed[:icapViolationsMaxListed]
+	}
+	fmt.Fprintf(&sb, "X-Violations-Found: %d\r\n", len(listed))
+	sb.WriteString(icapViolationLines(listed))
 	sb.WriteString(fmt.Sprintf("Encapsulated: res-hdr=0, res-body=%d\r\n", len(resHdr)))
 	sb.WriteString("\r\n")
 	sb.WriteString(resHdr)

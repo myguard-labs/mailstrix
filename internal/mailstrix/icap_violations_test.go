@@ -123,3 +123,64 @@ func TestICAPHeaderValue(t *testing.T) {
 		}
 	}
 }
+
+func TestICAPViolationsFoundCapped(t *testing.T) {
+	long := strings.Repeat("r", 300)
+	for _, n := range []int{icapViolationsMaxListed - 1, icapViolationsMaxListed, icapViolationsMaxListed + 1, 500} {
+		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
+			var ms []Match
+			for i := 0; i < n; i++ {
+				ms = append(ms, Match{Rule: fmt.Sprintf("%d_%s", i, long)})
+			}
+			var sb strings.Builder
+			if err := icapWriteInfected(&sb, "fp", ms); err != nil {
+				t.Fatal(err)
+			}
+			resp := sb.String()
+			lines, rest := splitICAPResponse(t, resp)
+			want := n
+			if want > icapViolationsMaxListed {
+				want = icapViolationsMaxListed
+			}
+			at := -1
+			for i, l := range lines {
+				if strings.HasPrefix(l, "X-Violations-Found:") {
+					at = i
+				}
+			}
+			if at < 0 {
+				t.Fatalf("X-Violations-Found missing")
+			}
+			if got := strings.TrimSpace(strings.TrimPrefix(lines[at], "X-Violations-Found:")); got != strconv.Itoa(want) {
+				t.Fatalf("count = %q, want %d", got, want)
+			}
+			cont := 0
+			for _, l := range lines[at+1:] {
+				if !strings.HasPrefix(l, "\t") {
+					break
+				}
+				cont++
+			}
+			if cont != 4*want {
+				t.Fatalf("continuation lines = %d, want %d", cont, 4*want)
+			}
+			if next := lines[at+1+cont]; !strings.HasPrefix(next, "Encapsulated:") {
+				t.Fatalf("header after violations = %q", next)
+			}
+			var hdrOff, bodyOff int
+			if _, err := fmt.Sscanf(lines[at+1+cont], "Encapsulated: res-hdr=%d, res-body=%d", &hdrOff, &bodyOff); err != nil {
+				t.Fatal(err)
+			}
+			if hdrOff != 0 || !strings.HasPrefix(rest, "HTTP/1.1 403 Forbidden\r\n") || bodyOff > len(rest) {
+				t.Fatalf("bad offsets %d/%d", hdrOff, bodyOff)
+			}
+			if !strings.Contains(rest[bodyOff:], "Blocked: 0_") {
+				t.Errorf("body offset does not locate chunked body")
+			}
+			hdrEnd := strings.Index(resp, "\r\n\r\n") + 4
+			if hdrEnd >= 16*1024 {
+				t.Errorf("ICAP header block %d bytes, want < 16 KiB", hdrEnd)
+			}
+		})
+	}
+}
