@@ -21,7 +21,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 		"MAILSTRIX_RULES_FETCH_TIMEOUT",
 	} {
 		t.Setenv(k, "")
-		os.Unsetenv(k)
+		if e := os.Unsetenv(k); e != nil {
+			t.Fatal(e)
+		}
 	}
 	c := LoadConfig()
 	if c.Host != "0.0.0.0" || c.Port != 8079 {

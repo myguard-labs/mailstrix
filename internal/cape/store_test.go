@@ -892,9 +892,13 @@ func TestStoreOrphanAndCleanupError(t *testing.T) {
 	if _, e = f.Write([]byte("orphan")); e != nil {
 		t.Fatal(e)
 	}
-	f.Sync()
+	if e := f.Sync(); e != nil {
+		t.Fatal(e)
+	}
 	_ = f.Close()
-	s.spool.Sync()
+	if e := s.spool.Sync(); e != nil {
+		t.Fatal(e)
+	}
 	_ = s.Close()
 	s = testStore(t, cfg, newStoreClock())
 	files, e := os.ReadDir(filepath.Join(cfg.Directory, "spool"))

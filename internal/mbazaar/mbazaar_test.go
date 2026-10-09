@@ -146,7 +146,9 @@ func TestPickSHA256FallbackColumn(t *testing.T) {
 		t.Fatal("sha256 in a non-standard column not found")
 	}
 	var want [32]byte
-	hex.Decode(want[:], []byte(hashOf("x")))
+	if _, e := hex.Decode(want[:], []byte(hashOf("x"))); e != nil {
+		t.Fatal(e)
+	}
 	if d != want {
 		t.Error("wrong digest picked")
 	}

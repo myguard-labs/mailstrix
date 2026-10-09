@@ -244,7 +244,7 @@ func TestFlightFollowerCancelReleases(t *testing.T) {
 	leaderIn := make(chan struct{})
 	leaderRelease := make(chan struct{})
 	go func() {
-		g.Do(context.Background(), "k", func() ([]Match, bool) {
+		_, _, _ = g.Do(context.Background(), "k", func() ([]Match, bool) {
 			close(leaderIn)
 			<-leaderRelease // hold the flight open
 			return nil, false
@@ -279,7 +279,7 @@ func TestFlightAbortedLeaderFollowerRerun(t *testing.T) {
 	leaderIn := make(chan struct{})
 	leaderRelease := make(chan struct{})
 	go func() {
-		g.Do(context.Background(), "k", func() ([]Match, bool) {
+		_, _, _ = g.Do(context.Background(), "k", func() ([]Match, bool) {
 			close(leaderIn)
 			<-leaderRelease
 			return nil, true // ABORT — no real verdict
@@ -332,7 +332,7 @@ func TestFlightCancelledFollowerNotCountedShared(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	followerGone := make(chan struct{})
 	go func() {
-		g.Do(ctx, "k", func() ([]Match, bool) { return nil, false })
+		_, _, _ = g.Do(ctx, "k", func() ([]Match, bool) { return nil, false })
 		close(followerGone)
 	}()
 	cancel()
@@ -358,7 +358,7 @@ func TestFlightPanicDoesNotHangWaiters(t *testing.T) {
 				t.Fatal("leader panic was swallowed; it must propagate")
 			}
 		}()
-		g.Do(context.Background(), "boom", func() ([]Match, bool) { panic("scan fault") })
+		_, _, _ = g.Do(context.Background(), "boom", func() ([]Match, bool) { panic("scan fault") })
 	}()
 
 	// Map entry must be gone — a fresh call for the same key runs its own fn
@@ -366,7 +366,7 @@ func TestFlightPanicDoesNotHangWaiters(t *testing.T) {
 	done := make(chan struct{})
 	var ran bool
 	go func() {
-		g.Do(context.Background(), "boom", func() ([]Match, bool) { ran = true; return nil, false })
+		_, _, _ = g.Do(context.Background(), "boom", func() ([]Match, bool) { ran = true; return nil, false })
 		close(done)
 	}()
 	select {
