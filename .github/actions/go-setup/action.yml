@@ -20,7 +20,7 @@ runs:
         # without fetching newer patches, so govulncheck flags stdlib CVEs
         # already fixed in a later patch.
         # For example, GO-2026-5856. Bump this on each stdlib-security patch.
-        go-version: "1.26.8"
+        go-version: "1.26.9"
         cache-dependency-path: go.sum
     - name: install libyara (CGO dep) ${{ inputs.packages }}
       shell: bash

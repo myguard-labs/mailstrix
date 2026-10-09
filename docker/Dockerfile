@@ -7,7 +7,7 @@
 # rulesets are baked in at build time; a daily rebuild (CACHEBUST) re-pulls the
 # latest. Override YARAFORGE_SET/YARAFORGE_URL / SIGBASE_REF to pin.
 
-ARG GO_VERSION=1.26.8
+ARG GO_VERSION=1.26.9
 ARG YARA_VERSION=4.5.2
 
 # ---- libyara (static) -------------------------------------------------------
@@ -33,7 +33,7 @@ RUN ./bootstrap.sh \
     && make -j"$(nproc)" && make install && ldconfig
 
 # ---- go build ---------------------------------------------------------------
-FROM golang:${GO_VERSION}-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS build
+FROM golang:${GO_VERSION}-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc pkg-config libssl-dev zlib1g-dev libzstd-dev \
     && rm -rf /var/lib/apt/lists/*

@@ -38,8 +38,8 @@ IMAGE_PINS = {
     "gcr.io/distroless/base-debian12:nonroot": (
         "7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5"
     ),
-    "golang:1.26.8-bookworm": (
-        "9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81"
+    "golang:1.26.9-bookworm": (
+        "d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c"
     ),
 }
 
@@ -1007,9 +1007,9 @@ class PinFixtures(unittest.TestCase):
         )
 
     def test_known_image_label_matches_reviewed_digest(self) -> None:
-        digest = IMAGE_PINS["golang:1.26.8-bookworm"]
+        digest = IMAGE_PINS["golang:1.26.9-bookworm"]
         recipe = (
-            "ARG GO_VERSION=1.26.8\n"
+            "ARG GO_VERSION=1.26.9\n"
             f"FROM golang:${{GO_VERSION}}-bookworm@sha256:{digest}\n"
         )
         self.assertEqual([], docker_errors(recipe))
@@ -1029,16 +1029,16 @@ class PinFixtures(unittest.TestCase):
             self.assertEqual([], docker_errors(candidate))
         self.assertIn(
             "label has no reviewed digest",
-            docker_errors(recipe.replace("1.26.8", "9.99.99"))[0],
+            docker_errors(recipe.replace("1.26.9", "9.99.99"))[0],
         )
         self.assertIn(
             "label has no reviewed digest",
-            docker_errors(qualified[0].replace("1.26.8", "9.99.99"))[0],
+            docker_errors(qualified[0].replace("1.26.9", "9.99.99"))[0],
         )
         for candidate in qualified[1:]:
             self.assertIn(
                 "label has no reviewed digest",
-                docker_errors(candidate.replace("1.26.8", "9.99.99"))[0],
+                docker_errors(candidate.replace("1.26.9", "9.99.99"))[0],
             )
         self.assertIn(
             "label/digest pair",
