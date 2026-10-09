@@ -143,9 +143,19 @@ func depthDefaultContent(data []byte, res *Result, depth int, deadline time.Time
 	}
 	scratch := &Result{childOpts: res.childOpts, probe: true}
 	scratchB := &archiveBudget{}
+	// Stop at the first extractor that yields a stream; order is unchanged.
 	fromEncodedScript(data, scratch, deadline)
+	if len(scratch.Streams) > 0 {
+		return true
+	}
 	fromCSVDDE(data, scratch, deadline)
+	if len(scratch.Streams) > 0 {
+		return true
+	}
 	fromHTMLSmuggling(data, scratch, scratchB, depth, deadline)
+	if len(scratch.Streams) > 0 {
+		return true
+	}
 	fromLauncherFields(data, scratch, deadline)
 	return len(scratch.Streams) > 0
 }
