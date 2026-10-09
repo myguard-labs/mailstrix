@@ -26,17 +26,16 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/myguard-labs/mailstrix/internal/atomicio"
+	"github.com/myguard-labs/mailstrix/internal/feedrefresh"
 )
 
 const (
@@ -65,8 +64,6 @@ const (
 // maxDecompressedBytes is a var (not const) so tests can lower it to exercise the
 // truncation path without allocating a real gigabyte.
 var maxDecompressedBytes int64 = 1 << 30
-
-var errFeedTooLarge = errors.New("malwarebazaar feed exceeds byte limit")
 
 // Hit is one scanned buffer whose SHA256 matched a known malware sample.
 type Hit struct {
@@ -143,7 +140,7 @@ func New(key string, refresh time.Duration, feedURL, cacheDir string, logf func(
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
 		cancel:  cancel,
-		client:  newFeedHTTPClient(fetchTimeout),
+		client:  feedrefresh.NewHTTPClient(fetchTimeout),
 		logf:    logf,
 	}
 	if cacheDir != "" {
@@ -151,46 +148,12 @@ func New(key string, refresh time.Duration, feedURL, cacheDir string, logf func(
 	}
 	c.set.Store(&hashSet{m: map[[32]byte]struct{}{}})
 	c.warmStart()
-	go c.refreshLoop(ctx)
+	go func() {
+		defer close(c.done)
+		// Immediate first fetch, then on the interval; see feedrefresh.Loop.
+		feedrefresh.Loop(ctx, c.stop, c.refresh, "malwarebazaar", c.refreshOnce, &c.failures, c.logf)
+	}()
 	return c
-}
-
-func newFeedHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
-func (c *Checker) refreshLoop(ctx context.Context) {
-	defer close(c.done)
-	// Immediate first fetch, then on the interval. A failure keeps the (empty or
-	// previous) set; lookups just miss until a refresh succeeds.
-	if err := c.refreshOnce(ctx); err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		c.failures.Add(1)
-		c.logf("malwarebazaar initial feed fetch failed: %v", err)
-	}
-	t := time.NewTicker(c.refresh)
-	defer t.Stop()
-	for {
-		select {
-		case <-c.stop:
-			return
-		case <-t.C:
-			if err := c.refreshOnce(ctx); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				c.failures.Add(1)
-				c.logf("malwarebazaar feed refresh failed (keeping previous set): %v", err)
-			}
-		}
-	}
 }
 
 // Close cancels the background refresher and waits for its publication and
@@ -222,9 +185,9 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return &statusError{resp.StatusCode}
+		return &feedrefresh.StatusError{Feed: "malwarebazaar", Code: resp.StatusCode}
 	}
-	body, err := readFeedBody(resp.Body, maxFeedBytes)
+	body, err := feedrefresh.ReadBody("malwarebazaar", resp.Body, maxFeedBytes)
 	if err != nil {
 		return err
 	}
@@ -236,7 +199,7 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	if old := c.set.Load(); old != nil {
 		prev = len(old.m)
 	}
-	if err := checkFeedSize(prev, len(hs.m)); err != nil {
+	if err := feedrefresh.CheckSize(prev, len(hs.m)); err != nil {
 		return err
 	}
 	c.set.Store(hs)
@@ -248,18 +211,6 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	}
 	c.logf("malwarebazaar feed loaded: %d hashes", len(hs.m))
 	return nil
-}
-
-func readFeedBody(r io.Reader, limit int64) ([]byte, error) {
-	lr := &io.LimitedReader{R: r, N: limit + 1}
-	body, err := io.ReadAll(lr)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, errFeedTooLarge
-	}
-	return body, nil
 }
 
 // warmStart loads the persisted feed snapshot (if any) so lookups work from the
@@ -280,10 +231,6 @@ func (c *Checker) warmStart() {
 	c.set.Store(hs)
 	c.logf("malwarebazaar warm-start from cache: %d hashes", len(hs.m))
 }
-
-type statusError struct{ code int }
-
-func (e *statusError) Error() string { return "malwarebazaar feed HTTP " + strconv.Itoa(e.code) }
 
 // parseFeed builds the digest set from the downloaded body — either the ZIP dump
 // (one CSV inside) or a plain CSV (the "recent" export / a custom feed). The
@@ -426,21 +373,4 @@ func (c *Checker) Metrics() Metrics {
 		Lookups:         c.lookups.Load(),
 		Hits:            c.hits.Load(),
 	}
-}
-
-// COR-08: a refresh that returns HTTP 200 with zero entries, or with a tiny
-// fraction of a large previous set, is a broken upstream response, not a
-// real feed. Reject it so the last-good set and the warm-start cache stay.
-const (
-	minFeedForDropCheck = 1000
-	maxFeedDropFactor   = 10
-)
-
-var errFeedShrank = errors.New("feed refresh rejected: empty or collapsed")
-
-func checkFeedSize(prev, next int) error {
-	if next == 0 || (prev >= minFeedForDropCheck && next*maxFeedDropFactor < prev) {
-		return fmt.Errorf("%w (%d -> %d entries)", errFeedShrank, prev, next)
-	}
-	return nil
 }

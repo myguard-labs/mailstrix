@@ -3,6 +3,8 @@ package mbazaar
 import (
 	"context"
 	"errors"
+
+	"github.com/myguard-labs/mailstrix/internal/feedrefresh"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,8 +29,8 @@ func TestRefreshEmptyKeepsLastGood(t *testing.T) {
 		t.Fatalf("loaded %d hashes, want 2", n)
 	}
 	body.Store("# sha256_hash\n")
-	if err := c.refreshOnce(context.Background()); !errors.Is(err, errFeedShrank) {
-		t.Fatalf("empty refresh: err=%v, want errFeedShrank", err)
+	if err := c.refreshOnce(context.Background()); !errors.Is(err, feedrefresh.ErrShrank) {
+		t.Fatalf("empty refresh: err=%v, want feedrefresh.ErrShrank", err)
 	}
 	if n := len(c.set.Load().m); n != 2 {
 		t.Fatalf("empty refresh replaced the set: %d hashes", n)

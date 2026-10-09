@@ -22,18 +22,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/myguard-labs/mailstrix/internal/atomicio"
+	"github.com/myguard-labs/mailstrix/internal/feedrefresh"
 	"github.com/myguard-labs/mailstrix/internal/urlcand"
 )
 
@@ -46,8 +44,6 @@ const (
 	fetchTimeout   = 60 * time.Second
 	maxFeedBytes   = 64 << 20 // hard ceiling on a downloaded feed
 )
-
-var errFeedTooLarge = errors.New("threatfox feed exceeds byte limit")
 
 // Hit is one URL or domain in a scanned buffer that matched the ThreatFox feed.
 type Hit struct {
@@ -126,7 +122,7 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
 		cancel:  cancel,
-		client:  newFeedHTTPClient(fetchTimeout),
+		client:  feedrefresh.NewHTTPClient(fetchTimeout),
 		logf:    logf,
 	}
 	if cacheDir != "" {
@@ -134,17 +130,12 @@ func New(key string, refresh time.Duration, cacheDir string, logf func(string, .
 	}
 	c.rs.Store(&ruleset{urls: map[string]struct{}{}, domains: map[string]struct{}{}})
 	c.warmStart()
-	go c.refreshLoop(ctx)
+	go func() {
+		defer close(c.done)
+		// Immediate first fetch, then on the interval; see feedrefresh.Loop.
+		feedrefresh.Loop(ctx, c.stop, c.refresh, "threatfox", c.refreshOnce, &c.failures, c.logf)
+	}()
 	return c
-}
-
-func newFeedHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 }
 
 func (c *Checker) warmStart() {
@@ -162,33 +153,6 @@ func (c *Checker) warmStart() {
 	}
 	c.rs.Store(rs)
 	c.logf("threatfox warm-start from cache: %d urls / %d domains", len(rs.urls), len(rs.domains))
-}
-
-func (c *Checker) refreshLoop(ctx context.Context) {
-	defer close(c.done)
-	if err := c.refreshOnce(ctx); err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		c.failures.Add(1)
-		c.logf("threatfox initial feed fetch failed: %v", err)
-	}
-	t := time.NewTicker(c.refresh)
-	defer t.Stop()
-	for {
-		select {
-		case <-c.stop:
-			return
-		case <-t.C:
-			if err := c.refreshOnce(ctx); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				c.failures.Add(1)
-				c.logf("threatfox feed refresh failed (keeping previous set): %v", err)
-			}
-		}
-	}
 }
 
 // Close cancels the background refresher and waits for its publication and
@@ -219,9 +183,9 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return &statusError{resp.StatusCode}
+		return &feedrefresh.StatusError{Feed: "threatfox", Code: resp.StatusCode}
 	}
-	body, err := readFeedBody(resp.Body, maxFeedBytes)
+	body, err := feedrefresh.ReadBody("threatfox", resp.Body, maxFeedBytes)
 	if err != nil {
 		return err
 	}
@@ -233,7 +197,7 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	if old := c.rs.Load(); old != nil {
 		prev = len(old.urls) + len(old.domains)
 	}
-	if err := checkFeedSize(prev, len(rs.urls)+len(rs.domains)); err != nil {
+	if err := feedrefresh.CheckSize(prev, len(rs.urls)+len(rs.domains)); err != nil {
 		return err
 	}
 	c.rs.Store(rs)
@@ -245,22 +209,6 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	}
 	c.logf("threatfox feed loaded: %d urls / %d domains", len(rs.urls), len(rs.domains))
 	return nil
-}
-
-type statusError struct{ code int }
-
-func (e *statusError) Error() string { return "threatfox feed HTTP " + strconv.Itoa(e.code) }
-
-func readFeedBody(r io.Reader, limit int64) ([]byte, error) {
-	lr := &io.LimitedReader{R: r, N: limit + 1}
-	body, err := io.ReadAll(lr)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, errFeedTooLarge
-	}
-	return body, nil
 }
 
 // parseFeed reads the ThreatFox CSV. The current dump is:
@@ -420,21 +368,4 @@ func (c *Checker) Metrics() Metrics {
 		Lookups:         c.lookups.Load(),
 		Hits:            c.hits.Load(),
 	}
-}
-
-// COR-08: a refresh that returns HTTP 200 with zero entries, or with a tiny
-// fraction of a large previous set, is a broken upstream response, not a
-// real feed. Reject it so the last-good set and the warm-start cache stay.
-const (
-	minFeedForDropCheck = 1000
-	maxFeedDropFactor   = 10
-)
-
-var errFeedShrank = errors.New("feed refresh rejected: empty or collapsed")
-
-func checkFeedSize(prev, next int) error {
-	if next == 0 || (prev >= minFeedForDropCheck && next*maxFeedDropFactor < prev) {
-		return fmt.Errorf("%w (%d -> %d entries)", errFeedShrank, prev, next)
-	}
-	return nil
 }
