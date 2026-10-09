@@ -2,7 +2,7 @@ module github.com/myguard-labs/mailstrix
 
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 require (
 	github.com/Teamwork/tnef v0.0.0-20200108124832-7deabccfdb32
@@ -20,7 +20,7 @@ require (
 	www.velocidex.com/golang/oleparse v0.0.0-20251204214047-2e3e765e26a1
 )
 
-require golang.org/x/net v0.59.0
+require golang.org/x/net v0.60.0
 
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
