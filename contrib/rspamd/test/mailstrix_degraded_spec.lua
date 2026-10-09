@@ -1,11 +1,11 @@
 #!/usr/bin/env lua
 --[[
-mailstrix_degraded_spec.lua (AUD-12a) - loads the REAL rspamd plugin with mocked
-Rspamd APIs and proves that a degraded /scan reply (incomplete|error|busy) with
-no actionable match is reported as the zero-weight STRIX_UNKNOWN symbol (option =
-reason), never silently clean, while an actionable match in a degraded reply is
-still a normal detection. Transport / non-200 / parse failures are deliberately
-unchanged (README contract covers only degraded replies).
+mailstrix_degraded_spec.lua (AUD-12a/12b) - loads the REAL rspamd plugin with
+mocked Rspamd APIs and proves that a degraded or failed scan (reply degraded
+incomplete|error|busy, or transport|http|parse|malformed|unscheduled failure)
+with no actionable match is reported as the zero-weight STRIX_UNKNOWN symbol
+(option = reason), never silently clean, while an actionable match is still a
+normal detection.
 
 Run: lua5.4 contrib/rspamd/test/mailstrix_degraded_spec.lua  (also lua5.1)
 --]]
@@ -42,7 +42,9 @@ local function run(replies, with_part)
     request = function(req)
       n = n + 1
       local r = replies[n] or { obj = { matches = {} } }
-      if r.err then
+      if r.unscheduled then
+        return false
+      elseif r.err then
         req.callback("boom", nil, nil)
       else
         req.callback(nil, r.code or 200, "synthetic")
@@ -54,7 +56,7 @@ local function run(replies, with_part)
   package.loaded.ucl = {
     parser = function()
       return {
-        parse_string = function() cur = replies[n]; return not (cur and cur.badjson) end,
+        parse_string = function() cur = replies[n] or { obj = { matches = {} } }; return not (cur and cur.badjson) end,
         get_object = function() return cur.obj end,
       }
     end,
@@ -128,13 +130,30 @@ check(s.STRIX_UNKNOWN ~= nil, "one degraded job among clean jobs -> unknown")
 s = run({ { obj = M({ degraded = "incomplete" }) }, { obj = M({ matches = { real } }) } }, true)
 check(s.STRIX_UNKNOWN == nil and s.STRIX_MALWARE ~= nil, "degraded job + actionable in another job -> detection only")
 
--- Unchanged behaviour: transport error / non-200 / parse failure stay silent.
+-- Fail-visible (AUD-12b): every failed-scan path reports its reason.
 s = run({ { err = true } })
-check(next(s) == nil, "transport error unchanged (no symbol)")
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.opts[1] == "transport", "transport error -> STRIX_UNKNOWN(transport)")
 s = run({ { code = 500, obj = M({ degraded = "error" }) } })
-check(next(s) == nil, "non-200 unchanged (no symbol)")
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.opts[1] == "http", "non-200 -> STRIX_UNKNOWN(http)")
 s = run({ { badjson = true, obj = M({ degraded = "error" }) } })
-check(next(s) == nil, "parse failure unchanged (no symbol)")
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.opts[1] == "parse", "parse failure -> STRIX_UNKNOWN(parse)")
+s = run({ { obj = "notatable" } })
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.opts[1] == "malformed", "non-table object -> STRIX_UNKNOWN(malformed)")
+s = run({ { obj = { matches = "x" } } })
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.opts[1] == "malformed", "matches not a table -> STRIX_UNKNOWN(malformed)")
+s = run({ { unscheduled = true } })
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.opts[1] == "unscheduled", "unscheduled request -> STRIX_UNKNOWN(unscheduled)")
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.w == 1.0, "failure unknown weight is 1.0")
+
+-- Negative controls: a failure on one job + actionable match on another -> detection only.
+s = run({ { err = true }, { obj = M({ matches = { real } }) } }, true)
+check(s.STRIX_MALWARE ~= nil and s.STRIX_UNKNOWN == nil, "transport failure + actionable elsewhere -> detection, no unknown")
+-- First degraded reason wins across jobs.
+s = run({ { err = true }, { code = 500 } }, true)
+check(s.STRIX_UNKNOWN and s.STRIX_UNKNOWN.opts[1] == "transport", "first degraded reason wins")
+-- Clean 200 reply stays silent.
+s = run({ { obj = M({}) } }, true)
+check(next(s) == nil, "clean 200 reply -> no symbol")
 
 if failures > 0 then os.exit(1) end
 print("mailstrix_degraded_spec: OK (mock APIs; no real Rspamd process proof)")

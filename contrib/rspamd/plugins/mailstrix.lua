@@ -84,10 +84,11 @@ local settings = {
   -- Canary/shadow symbol for strixd MAILSTRIX_CANARY responses. Canary hits are
   -- visible in history but never contribute to score.
   canary_symbol = "STRIX_CANARY",
-  -- Zero-weight "unknown, not clean" symbol: strixd answered 200 but flagged the
-  -- reply degraded (incomplete|error|busy) and no actionable (non-canary,
-  -- non-allowlisted) match was found. The degraded reason is the option. An
-  -- actionable match in a degraded reply is still reported as a normal detection.
+  -- Zero-weight "unknown, not clean" symbol: the scan was degraded or failed
+  -- (strixd reply flagged incomplete|error|busy, or transport|http|parse|
+  -- malformed|unscheduled) and no actionable (non-canary, non-allowlisted)
+  -- match was found. The reason is the option. An actionable match in a
+  -- degraded reply is still reported as a normal detection.
   unknown_symbol = "STRIX_UNKNOWN",
   -- What to scan. At least one must be true or the plugin does nothing.
   scan_message = true,         -- the whole rfc822 message in one scan
@@ -140,11 +141,13 @@ local settings = {
   pw_candidate_maxlen = 64,    -- max bytes per candidate (mirror strixd header cap)
 }
 
--- post sends buf to strixd and invokes cb(matches) with the decoded rule list
--- (possibly empty). Errors are logged and treated as "no match" (fail-open):
--- a scanner problem must never block mail. fname (optional) is the attachment
--- filename; it is passed to strixd so the YARA filename/extension external vars
--- get set and name-keyed rules (THOR/Loki) fire.
+-- post sends buf to strixd and invokes cb(matches, degraded) with the decoded
+-- rule list (possibly empty). Errors are logged and reported as a degraded
+-- reason (transport|http|parse|malformed|unscheduled) so the caller emits the
+-- zero-weight STRIX_UNKNOWN instead of silent clean; mail is never blocked.
+-- fname (optional) is the attachment filename; it is passed to strixd so the
+-- YARA filename/extension external vars get set and name-keyed rules
+-- (THOR/Loki) fire.
 -- compute_effort derives the X-MAILSTRIX-Effort value (1..effort_max) for this
 -- message, or nil when the feature is disabled (so no header is sent and strixd
 -- falls back to its own default/auto). Cheap, signal-driven: clean/trusted
@@ -248,22 +251,22 @@ local function post(task, buf, what, fname, effort, cb)
   local function http_cb(err, code, body)
     if err then
       rspamd_logger.errx(task, "strixd request failed (%s): %s", what, err)
-      return cb({})
+      return cb({}, "transport")
     end
     if code ~= 200 then
       rspamd_logger.errx(task, "strixd returned HTTP %s (%s)", code, what)
-      return cb({})
+      return cb({}, "http")
     end
     local ucl = require "ucl"
     local parser = ucl.parser()
     local ok, perr = parser:parse_string(body)
     if not ok then
       rspamd_logger.errx(task, "cannot parse strixd response: %s", perr)
-      return cb({})
+      return cb({}, "parse")
     end
     local res = parser:get_object()
     if type(res) ~= "table" or type(res.matches) ~= "table" then
-      return cb({})
+      return cb({}, "malformed")
     end
     -- Only a non-empty string counts as degraded; any other type is ignored.
     local degraded
@@ -312,7 +315,7 @@ local function post(task, buf, what, fname, effort, cb)
   })
   if not scheduled then
     rspamd_logger.errx(task, "strixd request could not be scheduled (%s)", what)
-    return cb({})
+    return cb({}, "unscheduled")
   end
 end
 
