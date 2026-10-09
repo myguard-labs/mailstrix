@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func startCAPEChain(t *testing.T) (*CAPEService, *http.Client) {
 	endpoint.Origin = "https://cape.invalid:" + port // origin port must match the destination
 	cfg.Endpoints["primary"] = endpoint
 	s := newTestServer(&fakeEngine{}, "tok")
-	service, err := s.startCAPE(cfg, capeServiceDeps{resolve, buildCAPERuntime, net.Listen})
+	service, err := s.startCAPE(cfg, capeServiceDeps{resolve, s.buildCAPERuntime, net.Listen})
 	if err != nil {
 		t.Fatalf("composed CAPE chain did not start: %v", err)
 	}
@@ -201,5 +202,57 @@ func TestCAPEServiceChainSubmissionFailureTransitionsJob(t *testing.T) {
 	}
 	if !view.TerminalAt.IsZero() {
 		t.Fatalf("uncertain job must not be terminal: %s", body)
+	}
+}
+
+// AUD-07e: the production factory wires the cape read-interrupt failure hook to
+// /metrics. A ResponseWriter without deadline support (httptest recorder) makes
+// the real 5 s ingress watchdog fail to interrupt; the counter must show it.
+// A server that never saw a failure renders the series at 0 (negative).
+func TestCAPEBuildRuntimeCountsInterruptFailuresOnMetrics(t *testing.T) {
+	resolve, _ := capeTLSFixture(t)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cape.SetStoreCapacityForTest())
+	cfg := capeFixtureConfig()
+	cfg.Store = cape.StoreConfig{Directory: dir, SubmitPerMinute: 100, TenantSubmitPerMinute: 50, RequestsPerMinute: 1000}
+	endpoint := cfg.Endpoints["primary"]
+	endpoint.Destination = closedLoopbackAddr(t)
+	_, port, _ := net.SplitHostPort(endpoint.Destination)
+	endpoint.Origin = "https://cape.invalid:" + port
+	cfg.Endpoints["primary"] = endpoint
+	s := newTestServer(&fakeEngine{}, "tok")
+	metrics := func() string {
+		w := httptest.NewRecorder()
+		s.serveMetrics(w)
+		return w.Body.String()
+	}
+	const zero = "mailstrix_cape_ingress_interrupt_failures_total 0\n"
+	if !strings.Contains(metrics(), zero) {
+		t.Fatalf("fresh server lacks zero-valued interrupt failure series")
+	}
+	rt, err := s.buildCAPERuntime(context.Background(), cfg, resolve, s.capeStaticScan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rt.close() })
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	r := httptest.NewRequest("POST", cape.JobsPath, pr)
+	r.Header.Set("Authorization", "Bearer fixture-alpha")
+	r.Header.Set("Content-Type", "application/octet-stream")
+	r.Header.Set("X-Mailstrix-CAPE-Profile", "manual")
+	done := make(chan struct{})
+	go func() { rt.handler.ServeHTTP(httptest.NewRecorder(), r); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(capeChainIdleBound):
+		t.Fatal("stalled ingress did not end within the idle bound")
+	}
+	if m := metrics(); !strings.Contains(m, "# TYPE mailstrix_cape_ingress_interrupt_failures_total counter\n") ||
+		!strings.Contains(m, "mailstrix_cape_ingress_interrupt_failures_total 1\n") {
+		t.Fatalf("interrupt failure not counted on /metrics:\n%s", m)
 	}
 }

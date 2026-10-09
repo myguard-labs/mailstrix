@@ -33,6 +33,10 @@ type APIConfig struct {
 	Authenticate func(*http.Request) (string, error)
 	Profile      func(context.Context, string, string) (APIProfile, error)
 	StaticScan   func(context.Context, string, io.Reader) (string, error)
+	// OnInterruptFailure is optional. It is called, in addition to the log
+	// line, each time the ingress watchdog fails to move the connection read
+	// deadline. It runs on the watchdog goroutine and must be concurrency-safe.
+	OnInterruptFailure func(error)
 }
 
 // APIHandler serves the opt-in CAPE job API.
@@ -62,6 +66,18 @@ type interruptibleBody struct {
 func (b interruptibleBody) InterruptRead() {
 	if err := b.rc.SetReadDeadline(time.Now()); err != nil && b.report != nil {
 		b.report(err)
+	}
+}
+
+// interruptReporter returns the report callback for one handler: the log line
+// always, then the optional hook.
+func (h *APIHandler) interruptReporter() func(error) {
+	hook := h.cfg.OnInterruptFailure
+	return func(err error) {
+		logInterruptFailure(err)
+		if hook != nil {
+			hook(err)
+		}
 	}
 }
 
@@ -165,7 +181,7 @@ func (h *APIHandler) submit(w http.ResponseWriter, r *http.Request, tenant strin
 		apiError(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	admission, err := h.cfg.Store.EnqueueClassified(r.Context(), EnqueueRequest{Tenant: tenant, Generation: profile.Generation, SubmissionPolicy: profile.SubmissionPolicy, ResultPolicy: profile.ResultPolicy}, interruptibleBody{ReadCloser: r.Body, rc: http.NewResponseController(w), report: logInterruptFailure},
+	admission, err := h.cfg.Store.EnqueueClassified(r.Context(), EnqueueRequest{Tenant: tenant, Generation: profile.Generation, SubmissionPolicy: profile.SubmissionPolicy, ResultPolicy: profile.ResultPolicy}, interruptibleBody{ReadCloser: r.Body, rc: http.NewResponseController(w), report: h.interruptReporter()},
 		func(ctx context.Context, body io.Reader) (string, error) {
 			static, err := h.cfg.StaticScan(ctx, tenant, body)
 			if err != nil {

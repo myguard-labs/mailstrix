@@ -99,6 +99,7 @@ type Server struct {
 		cacheHit, cacheMiss, cacheCoalesced     atomic.Uint64
 		icapRequests, icapInfected, icapOptions atomic.Uint64
 		icapBusy                                atomic.Uint64 // conns refused at the pre-admission cap
+		capeInterruptFailures                   atomic.Uint64 // CAPE ingress read-interrupt (SetReadDeadline) failures
 	}
 	info *log.Logger // access/info — stdout when MAILSTRIX_LOG_STDOUT, else stderr
 	errl *log.Logger // errors/warnings — always stderr
@@ -859,6 +860,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fg := func(name, help string, v uint64) { emit(name, help, "gauge", v) }
 	fm("scans_total", "total scan requests served across HTTP and clamd", s.metrics.scans.Load())
 	fm("clamd_accept_errors_total", "unexpected terminal clamd listener failures", s.metrics.clamdAcceptErrors.Load())
+	fm("cape_ingress_interrupt_failures_total", "CAPE ingress watchdog failures to interrupt a stalled request-body read (ResponseWriter without deadline support)", s.metrics.capeInterruptFailures.Load())
 	fm("matches_total", "scan requests with >=1 rule match across HTTP and clamd", s.metrics.matches.Load())
 	fm("errors_total", "scan/read/length errors", s.metrics.errors.Load())
 	fm("busy_total", "requests rejected by the concurrency gate", s.metrics.busy.Load())

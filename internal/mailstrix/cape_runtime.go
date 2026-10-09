@@ -142,7 +142,17 @@ func buildCAPEAuth(ctx context.Context, c *capeDaemonConfig, resolve capeResolve
 	}, nil
 }
 
-func buildCAPERuntime(ctx context.Context, c *capeDaemonConfig, resolve capeResolver, scan func(context.Context, string, io.Reader) (string, error)) (_ *capeRuntime, retErr error) {
+func buildCAPERuntime(ctx context.Context, c *capeDaemonConfig, resolve capeResolver, scan func(context.Context, string, io.Reader) (string, error)) (*capeRuntime, error) {
+	return buildCAPERuntimeHooked(ctx, c, resolve, scan, nil)
+}
+
+// buildCAPERuntime is the production factory: it wires the CAPE ingress
+// read-interrupt failure count into this server's /metrics.
+func (s *Server) buildCAPERuntime(ctx context.Context, c *capeDaemonConfig, resolve capeResolver, scan func(context.Context, string, io.Reader) (string, error)) (*capeRuntime, error) {
+	return buildCAPERuntimeHooked(ctx, c, resolve, scan, func(error) { s.metrics.capeInterruptFailures.Add(1) })
+}
+
+func buildCAPERuntimeHooked(ctx context.Context, c *capeDaemonConfig, resolve capeResolver, scan func(context.Context, string, io.Reader) (string, error), onInterrupt func(error)) (_ *capeRuntime, retErr error) {
 	clients := map[string]*cape.Client{}
 	defer func() {
 		if retErr != nil {
@@ -217,7 +227,7 @@ func buildCAPERuntime(ctx context.Context, c *capeDaemonConfig, resolve capeReso
 			_ = store.Close()
 		}
 	}()
-	handler, err := cape.NewAPIHandler(cape.APIConfig{Enabled: true, Store: store, Authenticate: authenticate, StaticScan: scan, Profile: func(_ context.Context, tenant, name string) (cape.APIProfile, error) {
+	handler, err := cape.NewAPIHandler(cape.APIConfig{Enabled: true, Store: store, Authenticate: authenticate, StaticScan: scan, OnInterruptFailure: onInterrupt, Profile: func(_ context.Context, tenant, name string) (cape.APIProfile, error) {
 		for _, allowed := range c.Tenants[tenant].Profiles {
 			if allowed == name {
 				return profiles[name], nil
