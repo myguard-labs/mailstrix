@@ -169,7 +169,7 @@ func filesystemCapacity(dir *os.File, path string) (capacity, error) {
 	if err != nil {
 		return capacity{}, ErrStoreUnavailable
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	scan := bufio.NewScanner(io.LimitReader(f, 1<<20))
 	scan.Buffer(make([]byte, 4096), 64<<10)
 	device := strconv.FormatUint(uint64(st.Dev_major), 10) + ":" + strconv.FormatUint(uint64(st.Dev_minor), 10)

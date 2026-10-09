@@ -135,7 +135,7 @@ func capeReadFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, ErrCAPEUnavailable
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err = f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, ErrCAPEUnavailable

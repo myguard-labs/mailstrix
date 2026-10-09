@@ -183,7 +183,7 @@ func (s *Store) classifyIngress(ctx context.Context, j Job, size int64, classify
 	if err != nil {
 		return "", ErrStoreUnavailable
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	live, cancel := context.WithCancel(ctx)
 	defer cancel()
 	timer := s.hooks.clock.NewTimer(j.IngressDeadline.Sub(s.hooks.clock.Now()))
@@ -292,7 +292,7 @@ func checkTenantDebt(tx *sql.Tx, tenant string, now time.Time) error {
 	if err != nil {
 		return ErrStoreUnavailable
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var raw []byte
 		var j Job
@@ -321,7 +321,7 @@ func (s *Store) writeIngress(ctx context.Context, j Job, body io.Reader, closeBo
 	if err != nil {
 		return 0, "", ErrStoreUnavailable
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	absolute := s.hooks.clock.NewTimer(j.IngressDeadline.Sub(s.hooks.clock.Now()))
 	defer absolute.Stop()
 	progress := make(chan struct{}, 1)

@@ -136,7 +136,7 @@ func (s *Server) StartCAPE() (*CAPEService, error) {
 	if s.cfg.capeConfig == nil {
 		return nil, nil
 	}
-	return s.startCAPE(s.cfg.capeConfig, capeServiceDeps{resolve: s.cfg.capeConfig.resolver(), build: buildCAPERuntime, listen: net.Listen})
+	return s.startCAPE(s.cfg.capeConfig, capeServiceDeps{resolve: s.cfg.capeConfig.resolver(), build: s.buildCAPERuntime, listen: net.Listen})
 }
 
 func (s *Server) startCAPE(c *capeDaemonConfig, deps capeServiceDeps) (*CAPEService, error) {

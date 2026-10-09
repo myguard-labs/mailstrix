@@ -293,7 +293,7 @@ func parseFeed(body []byte) (*hashSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() // read-only reader
 
 	hs := &hashSet{m: make(map[[32]byte]struct{})}
 	cr := csv.NewReader(io.LimitReader(rc, maxDecompressedBytes))
@@ -349,7 +349,7 @@ func openCSV(body []byte) (io.ReadCloser, error) {
 			// to spin reading 0 bytes per iteration — io.LimitReader on the output
 			// side cannot terminate that loop; only bounding the read here does.
 			raw, err := io.ReadAll(io.LimitReader(rc, maxDecompressedBytes))
-			rc.Close() // #nosec G104
+			_ = rc.Close() // zip entry fully read; a close error cannot change raw
 			if err != nil {
 				return nil, err
 			}

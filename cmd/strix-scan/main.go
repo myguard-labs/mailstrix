@@ -95,7 +95,7 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "strix-scan:", err)
 			return 2
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }() // read-only input
 		in = f
 	}
 

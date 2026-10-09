@@ -4,10 +4,12 @@ package cape
 
 import (
 	"bufio"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -127,3 +129,70 @@ func TestAPIIngressInterruptUnsupportedWriterFallsBack(t *testing.T) {
 		t.Fatalf("Deadline rejection body lacks unavailable code: %q", w.Body.String())
 	}
 }
+
+// serveStalledBody drives one stalled POST through a handler built from cfg and
+// returns once the watchdog has ended it. w decides whether deadline support exists.
+func serveStalledBody(t *testing.T, cfg APIConfig, clock *fakeStoreClock, w http.ResponseWriter) {
+	t.Helper()
+	h, err := NewAPIHandler(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBlockingBody()
+	r := httptest.NewRequest("POST", JobsPath, b)
+	r.Header.Set("Authorization", "Bearer fixture-alpha")
+	r.Header.Set("Content-Type", "application/octet-stream")
+	r.Header.Set("X-Mailstrix-CAPE-Profile", "private")
+	done := make(chan struct{})
+	go func() { h.ServeHTTP(w, r); close(done) }()
+	<-b.entered
+	waitStore(t, func() bool { return clock.hasDeadline(ingressIdle) })
+	clock.advance(ingressIdle)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stalled ingress did not end")
+	}
+}
+
+// AUD-07e positive: a writer without deadline support reports to the hook once.
+func TestAPIIngressInterruptFailureHookCounts(t *testing.T) {
+	clock := newStoreClock()
+	cfg := apiFixture(t, testStore(t, storeConfig(t.TempDir()), clock))
+	var got []error
+	var n atomic.Uint64
+	cfg.OnInterruptFailure = func(err error) { n.Add(1); got = append(got, err) }
+	serveStalledBody(t, cfg, clock, httptest.NewRecorder())
+	if n.Load() != 1 || len(got) != 1 || !errors.Is(got[0], http.ErrNotSupported) {
+		t.Fatalf("hook calls = %d (%v), want exactly one ErrNotSupported", n.Load(), got)
+	}
+}
+
+// AUD-07e negative: a writer that supports deadlines is interrupted
+// successfully, so the hook is never called.
+func TestAPIIngressInterruptSuccessDoesNotCount(t *testing.T) {
+	clock := newStoreClock()
+	cfg := apiFixture(t, testStore(t, storeConfig(t.TempDir()), clock))
+	var n atomic.Uint64
+	cfg.OnInterruptFailure = func(error) { n.Add(1) }
+	serveStalledBody(t, cfg, clock, deadlineRecorder{httptest.NewRecorder()})
+	if n.Load() != 0 {
+		t.Fatalf("hook called %d times for a successful interrupt", n.Load())
+	}
+}
+
+// AUD-07e: a nil hook is safe on the failing path.
+func TestAPIIngressInterruptFailureNilHookSafe(t *testing.T) {
+	clock := newStoreClock()
+	cfg := apiFixture(t, testStore(t, storeConfig(t.TempDir()), clock))
+	if cfg.OnInterruptFailure != nil {
+		t.Fatal("fixture must leave the hook nil")
+	}
+	serveStalledBody(t, cfg, clock, httptest.NewRecorder())
+}
+
+// deadlineRecorder is a ResponseWriter that accepts SetReadDeadline, as the
+// net/http server writer does.
+type deadlineRecorder struct{ *httptest.ResponseRecorder }
+
+func (deadlineRecorder) SetReadDeadline(time.Time) error { return nil }

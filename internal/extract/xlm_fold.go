@@ -112,7 +112,7 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(rc, maxBytesWorkbookXML))
-	rc.Close() // #nosec G104 -- zip entry close
+	_ = rc.Close() // zip entry close
 	if err != nil || len(raw) == 0 {
 		return
 	}

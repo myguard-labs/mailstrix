@@ -122,7 +122,7 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			return nil
 		}
 		raw, err := io.ReadAll(io.LimitReader(rc, docpropsCap))
-		rc.Close() // #nosec G104 -- zip entry close; error is unrecoverable here
+		_ = rc.Close() // zip entry close; error is unrecoverable here
 		if err != nil || len(raw) == 0 {
 			return nil
 		}

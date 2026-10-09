@@ -17,7 +17,7 @@ const (
 )
 
 func scanJobBatch(rows *sql.Rows, limit int) ([]Job, error) {
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // iteration errors are reported by rows.Err
 	jobs := make([]Job, 0, limit)
 	for rows.Next() {
 		var raw []byte

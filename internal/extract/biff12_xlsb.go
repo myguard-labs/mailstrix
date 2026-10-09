@@ -144,7 +144,7 @@ func fromXLSBExternalDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			continue
 		}
 		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesWorkbookXML))
-		rc.Close() // #nosec G104 -- zip entry close
+		_ = rc.Close() // zip entry close
 		if err != nil || len(raw) == 0 {
 			continue
 		}
@@ -255,7 +255,7 @@ func loadXLSBSharedStrings(zr *zip.Reader, deadline time.Time) []string {
 			return nil
 		}
 		raw, err := io.ReadAll(io.LimitReader(rc, maxBytesWorkbookXML))
-		rc.Close() // #nosec G104 -- zip entry close
+		_ = rc.Close() // zip entry close
 		if err != nil {
 			return nil
 		}
@@ -346,7 +346,7 @@ func processXLSBSheet(sf *zip.File, sst []string, out *[][]byte, totalOutput *in
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(rc, maxBytesWorkbookXML))
-	rc.Close() // #nosec G104 -- zip entry close
+	_ = rc.Close() // zip entry close
 	if err != nil || len(raw) == 0 {
 		return
 	}

@@ -419,7 +419,7 @@ func (s *Store) transaction(ctx context.Context, f func(*sql.Tx) error) error {
 	if err != nil {
 		return ErrStoreUnavailable
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }() // no-op (ErrTxDone) after Commit; f's error is the one returned
 	if err = f(tx); err != nil {
 		return err
 	}
@@ -527,7 +527,7 @@ func (s *Store) List(ctx context.Context, tenant string, state JobState, limit i
 	if err != nil {
 		return nil, ErrStoreUnavailable
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // iteration errors are reported by rows.Err
 	var jobs []Job
 	for rows.Next() {
 		var raw []byte

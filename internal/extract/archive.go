@@ -579,7 +579,7 @@ func unpackGzip(buf []byte, res *Result, b *archiveBudget, depth int, deadline t
 	if err != nil {
 		return
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 	res.IsArchive = true
 	data := readMemberRes(gr, 0, res) // gzip stream exposes no reliable uncompressed size
 	if len(data) == 0 {
