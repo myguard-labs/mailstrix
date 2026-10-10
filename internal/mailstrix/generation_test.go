@@ -160,7 +160,7 @@ func TestGenerationNativeWorkerSurvivesDisconnect(t *testing.T) {
 	t.Cleanup(s.Close)
 	var release sync.Once
 	defer release.Do(func() { close(resume) })
-	owner := p7Owner(t, s)
+	owner := p8Owner(t, s, s.rules.Load())
 	srv := newCachingServer(s, "generation-test")
 	const body = "ordinary worker fixture"
 	meta := ScanMeta{RawKey: streamDedupKey([]byte(body)), Effort: ResolveEffortLevel(0, false, srv.autoEnvDefault(true), srv.cfg.EffortMax)}

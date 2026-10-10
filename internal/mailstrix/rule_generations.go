@@ -54,7 +54,7 @@ func (o *ruleGenerationObserver) observe(r *yara.Rules) {
 
 // destroy must also be used for any future explicit destruction of an observed
 // object, under the caller's existing exclusive lifetime ownership. Production
-// uses explicit ownership for main and finalizers for auxiliary-only Rules.
+// uses explicit ownership for every published main and auxiliary Rules object.
 // Claim under mu, then destroy outside it; the count includes claimed objects
 // until native destruction completes. Callers must still exclude native users.
 func (o *ruleGenerationObserver) destroy(r *yara.Rules, key weak.Pointer[yara.Rules]) {

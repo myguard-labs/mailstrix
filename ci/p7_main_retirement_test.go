@@ -52,8 +52,8 @@ func TestP7PublicCloseAndFailedReload(t *testing.T) {
 // Private pool barriers stay in the owning package. This executable wrapper
 // makes the lifetime contract part of ci without exposing native test hooks.
 func TestP7InternalLifetimeRegressions(t *testing.T) {
-	cmd := exec.Command("go", "test", "-count=1", "-run", "^TestP7", "../internal/mailstrix")
+	cmd := exec.Command("go", "test", "-count=1", "-run", "^TestP[78]", "../internal/mailstrix")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("internal P7 lifetime regressions: %v\n%.8192s", err, output)
+		t.Fatalf("internal P7/P8 lifetime regressions: %v\n%.8192s", err, output)
 	}
 }

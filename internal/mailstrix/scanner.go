@@ -826,14 +826,12 @@ func (s *Scanner) publishReload(b *reloadBundle) *generationPin {
 			}
 		}
 		if !duplicate {
-			if owner := observedRuleGenerations.retainManaged(r); owner != nil {
+			if owner := observedRuleGenerations.adopt(r); owner != nil {
 				owners = append(owners, owner)
 			}
 		}
 	}
 	s.generation = &generationPin{refs: 1, owners: owners}
-	observedRuleGenerations.observe(b.bigRules)
-	observedRuleGenerations.observe(b.markerRules)
 	if old := s.fp.Load(); old != nil {
 		s.reloadPrevFP.Store(old)
 	}
@@ -860,7 +858,7 @@ func (s *Scanner) publishReload(b *reloadBundle) *generationPin {
 func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error {
 	s.mu.Lock()
 	var retired *generationPin
-	var candidate *nativeRulesOwner
+	var candidates []*nativeRulesOwner
 	defer func() {
 		s.mu.Unlock()
 		// Drain stale pools after BOTH publication and preparation unlock,
@@ -872,7 +870,9 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 			retireStale(&s.bigScanners, &s.bigRules)
 		}
 		retired.release()
-		candidate.release()
+		for _, candidate := range candidates {
+			candidate.release()
+		}
 	}()
 	s.generationMu.RLock()
 	closed := s.closed
@@ -895,7 +895,7 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 		return err
 	}
 
-	candidate = observedRuleGenerations.adopt(rules)
+	candidates = append(candidates, observedRuleGenerations.adopt(rules))
 
 	// PERF-30: pre-disable denied rules in the NEWLY LOADED bundle before it is
 	// exposed to scanners. This is safe: the object is fresh from LoadRules/compile
@@ -921,7 +921,12 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	s.logf("loaded %d YARA rules from %s (fp=%s, deny-disabled=%d)", len(list), src, fp, mainDisabled)
 
 	bigRules, bigContent := s.reloadBigBundle(deny, dlFP, s.bigRules.Load(), s.bigContent)
+	// Stage each prepared auxiliary before the next preparation can fail.
+	// Publication retains its deduplicated ownership set before these temporary
+	// references are released, including aliases of retained old bundles.
+	candidates = append(candidates, observedRuleGenerations.adopt(bigRules))
 	markerRules, markerContent := s.reloadMarkerBundle(rules, deny, mainContent, s.markerRules.Load(), s.markerContent)
+	candidates = append(candidates, observedRuleGenerations.adopt(markerRules))
 
 	// Hash the effective bundles, including retained auxiliaries after a failed
 	// load. Hashing only today's source files would misidentify that fallback.
