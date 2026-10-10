@@ -1336,6 +1336,9 @@ var serializeRules = (*yara.Rules).Write
 // Serialization preserves pre-disabled rules, including those from a .yac file.
 func cloneMarkerBundle(rules *yara.Rules, deny map[string]struct{}, logf func(string, ...any)) (*yara.Rules, error) {
 	var buf bytes.Buffer
+	// ReadRules can retain its reader on a native load error. Drop the backing
+	// storage on every exit; Reset alone would keep the serialized capacity.
+	defer func() { buf = bytes.Buffer{} }()
 	if err := serializeRules(rules, &buf); err != nil {
 		return nil, fmt.Errorf("marker bundle serialize: %w", err)
 	}

@@ -2,7 +2,9 @@ package mailstrix
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -275,39 +277,82 @@ func TestFlightFollowerCancelReleases(t *testing.T) {
 // still-connected follower must NOT inherit the empty non-verdict — it promotes
 // itself and re-runs fn, producing a real result.
 func TestFlightAbortedLeaderFollowerRerun(t *testing.T) {
-	var g flightGroup
-	leaderIn := make(chan struct{})
-	leaderRelease := make(chan struct{})
-	go func() {
-		_, _, _ = g.Do(context.Background(), "k", func() ([]Match, bool) {
-			close(leaderIn)
-			<-leaderRelease
-			return nil, true // ABORT — no real verdict
-		})
-	}()
-	<-leaderIn
+	for _, cancelAtRecheck := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelAtRecheck=%v", cancelAtRecheck), func(t *testing.T) {
+			var g flightGroup
+			leaderIn := make(chan struct{})
+			leaderRelease := make(chan struct{})
+			release := sync.OnceFunc(func() { close(leaderRelease) })
+			defer release()
+			go func() {
+				_, _, _ = g.Do(context.Background(), "k", func() ([]Match, bool) {
+					close(leaderIn)
+					<-leaderRelease
+					return nil, true
+				})
+			}()
+			<-leaderIn
 
-	var ran bool
-	done := make(chan []Match, 1)
-	go func() {
-		m, _, _ := g.Do(context.Background(), "k", func() ([]Match, bool) {
-			ran = true
-			return []Match{{Rule: "REAL"}}, false
+			ctx := context.Background()
+			if cancelAtRecheck {
+				underlying, cancel := context.WithCancel(ctx)
+				defer cancel()
+				ctx = &flightCancelAtRecheck{Context: underlying, cancel: cancel}
+			}
+			type result struct {
+				matches []Match
+				err     error
+			}
+			done := make(chan result, 1)
+			go func() {
+				m, _, err := g.Do(ctx, "k", func() ([]Match, bool) {
+					return []Match{{Rule: "REAL"}}, false
+				})
+				done <- result{m, err}
+			}()
+			// Releasing immediately after spawning can let the follower miss
+			// the aborted flight entirely. Observe registration before release.
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				g.mu.Lock()
+				joined := g.m["k"].joiners == 1
+				g.mu.Unlock()
+				if joined {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("follower never joined the held leader")
+				}
+				runtime.Gosched()
+			}
+			release()
+			select {
+			case got := <-done:
+				if cancelAtRecheck {
+					if !errors.Is(got.err, context.Canceled) || len(got.matches) != 0 {
+						t.Fatalf("canceled aborted-flight follower: matches=%v error=%v", got.matches, got.err)
+					}
+				} else if got.err != nil || len(got.matches) != 1 || got.matches[0].Rule != "REAL" {
+					t.Fatalf("follower re-run result: matches=%v error=%v, want [REAL]", got.matches, got.err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("follower hung after leader abort")
+			}
 		})
-		done <- m
-	}()
-	close(leaderRelease) // leader aborts → follower should re-run
-	select {
-	case m := <-done:
-		if !ran {
-			t.Fatal("follower accepted the aborted leader's non-verdict instead of re-running")
-		}
-		if len(m) != 1 || m[0].Rule != "REAL" {
-			t.Fatalf("follower re-run result = %+v, want [REAL]", m)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("follower hung after leader abort")
 	}
+}
+
+// Cancel a real standard-library context precisely when the follower rechecks
+// it after observing the aborted leader. Done closes before Err returns, as
+// required by the context contract; cancellation timing is deterministic.
+type flightCancelAtRecheck struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+func (c *flightCancelAtRecheck) Err() error {
+	c.cancel()
+	return c.Context.Err()
 }
 
 // TestFlightCancelledFollowerNotCountedShared (AUDIT-FLIGHT-CONTEXT, golang-pro
