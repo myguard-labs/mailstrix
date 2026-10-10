@@ -3,7 +3,12 @@ package mailstrix
 import (
 	"errors"
 	"io"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+	"weak"
 
 	yara "github.com/hillu/go-yara/v4"
 )
@@ -144,15 +149,60 @@ func TestP8ClosePinnedAuxiliariesAndNil(t *testing.T) {
 
 func TestP8CandidateRollbackAndDestructionLocks(t *testing.T) {
 	s := p8Scanner(t)
-	before := s.RuleGenerations()
 	big := s.bigRules.Load()
-	saved := serializeRules
-	serializeRules = func(*yara.Rules, io.Writer) error { panic("P8 marker preparation rollback") }
-	defer func() { serializeRules = saved }()
-	destroyed := 0
+	// Strong identities are collected before rollback; finalizers cannot change
+	// this fixture's membership or its per-object destruction counts.
+	var hookMu sync.Mutex
+	candidates := make(map[*yara.Rules]int)
+	unrelated := []*yara.Rules{observerRules(t), observerRules(t)}
+	for _, r := range unrelated {
+		observedRuleGenerations.observe(r)
+	}
+	existing := make(map[weak.Pointer[yara.Rules]]bool)
 	observedRuleGenerations.mu.Lock()
-	observedRuleGenerations.beforeDestroy = func(*yara.Rules) {
-		destroyed++
+	for key := range observedRuleGenerations.managed {
+		existing[key] = true
+	}
+	observedRuleGenerations.mu.Unlock()
+	saved := serializeRules
+	serializeRules = func(main *yara.Rules, _ io.Writer) error {
+		hookMu.Lock()
+		candidates[main] = 0
+		observedRuleGenerations.mu.Lock()
+		for key := range observedRuleGenerations.managed {
+			r := key.Value()
+			if !existing[key] && r != nil && r != main {
+				candidates[r] = 0
+			}
+		}
+		observedRuleGenerations.mu.Unlock()
+		n := len(candidates)
+		hookMu.Unlock()
+		if n != 2 {
+			t.Errorf("rollback candidate identities=%d want=2", n)
+		}
+		// Execute the unmanaged finalizer's exact callback body concurrently while
+		// Reload still owns s.mu. Neither identity belongs to this rollback.
+		var done sync.WaitGroup
+		for _, r := range unrelated {
+			done.Add(1)
+			go func(r *yara.Rules) { defer done.Done(); observedRuleGenerations.destroy(r, weak.Make(r)) }(r)
+		}
+		done.Wait()
+		panic("P8 marker preparation rollback")
+	}
+	defer func() { serializeRules = saved }()
+	observedRuleGenerations.mu.Lock()
+	observedRuleGenerations.beforeDestroy = func(r *yara.Rules) {
+		hookMu.Lock()
+		_, selected := candidates[r]
+		if selected {
+			candidates[r]++
+		}
+		hookMu.Unlock()
+		if !selected {
+			return
+		}
 		if !s.mu.TryLock() {
 			t.Error("auxiliary destruction holds reload lock")
 		} else {
@@ -163,10 +213,10 @@ func TestP8CandidateRollbackAndDestructionLocks(t *testing.T) {
 		} else {
 			s.generationMu.Unlock()
 		}
-		// count takes the observer lock: destruction must run outside it, and the
-		// object being destroyed must still count until native Destroy completes.
-		if s.RuleGenerations() <= before {
-			t.Error("candidate removed from count before native Destroy")
+		// Check this identity, rather than a global count affected by finalizers.
+		counted := p8CandidateClaimed(&observedRuleGenerations, r)
+		if !counted {
+			t.Error("candidate identity missing before native Destroy")
 		}
 	}
 	observedRuleGenerations.mu.Unlock()
@@ -183,7 +233,138 @@ func TestP8CandidateRollbackAndDestructionLocks(t *testing.T) {
 		}()
 		_ = s.Reload()
 	}()
-	if destroyed != 2 || s.RuleGenerations() != before || s.bigRules.Load() != big {
-		t.Fatalf("auxiliary candidate rollback: destroys=%d count=%d want=%d", destroyed, s.RuleGenerations(), before)
+	hookMu.Lock()
+	defer hookMu.Unlock()
+	if len(candidates) != 2 {
+		t.Fatalf("rollback candidate identities=%d want=2", len(candidates))
+	}
+	for r, n := range candidates {
+		if n != 1 {
+			t.Errorf("rollback candidate destruction count=%d want=1", n)
+		}
+		observedRuleGenerations.mu.Lock()
+		state := observedRuleGenerations.live[weak.Make(r)]
+		_, managed := observedRuleGenerations.managed[weak.Make(r)]
+		observedRuleGenerations.mu.Unlock()
+		if state == nil || !state.claimed || managed {
+			t.Error("rollback candidate remains live after Destroy")
+		}
+	}
+	if s.bigRules.Load() != big {
+		t.Fatal("auxiliary candidate rollback changed published big rules")
+	}
+}
+
+// An isolated observer makes count sequencing exact even when unrelated global
+// finalizers run. Both claimed objects overlap before their native destruction.
+func TestP8CandidateCountUntilDestroy(t *testing.T) {
+	o := new(ruleGenerationObserver)
+	first, second := observerRules(t), observerRules(t)
+	owners := []*nativeRulesOwner{o.adopt(first), o.adopt(second)}
+	entered := make(chan *yara.Rules, 2)
+	unblock := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(unblock) }) }
+	defer release()
+	o.beforeDestroy = func(r *yara.Rules) { entered <- r; <-unblock }
+	var done sync.WaitGroup
+	for _, owner := range owners {
+		done.Add(1)
+		go func(owner *nativeRulesOwner) { defer done.Done(); owner.release() }(owner)
+	}
+	a, b := generationWait(t, entered), generationWait(t, entered)
+	if a == b || (a != first && a != second) || (b != first && b != second) {
+		t.Error("overlapping candidate identities differ from fixture")
+	}
+	// Both callbacks are waiting, so no other isolated observer operation can
+	// contend with this explicit outside-observer assertion.
+	if !o.mu.TryLock() {
+		t.Error("candidate destruction holds observer lock")
+	} else {
+		o.mu.Unlock()
+	}
+	if got := o.count(); got != 2 {
+		t.Errorf("claimed candidates count before native Destroy=%d want=2", got)
+	}
+	release()
+	done.Wait()
+	if got := o.count(); got != 0 {
+		t.Errorf("candidate count after native Destroy=%d want=0", got)
+	}
+}
+
+// Read the selected identity while tolerating another observer operation. The
+// callback itself must run outside mu; the isolated regression proves that.
+func p8CandidateClaimed(o *ruleGenerationObserver, r *yara.Rules) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	state := o.live[weak.Make(r)]
+	return state != nil && state.claimed
+}
+
+func TestP8CandidateUnrelatedObserverContention(t *testing.T) {
+	o := new(ruleGenerationObserver)
+	r := observerRules(t)
+	owner := o.adopt(r)
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	result := make(chan bool, 1)
+	done := make(chan struct{})
+	o.beforeDestroy = func(r *yara.Rules) {
+		close(entered)
+		<-resume
+		result <- p8CandidateClaimed(o, r)
+	}
+	go func() { owner.release(); close(done) }()
+	generationWait(t, entered)
+	// The callback has entered outside the observer lock. Hold that lock as an
+	// unrelated operation, then allow the identity read to attempt acquisition.
+	o.mu.Lock()
+	close(resume)
+	// Inspect the actual blocked reader stack, not elapsed time. A TryLock reader
+	// returns false while this operation still owns mu and fails this regression.
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			o.mu.Unlock()
+			generationWait(t, done)
+			t.Fatal("candidate identity reader did not reach observer mutex wait")
+		case counted := <-result:
+			o.mu.Unlock()
+			generationWait(t, done)
+			t.Fatalf("unrelated observer contention returned early: claimed=%v", counted)
+		default:
+		}
+		buf := make([]byte, 64*1024)
+		var stacks string
+		for {
+			n := runtime.Stack(buf, true)
+			if n < len(buf) {
+				stacks = string(buf[:n])
+				break
+			}
+			buf = make([]byte, len(buf)*2)
+		}
+		blocked := false
+		for _, stack := range strings.Split(stacks, "\n\n") {
+			if strings.Contains(stack, "p8CandidateClaimed(") && strings.Contains(stack, "[sync.Mutex.Lock]") {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			break
+		}
+		runtime.Gosched()
+	}
+	o.mu.Unlock()
+	if !generationWait(t, result) {
+		t.Error("candidate identity missing after unrelated observer contention")
+	}
+	generationWait(t, done)
+	if got := o.count(); got != 0 {
+		t.Errorf("candidate count after contention Destroy=%d want=0", got)
 	}
 }
