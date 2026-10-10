@@ -49,19 +49,19 @@ func TestRuleGenerationsMetricsReload(t *testing.T) {
 	if before < 3 {
 		t.Fatalf("main/big/marker count=%d want >=3", before)
 	}
-	// Auxiliary failure retains its previous alias: only main+marker are new.
+	// Auxiliary failure retains its previous alias: main is destroyed immediately; only the old marker awaits GC.
 	reloadWrite(t, bigPath, "broken rules")
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if got := scrape(); got != before+2 {
-		t.Fatalf("retired-unfreed gauge=%d want=%d after auxiliary failure", got, before+2)
+	if got := scrape(); got != before+1 {
+		t.Fatalf("retired-unfreed gauge=%d want=%d after auxiliary failure", got, before+1)
 	}
 	reloadWrite(t, filepath.Join(dir, "main.yar"), "broken rules")
 	if err := s.Reload(); err == nil {
 		t.Fatal("malformed main reload succeeded")
 	}
-	if got := scrape(); got != before+2 {
+	if got := scrape(); got != before+1 {
 		t.Fatalf("failed main reload changed gauge=%d", got)
 	}
 	if _, err := s.Scan([]byte("fixture"), ms.ScanMeta{}); err != nil {

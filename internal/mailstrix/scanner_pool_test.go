@@ -112,6 +112,8 @@ func TestScannerPoolBigRulesUnsetRetiresBigPool(t *testing.T) {
 // gets a one-off generation that never becomes the pool.
 func TestScannerPoolReloadRetiresOldGenerations(t *testing.T) {
 	s := newBigScanner(t, 1<<20)
+	lease := s.acquireScanLease()
+	defer lease.release()
 	oldMain, oldBig := mainAndBig(t, s)
 	idle, mg := poolGet(t, s, oldMain)
 	inflight, ig := poolGet(t, s, oldMain)
@@ -165,10 +167,14 @@ func TestScannerPoolConcurrentAlternatingReload(t *testing.T) {
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
+				s.generationMu.RLock()
+				pin := s.generation
+				pin.retain()
 				rules := s.rules.Load()
 				if (i+w)%2 == 1 {
 					rules = s.bigRules.Load()
 				}
+				s.generationMu.RUnlock()
 				sc, gen, err := s.getScanner(rules)
 				if err != nil {
 					t.Error(err)
@@ -178,6 +184,7 @@ func TestScannerPoolConcurrentAlternatingReload(t *testing.T) {
 					t.Error("generation bound to different rules")
 				}
 				s.putScanner(sc, gen)
+				pin.release()
 			}
 		}(w)
 	}

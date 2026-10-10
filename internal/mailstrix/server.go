@@ -677,6 +677,9 @@ func (s *Server) lookupScanOutcomeLease(ctx context.Context, lease scanLease, ke
 		s.metrics.canceled.Add(1)
 		return scanOutcome{err: ctx.Err()}, "canceled"
 	}
+	if lease.err != nil {
+		return scanOutcome{err: lease.err}, "miss"
+	}
 	// Redis work never holds a scan-CPU slot.
 	if m, found := s.cache.Get(key); found {
 		s.metrics.cacheHit.Add(1)

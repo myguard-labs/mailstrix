@@ -117,14 +117,14 @@ func TestRuleGenerationPinnedReload(t *testing.T) {
 	}
 	defer s.Close()
 	observerPinnedReload(t, s)
-	awaitObserverCount(t, &observedRuleGenerations, 4)
+	awaitObserverCount(t, &observedRuleGenerations, 3)
 	old := s.rules.Load()
 	oldMarker := s.markerRules.Load()
 	write("invalid yara source")
 	if err := s.Reload(); err == nil {
 		t.Fatal("malformed main reload succeeded")
 	}
-	if s.rules.Load() != old || s.markerRules.Load() != oldMarker || s.RuleGenerations() != 4 {
+	if s.rules.Load() != old || s.markerRules.Load() != oldMarker || s.RuleGenerations() != 3 {
 		t.Fatal("failed reload changed native identity/count")
 	}
 	runtime.KeepAlive(old)
@@ -151,11 +151,11 @@ func observerPinnedReload(t *testing.T, s *Scanner) {
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if s.RuleGenerations() != 6 {
-		t.Fatalf("two reloads with pin=%d want=6", s.RuleGenerations())
+	if s.RuleGenerations() != 5 {
+		t.Fatalf("two reloads with pin=%d want=5", s.RuleGenerations())
 	}
 	runtime.GC()
-	if s.RuleGenerations() != 6 {
+	if s.RuleGenerations() != 5 {
 		t.Fatal("pinned retired generation was freed")
 	}
 	if _, err := pin.scan([]byte("fixture"), ScanMeta{}); err != nil {
@@ -185,7 +185,7 @@ func TestRuleGenerationMarkerFailureAlias(t *testing.T) {
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if s.markerRules.Load() != marker || s.RuleGenerations() != 3 {
+	if s.markerRules.Load() != marker || s.RuleGenerations() != 2 {
 		t.Fatal("failed marker reload changed alias or double-counted retained native object")
 	}
 	if _, err := s.Scan([]byte("fixture"), ScanMeta{}); err != nil {
