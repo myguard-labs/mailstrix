@@ -117,14 +117,14 @@ func TestRuleGenerationPinnedReload(t *testing.T) {
 	}
 	defer s.Close()
 	observerPinnedReload(t, s)
-	awaitObserverCount(t, &observedRuleGenerations, 4)
+	awaitObserverCount(t, &observedRuleGenerations, 2)
 	old := s.rules.Load()
 	oldMarker := s.markerRules.Load()
 	write("invalid yara source")
 	if err := s.Reload(); err == nil {
 		t.Fatal("malformed main reload succeeded")
 	}
-	if s.rules.Load() != old || s.markerRules.Load() != oldMarker || s.RuleGenerations() != 4 {
+	if s.rules.Load() != old || s.markerRules.Load() != oldMarker || s.RuleGenerations() != 2 {
 		t.Fatal("failed reload changed native identity/count")
 	}
 	runtime.KeepAlive(old)
@@ -132,9 +132,8 @@ func TestRuleGenerationPinnedReload(t *testing.T) {
 	runtime.KeepAlive(s)
 }
 
-// Return from a separate stack frame before collection; the pin must cease
-// being a Go root. reloadPrevFP intentionally retains the immediately previous
-// reloadBundle through its interior string pointer, so two reloads are required.
+// A lease pins both old bundles across successive reloads. Retirement is
+// explicit even when Go pointers to the retired Rules remain reachable.
 //
 //go:noinline
 func observerPinnedReload(t *testing.T, s *Scanner) {
@@ -151,11 +150,11 @@ func observerPinnedReload(t *testing.T, s *Scanner) {
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if s.RuleGenerations() != 6 {
-		t.Fatalf("two reloads with pin=%d want=6", s.RuleGenerations())
+	if s.RuleGenerations() != 4 {
+		t.Fatalf("two reloads with pin=%d want=4", s.RuleGenerations())
 	}
 	runtime.GC()
-	if s.RuleGenerations() != 6 {
+	if s.RuleGenerations() != 4 {
 		t.Fatal("pinned retired generation was freed")
 	}
 	if _, err := pin.scan([]byte("fixture"), ScanMeta{}); err != nil {
@@ -185,7 +184,7 @@ func TestRuleGenerationMarkerFailureAlias(t *testing.T) {
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if s.markerRules.Load() != marker || s.RuleGenerations() != 3 {
+	if s.markerRules.Load() != marker || s.RuleGenerations() != 2 {
 		t.Fatal("failed marker reload changed alias or double-counted retained native object")
 	}
 	if _, err := s.Scan([]byte("fixture"), ScanMeta{}); err != nil {

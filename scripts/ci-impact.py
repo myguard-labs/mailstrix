@@ -161,6 +161,7 @@ RULES = {
 GO_INPUTS = [
     "ci/extraction_memory_test.go",
     "ci/rule_generations_test.go",
+    "ci/p7_main_retirement_test.go",
     "ci/memory_metrics_test.go",
     "ci/startup_memory_test.go",
     "ci/cape_response_test.go",
