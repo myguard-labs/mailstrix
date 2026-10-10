@@ -246,35 +246,29 @@ func (s *Server) logStartup(addr string) {
 		addr, s.engine.RuleCount(), s.cfg.BackendTimeout, s.cfg.ScanTimeout,
 		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, bigfile, cache, s.cfg.CacheTTL, s.cfg.CacheSize, effort, s.cfg.EffortMax, s.authRequired())
 
-	// Worst-case request-buffer memory: each in-flight scan can hold a full body
-	// plus its extracted macro streams, on top of the loaded-rules RSS. Surface
-	// it so an operator can see whether MAX_CONCURRENT × MAX_BODY fits the
-	// container limit — with MAX_CONCURRENT=auto (CPU count) a many-core host can
-	// reserve far more buffer memory than a small mem_limit allows (memory != rule
-	// count). When the cgroup memory limit is known, warn if the buffers alone
-	// would exceed 3/4 of it (leaving room for GC headroom + burst); the estimate
-	// now includes rules+feed RSS, so it is the full resident peak, not buffers only.
-	// In-flight buffers are bounded by the admission gate (MaxInflight), not the
-	// scan gate, so size the estimate on that.
+	// Lower bound for peak memory: startup RSS plus request buffers bounded by
+	// the admission gate (MaxInflight). Extraction streams and ICAP pre-admission
+	// buffers are unaccounted for. Warn above 3/4 of a known container limit to
+	// leave room for GC headroom and bursts.
 	bufMiB := (int64(s.cfg.MaxInflight) * s.cfg.MaxBody) >> 20
 	// RSS at startup already holds the loaded rules + mbazaar feed (both built
 	// before ListenAndServe), so it captures the two terms the buffers-only
-	// estimate omits. peakMiB = resident base + worst-case request buffers; when
+	// estimate omits. peakMiB is a lower bound: resident base + request buffers; when
 	// RSS is unknown (0) fall back to buffers alone.
 	rssMiB := procRSSMiB()
 	peakMiB := bufMiB + rssMiB
 	if rssMiB > 0 {
-		s.logf("est. peak memory ~%d MiB (rules+feed RSS=%d MiB + max_inflight=%d × max_body=%d MiB buffers)",
+		s.logf("lower bound for peak memory ~%d MiB (rules+feed RSS=%d MiB + max_inflight=%d × max_body=%d MiB buffers; excludes extraction streams and ICAP pre-admission buffers)",
 			peakMiB, rssMiB, s.cfg.MaxInflight, s.cfg.MaxBody>>20)
 	} else {
-		s.logf("est. peak request-buffer memory ~%d MiB (max_inflight=%d × max_body=%d MiB) on top of rules RSS",
+		s.logf("lower bound for peak request-buffer memory ~%d MiB (max_inflight=%d × max_body=%d MiB) on top of rules RSS; excludes extraction streams and ICAP pre-admission buffers",
 			bufMiB, s.cfg.MaxInflight, s.cfg.MaxBody>>20)
 	}
 	if limitMiB := cgroupMemLimitMiB(); limitMiB > 0 && peakMiB > (limitMiB*3)/4 {
-		s.errf("WARNING: est. peak memory (~%d MiB: %d MiB RSS + %d MiB buffers) exceeds 3/4 of the %d MiB container limit; lower MAILSTRIX_MAX_INFLIGHT/MAILSTRIX_MAX_CONCURRENT or MAILSTRIX_MAX_BODY, or raise mem_limit",
+		s.errf("WARNING: lower bound for peak memory (~%d MiB: %d MiB RSS + %d MiB buffers) exceeds 3/4 of the %d MiB container limit; excludes extraction streams and ICAP pre-admission buffers; lower MAILSTRIX_MAX_INFLIGHT or MAILSTRIX_MAX_BODY, or raise mem_limit",
 			peakMiB, rssMiB, bufMiB, limitMiB)
 	} else if limitMiB == 0 && peakMiB > 512 {
-		s.errf("WARNING: est. peak memory ~%d MiB (%d MiB RSS + %d MiB buffers); lower MAILSTRIX_MAX_INFLIGHT/MAILSTRIX_MAX_BODY or set a container mem_limit", peakMiB, rssMiB, bufMiB)
+		s.errf("WARNING: lower bound for peak memory ~%d MiB (%d MiB RSS + %d MiB buffers); excludes extraction streams and ICAP pre-admission buffers; lower MAILSTRIX_MAX_INFLIGHT/MAILSTRIX_MAX_BODY or set a container mem_limit", peakMiB, rssMiB, bufMiB)
 	}
 	if quota := cgroupCPUQuota(); quota > 0 && float64(s.cfg.MaxConcurrent) > quota*1.5 {
 		s.errf("WARNING: max_concurrent=%d but cgroup cpu.max grants only %.1f CPUs; "+
@@ -302,7 +296,11 @@ const License = "MIT"
 // no enforced limit or it can't be read. Supports cgroup v2 (memory.max) and v1
 // (memory.limit_in_bytes); "max" or the kernel's no-limit sentinel is unlimited.
 func cgroupMemLimitMiB() int64 {
-	return cgroupMemLimitMiBFrom(
+	return cgroupMemLimitBytes() >> 20
+}
+
+func cgroupMemLimitBytes() int64 {
+	return cgroupMemLimitBytesFrom(
 		"/sys/fs/cgroup/memory.max",                   // cgroup v2
 		"/sys/fs/cgroup/memory/memory.limit_in_bytes", // cgroup v1
 	)
@@ -311,6 +309,10 @@ func cgroupMemLimitMiB() int64 {
 // cgroupMemLimitMiBFrom is cgroupMemLimitMiB over caller-supplied paths, tried in
 // order, so the parse and sentinel handling can be exercised without a container.
 func cgroupMemLimitMiBFrom(paths ...string) int64 {
+	return cgroupMemLimitBytesFrom(paths...) >> 20
+}
+
+func cgroupMemLimitBytesFrom(paths ...string) int64 {
 	for _, p := range paths {
 		b, err := os.ReadFile(p) // #nosec G304 -- fixed cgroup pseudo-file paths, not user input
 		if err != nil {
@@ -324,7 +326,7 @@ func cgroupMemLimitMiBFrom(paths ...string) int64 {
 		if err != nil || n <= 0 || n >= 1<<62 { // huge value = kernel "no limit" sentinel
 			return 0
 		}
-		return n >> 20
+		return n
 	}
 	return 0
 }
@@ -336,19 +338,7 @@ func cgroupMemLimitMiBFrom(paths ...string) int64 {
 // memory terms the buffer-only estimate omits. Best-effort: a 0 means "unknown",
 // and the caller falls back to the buffers-only peak.
 func procRSSMiB() int64 {
-	b, err := os.ReadFile("/proc/self/statm") // #nosec G304 -- fixed proc pseudo-file path
-	if err != nil {
-		return 0
-	}
-	f := strings.Fields(string(b))
-	if len(f) < 2 {
-		return 0
-	}
-	pages, err := strconv.ParseInt(f[1], 10, 64)
-	if err != nil || pages <= 0 {
-		return 0
-	}
-	return (pages * int64(os.Getpagesize())) >> 20
+	return procRSSBytes() >> 20
 }
 
 // cgroupCPUQuota returns the cgroup v2 CPU quota in fractional CPUs, or 0 if
@@ -858,6 +848,29 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	// reset, so rate()/increase() on it silently invent traffic that never happened.
 	fm := func(name, help string, v uint64) { emit(name, help, "counter", v) }
 	fg := func(name, help string, v uint64) { emit(name, help, "gauge", v) }
+	mem := goMemStats()
+	fg("rss_bytes", "process resident memory in bytes (0 if unknown)", uint64(procRSSBytes())) // #nosec G115 -- sampler returns only nonnegative, overflow-checked byte counts.
+	fg("heap_inuse_bytes", "Go heap spans in use in bytes", mem.HeapInuse)
+	fg("cgroup_mem_limit_bytes", "cgroup memory limit in bytes (0 if unknown or unlimited)", uint64(cgroupMemLimitBytes())) // #nosec G115 -- cgroup parser returns only 0 or positive values below 1<<62.
+	if provider, ok := s.engine.(interface{ RuleGenerations() uint64 }); ok {
+		fg("rule_generations", "distinct observed native rule objects, including retired objects awaiting destruction", provider.RuleGenerations())
+	} else {
+		fg("rule_generations", "distinct observed native rule objects, including retired objects awaiting destruction", 0)
+	}
+	var extraction ExtractionBytesSnapshot
+	if provider, ok := s.engine.(interface {
+		ExtractionBytesRetained() ExtractionBytesSnapshot
+	}); ok {
+		extraction = provider.ExtractionBytesRetained()
+	}
+	b.WriteString("# HELP mailstrix_extraction_bytes_retained sum of logical Result.Streams lengths after each extraction invocation; excludes raw input and markers; cache and coalesced hits do not observe\n")
+	b.WriteString("# TYPE mailstrix_extraction_bytes_retained histogram\n")
+	for i, bound := range extractionByteBounds {
+		b.WriteString("mailstrix_extraction_bytes_retained_bucket{le=\"" + strconv.FormatUint(bound, 10) + "\"} " + strconv.FormatUint(extraction.Buckets[i], 10) + "\n")
+	}
+	b.WriteString("mailstrix_extraction_bytes_retained_bucket{le=\"+Inf\"} " + strconv.FormatUint(extraction.Count, 10) + "\n")
+	b.WriteString("mailstrix_extraction_bytes_retained_sum " + strconv.FormatUint(extraction.Sum, 10) + "\n")
+	b.WriteString("mailstrix_extraction_bytes_retained_count " + strconv.FormatUint(extraction.Count, 10) + "\n")
 	fm("scans_total", "total scan requests served across HTTP and clamd", s.metrics.scans.Load())
 	fm("clamd_accept_errors_total", "unexpected terminal clamd listener failures", s.metrics.clamdAcceptErrors.Load())
 	fm("cape_ingress_interrupt_failures_total", "CAPE ingress watchdog failures to interrupt a stalled request-body read (ResponseWriter without deadline support)", s.metrics.capeInterruptFailures.Load())

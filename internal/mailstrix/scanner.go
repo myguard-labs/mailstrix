@@ -101,8 +101,9 @@ type Scanner struct {
 	// that lacks the "marker" tag. A nil pointer means the bundle could not be
 	// built (logged); extractScan.scan then falls back to the full ruleset (no
 	// detection loss). filterMarkerChannel remains as belt-and-suspenders.
-	markerRules atomic.Pointer[yara.Rules]
-	rawScanErrs atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
+	markerRules     atomic.Pointer[yara.Rules]
+	extractionBytes retainedExtractionHistogram
+	rawScanErrs     atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
 	// Per-channel scanOne counts (PERF-17): which channel each libyara scan ran on,
 	// so /metrics shows where scan cost goes. Totals INCLUDE the big-file subset
 	// (bigFileScans ⊆ rawChannelScans, bigFileStreamScans ⊆ streamChannelScans).
@@ -748,6 +749,9 @@ type reloadBundle struct {
 // the replaced generations' idle scanners.
 func (s *Scanner) publishReload(b *reloadBundle) {
 	s.generationMu.Lock()
+	observedRuleGenerations.observe(b.rules)
+	observedRuleGenerations.observe(b.bigRules)
+	observedRuleGenerations.observe(b.markerRules)
 	if old := s.fp.Load(); old != nil {
 		s.reloadPrevFP.Store(old)
 	}
@@ -1649,6 +1653,7 @@ func (s *Scanner) scanGeneration(buf []byte, meta ScanMeta, generation scannerGe
 		extractDeadline = time.Now().Add(time.Until(deadline) / 2)
 	}
 	res := extract.ExtractWithOptions(buf, s.buildExtractOptions(meta, profile, extractDeadline))
+	s.extractionBytes.observe(res.Streams)
 	incomplete := s.extractionIncomplete(&res, extractDeadline)
 	if (res.Failed || res.Panicked) && completionErr == nil {
 		completionErr = fmt.Errorf("extractor did not complete")

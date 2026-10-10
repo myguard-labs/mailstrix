@@ -142,3 +142,56 @@ groups:
         annotations:
           summary: "strixd ICAP infection rate >20%"
           description: "Over 20% of ICAP REQMOD/RESPMOD requests matched a rule (403 sent) for 15m. Expected during an outbreak; otherwise check for a noisy/false-positive rule."
+
+      # --- container memory pressure (requires a known positive limit) ---
+      - alert: MailstrixHighRSS
+        expr: |
+          mailstrix_rss_bytes > 0.75 * mailstrix_cgroup_mem_limit_bytes
+            and mailstrix_cgroup_mem_limit_bytes > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "strixd RSS exceeds 75% of the container memory limit"
+          description: >-
+            RSS has exceeded 75% of the verified container memory limit for 5m.
+            Investigate memory use, reduce in-flight/body limits, or raise the
+            verified container limit.
+
+      # Current and previous main/big/marker objects can normally total six.
+      # This conservative ceiling can miss leaks below seven when optional sets
+      # are disabled; the metric counts native objects, not bundle generations.
+      - alert: MailstrixExcessRuleObjects
+        expr: mailstrix_rule_generations > 6
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "strixd retains more than six native rule objects"
+          description: >-
+            More than six distinct native rule objects have remained live for
+            10m. Investigate reload cadence, in-flight scans, and delayed
+            GC/native memory reclamation; this is not proof of a leak.
+
+      # Advisory 64 MiB budget is an actual histogram boundary, between 16 and
+      # 256 MiB. A 5m rate window smooths bursts; 10m dwell avoids brief spikes.
+      # No sum: histogram_quantile removes only le, retaining all target labels.
+      # Round to whole bytes to avoid float noise at the exact budget boundary.
+      # Linear interpolation within wide buckets estimates p99, not exact sizes;
+      # +Inf observations cap the estimate at 256 MiB. Sparse traffic is noisy,
+      # while absent/no observations yield no alert. Includes zero/error
+      # results.
+      - alert: MailstrixHighExtractionRetainedBytes
+        expr: |
+          round(histogram_quantile(0.99,
+            rate(mailstrix_extraction_bytes_retained_bucket[5m]))) > 67108864
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "strixd extraction retained-byte p99 exceeds 64 MiB"
+          description: >-
+            Estimated p99 logical stream bytes per extraction has exceeded the
+            advisory 64 MiB budget for 10m over a 5m rate window. Inspect
+            large/archive inputs and extraction workload; reduce admitted body
+            size or concurrency, or adjust this deployment budget. This is not
+            allocated memory or an enforced extraction limit; bucket
+            interpolation
+            and sparse traffic limit precision.

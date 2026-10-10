@@ -1,0 +1,762 @@
+---
+rule_files:
+  - ../contrib/deploy/prometheus/mailstrix-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: RSS above threshold dwell and recovery
+    input_series:
+      - series: 'mailstrix_rss_bytes{instance="i",job="strixd"}'
+        values: '76x5 74x6'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="i",job="strixd"}'
+        values: '100x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: MailstrixHighRSS
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              severity: warning
+            exp_annotations:
+              summary: "strixd RSS exceeds 75% of the container memory limit"
+              description: >-
+                RSS has exceeded 75% of the verified container memory limit for
+                5m. Investigate memory use, reduce in-flight/body limits, or
+                raise the verified container limit.
+      - eval_time: 6m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+  - name: exact 75 percent boundary
+    input_series:
+      - series: 'mailstrix_rss_bytes{instance="i",job="strixd"}'
+        values: '75x10'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="i",job="strixd"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+  - name: below threshold
+    input_series:
+      - series: 'mailstrix_rss_bytes{instance="i",job="strixd"}'
+        values: '74x10'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="i",job="strixd"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+  - name: zero container limit
+    input_series:
+      - series: 'mailstrix_rss_bytes{instance="i",job="strixd"}'
+        values: '76x10'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="i",job="strixd"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+  - name: unknown container limit
+    input_series:
+      - series: 'mailstrix_rss_bytes{instance="i",job="strixd"}'
+        values: '76x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+  - name: missing RSS
+    input_series:
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="i",job="strixd"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+  - name: dwell resets after interruption
+    input_series:
+      - series: 'mailstrix_rss_bytes{instance="i",job="strixd"}'
+        values: '76x3 74 76x6'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="i",job="strixd"}'
+        values: '100x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: MailstrixHighRSS
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: MailstrixHighRSS
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              severity: warning
+            exp_annotations:
+              summary: "strixd RSS exceeds 75% of the container memory limit"
+              description: >-
+                RSS has exceeded 75% of the verified container memory limit for
+                5m. Investigate memory use, reduce in-flight/body limits, or
+                raise the verified container limit.
+  - name: target labels remain isolated
+    input_series:
+      - series: 'mailstrix_rss_bytes{instance="shared",job="high"}'
+        values: '76x10'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="shared",job="high"}'
+        values: '100x10'
+      - series: 'mailstrix_rss_bytes{instance="shared",job="low"}'
+        values: '76x10'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="shared",job="low"}'
+        values: '200x10'
+      - series: 'mailstrix_rss_bytes{instance="other",job="high"}'
+        values: '76x10'
+      - series: 'mailstrix_cgroup_mem_limit_bytes{instance="other",job="high"}'
+        values: '200x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: MailstrixHighRSS
+        exp_alerts:
+          - exp_labels:
+              instance: shared
+              job: high
+              severity: warning
+            exp_annotations:
+              summary: "strixd RSS exceeds 75% of the container memory limit"
+              description: >-
+                RSS has exceeded 75% of the verified container memory limit for
+                5m. Investigate memory use, reduce in-flight/body limits, or
+                raise the verified container limit.
+  - name: native objects seven dwell and recovery
+    input_series:
+      - series: mailstrix_rule_generations{instance="i",job="strixd"}
+        values: 7x10 6x6
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              severity: warning
+            exp_annotations:
+              summary: strixd retains more than six native rule objects
+              description: More than six distinct native rule objects
+                have remained live for 10m. Investigate reload cadence,
+                in-flight scans, and delayed GC/native memory reclamation;
+                this is not proof of a leak.
+      - eval_time: 11m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+  - name: native objects normal two four six and zero
+    input_series:
+      - series: mailstrix_rule_generations{instance="0",job="strixd"}
+        values: '0x20'
+      - series: mailstrix_rule_generations{instance="2",job="strixd"}
+        values: 2x20
+      - series: mailstrix_rule_generations{instance="4",job="strixd"}
+        values: 4x20
+      - series: mailstrix_rule_generations{instance="6",job="strixd"}
+        values: 6x20
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+  - name: native objects missing metric
+    input_series: []
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+  - name: native objects interrupted dwell resets
+    input_series:
+      - series: mailstrix_rule_generations{instance="i",job="strixd"}
+        values: 7x8 6 7x11
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              severity: warning
+            exp_annotations:
+              summary: strixd retains more than six native rule objects
+              description: More than six distinct native rule objects
+                have remained live for 10m. Investigate reload cadence,
+                in-flight scans, and delayed GC/native memory reclamation;
+                this is not proof of a leak.
+  - name: native objects instance and job isolation
+    input_series:
+      - series: mailstrix_rule_generations{instance="shared",job="high"}
+        values: 7x10
+      - series: mailstrix_rule_generations{instance="shared",job="low"}
+        values: 6x10
+      - series: mailstrix_rule_generations{instance="other",job="high"}
+        values: 6x10
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MailstrixExcessRuleObjects
+        exp_alerts:
+          - exp_labels:
+              instance: shared
+              job: high
+              severity: warning
+            exp_annotations:
+              summary: strixd retains more than six native rule objects
+              description: More than six distinct native rule objects
+                have remained live for 10m. Investigate reload cadence,
+                in-flight scans, and delayed GC/native memory reclamation;
+                this is not proof of a leak.
+  - name: extraction sustained high dwell recovery
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: >-
+          0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 100 200 300 400 500 600 700 800
+          900 1000
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: >-
+          0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 100 200 300 400 500 600 700 800
+          900 1000
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              deployment: a
+              severity: warning
+            exp_annotations:
+              summary: strixd extraction retained-byte p99 exceeds 64 MiB
+              description: >-
+                Estimated p99 logical stream bytes per extraction has exceeded
+                the advisory 64 MiB budget for 10m over a 5m rate window.
+                Inspect large/archive inputs and extraction workload; reduce
+                admitted body size or concurrency, or adjust this deployment
+                budget. This is not allocated memory or an enforced extraction
+                limit; bucket interpolation and sparse traffic limit precision.
+      - eval_time: 15m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              deployment: a
+              severity: warning
+            exp_annotations:
+              summary: strixd extraction retained-byte p99 exceeds 64 MiB
+              description: >-
+                Estimated p99 logical stream bytes per extraction has exceeded
+                the advisory 64 MiB budget for 10m over a 5m rate window.
+                Inspect large/archive inputs and extraction workload; reduce
+                admitted body size or concurrency, or adjust this deployment
+                budget. This is not allocated memory or an enforced extraction
+                limit; bucket interpolation and sparse traffic limit precision.
+      - eval_time: 20m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+  - name: extraction boundary
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: >-
+          0 99 198 297 396 495 594 693 792 891 990 1089 1188 1287 1386 1485
+          1584 1683 1782 1881 1980 2079 2178 2277 2376 2475
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+  - name: extraction low
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+  - name: extraction idle
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+  - name: extraction zero
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+  - name: extraction missing metric
+    input_series: []
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+  - name: extraction interrupted dwell
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: >-
+          0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+          0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: >-
+          0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+          0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: >-
+          0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+          0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: >-
+          0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+          0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: >-
+          0 0 0 0 0 0 100 200 300 400 500 600 700 800 800 800 800 800 800
+          800 800 800 800 800 800 800 800 800 800 800 800 800 800 800 800
+          800 800 800 800
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: >-
+          0 0 0 0 0 0 100 200 300 400 500 600 700 800 800 800 800 800 800
+          800 800 800 800 800 800 800 800 800 800 800 800 800 800 800 800
+          800 800 800 800
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500 2600 2700 2800
+          2900 3000 3100 3200 3300 3400 3500 3600 3700 3800
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500 2600 2700 2800
+          2900 3000 3100 3200 3300 3400 3500 3600 3700 3800
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              deployment: a
+              severity: warning
+            exp_annotations:
+              summary: strixd extraction retained-byte p99 exceeds 64 MiB
+              description: >-
+                Estimated p99 logical stream bytes per extraction has exceeded
+                the advisory 64 MiB budget for 10m over a 5m rate window.
+                Inspect large/archive inputs and extraction workload; reduce
+                admitted body size or concurrency, or adjust this deployment
+                budget. This is not allocated memory or an enforced extraction
+                limit; bucket interpolation and sparse traffic limit precision.
+  - name: extraction counter reset
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 100 200 300
+          400 500 600 700 800 900 1000 1100 1200 1300
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 100 200 300
+          400 500 600 700 800 900 1000 1100 1200 1300
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              deployment: a
+              severity: warning
+            exp_annotations:
+              summary: strixd extraction retained-byte p99 exceeds 64 MiB
+              description: >-
+                Estimated p99 logical stream bytes per extraction has exceeded
+                the advisory 64 MiB budget for 10m over a 5m rate window.
+                Inspect large/archive inputs and extraction workload; reduce
+                admitted body size or concurrency, or adjust this deployment
+                budget. This is not allocated memory or an enforced extraction
+                limit; bucket interpolation and sparse traffic limit precision.
+      - eval_time: 13m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              deployment: a
+              severity: warning
+            exp_annotations:
+              summary: strixd extraction retained-byte p99 exceeds 64 MiB
+              description: >-
+                Estimated p99 logical stream bytes per extraction has exceeded
+                the advisory 64 MiB budget for 10m over a 5m rate window.
+                Inspect large/archive inputs and extraction workload; reduce
+                admitted body size or concurrency, or adjust this deployment
+                budget. This is not allocated memory or an enforced extraction
+                limit; bucket interpolation and sparse traffic limit precision.
+      - eval_time: 25m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              deployment: a
+              severity: warning
+            exp_annotations:
+              summary: strixd extraction retained-byte p99 exceeds 64 MiB
+              description: >-
+                Estimated p99 logical stream bytes per extraction has exceeded
+                the advisory 64 MiB budget for 10m over a 5m rate window.
+                Inspect large/archive inputs and extraction workload; reduce
+                admitted body size or concurrency, or adjust this deployment
+                budget. This is not allocated memory or an enforced extraction
+                limit; bucket interpolation and sparse traffic limit precision.
+  - name: extraction all target labels isolated
+    input_series:
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="16777216"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="67108864"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="16777216"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="67108864"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="other",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="16777216"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="67108864"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="other",job="strixd",deployment="a",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="1024"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="16384"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="262144"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="1048576"}
+        values: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="16777216"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="67108864"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="268435456"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+      - series: >-
+          mailstrix_extraction_bytes_retained_bucket{instance="i",job="strixd",deployment="b",le="+Inf"}
+        values: >-
+          0 100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500
+          1600 1700 1800 1900 2000 2100 2200 2300 2400 2500
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MailstrixHighExtractionRetainedBytes
+        exp_alerts:
+          - exp_labels:
+              instance: i
+              job: strixd
+              deployment: a
+              severity: warning
+            exp_annotations:
+              summary: strixd extraction retained-byte p99 exceeds 64 MiB
+              description: >-
+                Estimated p99 logical stream bytes per extraction has exceeded
+                the advisory 64 MiB budget for 10m over a 5m rate window.
+                Inspect large/archive inputs and extraction workload; reduce
+                admitted body size or concurrency, or adjust this deployment
+                budget. This is not allocated memory or an enforced extraction
+                limit; bucket interpolation and sparse traffic limit precision.
