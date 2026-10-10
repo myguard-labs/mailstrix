@@ -16,8 +16,16 @@ import (
 type ruleGenerationObserver struct {
 	beforeDestroy func(*yara.Rules) // test instrumentation; mu
 	mu            sync.Mutex
-	live          map[weak.Pointer[yara.Rules]]struct{}
+	liveCount     uint64
+	live          map[weak.Pointer[yara.Rules]]*ruleGenerationState
 	managed       map[weak.Pointer[yara.Rules]]weak.Pointer[nativeRulesOwner]
+}
+
+// A claimed identity cannot gain a new owner, even if its weak owner has
+// already disappeared before the owner's finalizer runs. Destroyed identities
+// remain tombstones until Rules itself becomes unreachable.
+type ruleGenerationState struct {
+	claimed bool
 }
 
 var observedRuleGenerations ruleGenerationObserver
@@ -33,38 +41,54 @@ func (o *ruleGenerationObserver) observe(r *yara.Rules) {
 		return
 	}
 	if o.live == nil {
-		o.live = make(map[weak.Pointer[yara.Rules]]struct{})
+		o.live = make(map[weak.Pointer[yara.Rules]]*ruleGenerationState)
 	}
 	// go-yara v4.3.3 installs (*Rules).Destroy. Replace it while r is
 	// strongly reachable with exactly the same operation plus observation.
 	runtime.SetFinalizer(r, nil)
 	runtime.SetFinalizer(r, func(selected *yara.Rules) { o.destroy(selected, key) })
-	o.live[key] = struct{}{}
+	o.live[key] = new(ruleGenerationState)
+	o.liveCount++
 	runtime.KeepAlive(r)
 }
 
 // destroy must also be used for any future explicit destruction of an observed
 // object, under the caller's existing exclusive lifetime ownership. Production
-// uses explicit ownership for main and finalizers for auxiliary-only Rules. Serializing the
-// native operation with removal makes count reads observe complete transitions.
+// uses explicit ownership for main and finalizers for auxiliary-only Rules.
+// Claim under mu, then destroy outside it; the count includes claimed objects
+// until native destruction completes. Callers must still exclude native users.
 func (o *ruleGenerationObserver) destroy(r *yara.Rules, key weak.Pointer[yara.Rules]) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
-	if _, exists := o.live[key]; !exists {
+	state := o.live[key]
+	if state == nil || state.claimed {
+		o.mu.Unlock()
 		return
 	}
-	if o.beforeDestroy != nil {
-		o.beforeDestroy(r)
+	state.claimed = true
+	beforeDestroy := o.beforeDestroy
+	o.mu.Unlock()
+	if beforeDestroy != nil {
+		beforeDestroy(r)
 	}
 	r.Destroy()
-	delete(o.live, key)
+	// Destroy clears go-yara's finalizer. Install only tombstone cleanup:
+	// no native work and no strong reference to Rules or its owner.
+	runtime.SetFinalizer(r, func(*yara.Rules) {
+		o.mu.Lock()
+		delete(o.live, key)
+		o.mu.Unlock()
+	})
+	o.mu.Lock()
+	o.liveCount--
+	delete(o.managed, key)
+	o.mu.Unlock()
 	runtime.KeepAlive(r)
 }
 
 func (o *ruleGenerationObserver) count() uint64 {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return uint64(len(o.live))
+	return o.liveCount
 }
 
 // RuleGenerations counts all distinct adopted/published native objects in the process,
@@ -125,9 +149,6 @@ func (o *nativeRulesOwner) destroy() {
 	runtime.SetFinalizer(o, nil)
 	key := weak.Make(o.rules)
 	o.observer.destroy(o.rules, key)
-	o.observer.mu.Lock()
-	delete(o.observer.managed, key)
-	o.observer.mu.Unlock()
 	o.mu.Lock()
 	o.destroyed = true
 	o.mu.Unlock()
@@ -135,7 +156,8 @@ func (o *nativeRulesOwner) destroy() {
 }
 
 // adopt transfers a fresh candidate to explicit ownership, or retains the
-// existing owner for an alias. Caller releases the returned reference.
+// existing owner for an alias. Caller releases the returned reference. Adoption
+// of a terminal identity or an unreachable owner is invariant misuse and panics.
 func (o *ruleGenerationObserver) adopt(r *yara.Rules) *nativeRulesOwner {
 	if r == nil {
 		return nil
@@ -143,7 +165,15 @@ func (o *ruleGenerationObserver) adopt(r *yara.Rules) *nativeRulesOwner {
 	key := weak.Make(r)
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if existing := o.managed[key].Value(); existing != nil {
+	if state := o.live[key]; state != nil && state.claimed {
+		panic("adopting destroyed native rules")
+	}
+	if handle, managed := o.managed[key]; managed {
+		existing := handle.Value()
+		if existing == nil {
+			// Its pending finalizer remains the sole destroyer.
+			panic("adopting unreachable native rules owner")
+		}
 		existing.retain()
 		return existing
 	}
@@ -151,12 +181,15 @@ func (o *ruleGenerationObserver) adopt(r *yara.Rules) *nativeRulesOwner {
 	owner := &nativeRulesOwner{rules: r, refs: 1, observer: o}
 	runtime.SetFinalizer(owner, (*nativeRulesOwner).destroy)
 	if o.live == nil {
-		o.live = make(map[weak.Pointer[yara.Rules]]struct{})
+		o.live = make(map[weak.Pointer[yara.Rules]]*ruleGenerationState)
 	}
 	if o.managed == nil {
 		o.managed = make(map[weak.Pointer[yara.Rules]]weak.Pointer[nativeRulesOwner])
 	}
-	o.live[key] = struct{}{}
+	if o.live[key] == nil {
+		o.live[key] = new(ruleGenerationState)
+		o.liveCount++
+	}
 	o.managed[key] = weak.Make(owner)
 	return owner
 }
@@ -169,7 +202,15 @@ func (o *ruleGenerationObserver) retainManaged(r *yara.Rules) *nativeRulesOwner 
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	owner := o.managed[weak.Make(r)].Value()
+	key := weak.Make(r)
+	if state := o.live[key]; state != nil && state.claimed {
+		panic("retaining destroyed native rules")
+	}
+	handle, managed := o.managed[key]
+	owner := handle.Value()
+	if managed && owner == nil {
+		panic("retaining unreachable native rules owner")
+	}
 	if owner != nil {
 		owner.retain()
 	}
