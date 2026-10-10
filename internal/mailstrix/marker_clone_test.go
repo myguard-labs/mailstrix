@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"weak"
 
 	yara "github.com/hillu/go-yara/v4"
 )
@@ -161,7 +162,7 @@ func TestReloadMarkerCloneNativeParity(t *testing.T) {
 				// Native destruction of the clone must not invalidate the main allocation.
 				before := cloneNativeNames(t, main)
 				s.markerRules.Store(nil)
-				marker.Destroy()
+				observedRuleGenerations.destroy(marker, weak.Make(marker))
 				if got := cloneNativeNames(t, main); !reflect.DeepEqual(got, before) {
 					t.Fatalf("destroying marker changed main: %v want %v", got, before)
 				}

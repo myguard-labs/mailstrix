@@ -344,7 +344,8 @@ jobs:
             -v "$PWD:/workspace" -w /workspace \
             "$image" \
             test rules \
-            contrib/deploy/prometheus/mailstrix-alerts_test.yml
+            contrib/deploy/prometheus/mailstrix-alerts_test.yml \
+            ci/mailstrix_memory_alerts_test.yml
 
       - name: SHA-pinned actions consistent across workflows
         if: needs.changes.outputs.pins == 'true'

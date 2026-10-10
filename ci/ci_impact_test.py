@@ -21,6 +21,13 @@ SPEC.loader.exec_module(impact)
 
 
 class ImpactTests(unittest.TestCase):
+    def test_memory_alert_fixture_selects_prometheus_only(self):
+        result = impact.plan(["ci/mailstrix_memory_alerts_test.yml"])
+        self.assertTrue(result["prometheus"])
+        for key in ["go", "image", "parity", "postfix"]:
+            self.assertFalse(result[key], key)
+        self.assertFalse(impact.plan(["README.md"])["prometheus"])
+
     def test_docs_and_empty_skip_expensive_domains(self):
         for paths in [[], ["README.md"], ["tools/parity/README.md"]]:
             with self.subTest(paths=paths):
@@ -182,6 +189,94 @@ class ImpactTests(unittest.TestCase):
         for unrelated in ["ci/unmapped_test.go", "ci/scanner_budget_test.py"]:
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
+
+    def test_rule_generations_native_go_consumer(self):
+        path = "ci/rule_generations_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/rule_generations_test.py"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+        without_generations = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_generations),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+        self.assertEqual(impact.plan([path]), result)
+
+    def test_extraction_memory_native_go_consumer(self):
+        path = "ci/extraction_memory_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/extraction_memory_test.py"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+        without_extraction = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_extraction),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+        self.assertEqual(impact.plan([path]), result)
+
+    def test_memory_metrics_native_go_consumer(self):
+        path = "ci/memory_metrics_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/memory_metrics_test.py"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+        without_memory = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_memory),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+        self.assertEqual(impact.plan([path]), result)
+
+    def test_startup_memory_go_consumer(self):
+        path = "ci/startup_memory_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/startup_memory_test.py"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+        without_memory = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_memory),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+        self.assertEqual(impact.plan([path]), result)
 
     def test_reload_generation_native_go_consumer(self):
         path = "ci/reload_generation_test.go"

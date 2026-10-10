@@ -58,7 +58,10 @@ RULES = {
     "rspamd": ["contrib/rspamd/*", ".luacheckrc"],
     "spamassassin": ["contrib/spamassassin/*"],
     "python": ["tools/parity/*.py", "tools/parity/comparator-pins.json"],
-    "prometheus": ["contrib/deploy/prometheus/*"],
+    "prometheus": [
+        "contrib/deploy/prometheus/*",
+        "ci/mailstrix_memory_alerts_test.yml",
+    ],
     "dependencies": ["go.mod", "go.sum", "osv-scanner.toml"],
     "workflows": [
         ".github/*.yml",
@@ -156,6 +159,10 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/extraction_memory_test.go",
+    "ci/rule_generations_test.go",
+    "ci/memory_metrics_test.go",
+    "ci/startup_memory_test.go",
     "ci/cape_response_test.go",
     "ci/cape_store_seam_test.go",
     "ci/decode_runs_test.go",

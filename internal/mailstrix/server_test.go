@@ -269,15 +269,26 @@ func TestProcRSSMiB(t *testing.T) {
 func TestLogStartupFoldsRSS(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1}, "tok")
 	s.cfg.MaxInflight = 8
-	s.cfg.MaxBody = 32 << 20 // 256 MiB of buffers
-	var info bytes.Buffer
+	s.cfg.MaxBody = 1 << 50 // Force a memory warning without allocating bodies.
+	var info, warnings bytes.Buffer
 	s.info = log.New(&info, "", 0)
-	s.errl = log.New(io.Discard, "", 0)
+	s.errl = log.New(&warnings, "", 0)
 	s.logStartup("127.0.0.1:0")
 	out := info.String()
-	if !strings.Contains(out, "RSS=") || !strings.Contains(out, "est. peak memory") {
+	if !strings.Contains(out, "RSS=") || !strings.Contains(out, "lower bound for peak memory") {
 		t.Fatalf("startup line did not fold RSS into peak estimate:\n%s", out)
 	}
+	for _, text := range []string{"lower bound", "extraction streams", "ICAP pre-admission buffers"} {
+		if !strings.Contains(out, text) || !strings.Contains(warnings.String(), text) {
+			t.Fatalf("startup memory logs missing %q: info=%s warnings=%s", text, out, warnings.String())
+		}
+	}
+	for _, line := range strings.Split(warnings.String(), "\n") {
+		if strings.Contains(line, "memory") && strings.Contains(line, "MAILSTRIX_MAX_CONCURRENT") {
+			t.Fatalf("memory warning recommends unrelated scan concurrency: %s", line)
+		}
+	}
+
 }
 
 func TestShutdownSetsDraining(t *testing.T) {
