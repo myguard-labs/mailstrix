@@ -267,10 +267,10 @@ type scannerGen struct {
 	retired      bool                                  // set (under mu) once the generation leaves its slot or was never installed
 }
 
-// maxPooledScanners caps idle scanners kept per generation. Concurrency is
-// already bounded by the scan-CPU gate, so a handful covers steady state; extra
-// returns are destroyed rather than hoarded.
-const maxPooledScanners = 32
+// maxPooledScanners caps idle scanners kept per generation: four for the
+// deployment's max_concurrent=4 plus two of headroom. This retention ceiling
+// does not limit active scanner admission; excess returns are destroyed.
+const maxPooledScanners = 6
 
 // get pops an idle scanner or returns nil if the free-list is empty.
 func (g *scannerGen) get() *yara.Scanner {

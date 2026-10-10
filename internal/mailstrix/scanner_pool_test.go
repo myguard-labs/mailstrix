@@ -1,6 +1,7 @@
 package mailstrix
 
 import (
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -363,4 +364,47 @@ func TestScannerPoolFailedReloadKeepsLiveGenerations(t *testing.T) {
 	wantGen(t, "live big gen after failed reload", bg, 1, false)
 	s.putScanner(inflight, mg)
 	wantGen(t, "live main gen after in-flight put", mg, 2, false)
+}
+
+// P9 bounds idle retention independently of active scanner admission. The
+// forced 32-checkout case fills the old ceiling; ordinary four fits unchanged.
+func TestP9IdlePoolCapBoundary(t *testing.T) {
+	for _, checkout := range []int{4, 6, 7, 32} {
+		t.Run(fmt.Sprint(checkout), func(t *testing.T) {
+			s := p7Scanner(t, func(string, ...any) {})
+			rules := s.rules.Load()
+			scanners := make([]*yara.Scanner, checkout)
+			var gen *scannerGen
+			for i := range scanners {
+				scanners[i], gen = poolGet(t, s, rules)
+			}
+			// A checked-out scanner survives other scanners overflowing the cap.
+			held, heldGen := poolGet(t, s, rules)
+			for i, sc := range scanners {
+				s.putScanner(sc, gen)
+				want := min(i+1, 6)
+				wantGen(t, "idle cap boundary", gen, want, false)
+				gen.mu.Lock()
+				dependencies := len(gen.dependencies)
+				gen.mu.Unlock()
+				if dependencies != checkout-i-1+want+1 {
+					t.Fatalf("overflow retained native dependency: got %d", dependencies)
+				}
+			}
+			var matches yara.MatchRules
+			held.SetCallback(&matches)
+			if err := held.ScanMem([]byte("ordinary")); err != nil || len(matches) != 0 {
+				t.Fatalf("checked-out scanner verdict changed: matches=%v err=%v", matches, err)
+			}
+			s.putScanner(held, heldGen)
+			wantGen(t, "held return bounded", gen, min(checkout+1, 6), false)
+			// Retained scanners still work when borrowed again.
+			reused, reusedGen := poolGet(t, s, rules)
+			reused.SetCallback(&matches)
+			if err := reused.ScanMem([]byte("ordinary")); err != nil || len(matches) != 0 {
+				t.Fatalf("reused scanner verdict changed: matches=%v err=%v", matches, err)
+			}
+			s.putScanner(reused, reusedGen)
+		})
+	}
 }
