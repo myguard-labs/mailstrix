@@ -84,11 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
       - name: require native compiler proof prerequisites
-        run: |
-          command -v docker
-          command -v python3
-          docker info >/dev/null
-          test -r /etc/apt/keyrings/deb.myguard.nl.gpg
+        run: ci/compiler-input-check.sh --prerequisites-only
       - name: exact compiler input static prerequisites and controls
         run: ci/compiler-input-check.sh
 

@@ -436,10 +436,8 @@ class CompilerInputRetention(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         retained, state = self.state()
         projection = self.root / "projected-collision"
-        capture.restore(retained, projection)
+        self.assert_replay_projection(retained, state, projection)
         projected_include = projection / "inputs/replay.json"
-        if not projected_include.exists():
-            projected_include = projection / "replay.json"
         self.assertEqual(projected_include.read_bytes(), include.read_bytes())
         include.write_bytes(projected_include.read_bytes())
         argv = state["final"]["argv"].copy()
@@ -785,7 +783,9 @@ class CompilerInputRetention(unittest.TestCase):
                 capture.verify(root, bad)
         capture.verify(root, state)
         # Repeated bundle builds preserve artifact bytes and publish a fresh pointer.
+        previous_target = root.readlink()
         self.assertEqual(self.compile_bundle().returncode, 0)
+        self.assertNotEqual(root.readlink(), previous_target)
         self.assertEqual(self.out.read_bytes(), capture.get(root, state["compiled"]))
 
     def direct_capture(self, mode, source, include=None):
