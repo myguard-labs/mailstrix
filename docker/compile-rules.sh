@@ -25,29 +25,40 @@ SRC="${1:-/rules/src}"
 OUT="${2:-/rules/compiled.yac}"
 EXT="-d filepath= -d filename= -d extension= -d filetype= -d file_type= -d owner= -d VBA=0"
 
+HELPER="$(dirname "$0")/capture-compiler-inputs.py"
+retained="$(python3 "$HELPER" begin "$OUT" "$SRC")"
 good="$(mktemp)"
 tmpout="$(mktemp)"
 n=0
 skip=0
 for f in "$SRC"/*.yar "$SRC"/*.yara; do
-    [ -e "$f" ] || continue
-    ns="$(basename "$f")"
-    # shellcheck disable=SC2086
-    if yarac $EXT "${ns}:${f}" "$tmpout" >/dev/null 2>&1; then
-        printf '%s:%s\n' "$ns" "$f" >> "$good"
-        n=$((n + 1))
-    else
-        echo "compile-rules: skip $ns (uncompilable)" >&2
-        skip=$((skip + 1))
-    fi
+	[ -e "$f" ] || continue
+	ns="$(basename "$f")"
+	# shellcheck disable=SC2086
+	if python3 "$HELPER" run "$retained" validation "$ns" "$f" yarac $EXT "${ns}:${f}" "$tmpout" >/dev/null 2>&1; then
+		printf '%s:%s\n' "$ns" "$f" >>"$good"
+		n=$((n + 1))
+	else
+		status=$?
+		if [ "$status" -eq 125 ]; then
+			echo "compile-rules: input retention failed for $ns ($retained)" >&2
+			exit 125
+		fi
+		echo "compile-rules: skip $ns (uncompilable)" >&2
+		skip=$((skip + 1))
+	fi
 done
 rm -f "$tmpout"
 
-[ "$n" -gt 0 ] || { echo "compile-rules: nothing compiled from $SRC" >&2; exit 1; }
+[ "$n" -gt 0 ] || {
+	echo "compile-rules: nothing compiled from $SRC" >&2
+	exit 1
+}
 
 # one bundle from every good (namespaced) file
 # shellcheck disable=SC2046,SC2086
-yarac $EXT $(cat "$good") "$OUT"
+python3 "$HELPER" run "$retained" final "" "" yarac $EXT $(cat "$good") "$OUT"
+python3 "$HELPER" finish "$retained"
 rm -f "$good"
 echo "compile-rules: bundled $n files ($skip skipped) -> $OUT"
 
@@ -55,6 +66,6 @@ echo "compile-rules: bundled $n files ($skip skipped) -> $OUT"
 # rm -rf of the src dir does not erase it.
 OUTDIR="$(dirname "$OUT")"
 if [ -f "$SRC/sources.json" ] && [ "$OUTDIR" != "$SRC" ]; then
-    cp "$SRC/sources.json" "$OUTDIR/sources.json"
-    echo "compile-rules: copied sources.json -> $OUTDIR/sources.json"
+	cp "$SRC/sources.json" "$OUTDIR/sources.json"
+	echo "compile-rules: copied sources.json -> $OUTDIR/sources.json"
 fi

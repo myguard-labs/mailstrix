@@ -1,9 +1,11 @@
 """Exercise the required CI check against the shipped workflow script."""
 
+import hashlib
 import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -15,6 +17,166 @@ import yaml
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
 OPTIONAL = ("PARITY", "LINT", "RSPAMD", "SPAMASSASSIN")
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class NativePrerequisiteTests(unittest.TestCase):
+    """Exercise the real shell entrypoint with isolated daemon and key controls."""
+
+    def setUp(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(temporary)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        (self.root / "ci").mkdir()
+        (self.root / "docker").mkdir()
+        self.script = self.root / "ci/compiler-input-check.sh"
+        self.source = (ROOT / "ci/compiler-input-check.sh").read_text()
+        self.script.write_text(self.source)
+        for name in (
+            "compiler-input-capture.h",
+            "patch-compiler-input-capture.py",
+            "Dockerfile",
+        ):
+            shutil.copyfile(ROOT / "docker" / name, self.root / "docker" / name)
+        self.env = os.environ | {
+            "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+            "NATIVE_FIXTURE": str(self.root),
+        }
+        self.command(
+            "docker",
+            """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$NATIVE_FIXTURE/docker.log"
+case "$1" in
+    info) exit "${NATIVE_DAEMON_EXIT:-0}" ;;
+    build)
+        for context do :; done
+        cp "$context/deb.myguard.nl.gpg" "$NATIVE_FIXTURE/public-key.gpg"
+        cp "$context/Dockerfile" "$NATIVE_FIXTURE/production-stage"
+        exit "${NATIVE_BUILD_EXIT:-0}"
+        ;;
+    run) exit "${NATIVE_RUN_EXIT:-0}" ;;
+esac
+""",
+        )
+
+    def command(self, name, source):
+        path = self.bin / name
+        path.write_text(source)
+        path.chmod(0o755)
+
+    def run_script(self, *arguments):
+        return subprocess.run(
+            ["/bin/sh", str(self.script), *arguments],
+            env=self.env,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_pinned_public_key_bootstrap_and_cleanup(self):
+        # A missing host key is supported: the only trust input is the pinned
+        # public key embedded in the checked entrypoint, with no host copy.
+        self.assertNotIn("cp /etc/apt/keyrings", self.source)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            hashlib.sha256((self.root / "public-key.gpg").read_bytes()).hexdigest(),
+            "9744a10c48237234dcb762b5f7326ed21b6944a6f079cc3624169edf90118bdc",
+        )
+        stage = (self.root / "production-stage").read_text()
+        self.assertIn("signed-by=/etc/apt/keyrings/deb.myguard.nl.gpg", stage)
+        self.assertIn("http://deb.myguard.nl:8888 bookworm main", stage)
+        self.assertNotIn("trusted=yes", stage)
+        self.assertNotIn("# ---- go build", stage)
+        calls = (self.root / "docker.log").read_text().splitlines()
+        context = Path(
+            next(line for line in calls if line.startswith("build ")).split()[-1]
+        )
+        self.assertFalse(context.exists())
+        self.assertTrue(any(line.startswith("run --rm ") for line in calls))
+        self.assertTrue(any(line.startswith("container rm -f ") for line in calls))
+        self.assertTrue(any(line.startswith("image rm ") for line in calls))
+
+    def test_prerequisite_only_and_daemon_failure(self):
+        result = self.run_script("--prerequisites-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "docker.log").read_text(), "info\n")
+        self.env["NATIVE_DAEMON_EXIT"] = "1"
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"Docker daemon unavailable", result.stderr)
+        self.assertFalse((self.root / "public-key.gpg").exists())
+
+    def test_missing_executable_errors(self):
+        for missing in ("docker", "python3"):
+            with self.subTest(missing=missing):
+                isolated = self.root / ("missing-" + missing)
+                isolated.mkdir()
+                present = "python3" if missing == "docker" else "docker"
+                (isolated / present).symlink_to(
+                    shutil.which(present, path=self.env["PATH"])
+                )
+                self.env["PATH"] = str(isolated)
+                result = self.run_script("--prerequisites-only")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    ("required executable unavailable: " + missing).encode(),
+                    result.stderr,
+                )
+                self.env["PATH"] = str(self.bin) + os.pathsep + os.environ["PATH"]
+
+    def test_malformed_and_unpinned_public_key_rejected(self):
+        for encoded, marker in (
+            ("!", b"malformed pinned public archive key"),
+            ("AAAA", b"pinned public archive key checksum mismatch"),
+        ):
+            with self.subTest(marker=marker):
+                self.script.write_text(
+                    re.sub(
+                        r'encoded = """.*?"""',
+                        'encoded = """' + encoded + '"""',
+                        self.source,
+                        count=1,
+                        flags=re.DOTALL,
+                    )
+                )
+                result = self.run_script()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(marker, result.stderr)
+                self.assertFalse((self.root / "public-key.gpg").exists())
+                self.assertNotIn("build ", (self.root / "docker.log").read_text())
+
+    def test_key_provision_error_is_explicit(self):
+        scratch = self.root / "scratch"
+        (scratch / "deb.myguard.nl.gpg").mkdir(parents=True)
+        self.command("mktemp", '#!/bin/sh\nprintf "%s\\n" "$NATIVE_FIXTURE/scratch"\n')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"cannot provision disposable public archive key", result.stderr)
+        self.assertFalse(scratch.exists())
+        self.assertNotIn("build ", (self.root / "docker.log").read_text())
+
+    def test_build_and_proof_errors_propagate(self):
+        for variable in ("NATIVE_BUILD_EXIT", "NATIVE_RUN_EXIT"):
+            with self.subTest(variable=variable):
+                self.env[variable] = "7"
+                result = self.run_script()
+                self.assertEqual(result.returncode, 7)
+                self.env.pop(variable)
+
+    def test_production_stage_boundary_errors(self):
+        dockerfile = self.root / "docker/Dockerfile"
+        production = dockerfile.read_text()
+        for old, marker in (
+            ("# ---- go build", b"production yara-stage boundary changed"),
+            ("RUN apt-get update", b"production yara-stage apt prerequisite changed"),
+        ):
+            with self.subTest(marker=marker):
+                dockerfile.write_text(production.replace(old, "changed"))
+                result = self.run_script()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(marker, result.stderr)
+                self.assertNotIn("build ", (self.root / "docker.log").read_text())
 
 
 def workflow_document(path_variable, filename):
@@ -42,12 +204,23 @@ def required_check():
     return job, textwrap.dedent("".join(script))
 
 
-def verdict(selected, results, *, changes="success", docker="success", scanners="success"):
+def verdict(
+    selected,
+    results,
+    *,
+    changes="success",
+    docker="success",
+    scanners="success",
+    native_selected="false",
+    native_result="skipped",
+):
     env = dict(os.environ)
     env.update(
         CHANGES_RESULT=changes,
         DOCKER_RESULT=docker,
         SCANNERS_RESULT=scanners,
+        NATIVE_SELECTED=native_selected,
+        NATIVE_RESULT=native_result,
         PARITY_SELECTED=selected[0],
         GO_SELECTED=selected[1],
         SCOPE_SELECTED=selected[2],
@@ -55,13 +228,16 @@ def verdict(selected, results, *, changes="success", docker="success", scanners=
         SPAMASSASSIN_SELECTED=selected[4],
     )
     env.update(zip((f"{name}_RESULT" for name in OPTIONAL), results, strict=True))
-    return subprocess.run(
-        ["bash", "-e", "-c", required_check()[1]],
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    ).returncode == 0
+    return (
+        subprocess.run(
+            ["bash", "-e", "-c", required_check()[1]],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    )
 
 
 class RequiredCheck(unittest.TestCase):
@@ -88,8 +264,8 @@ class RequiredCheck(unittest.TestCase):
                 "#!/bin/sh\n"
                 "shift 5\n"
                 "for file do\n"
-                "  printf '%s\\n' \"$file\" >> \"$CALLS\"\n"
-                "  test -f \"$file\" || exit 3\n"
+                '  printf \'%s\\n\' "$file" >> "$CALLS"\n'
+                '  test -f "$file" || exit 3\n'
                 "done\n"
                 'test "${FAIL_LINT:-0}" = 0\n'
             )
@@ -148,16 +324,69 @@ class RequiredCheck(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 7, "a failing contract must fail CI")
 
+    def test_native_compiler_required_scope_and_prerequisites(self):
+        document = yaml.safe_load(WORKFLOW.read_text())
+        jobs = document["jobs"]
+        self.assertFalse(
+            any(
+                "compiler-input-check.sh" in step.get("run", "")
+                for step in jobs["changes"]["steps"]
+            ),
+            "planner must not build YARA",
+        )
+        job = jobs["compiler-inputs"]
+        self.assertEqual(job["needs"], "changes")
+        self.assertEqual(job["if"], "${{ needs.changes.outputs.native == 'true' }}")
+        self.assertGreater(job["timeout-minutes"], jobs["changes"]["timeout-minutes"])
+        steps = job["steps"]
+        self.assertTrue(
+            any(step.get("uses", "").startswith("actions/checkout@") for step in steps)
+        )
+        prereq = next(
+            step
+            for step in steps
+            if step.get("name") == "require native compiler proof prerequisites"
+        )
+        self.assertEqual(
+            prereq["run"], "ci/compiler-input-check.sh --prerequisites-only"
+        )
+        self.assertEqual(steps[-1]["run"], "ci/compiler-input-check.sh")
+        self.assertIn("compiler-inputs", jobs["ci-ok"]["needs"])
+        env = jobs["ci-ok"]["steps"][0]["env"]
+        self.assertEqual(env["NATIVE_SELECTED"], "${{ needs.changes.outputs.native }}")
+        self.assertEqual(env["NATIVE_RESULT"], "${{ needs.compiler-inputs.result }}")
+
+    def test_native_required_gate_failure_and_legitimate_skip(self):
+        for selected in ("true", "false", "", "unexpected"):
+            for result in ("success", "skipped", "failure", "cancelled", ""):
+                with self.subTest(selected=selected, result=result):
+                    self.assertEqual(
+                        verdict(
+                            ("false",) * 5,
+                            ("skipped",) * 4,
+                            native_selected=selected,
+                            native_result=result,
+                        ),
+                        (selected, result)
+                        in (("true", "success"), ("false", "skipped")),
+                    )
+
     def test_wiring(self):
         job, script = required_check()
         self.assertIn("if: ${{ always() }}", job)
         self.assertIn(
-            "needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin]",
+            "needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin, compiler-inputs]",
             job,
         )
         for name in (
-            "changes", "docker", "parity-isolation", "lint", "scanners", "rspamd",
+            "changes",
+            "docker",
+            "parity-isolation",
+            "lint",
+            "scanners",
+            "rspamd",
             "spamassassin",
+            "compiler-inputs",
         ):
             self.assertIn(f"needs.{name}.result", job)
         for name in ("parity", "go", "scope", "rspamd", "spamassassin"):
@@ -319,8 +548,10 @@ class NightlyWorkflowContract(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            return result, output.read_text() if output.exists() else "", (
-                calls.read_text() if calls.exists() else ""
+            return (
+                result,
+                output.read_text() if output.exists() else "",
+                (calls.read_text() if calls.exists() else ""),
             )
 
     def test_schedule_gate_and_amd64_build(self):
@@ -329,7 +560,9 @@ class NightlyWorkflowContract(unittest.TestCase):
         self.assertEqual(workflow[True]["schedule"], [{"cron": "0 9 * * *"}])
         self.assertIn("workflow_dispatch", workflow[True])
         jobs = workflow["jobs"]
-        self.assertEqual(jobs["plan"]["outputs"]["skip"], "${{ steps.release.outputs.skip }}")
+        self.assertEqual(
+            jobs["plan"]["outputs"]["skip"], "${{ steps.release.outputs.skip }}"
+        )
         self.assertEqual(
             jobs["plan"]["outputs"]["version"], "${{ steps.release.outputs.version }}"
         )
@@ -404,38 +637,53 @@ class NightlyWorkflowContract(unittest.TestCase):
         """Only a completed amd64 build can publish under a write token."""
         workflow = self.nightly()
         self.assertEqual(workflow["concurrency"]["cancel-in-progress"], False)
-        self.assertEqual(workflow["concurrency"]["group"],
-                         "nightly-release-${{ github.repository }}")
+        self.assertEqual(
+            workflow["concurrency"]["group"], "nightly-release-${{ github.repository }}"
+        )
         self.assertEqual(workflow["permissions"]["contents"], "read")
         jobs = workflow["jobs"]
         self.assertEqual(jobs["publish"]["needs"], ["plan", "gate", "binaries"])
-        self.assertEqual(jobs["publish"]["if"],
-                         "needs.binaries.result == 'success'")
+        self.assertEqual(jobs["publish"]["if"], "needs.binaries.result == 'success'")
         self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
         for name, job in jobs.items():
             if name != "publish":
-                self.assertNotEqual(job.get("permissions", {}).get("contents"),
-                                    "write")
-        download = next(step for step in jobs["publish"]["steps"]
-                        if step.get("name") == "download amd64 binaries")
-        self.assertEqual(download["uses"],
-                         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093")
+                self.assertNotEqual(job.get("permissions", {}).get("contents"), "write")
+        download = next(
+            step
+            for step in jobs["publish"]["steps"]
+            if step.get("name") == "download amd64 binaries"
+        )
+        self.assertEqual(
+            download["uses"],
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        )
         self.assertEqual(download["with"], {"name": "bin-amd64", "path": "out/"})
 
     def test_amd64_checksums_cover_exact_assets(self):
         """All three downloaded binaries must be hashed before publication."""
-        step = next(step for step in self.nightly()["jobs"]["publish"]["steps"]
-                    if step.get("name") == "checksums")
+        step = next(
+            step
+            for step in self.nightly()["jobs"]["publish"]["steps"]
+            if step.get("name") == "checksums"
+        )
         with tempfile.TemporaryDirectory(prefix="mailstrix-nightly-assets-") as temp:
             root = Path(temp)
             output = root / "out"
             output.mkdir()
-            names = ("strixd-linux-amd64", "strix-scan-linux-amd64",
-                     "strix-milter-linux-amd64")
+            names = (
+                "strixd-linux-amd64",
+                "strix-scan-linux-amd64",
+                "strix-milter-linux-amd64",
+            )
             for name in names:
                 (output / name).write_bytes(name.encode())
-            result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root,
-                                    capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                ["bash", "-e", "-c", step["run"]],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             sums = (output / "SHA256SUMS").read_text(encoding="utf-8")
             self.assertEqual(
@@ -443,14 +691,22 @@ class NightlyWorkflowContract(unittest.TestCase):
             )
             self.assertIn("sha256sum -c SHA256SUMS", step["run"])
             (output / names[1]).unlink()
-            missing = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=root,
-                                     capture_output=True, text=True, check=False)
+            missing = subprocess.run(
+                ["bash", "-e", "-c", step["run"]],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
             self.assertNotEqual(missing.returncode, 0)
 
     def publication(self, release):
         """Run the real publish script against a harmless fake gh CLI."""
-        step = next(step for step in self.nightly()["jobs"]["publish"]["steps"]
-                    if step.get("name") == "publish rolling nightly")
+        step = next(
+            step
+            for step in self.nightly()["jobs"]["publish"]["steps"]
+            if step.get("name") == "publish rolling nightly"
+        )
         with tempfile.TemporaryDirectory(prefix="mailstrix-nightly-publish-") as temp:
             root = Path(temp)
             fake_gh = root / "gh"
@@ -460,23 +716,32 @@ class NightlyWorkflowContract(unittest.TestCase):
                 'case "$1 $2" in\n'
                 '  "release view")\n'
                 '    case "$FAKE_RELEASE" in\n'
-                '      existing) echo existing;;\n'
+                "      existing) echo existing;;\n"
                 '      missing) echo "release not found" >&2; exit 1;;\n'
                 '      denied) echo "HTTP 403" >&2; exit 1;;\n'
-                '    esac;;\n'
+                "    esac;;\n"
                 '  "release delete")\n'
                 '    if [ "$FAKE_RELEASE" = delete_fail ]; then exit 1; fi;;\n'
-                'esac\n',
+                "esac\n",
                 encoding="utf-8",
             )
             fake_gh.chmod(0o755)
             calls = root / "calls"
-            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
-                       GH_CALLS=str(calls), FAKE_RELEASE=release,
-                       GITHUB_REPOSITORY="myguard-labs/mailstrix",
-                       GITHUB_SHA="a" * 40)
-            result = subprocess.run(["bash", "-e", "-c", step["run"]], env=env,
-                                    capture_output=True, text=True, check=False)
+            env = dict(
+                os.environ,
+                PATH=f"{root}:{os.environ['PATH']}",
+                GH_CALLS=str(calls),
+                FAKE_RELEASE=release,
+                GITHUB_REPOSITORY="myguard-labs/mailstrix",
+                GITHUB_SHA="a" * 40,
+            )
+            result = subprocess.run(
+                ["bash", "-e", "-c", step["run"]],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
             return result, calls.read_text().splitlines() if calls.exists() else []
 
     def test_first_publication_is_prerelease_and_never_latest(self):
@@ -490,8 +755,12 @@ class NightlyWorkflowContract(unittest.TestCase):
         self.assertIn("--target " + "a" * 40, create)
         self.assertIn("--prerelease", create_args)
         self.assertIn("--latest=false", create_args)
-        for asset in ("strixd-linux-amd64", "strix-scan-linux-amd64",
-                      "strix-milter-linux-amd64", "SHA256SUMS"):
+        for asset in (
+            "strixd-linux-amd64",
+            "strix-scan-linux-amd64",
+            "strix-milter-linux-amd64",
+            "SHA256SUMS",
+        ):
             self.assertIn("out/" + asset, create)
         self.assertNotIn("arm64", create)
 

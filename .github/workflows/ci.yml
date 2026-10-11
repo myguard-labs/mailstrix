@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       go: ${{ steps.plan.outputs.go }}
+      native: ${{ steps.plan.outputs.native }}
       image: ${{ steps.plan.outputs.image }}
       parity: ${{ steps.plan.outputs.parity }}
       postfix: ${{ steps.plan.outputs.postfix }}
@@ -72,6 +73,20 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: bash scripts/ci-plan.sh
+
+  # Native observations require both pinned static compilers and real read controls.
+  # Keep this build out of the lightweight planner; ci-ok requires selected success.
+  compiler-inputs:
+    needs: changes
+    if: ${{ needs.changes.outputs.native == 'true' }}
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+      - name: require native compiler proof prerequisites
+        run: ci/compiler-input-check.sh --prerequisites-only
+      - name: exact compiler input static prerequisites and controls
+        run: ci/compiler-input-check.sh
 
   # Authoritative gate: build + test exactly as the production image does (CGO
   # against the statically-built libyara). The Dockerfile `test` target runs
@@ -496,7 +511,7 @@ jobs:
   # failed gate, or unexpected skip must not look like a successful narrow run.
   ci-ok:
     if: ${{ always() }}
-    needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin]
+    needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin, compiler-inputs]
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 5
     steps:
@@ -505,6 +520,8 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DOCKER_RESULT: ${{ needs.docker.result }}
           SCANNERS_RESULT: ${{ needs.scanners.result }}
+          NATIVE_SELECTED: ${{ needs.changes.outputs.native }}
+          NATIVE_RESULT: ${{ needs.compiler-inputs.result }}
           PARITY_RESULT: ${{ needs.parity-isolation.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           RSPAMD_RESULT: ${{ needs.rspamd.result }}
@@ -525,6 +542,7 @@ jobs:
               *) return 1 ;;
             esac
           }
+          require_selected "$NATIVE_SELECTED" "$NATIVE_RESULT"
           require_selected "$PARITY_SELECTED" "$PARITY_RESULT"
           case "$GO_SELECTED:$SCOPE_SELECTED" in
             true:true|true:false|false:true) lint_selected=true ;;

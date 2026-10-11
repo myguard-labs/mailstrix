@@ -104,6 +104,8 @@ YARA_RECIPE = (
     + r' -o /tmp/yara\.tar\.gz && echo "'
     + HEX64
     + r'  /tmp/yara\.tar\.gz" \| sha256sum -c -'
+    + r"(?: && mkdir -p /opt/compiler-input-proof"
+    + r" && cp /tmp/yara\.tar\.gz /opt/compiler-input-proof/yara\.tar\.gz)?"
     + r" && tar -xzf /tmp/yara\.tar\.gz -C /tmp && rm /tmp/yara\.tar\.gz"
 )
 NFPM_URL = (

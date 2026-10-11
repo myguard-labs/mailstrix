@@ -781,6 +781,43 @@ class TestWorkflowControls(unittest.TestCase):
         )
         self.reject("YARA download must verify")
 
+    def test_production_yara_retention_recipe_and_bypasses(self) -> None:
+        production = Path(__file__).resolve().parents[2] / "docker/Dockerfile"
+        logical = immutable_inputs._docker_logical_text(production.read_text())
+        recipe = next(
+            line.strip()
+            for line in logical.splitlines()
+            if line.startswith("RUN curl") and "yara.tar.gz" in line
+        )
+        prefix = f"ARG YARA_VERSION={immutable_inputs.PinFixtures.yara_version}\n"
+        self.write("docker/Dockerfile", prefix + recipe + "\n")
+        result = self.gate()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        retention = (
+            " && mkdir -p /opt/compiler-input-proof"
+            " && cp /tmp/yara.tar.gz /opt/compiler-input-proof/yara.tar.gz"
+        )
+        self.assertIn(retention, recipe)
+        mutations = {
+            "copy before checksum": recipe.replace(retention, "").replace(
+                ' && echo "', retention + ' && echo "'
+            ),
+            "unverified input": recipe.replace(
+                "cp /tmp/yara.tar.gz", "cp /tmp/unverified.tar.gz"
+            ),
+            "arbitrary destination": recipe.replace(
+                "/opt/compiler-input-proof/yara.tar.gz", "/tmp/retained.tar.gz"
+            ),
+            "extra download": recipe.replace(
+                " && tar", " && curl -fsSL https://example.test/extra && tar"
+            ),
+            "checksum bypass": recipe.replace("sha256sum -c -", "true"),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.write("docker/Dockerfile", prefix + mutated + "\n")
+                self.reject("YARA download must verify")
+
     def test_required_yara_recipe_cannot_disappear(self) -> None:
         self.write(
             "docker/Dockerfile.release",

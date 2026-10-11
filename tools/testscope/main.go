@@ -116,6 +116,8 @@ func externalInputs(f string) []string {
 
 var globalInputs = map[string]bool{
 	"go.mod": true, "go.sum": true, "docker/Dockerfile": true, ".dockerignore": true,
+	// These exact inputs alter the statically linked libyara used by all consumers.
+	"docker/compiler-input-capture.h": true, "docker/patch-compiler-input-capture.py": true,
 }
 
 func workflowInput(f string) bool {
@@ -124,6 +126,8 @@ func workflowInput(f string) bool {
 }
 
 var contractFiles = map[string]bool{
+	"docker/capture-compiler-inputs.py": true,
+	"ci/compiler-input/io-faults.c":     true, "ci/compiler-input/seek.c": true,
 	"ci/testscope_test.sh": true, "docker/Dockerfile.release": true, "docker/docker-compose.yml": true,
 }
 
