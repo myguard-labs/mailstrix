@@ -60,10 +60,14 @@ func TestReputationLoopCompletesWithinBudget(t *testing.T) {
 // two distinct extracted members. Virtual time expires exactly at the shared
 // deadline after extraction, before reputation matching starts.
 func TestScanReputationDeadlineForwarding(t *testing.T) {
+	// Fixture setup starts an HTTP refresher using the process-wide transport.
+	// Keep its goroutines outside virtual time and stop it before entering the
+	// bubble; the warm-started feed remains available to both Scan assertions.
+	s := newURLhausScanner(t)
+	defer s.Close()
+	s.urlhaus.Close()
+	body := makePlainZIP(t, [][]byte{[]byte("ordinary first member"), []byte(feedURLBody)})
 	synctest.Test(t, func(t *testing.T) {
-		s := newURLhausScanner(t)
-		defer s.Close()
-		body := makePlainZIP(t, [][]byte{[]byte("ordinary first member"), []byte(feedURLBody)})
 		const budget = time.Second
 		s.scanTimeout = budget
 		s.bigFileThreshold = 1
