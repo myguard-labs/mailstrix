@@ -28,6 +28,66 @@ class ImpactTests(unittest.TestCase):
             self.assertFalse(result[key], key)
         self.assertFalse(impact.plan(["README.md"])["prometheus"])
 
+    def test_native_compiler_proof_exact_scope(self):
+        paths = (
+            "docker/Dockerfile",
+            "docker/compiler-input-capture.h",
+            "docker/patch-compiler-input-capture.py",
+            "docker/capture-compiler-inputs.py",
+            "docker/compile-rules.sh",
+            "ci/compiler-input-check.sh",
+            "ci/compiler_input_retention_test.py",
+            "ci/compiler-input/io-faults.c",
+            "ci/compiler-input/seek.c",
+            ".github/workflows/ci.yml",
+            "ci/workflow_contract_test.py",
+            "scripts/ci-impact.py",
+        )
+        for path in paths:
+            self.assertTrue(impact.plan([path])["native"], path)
+        for path in (
+            "README.md",
+            "internal/extract/pdf.go",
+            "tools/parity/compare.py",
+            "contrib/rspamd/README.md",
+        ):
+            self.assertFalse(impact.plan([path])["native"], path)
+        self.assertTrue(impact.plan([], full=True)["native"])
+        for path in ("docker/unmapped.py", "ci/compiler-input/unmapped.c"):
+            with self.assertRaisesRegex(ValueError, "unmapped changed path"):
+                impact.plan(["docker/Dockerfile", path])
+
+    def test_exact_compiler_input_consumers_and_unmapped_controls(self):
+        native = [
+            "docker/compiler-input-capture.h",
+            "docker/patch-compiler-input-capture.py",
+        ]
+        for path in native:
+            result = impact.plan([path])
+            for key in ("go", "image", "parity", "docker"):
+                self.assertTrue(result[key], (path, key))
+            self.assertIn(path, result["changed_files"])
+        retained = impact.plan(["docker/capture-compiler-inputs.py"])
+        self.assertTrue(retained["image"])
+        self.assertTrue(retained["docker"])
+        self.assertFalse(retained["go"])
+        for path in (
+            "ci/compiler-input-check.sh",
+            "ci/compiler_input_retention_test.py",
+            "ci/compiler-input/io-faults.c",
+            "ci/compiler-input/seek.c",
+        ):
+            self.assertTrue(impact.plan([path])["scope"], path)
+        for path in (
+            "docker/unmapped.py",
+            "docker/unmapped.h",
+            "ci/compiler-input/unmapped.c",
+        ):
+            with self.assertRaisesRegex(ValueError, "unmapped changed path"):
+                impact.plan([path])
+            with self.assertRaisesRegex(ValueError, "unmapped changed path"):
+                impact.plan(["docker/Dockerfile", path])
+
     def test_docs_and_empty_skip_expensive_domains(self):
         for paths in [[], ["README.md"], ["tools/parity/README.md"]]:
             with self.subTest(paths=paths):
@@ -46,10 +106,18 @@ class ImpactTests(unittest.TestCase):
 
     def test_named_consumers_and_unrelated_controls(self):
         for path, selected, unrelated in [
-            ("ci/rules_polling_defaults_test.sh", ["envkeys", "shell"], ["go", "image"]),
+            (
+                "ci/rules_polling_defaults_test.sh",
+                ["envkeys", "shell"],
+                ["go", "image"],
+            ),
             ("ci/rules_polling_test.sh", ["image", "shell", "smoke"], ["go", "parity"]),
             ("docker/docker-compose.yml", ["envkeys"], ["go", "image"]),
-            ("packaging/deb/stop_timeout_test.sh", ["envkeys", "shell"], ["go", "image"]),
+            (
+                "packaging/deb/stop_timeout_test.sh",
+                ["envkeys", "shell"],
+                ["go", "image"],
+            ),
             ("ci/rules_polling_config_test.go", ["go"], ["image", "parity"]),
             ("ci/config_auto_derive_test.go", ["go"], ["image", "parity"]),
             ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
@@ -430,7 +498,10 @@ class ImpactTests(unittest.TestCase):
             {"go", "docker"},
         )
         self.assertEqual(result["changed_files"], "--changed -- " + path)
-        for unrelated in ["ci/unmapped_test.go", "ci/extract_verify_first_member_test.py"]:
+        for unrelated in [
+            "ci/unmapped_test.go",
+            "ci/extract_verify_first_member_test.py",
+        ]:
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
@@ -454,7 +525,10 @@ class ImpactTests(unittest.TestCase):
             {"go", "docker"},
         )
         self.assertEqual(result["changed_files"], "--changed -- " + path)
-        for unrelated in ["ci/extract_lzma3_dict_cap_test.go", "ci/extract_lzma2_dict_cap_test.py"]:
+        for unrelated in [
+            "ci/extract_lzma3_dict_cap_test.go",
+            "ci/extract_lzma2_dict_cap_test.py",
+        ]:
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
@@ -462,8 +536,7 @@ class ImpactTests(unittest.TestCase):
         cases = {
             "ci/rc4md5_extract_test.go": "--changed -- ci/rc4md5_extract_test.go",
             "ci/testdata/rc4md5-biff.xls": (
-                "--changed -- ci/testdata/rc4md5-biff.xls "
-                "internal/extract/rc4md5_fixture_test.go"
+                "--changed -- ci/testdata/rc4md5-biff.xls internal/extract/rc4md5_fixture_test.go"
             ),
         }
         for path, changed_files in cases.items():

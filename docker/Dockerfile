@@ -15,11 +15,13 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 ARG YARA_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential automake libtool make pkg-config \
-        libssl-dev curl ca-certificates \
+        libssl-dev curl ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
         -o /tmp/yara.tar.gz \
     && echo "1f87056fcb10ee361936ee7b0548444f7974612ebb0e681734d8de7df055d1ec  /tmp/yara.tar.gz" | sha256sum -c - \
+    && mkdir -p /opt/compiler-input-proof \
+    && cp /tmp/yara.tar.gz /opt/compiler-input-proof/yara.tar.gz \
     && tar -xzf /tmp/yara.tar.gz -C /tmp \
     && rm /tmp/yara.tar.gz
 WORKDIR /tmp/yara-${YARA_VERSION}
@@ -30,6 +32,14 @@ WORKDIR /tmp/yara-${YARA_VERSION}
 RUN ./bootstrap.sh \
     && CFLAGS="-O2 -flto -DNDEBUG" LDFLAGS="-flto" \
        ./configure --disable-shared --enable-static --with-crypto \
+    && make -j"$(nproc)" && make install && ldconfig
+# Keep the untouched static compiler for local equivalence controls. Instrument
+# only native source read observation points; the runtime leaves logging unset.
+COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py /tmp/capture/
+RUN mkdir -p /opt/compiler-input-proof \
+    && cp /usr/local/bin/yarac /opt/compiler-input-proof/yarac-original \
+    && cp /usr/local/lib/libyara.a /opt/compiler-input-proof/libyara-original.a \
+    && python3 /tmp/capture/patch-compiler-input-capture.py . \
     && make -j"$(nproc)" && make install && ldconfig
 
 # ---- go build ---------------------------------------------------------------
@@ -176,7 +186,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # filter-rules.py must sit beside fetch-rules.sh (resolved via $(dirname "$0"))
 # so the `mail` profile per-rule mail-relevance/license filter runs.
-COPY docker/fetch-rules.sh docker/compile-rules.sh docker/filter-rules.py /usr/local/bin/
+COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/filter-rules.py /usr/local/bin/
 # Repo-tracked local rules (our own heuristics, e.g. the mraptor-style maldoc
 # rule) baked alongside the fetched public sets so they ship in the seed .yac.
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/

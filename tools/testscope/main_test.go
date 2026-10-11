@@ -125,6 +125,10 @@ func TestChangedScopeExplicitMappings(t *testing.T) {
 		{"deleted-package", []string{"internal/gone/a.go"}, "", true},
 		{"unknown-script", []string{"scripts/unknown.go"}, "", true},
 		{"script-python-contract", []string{"scripts/ci-impact.py"}, "", false},
+		{"compiler-input-contract", []string{"docker/capture-compiler-inputs.py", "ci/compiler-input/io-faults.c", "ci/compiler-input/seek.c"}, "", false},
+		{"unknown-docker-python", []string{"docker/unmapped.py"}, "", true},
+		{"unknown-docker-header", []string{"docker/unmapped.h"}, "", true},
+		{"native-global-does-not-hide-unknown", []string{"docker/compiler-input-capture.h", "docker/unmapped.py"}, "", true},
 		{"unknown-ci-input", []string{"ci/unknown.txt"}, "", true},
 		{"unknown-workflow-code", []string{".github/unknown.go"}, "", true},
 		{"mixed-unknown", []string{"internal/verdict/a.go", "unknown.txt"}, "", true},
@@ -137,7 +141,7 @@ func TestChangedScopeExplicitMappings(t *testing.T) {
 			}
 		})
 	}
-	for _, file := range []string{"go.mod", "go.sum", "docker/Dockerfile", ".dockerignore"} {
+	for _, file := range []string{"go.mod", "go.sum", "docker/Dockerfile", ".dockerignore", "docker/compiler-input-capture.h", "docker/patch-compiler-input-capture.py"} {
 		got, err := selectChangedPackages([]string{file}, graph, "/r")
 		if err != nil || len(got) != len(graph) || strings.Join(got, " ") == all {
 			t.Fatalf("global %s: got %v, %v", file, got, err)
