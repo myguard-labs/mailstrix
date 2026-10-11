@@ -216,31 +216,38 @@ func TestP10CAPEScanJobBatchContext(t *testing.T) {
 // Query/scan failures used to be covered only if cancellation won a race.
 // A malformed queued document deterministically exercises scan propagation.
 func TestP10CAPESchedulerCorruptRow(t *testing.T) {
-	for _, malformed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("malformed=%v", malformed), func(t *testing.T) {
-			s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
-			job := enqueueBytes(t, s, "alpha", "payload").Job
-			if malformed {
-				var original []byte
-				if err := s.db.QueryRow("SELECT document FROM jobs WHERE id=?", job.ID).Scan(&original); err != nil {
-					t.Fatal(err)
-				}
-				defer func() {
-					if _, err := s.db.Exec("UPDATE jobs SET document=? WHERE id=?", original, job.ID); err != nil {
-						t.Error(err)
+	for _, wrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrap=%v", wrap), func(t *testing.T) {
+			for _, malformed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("malformed=%v", malformed), func(t *testing.T) {
+					s := testStore(t, storeConfig(t.TempDir()), newStoreClock())
+					job := enqueueBytes(t, s, "alpha", "payload").Job
+					if malformed {
+						var original []byte
+						if err := s.db.QueryRow("SELECT document FROM jobs WHERE id=?", job.ID).Scan(&original); err != nil {
+							t.Fatal(err)
+						}
+						defer func() {
+							if _, err := s.db.Exec("UPDATE jobs SET document=? WHERE id=?", original, job.ID); err != nil {
+								t.Error(err)
+							}
+						}()
+						if _, err := s.db.Exec("UPDATE jobs SET document=? WHERE id=?", []byte("{"), job.ID); err != nil {
+							t.Fatal(err)
+						}
 					}
-				}()
-				if _, err := s.db.Exec("UPDATE jobs SET document=? WHERE id=?", []byte("{"), job.ID); err != nil {
-					t.Fatal(err)
-				}
-			}
-			jobs, err := s.schedulerJobs(context.Background())
-			if malformed {
-				if !errors.Is(err, ErrStoreUnavailable) || jobs != nil {
-					t.Fatalf("scheduler malformed row: jobs=%v error=%v", jobs, err)
-				}
-			} else if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
-				t.Fatalf("scheduler valid row: jobs=%v error=%v", jobs, err)
+					if wrap {
+						s.schedulerCursor = job.ID
+					}
+					jobs, err := s.schedulerJobs(context.Background())
+					if malformed {
+						if !errors.Is(err, ErrStoreUnavailable) || jobs != nil {
+							t.Fatalf("scheduler malformed row: jobs=%v error=%v", jobs, err)
+						}
+					} else if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+						t.Fatalf("scheduler valid row: jobs=%v error=%v", jobs, err)
+					}
+				})
 			}
 		})
 	}

@@ -66,6 +66,11 @@ func processGone(err error) bool {
 }
 
 func bridgeGroupQuiescent(pid int) (bool, error) {
+	return bridgeGroupQuiescentRead(pid, os.ReadFile)
+}
+
+// Inject only stat reads: enumeration, ownership and group checks retain real /proc semantics.
+func bridgeGroupQuiescentRead(pid int, readStat func(string) ([]byte, error)) (bool, error) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		entries, err := os.ReadDir("/proc")
@@ -79,7 +84,7 @@ func bridgeGroupQuiescent(pid int) (bool, error) {
 				continue
 			}
 			statPath := filepath.Join("/proc", entry.Name(), "stat")
-			raw, err := os.ReadFile(statPath) // #nosec G304 -- fixed /proc root plus a kernel-produced numeric directory entry.
+			raw, err := readStat(statPath) // #nosec G304 -- fixed /proc root plus a kernel-produced numeric directory entry.
 			if processGone(err) {
 				continue
 			}
