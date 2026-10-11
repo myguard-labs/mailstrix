@@ -160,6 +160,7 @@ func TestGenerationNativeWorkerSurvivesDisconnect(t *testing.T) {
 	t.Cleanup(s.Close)
 	var release sync.Once
 	defer release.Do(func() { close(resume) })
+	owner := p8Owner(t, s, s.rules.Load())
 	srv := newCachingServer(s, "generation-test")
 	const body = "ordinary worker fixture"
 	meta := ScanMeta{RawKey: streamDedupKey([]byte(body)), Effort: ResolveEffortLevel(0, false, srv.autoEnvDefault(true), srv.cfg.EffortMax)}
@@ -180,9 +181,11 @@ func TestGenerationNativeWorkerSurvivesDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.FlushCache()
-	runtime.GC() // The request pin must keep retired native bundles reachable.
+	runtime.GC() // The worker retains its generation independently of connection cancellation.
+	p7Alive(t, owner, "detached clamd worker")
 	release.Do(func() { close(resume) })
 	generationWait(t, service.done)
+	p7Dead(t, owner)
 	if cached, ok := srv.cache.Get(oldKey); !ok || len(cached) != 0 {
 		t.Fatalf("disconnected native worker poisoned old key: found=%v matches=%v", ok, cached)
 	}
@@ -214,6 +217,7 @@ func TestGenerationPinnedBundlesAndPolicy(t *testing.T) {
 		{old, "small", "[Main]"}, {old, strings.Repeat("x", 32), "[Main]"}, {old, strings.Repeat("x", 33), "[Big]"},
 		{s.acquireScanLease(), "small", "[]"}, {s.acquireScanLease(), strings.Repeat("x", 33), "[NewBig]"},
 	} {
+		t.Cleanup(tc.lease.release)
 		matches, err := tc.lease.scan([]byte(tc.body), ScanMeta{})
 		if err != nil {
 			t.Fatal(err)
@@ -229,6 +233,7 @@ func TestGenerationPinnedBundlesAndPolicy(t *testing.T) {
 		{old, "[Main, Marker]", "[Big]"},
 		{s.acquireScanLease(), "[NewMarker]", "[NewBig]"},
 	} {
+		t.Cleanup(tc.lease.release)
 		before := s.MarkerChannelScans()
 		matches, err := tc.lease.scan([]byte("{\\rtf1 ordinary}"), ScanMeta{Filename: "ordinary.jpg", Extension: ".jpg"})
 		if err != nil || ruleNames(matches) != tc.marker || s.MarkerChannelScans() == before {

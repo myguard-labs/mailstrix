@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -255,6 +256,10 @@ func (s *Server) logStartup(addr string) {
 	// before ListenAndServe), so it captures the two terms the buffers-only
 	// estimate omits. peakMiB is a lower bound: resident base + request buffers; when
 	// RSS is unknown (0) fall back to buffers alone.
+	// Reclaim temporary Go allocations from startup rule/feed loading before
+	// sampling the resident base. Native rule owners keep their own lifetime;
+	// this forced collection must never run on reload or scan paths.
+	debug.FreeOSMemory()
 	rssMiB := procRSSMiB()
 	peakMiB := bufMiB + rssMiB
 	if rssMiB > 0 {
@@ -676,6 +681,9 @@ func (s *Server) lookupScanOutcomeLease(ctx context.Context, lease scanLease, ke
 	if ctx.Err() != nil {
 		s.metrics.canceled.Add(1)
 		return scanOutcome{err: ctx.Err()}, "canceled"
+	}
+	if lease.err != nil {
+		return scanOutcome{err: lease.err}, "miss"
 	}
 	// Redis work never holds a scan-CPU slot.
 	if m, found := s.cache.Get(key); found {

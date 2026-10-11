@@ -12,6 +12,7 @@ import (
 	"hash"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -70,7 +71,7 @@ type Match struct {
 // them. The compiled *yara.Rules is immutable once built, so reloads build a
 // fresh generation and publish its rules and policy together. A scan pins that
 // immutable generation until its verdict has been cached; native objects remain
-// reachable through the pin. No scan holds a lock for its duration.
+// owned through the pin. No scan holds a lock for its duration.
 type Scanner struct {
 	cacheDir       string // only set when srcFile is the managed cache bundle
 	loadedManifest atomic.Pointer[RulesManifest]
@@ -125,8 +126,10 @@ type Scanner struct {
 	// They never reacquire it during a scan or retain it across cache/native I/O.
 	mu            sync.Mutex
 	generationMu  sync.RWMutex
-	bigContent    string // source + pre-disable policy of the retained big bundle; mu
-	markerContent string // source + pre-disable policy of the retained marker bundle; mu
+	generation    *generationPin // publication root; generationMu
+	closed        bool           // generationMu
+	bigContent    string         // source + pre-disable policy of the retained big bundle; mu
+	markerContent string         // source + pre-disable policy of the retained marker bundle; mu
 	srcDir        string
 	srcFile       string // precompiled bundle; wins over srcDir when set
 	count         atomic.Int64
@@ -257,16 +260,17 @@ func (s *Scanner) loadedRulesManifest() (RulesManifest, bool) {
 // judged against a fresh load of s.rules / s.bigRules at each decision, never a
 // snapshot taken earlier in the call.
 type scannerGen struct {
-	rules   *yara.Rules
-	mu      sync.Mutex
-	free    []*yara.Scanner
-	retired bool // set (under mu) once the generation leaves its slot or was never installed
+	rules        *yara.Rules
+	mu           sync.Mutex
+	free         []*yara.Scanner
+	dependencies map[*yara.Scanner]*ownedNativeScanner // retained before construction until after Destroy
+	retired      bool                                  // set (under mu) once the generation leaves its slot or was never installed
 }
 
-// maxPooledScanners caps idle scanners kept per generation. Concurrency is
-// already bounded by the scan-CPU gate, so a handful covers steady state; extra
-// returns are destroyed rather than hoarded.
-const maxPooledScanners = 32
+// maxPooledScanners caps idle scanners kept per generation: four for the
+// deployment's max_concurrent=4 plus two of headroom. This retention ceiling
+// does not limit active scanner admission; excess returns are destroyed.
+const maxPooledScanners = 6
 
 // get pops an idle scanner or returns nil if the free-list is empty.
 func (g *scannerGen) get() *yara.Scanner {
@@ -302,9 +306,14 @@ func (g *scannerGen) retire() {
 	g.retired = true
 	g.mu.Unlock()
 	for _, sc := range out {
-		sc.Destroy()
+		g.destroyScanner(sc)
 	}
 }
+
+// Test barriers run after live validation / successful CAS, never in production.
+var installGenBeforeCASHook func(*yara.Rules)
+var installGenAfterCASHook func(*scannerGen)
+var retireStaleAfterCASHook func(*scannerGen)
 
 // retireStale removes and retires slot's generation when it no longer serves
 // the slot's CURRENT rules (Reload replaced or unset them). live is read afresh
@@ -313,6 +322,9 @@ func (g *scannerGen) retire() {
 // referenced, so the pointer cannot be reused), so the check cannot misfire.
 func retireStale(slot *atomic.Pointer[scannerGen], live *atomic.Pointer[yara.Rules]) {
 	if g := slot.Load(); g != nil && g.rules != live.Load() && slot.CompareAndSwap(g, nil) {
+		if h := retireStaleAfterCASHook; h != nil {
+			h(g)
+		}
 		g.retire()
 	}
 }
@@ -322,15 +334,19 @@ func retireStale(slot *atomic.Pointer[scannerGen], live *atomic.Pointer[yara.Rul
 // Reload at that point; production leaves it nil (one nil check).
 var getScannerAfterSelectHook func()
 
+// Native constructor seam permits deterministic allocation-error tests.
+var newNativeScanner = yara.NewScanner
+
 // getScanner returns a yara.Scanner bound to rules, reusing a pooled one when
 // possible. The caller MUST hand it back via putScanner. gen is returned so
 // putScanner can verify the scanner still belongs to a live generation.
 //
-// There is no entry snapshot of the live rules: every decision (slot choice,
-// retireStale, and each install) re-reads s.rules / s.bigRules at the moment it
-// acts, so a call paused across a Reload never retires the new live generation
-// nor installs one bound to replaced rules. No Scanner lock is taken (see
-// fingerprintLocked: a recursive RLock can deadlock behind a waiting writer).
+// There is no entry snapshot of the live rules: slot choice, stale retirement,
+// and installation re-read s.rules / s.bigRules. A paused install can transiently
+// land after its rules are replaced. Post-CAS validation and fresh retirement
+// checks remove stale pools while preserving the new live pool; generation pins
+// and scanner dependencies protect the delayed old scan. No Scanner lock is
+// taken (see fingerprintLocked: recursive RLock can deadlock behind a writer).
 func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, error) {
 	var slot *atomic.Pointer[scannerGen]
 	var live *atomic.Pointer[yara.Rules]
@@ -344,7 +360,7 @@ func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, err
 		h()
 	}
 	// Retire stale generations in both slots. Reload itself retires replaced
-	// generations eagerly at publication; these calls are the fallback for a
+	// generations after publication unlock; these calls are the fallback for a
 	// generation installed during a Reload race (a scan that selected old rules
 	// and installed a generation after Reload's eager retire).
 	retireStale(&s.scanners, &s.rules)
@@ -353,10 +369,21 @@ func (s *Scanner) getScanner(rules *yara.Rules) (*yara.Scanner, *scannerGen, err
 	if sc := gen.get(); sc != nil {
 		return sc, gen, nil
 	}
-	sc, err := yara.NewScanner(rules)
+	owner := observedRuleGenerations.retainManaged(rules)
+	sc, err := newNativeScanner(rules)
 	if err != nil {
+		owner.release()
 		return nil, nil, err
 	}
+	gen.mu.Lock()
+	if gen.dependencies == nil {
+		gen.dependencies = make(map[*yara.Scanner]*ownedNativeScanner)
+	}
+	runtime.SetFinalizer(sc, nil)
+	dependency := &ownedNativeScanner{scanner: sc, owner: owner}
+	runtime.SetFinalizer(dependency, (*ownedNativeScanner).destroy)
+	gen.dependencies[sc] = dependency
+	gen.mu.Unlock()
 	return sc, gen, nil
 }
 
@@ -382,7 +409,13 @@ func installGen(slot *atomic.Pointer[scannerGen], live *atomic.Pointer[yara.Rule
 		if live.Load() != rules {
 			continue // replaced meanwhile: next pass takes the one-off path
 		}
+		if h := installGenBeforeCASHook; h != nil {
+			h(rules)
+		}
 		if slot.CompareAndSwap(cur, fresh) {
+			if h := installGenAfterCASHook; h != nil {
+				h(fresh)
+			}
 			if cur != nil {
 				cur.retire()
 			}
@@ -407,7 +440,35 @@ func (s *Scanner) putScanner(sc *yara.Scanner, gen *scannerGen) {
 	if gen.put(sc) {
 		return
 	}
-	sc.Destroy()
+	gen.destroyScanner(sc)
+}
+
+// Destroy native scanners before releasing their Rules dependency. No pool
+// lock is held during either native destruction or owner release.
+type ownedNativeScanner struct {
+	scanner *yara.Scanner
+	owner   *nativeRulesOwner
+	once    sync.Once
+}
+
+func (d *ownedNativeScanner) destroy() {
+	d.once.Do(func() {
+		runtime.SetFinalizer(d, nil)
+		d.scanner.Destroy()
+		d.owner.release()
+	})
+	runtime.KeepAlive(d)
+}
+func (g *scannerGen) destroyScanner(sc *yara.Scanner) {
+	g.mu.Lock()
+	dependency := g.dependencies[sc]
+	delete(g.dependencies, sc)
+	g.mu.Unlock()
+	if dependency != nil {
+		dependency.destroy()
+	} else {
+		sc.Destroy()
+	}
 }
 
 // ExtractMetrics is a snapshot of the document pre-extraction counters, surfaced
@@ -745,13 +806,32 @@ type reloadBundle struct {
 	modUnix       int64
 }
 
-// publishReload swaps the prepared bundle in under generationMu, then retires
-// the replaced generations' idle scanners.
-func (s *Scanner) publishReload(b *reloadBundle) {
+// publishReload swaps the prepared bundle under generationMu. The caller must
+// retire stale pools and release the returned root after releasing reload mu.
+func (s *Scanner) publishReload(b *reloadBundle) *generationPin {
 	s.generationMu.Lock()
-	observedRuleGenerations.observe(b.rules)
-	observedRuleGenerations.observe(b.bigRules)
-	observedRuleGenerations.observe(b.markerRules)
+	oldGeneration := s.generation
+	owners := []*nativeRulesOwner{}
+	if owner := observedRuleGenerations.adopt(b.rules); owner != nil {
+		owners = append(owners, owner)
+	}
+	for _, r := range []*yara.Rules{b.bigRules, b.markerRules} {
+		if r == b.rules || r == nil {
+			continue
+		}
+		duplicate := false
+		for _, owner := range owners {
+			if owner.rules == r {
+				duplicate = true
+			}
+		}
+		if !duplicate {
+			if owner := observedRuleGenerations.adopt(r); owner != nil {
+				owners = append(owners, owner)
+			}
+		}
+	}
+	s.generation = &generationPin{refs: 1, owners: owners}
 	if old := s.fp.Load(); old != nil {
 		s.reloadPrevFP.Store(old)
 	}
@@ -772,19 +852,34 @@ func (s *Scanner) publishReload(b *reloadBundle) {
 	// scan that pinned the old generation can no longer add to the new counters.
 	s.topMatches.Reset()
 	s.generationMu.Unlock()
-	// AUD-P3b: free the replaced generations' idle C scanners now rather than
-	// on the next pooled scan. retireStale re-reads the live rules, so it only
-	// retires a slot whose rules this publication replaced or unset; scanners
-	// checked out across the swap are still destroyed by putScanner. The old
-	// *yara.Rules stays referenced by each scanner and its generation, so no
-	// scanner is destroyed after its rules are freed.
-	retireStale(&s.scanners, &s.rules)
-	retireStale(&s.bigScanners, &s.bigRules)
+	return oldGeneration
 }
 
 func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var retired *generationPin
+	var candidates []*nativeRulesOwner
+	defer func() {
+		s.mu.Unlock()
+		// Drain stale pools after BOTH publication and preparation unlock,
+		// before dropping the retired root. Fresh live reads preserve pools
+		// installed by a concurrent newer publication; scanner dependencies
+		// protect rules even when a delayed old install outlives its root.
+		if retired != nil {
+			retireStale(&s.scanners, &s.rules)
+			retireStale(&s.bigScanners, &s.bigRules)
+		}
+		retired.release()
+		for _, candidate := range candidates {
+			candidate.release()
+		}
+	}()
+	s.generationMu.RLock()
+	closed := s.closed
+	s.generationMu.RUnlock()
+	if closed {
+		return ErrScannerClosed
+	}
 
 	s.reloadAttempts.Add(1)
 	start := time.Now()
@@ -799,6 +894,8 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 		s.logf("ERROR reload failed, keeping previous rules: %v", err)
 		return err
 	}
+
+	candidates = append(candidates, observedRuleGenerations.adopt(rules))
 
 	// PERF-30: pre-disable denied rules in the NEWLY LOADED bundle before it is
 	// exposed to scanners. This is safe: the object is fresh from LoadRules/compile
@@ -816,12 +913,7 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	dlFP := denylistHash(deny)
 	mainContent := rulesetContentHash(s.srcFile, s.srcDir, "", "") + ":" + dlFP
 
-	// The previous *yara.Rules is intentionally NOT Destroy()ed here: an in-flight
-	// scan may still hold the pointer it loaded before the swap, and freeing the
-	// native rules under it would crash. go-yara registers a runtime finalizer on
-	// *Rules (via runtime.SetFinalizer in Compile/GetRules), so the old set is
-	// freed by the GC once no goroutine references it. Reloads are infrequent, so
-	// finalizer-driven cleanup is the safe choice over manual/refcounted retire.
+	// Retired roots are released after both reload and publication unlock.
 	src := s.srcDir
 	if s.srcFile != "" {
 		src = s.srcFile
@@ -829,13 +921,18 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	s.logf("loaded %d YARA rules from %s (fp=%s, deny-disabled=%d)", len(list), src, fp, mainDisabled)
 
 	bigRules, bigContent := s.reloadBigBundle(deny, dlFP, s.bigRules.Load(), s.bigContent)
+	// Stage each prepared auxiliary before the next preparation can fail.
+	// Publication retains its deduplicated ownership set before these temporary
+	// references are released, including aliases of retained old bundles.
+	candidates = append(candidates, observedRuleGenerations.adopt(bigRules))
 	markerRules, markerContent := s.reloadMarkerBundle(rules, deny, mainContent, s.markerRules.Load(), s.markerContent)
+	candidates = append(candidates, observedRuleGenerations.adopt(markerRules))
 
 	// Hash the effective bundles, including retained auxiliaries after a failed
 	// load. Hashing only today's source files would misidentify that fallback.
 	h := sha256.Sum256([]byte(mainContent + "\x00big\x00" + bigContent + "\x00marker\x00" + markerContent))
 	ch := hex.EncodeToString(h[:8])
-	s.publishReload(&reloadBundle{
+	retired = s.publishReload(&reloadBundle{
 		rules: rules, bigRules: bigRules, markerRules: markerRules,
 		bigContent: bigContent, markerContent: markerContent,
 		list: list, fp: fp, ch: ch, deny: deny, dlFP: dlFP,
@@ -1239,6 +1336,9 @@ var serializeRules = (*yara.Rules).Write
 // Serialization preserves pre-disabled rules, including those from a .yac file.
 func cloneMarkerBundle(rules *yara.Rules, deny map[string]struct{}, logf func(string, ...any)) (*yara.Rules, error) {
 	var buf bytes.Buffer
+	// ReadRules can retain its reader on a native load error. Drop the backing
+	// storage on every exit; Reset alone would keep the serialized capacity.
+	defer func() { buf = bytes.Buffer{} }()
 	if err := serializeRules(rules, &buf); err != nil {
 		return nil, fmt.Errorf("marker bundle serialize: %w", err)
 	}
@@ -2198,11 +2298,32 @@ func (s *Scanner) publishDenylist(deny *map[string]struct{}) {
 	s.generationMu.Unlock()
 }
 
-// Close releases the scanner's background resources: it stops the abuse.ch feed
+// Close detaches the native publication root and retires idle scanners, while
+// outstanding leases and checked-out scanners keep their dependencies alive.
+// New scan/reload admission fails with ErrScannerClosed. It also stops the abuse.ch feed
 // refresher goroutines (URLhaus + MalwareBazaar) so they don't outlive a
 // graceful shutdown. Both Close calls are nil-safe (no-op when the feed is
 // disabled) and idempotent. Call after the HTTP server has drained.
 func (s *Scanner) Close() {
+	s.mu.Lock()
+	s.generationMu.Lock()
+	root := s.generation
+	s.generation = nil
+	s.closed = true
+	// Late construction by an existing lease must get a retired one-off pool.
+	// Keep the Go fingerprint/count/manifest, but remove native live-slot identities.
+	s.rules.Store(nil)
+	s.bigRules.Store(nil)
+	s.markerRules.Store(nil)
+	s.generationMu.Unlock()
+	s.mu.Unlock()
+	if g := s.scanners.Swap(nil); g != nil {
+		g.retire()
+	}
+	if g := s.bigScanners.Swap(nil); g != nil {
+		g.retire()
+	}
+	root.release()
 	s.urlhaus.Close()
 	s.mbazaar.Close()
 	s.threatfox.Close()

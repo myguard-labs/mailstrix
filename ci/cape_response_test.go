@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -95,5 +96,51 @@ func TestCAPEResponseCompletion(t *testing.T) {
 				t.Fatalf("response cleanup: result=%+v closes=%d calls=%d", result, src.closes.Load(), calls.Load())
 			}
 		})
+	}
+}
+
+// Exercise stale payload rejection directly rather than depending on whether
+// scheduler cancellation wins a concurrent OpenPayload race.
+func TestP10CAPEOpenPayloadVersion(t *testing.T) {
+	// Reuse the existing capacity seam: a test directory is not a dedicated
+	// production ext4/XFS volume; private-path and database checks still run.
+	t.Cleanup(cape.SetStoreCapacityForTest())
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := cape.OpenStore(ctx, cape.StoreConfig{Directory: dir, Tenants: []string{"alpha"}, MaxAttachment: 32})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	admission, err := store.Enqueue(ctx, cape.EnqueueRequest{Tenant: "alpha", Generation: "g1", SubmissionPolicy: "s1", ResultPolicy: "r1", StaticVerdict: "unknown"}, io.NopCloser(strings.NewReader("payload")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.BeginSubmission(ctx, "alpha", admission.Job.ID, admission.Job.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload, err := store.OpenPayload(ctx, "alpha", job.ID, job.Version-1); payload != nil || !errors.Is(err, cape.ErrConflict) {
+		t.Fatalf("stale payload version: reader=%v error=%v", payload, err)
+	}
+	payload, err := store.OpenPayload(ctx, "alpha", job.ID, job.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := payload.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	body, err := io.ReadAll(payload)
+	if err != nil || string(body) != "payload" {
+		t.Fatalf("current payload version: body=%q error=%v", body, err)
 	}
 }
