@@ -212,6 +212,15 @@ class ImpactTests(unittest.TestCase):
             impact.plan([path])
         self.assertEqual(impact.plan([path]), result)
 
+    def test_p7_lifetime_has_no_nested_go_test(self):
+        source = (ROOT / "ci/p7_main_retirement_test.go").read_text()
+        self.assertNotRegex(
+            source,
+            r'exec\.Command(?:Context)?\([\s\S]*?"go"\s*,\s*"test"',
+            "native lifetime tests must run directly in their owning package",
+        )
+        self.assertIn("func TestP7PublicCloseAndFailedReload", source)
+
     def test_p7_main_retirement_native_go_consumer(self):
         path = "ci/p7_main_retirement_test.go"
         result = impact.plan([path])

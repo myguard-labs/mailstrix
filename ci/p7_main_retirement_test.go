@@ -4,7 +4,6 @@ import (
 	"errors"
 	ms "github.com/myguard-labs/mailstrix/internal/mailstrix"
 	"net/http/httptest"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,14 +45,5 @@ func TestP7PublicCloseAndFailedReload(t *testing.T) {
 	srv.ServeHTTP(w, r)
 	if !strings.Contains(w.Body.String(), "MAILSTRIX_SCAN_DEGRADED") {
 		t.Fatalf("closed HTTP verdict was certified clean: %s", w.Body.String())
-	}
-}
-
-// Private pool barriers stay in the owning package. This executable wrapper
-// makes the lifetime contract part of ci without exposing native test hooks.
-func TestP7InternalLifetimeRegressions(t *testing.T) {
-	cmd := exec.Command("go", "test", "-count=1", "-run", "^TestP([789]|10)", "../internal/mailstrix")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("internal P7/P8/P9/P10 lifetime and retention regressions: %v\n%.8192s", err, output)
 	}
 }
