@@ -139,3 +139,27 @@ func TestP10MaintenanceQuerySuccess(t *testing.T) {
 		}
 	}
 }
+
+// TestP10MaintenanceWrapQueryFailure pins the second query's error path without
+// depending on whether a concurrent cancellation beats the cursor-wrap query.
+func TestP10MaintenanceWrapQueryFailure(t *testing.T) {
+	for _, states := range []string{deadlineStates, cleanupStates, cleanupDeadlineStates} {
+		t.Run(states, func(t *testing.T) {
+			c := &p10QueryConn{failAt: 2}
+			db := sql.OpenDB(p10QueryConnector{c})
+			defer db.Close()
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			jobs, next, err := nextMaintenanceBatch(tx, states, "z")
+			if jobs != nil || next != "z" || !errors.Is(err, ErrStoreUnavailable) {
+				t.Fatalf("wrap query failure must preserve cursor and unavailable verdict: jobs=%v next=%q error=%v", jobs, next, err)
+			}
+			if c.calls != 2 || c.cursors[0] != "z" || c.cursors[1] != "" || c.limits[0] != maintenanceBatchSize || c.limits[1] != maintenanceBatchSize {
+				t.Fatalf("maintenance wrap query fixture: %+v", c)
+			}
+		})
+	}
+}

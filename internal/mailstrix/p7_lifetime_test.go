@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
+	"weak"
 
 	yara "github.com/hillu/go-yara/v4"
 )
@@ -252,11 +253,35 @@ func TestP7RollbackAndFailedReload(t *testing.T) {
 	}
 	p7Alive(t, owner, "failed main reload")
 	// A preparation panic discards an adopted fresh candidate after both locks
-	// unlock. Its gauge disappears synchronously, without collection.
+	// unlock. Check its own identity, independent of unrelated native destruction.
 	generationWrite(t, s.srcDir, "rule Stable { condition: true }")
-	before := s.RuleGenerations()
+	unrelated := observedRuleGenerations.adopt(observerRules(t))
+	unrelatedReleased := false
+	defer func() {
+		if !unrelatedReleased {
+			unrelated.release()
+		}
+	}()
 	observedRuleGenerations.mu.Lock()
-	observedRuleGenerations.beforeDestroy = func(*yara.Rules) {
+	existing := make(map[weak.Pointer[yara.Rules]]bool, len(observedRuleGenerations.managed))
+	for key := range observedRuleGenerations.managed {
+		existing[key] = true
+	}
+	observedRuleGenerations.mu.Unlock()
+	var hookMu sync.Mutex
+	var candidate *nativeRulesOwner
+	var candidateDestroyed int
+	observedRuleGenerations.mu.Lock()
+	observedRuleGenerations.beforeDestroy = func(r *yara.Rules) {
+		hookMu.Lock()
+		isCandidate := candidate != nil && r == candidate.rules
+		if isCandidate {
+			candidateDestroyed++
+		}
+		hookMu.Unlock()
+		if !isCandidate {
+			return
+		}
 		if !s.mu.TryLock() {
 			t.Error("actual native destruction under reload mutex")
 		} else {
@@ -277,6 +302,28 @@ func TestP7RollbackAndFailedReload(t *testing.T) {
 	oldLog := s.logf
 	s.logf = func(format string, _ ...any) {
 		if strings.HasPrefix(format, "loaded %d YARA rules from") {
+			var freshCandidate *nativeRulesOwner
+			freshCount := 0
+			observedRuleGenerations.mu.Lock()
+			for key, handle := range observedRuleGenerations.managed {
+				if !existing[key] {
+					if fresh := handle.Value(); fresh != nil {
+						freshCandidate = fresh
+						freshCount++
+					}
+				}
+			}
+			observedRuleGenerations.mu.Unlock()
+			if freshCount != 1 {
+				t.Fatalf("fresh rollback candidates=%d want=1", freshCount)
+			}
+			// Publish instrumentation only after releasing the registry lock;
+			// unrelated finalizers can invoke beforeDestroy concurrently.
+			hookMu.Lock()
+			candidate = freshCandidate
+			hookMu.Unlock()
+			unrelated.release() // A process-wide before/after gauge would now be wrong.
+			unrelatedReleased = true
 			panic("candidate rollback")
 		}
 	}
@@ -291,9 +338,20 @@ func TestP7RollbackAndFailedReload(t *testing.T) {
 		}
 	}()
 	s.logf = oldLog
-	if s.RuleGenerations() != before || s.rules.Load() != owner.rules {
-		t.Fatal("discarded candidate was not rolled back")
+	hookMu.Lock()
+	rolledBack, destructions := candidate, candidateDestroyed
+	hookMu.Unlock()
+	if rolledBack == nil || destructions != 1 || s.rules.Load() != owner.rules {
+		t.Fatalf("discarded candidate was not rolled back: native destructions=%d", destructions)
 	}
+	p7Dead(t, rolledBack)
+	observedRuleGenerations.mu.Lock()
+	_, managed := observedRuleGenerations.managed[weak.Make(rolledBack.rules)]
+	observedRuleGenerations.mu.Unlock()
+	if managed {
+		t.Fatal("discarded candidate identity remains managed")
+	}
+	p7Alive(t, owner, "rollback retains published owner")
 	if !s.mu.TryLock() {
 		t.Fatal("rollback retained reload lock")
 	}
