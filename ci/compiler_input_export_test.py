@@ -6,6 +6,7 @@ The command interface also prepares and verifies the BuildKit local transfer.
 """
 
 import copy
+import errno
 import importlib.util
 import json
 import os
@@ -455,7 +456,7 @@ class CompilerInputExport(unittest.TestCase):
             pointer.unlink()
             pointer.symlink_to(original)
         with mock.patch.object(
-            export.os, "rename", side_effect=OSError("publication failure")
+            export, "publish", side_effect=OSError("publication failure")
         ):
             self.assertEqual(export.main(["export", str(source), str(dest)]), 125)
         self.assertFalse(dest.exists())
@@ -465,6 +466,132 @@ class CompilerInputExport(unittest.TestCase):
         with mock.patch.object(export, "regular", side_effect=TypeError("malformed")):
             self.assertEqual(export.main(["verify", str(dest)]), 125)
         self.assertEqual(export.main([]), 125)
+
+    def test_publication_success_and_existing_entries(self):
+        stage = self.root / "stage"
+        destination = self.root / "published"
+        stage.mkdir()
+        (stage / "verified").write_bytes(b"complete")
+        inode = stage.stat().st_ino
+        export.publish(stage, destination)
+        self.assertFalse(stage.exists())
+        self.assertEqual(destination.stat().st_ino, inode)
+        self.assertEqual((destination / "verified").read_bytes(), b"complete")
+        for kind in ("empty", "nonempty", "file", "symlink"):
+            with self.subTest(kind=kind):
+                stage.mkdir()
+                (stage / "verified").write_bytes(b"complete")
+                foreign = self.root / kind
+                if kind in ("empty", "nonempty"):
+                    foreign.mkdir()
+                    if kind == "nonempty":
+                        (foreign / "owner").write_bytes(b"foreign")
+                elif kind == "file":
+                    foreign.write_bytes(b"foreign")
+                else:
+                    foreign.symlink_to(self.root / "absent")
+                before = foreign.lstat()
+                with self.assertRaises(OSError) as result:
+                    export.publish(stage, foreign)
+                self.assertEqual(result.exception.errno, errno.EEXIST)
+                self.assertEqual(foreign.lstat().st_ino, before.st_ino)
+                self.assertEqual(foreign.lstat().st_mode, before.st_mode)
+                self.assertEqual((stage / "verified").read_bytes(), b"complete")
+                if kind == "nonempty":
+                    self.assertEqual((foreign / "owner").read_bytes(), b"foreign")
+                elif kind == "file":
+                    self.assertEqual(foreign.read_bytes(), b"foreign")
+                elif kind == "symlink":
+                    self.assertEqual(os.readlink(foreign), str(self.root / "absent"))
+                shutil.rmtree(stage)
+
+    def source_identity(self):
+        return {
+            "files": {
+                name: export.fingerprint(export.regular(self.source / name))
+                for name in (*export.SLOTS.values(), *export.METADATA)
+            },
+            "graphs": {
+                name: export.inventory((self.source / (name + ".inputs")).resolve())
+                for name in export.SLOTS.values()
+            },
+            "pointers": {
+                name: os.readlink(self.source / (name + ".inputs"))
+                for name in export.SLOTS.values()
+            },
+        }
+
+    def publication_race(self, nonempty):
+        destination = self.root / "raced"
+        before = self.source_identity()
+        real = export.publish
+        owned = []
+
+        def compete(stage, target):
+            self.assertEqual(target, destination)
+            self.assertFalse(target.exists())
+            # Verify the full envelope before its only publication boundary.
+            export.verify(stage)
+            destination.mkdir()
+            if nonempty:
+                (destination / "owner").write_bytes(b"foreign")
+            owned.append((destination.stat().st_ino, stage))
+            return real(stage, target)
+
+        with mock.patch.object(export, "publish", side_effect=compete):
+            self.assertEqual(
+                export.main(["export", str(self.source), str(destination)]), 125
+            )
+        inode, stage = owned[0]
+        self.assertEqual(destination.stat().st_ino, inode)
+        self.assertEqual(
+            sorted(p.name for p in destination.iterdir()),
+            ["owner"] if nonempty else [],
+        )
+        if nonempty:
+            self.assertEqual((destination / "owner").read_bytes(), b"foreign")
+        export.verify(stage)
+        self.assertEqual(self.source_identity(), before)
+
+    def test_concurrent_empty_publication_preserves_owner(self):
+        self.publication_race(False)
+
+    def test_concurrent_nonempty_publication_preserves_owner(self):
+        self.publication_race(True)
+
+    def test_publication_unavailable_and_errno_fail_closed(self):
+        destination = self.root / "unsupported"
+        before = self.source_identity()
+        with mock.patch.object(export.ctypes, "CDLL", return_value=object()):
+            self.assertEqual(
+                export.main(["export", str(self.source), str(destination)]), 125
+            )
+        for number in (
+            errno.ENOSYS,
+            errno.EOPNOTSUPP,
+            errno.EINVAL,
+            errno.EACCES,
+            errno.EXDEV,
+            errno.EIO,
+        ):
+            with self.subTest(errno=number):
+                call = mock.Mock(return_value=-1)
+                with (
+                    mock.patch.object(export.ctypes, "CDLL") as library,
+                    mock.patch.object(export.ctypes, "get_errno", return_value=number),
+                ):
+                    library.return_value.renameat2 = call
+                    self.assertEqual(
+                        export.main(["export", str(self.source), str(destination)]), 125
+                    )
+                    call.assert_called_once()
+                    self.assertEqual(call.call_args.args[-1], 1)
+                self.assertFalse(destination.exists())
+        stages = list(self.root.glob(".compiler-export-*"))
+        self.assertEqual(len(stages), 7)
+        for stage in stages:
+            export.verify(stage)
+        self.assertEqual(self.source_identity(), before)
 
     def test_source_output_and_version_binding(self):
         with mock.patch.object(

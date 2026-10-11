@@ -3,9 +3,10 @@
 
 Hashes bind transfer integrity; they do not authenticate a publisher. Source
 snapshots and failed staging directories are retained. Only a fully verified
-new destination is published, by a same-filesystem atomic rename.
+new destination is published, by a same-filesystem atomic no-replace rename.
 """
 
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -28,6 +29,30 @@ METADATA = ("libyara.version", "sources.json")
 
 class ExportError(Exception):
     """Absent, malformed or inconsistent export evidence."""
+
+
+def publish(stage, destination):
+    """Linux renameat2 rejects every competing entry atomically, without fallback.
+
+    Failed publication retains our staging directory for diagnosis. Constants
+    and signature follow Linux fs.h and glibc stdio.h/fcntl.h.
+    """
+    try:
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as error:
+        raise ExportError("atomic no-replace publication unavailable") from error
+    rename.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename.restype = ctypes.c_int
+    # AT_FDCWD = -100; RENAME_NOREPLACE = 1. No check-and-rename emulation.
+    if rename(-100, os.fsencode(stage), -100, os.fsencode(destination), 1) != 0:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number), str(destination))
 
 
 def require(condition, message):
@@ -272,7 +297,7 @@ def produce(source, destination):
         not destination.exists() and not destination.is_symlink(),
         "destination already exists",
     )
-    os.rename(stage, destination)
+    publish(stage, destination)
     return index
 
 

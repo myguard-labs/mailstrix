@@ -12,6 +12,19 @@ docker info >/dev/null 2>&1 || {
 	echo "native compiler proof: Docker daemon unavailable; check runner daemon and permissions" >&2
 	exit 1
 }
+# The reserved default builder uses the current Docker daemon image store.
+# Explicit selection overrides both buildx use and BUILDX_BUILDER.
+builder_info="$(docker buildx inspect default)" || {
+	echo "native compiler proof: required default Docker builder unavailable" >&2
+	exit 1
+}
+printf '%s\n' "$builder_info" | python3 -c '
+import re
+import sys
+info = sys.stdin.read()
+if not re.search(r"^Driver: +docker$", info, re.MULTILINE):
+    raise SystemExit("native compiler proof: default builder must use the Docker driver")
+'
 if [ "${1-}" = --prerequisites-only ]; then
 	exit 0
 fi
@@ -127,7 +140,7 @@ source = source.replace('COPY docker/compiler-input-capture.h docker/patch-compi
                         'COPY compiler-input-capture.h patch-compiler-input-capture.py')
 (scratch / 'Dockerfile').write_text(source)
 PY
-docker build --progress=plain -t "$image" "$scratch"
+docker build --builder default --progress=plain -t "$image" "$scratch"
 mkdir "$evidence/native-source"
 cp "$scratch/Dockerfile" "$scratch/deb.myguard.nl.gpg" "$scratch/compiler-input-capture.h" "$scratch/patch-compiler-input-capture.py" "$evidence/native-source/"
 docker image inspect "$image" >"$evidence/native-image.json"
@@ -158,10 +171,10 @@ header = '# syntax=docker/dockerfile:1\nFROM ' + sys.argv[3] + ' AS rules\nCOPY 
 (context / 'Dockerfile').write_text(header + source[start:end])
 (context / 'Dockerfile.omission').write_text(header + 'FROM scratch AS rules-export\nCOPY --from=rules /rules/compiled.yac /compiled.yac\nCOPY --from=rules /rules/libyara.version /libyara.version\nCOPY --from=rules /rules/sources.json /sources.json\n')
 TRANSFER
-docker buildx build --progress=plain --target rules-export --output "type=local,dest=$evidence/complete" "$scratch/transfer"
+docker buildx build --builder default --progress=plain --target rules-export --output "type=local,dest=$evidence/complete" "$scratch/transfer"
 docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/complete:/export:ro" "$image" \
 	python3 -B /repo/ci/compiler_input_export_test.py verify /export
-docker buildx build --progress=plain -f "$scratch/transfer/Dockerfile.omission" --target rules-export --output "type=local,dest=$evidence/omission" "$scratch/transfer"
+docker buildx build --builder default --progress=plain -f "$scratch/transfer/Dockerfile.omission" --target rules-export --output "type=local,dest=$evidence/omission" "$scratch/transfer"
 if docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/omission:/export:ro" "$image" \
 	python3 -B /repo/ci/compiler_input_export_test.py verify /export >"$evidence/omission-red.log" 2>&1; then
 	echo "compiler export omission control survived" >&2
@@ -169,7 +182,7 @@ if docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$e
 fi
 # This exact missing envelope assertion owns the omission-red control.
 grep -F 'compiler-inputs/index.json' "$evidence/omission-red.log"
-docker buildx build --progress=plain --target rules-export --output "type=local,dest=$evidence/restored" "$scratch/transfer"
+docker buildx build --builder default --progress=plain --target rules-export --output "type=local,dest=$evidence/restored" "$scratch/transfer"
 docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/restored:/export:ro" "$image" \
 	python3 -B /repo/ci/compiler_input_export_test.py verify /export
 docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/restored:/export:ro" -v "$evidence:/evidence" "$image" \

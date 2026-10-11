@@ -19,6 +19,67 @@ OPTIONAL = ("PARITY", "LINT", "RSPAMD", "SPAMASSASSIN")
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class CheckoutCredentialContract(unittest.TestCase):
+    """Reject persisted checkout credentials before repository container mounts."""
+
+    def assert_safe_checkouts(self, source):
+        workflow = yaml.safe_load(source)
+        self.assertEqual(workflow["permissions"]["contents"], "read")
+        for name in ("changes", "compiler-inputs"):
+            job = workflow["jobs"][name]
+            self.assertEqual(
+                job.get("permissions", workflow["permissions"])["contents"], "read"
+            )
+            checkouts = [
+                step for step in job["steps"]
+                if step.get("uses", "").startswith("actions/checkout@")
+            ]
+            self.assertTrue(checkouts, name + " requires a checkout")
+            for checkout in checkouts:
+                self.assertIs(
+                    checkout.get("with", {}).get("persist-credentials"), False,
+                    name + " checkout must explicitly disable persisted credentials",
+                )
+
+    def test_shipped_checkout_credentials_are_disabled(self):
+        self.assert_safe_checkouts(WORKFLOW.read_text())
+
+    def test_unsafe_checkout_controls(self):
+        for name in ("changes", "compiler-inputs"):
+            for value in (None, True, "false", "true", 0, [], {}):
+                with self.subTest(job=name, value=value):
+                    workflow = yaml.safe_load(WORKFLOW.read_text())
+                    checkout = workflow["jobs"][name]["steps"][0]
+                    if value is None:
+                        del checkout["with"]["persist-credentials"]
+                    else:
+                        checkout["with"]["persist-credentials"] = value
+                    with self.assertRaises(AssertionError):
+                        self.assert_safe_checkouts(yaml.safe_dump(workflow))
+            for mutation in ("missing-job", "missing-checkout", "unsafe-extra"):
+                with self.subTest(job=name, mutation=mutation):
+                    workflow = yaml.safe_load(WORKFLOW.read_text())
+                    if mutation == "missing-job":
+                        del workflow["jobs"][name]
+                    elif mutation == "missing-checkout":
+                        workflow["jobs"][name]["steps"].pop(0)
+                    else:
+                        workflow["jobs"][name]["steps"].append(
+                            {"uses": "actions/checkout@unsafe"}
+                        )
+                    with self.assertRaises((AssertionError, KeyError)):
+                        self.assert_safe_checkouts(yaml.safe_dump(workflow))
+
+    def test_broadened_contents_permissions_controls(self):
+        for scope in ("workflow", "changes", "compiler-inputs"):
+            with self.subTest(scope=scope):
+                workflow = yaml.safe_load(WORKFLOW.read_text())
+                target = workflow if scope == "workflow" else workflow["jobs"][scope]
+                target["permissions"] = {"contents": "write"}
+                with self.assertRaises(AssertionError):
+                    self.assert_safe_checkouts(yaml.safe_dump(workflow))
+
+
 class NativePrerequisiteTests(unittest.TestCase):
     """Exercise the real shell entrypoint with isolated daemon and key controls."""
 
@@ -69,6 +130,7 @@ printf '%s\\n' "$*" >> "$NATIVE_FIXTURE/docker.log"
 case "$1" in
     info) exit "${NATIVE_DAEMON_EXIT:-0}" ;;
     build)
+        [ "$2" = --builder ] && [ "$3" = default ] || exit 9
         for context do :; done
         cp "$context/deb.myguard.nl.gpg" "$NATIVE_FIXTURE/public-key.gpg"
         cp "$context/Dockerfile" "$NATIVE_FIXTURE/production-stage"
@@ -108,7 +170,14 @@ case "$1" in
         esac
         ;;
     buildx)
-        [ "$2" = build ]
+        if [ "$2" = inspect ]; then
+            [ "$#" = 3 ] && [ "$3" = default ] || exit 9
+            [ "${NATIVE_BUILDER_EXIT:-0}" = 0 ] || exit "$NATIVE_BUILDER_EXIT"
+            printf 'Driver:  %s\\n' "${NATIVE_BUILDER_DRIVER-docker}"
+            exit 0
+        fi
+        [ "$2" = build ] && [ "$3" = --builder ] && [ "$4" = default ] || exit 9
+        [ "${NATIVE_TRANSFER_EXIT:-0}" = 0 ] || exit "$NATIVE_TRANSFER_EXIT"
         for argument do
             case "$argument" in
                 type=local,dest=*) destination="${argument#type=local,dest=}" ;;
@@ -172,6 +241,61 @@ esac
         self.assertTrue(
             any("--network none" in line and "replay /export" in line for line in calls)
         )
+
+    def test_explicit_daemon_builder_ignores_selection_and_environment(self):
+        for selected in ("default", "mailstrix-multi", "unavailable-builder"):
+            with self.subTest(selected=selected):
+                self.env["BUILDX_BUILDER"] = selected
+                result = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "docker.log").read_text().splitlines()
+        native = [line for line in calls if line.startswith("build ")]
+        transfers = [line for line in calls if line.startswith("buildx build ")]
+        self.assertEqual(len(native), 3)
+        self.assertEqual(len(transfers), 9)
+        self.assertTrue(
+            all(line.startswith("build --builder default ") for line in native)
+        )
+        self.assertTrue(
+            all(
+                line.startswith("buildx build --builder default ") for line in transfers
+            )
+        )
+        self.assertFalse(any(line.startswith("buildx use ") for line in calls))
+
+    def test_required_builder_errors_are_explicit(self):
+        for variable, value, message in (
+            (
+                "NATIVE_BUILDER_EXIT",
+                "7",
+                b"required default Docker builder unavailable",
+            ),
+            (
+                "NATIVE_BUILDER_DRIVER",
+                "docker-container",
+                b"must use the Docker driver",
+            ),
+            ("NATIVE_BUILDER_DRIVER", "", b"must use the Docker driver"),
+        ):
+            with self.subTest(variable=variable, value=value):
+                self.env[variable] = value
+                result = self.run_script("--prerequisites-only")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.env.pop(variable)
+        self.assertFalse((self.root / "public-key.gpg").exists())
+
+    def test_transfer_error_propagates_and_cleans_up(self):
+        self.env["NATIVE_TRANSFER_EXIT"] = "7"
+        result = self.run_script()
+        self.assertEqual(result.returncode, 7, result.stderr)
+        calls = (self.root / "docker.log").read_text().splitlines()
+        context = Path(
+            next(line for line in calls if line.startswith("build ")).split()[-1]
+        )
+        self.assertFalse(context.exists())
+        self.assertTrue(any(line.startswith("container rm -f ") for line in calls))
+        self.assertTrue(any(line.startswith("image rm ") for line in calls))
 
     def test_workflow_contract_dependencies_are_disposable_and_pinned(self):
         steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["changes"]["steps"]
@@ -351,7 +475,9 @@ esac
     def test_prerequisite_only_and_daemon_failure(self):
         result = self.run_script("--prerequisites-only")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.root / "docker.log").read_text(), "info\n")
+        self.assertEqual(
+            (self.root / "docker.log").read_text(), "info\nbuildx inspect default\n"
+        )
         self.env["NATIVE_DAEMON_EXIT"] = "1"
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
