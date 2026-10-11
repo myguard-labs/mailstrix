@@ -49,14 +49,17 @@ class NativePrerequisiteTests(unittest.TestCase):
             "git",
             """#!/bin/sh
 set -eu
-[ "$1" = -C ] && [ "$2" = "$NATIVE_FIXTURE" ] &&
-    [ "$3" = show ] && [ "$4" = HEAD:docker/Dockerfile ]
+if [ "$#" -ne 4 ] || [ "$1" != -C ] || [ "$2" != "$NATIVE_FIXTURE" ] ||
+    [ "$3" != show ] || [ "$4" != HEAD:docker/Dockerfile ]; then
+    exit 1
+fi
 cat "$NATIVE_FIXTURE/baseline-Dockerfile"
 """,
         )
         self.env = os.environ | {
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "NATIVE_FIXTURE": str(self.root),
+            "MX_INPUT_STAGE_MODE": "callable",
         }
         self.command(
             "docker",
@@ -74,6 +77,14 @@ case "$1" in
     run)
         [ "${NATIVE_RUN_EXIT:-0}" = 0 ] || exit "$NATIVE_RUN_EXIT"
         case "$*" in
+            *"coverage report"*)
+                if [ -n "${NATIVE_COVERAGE_FILE:-}" ]; then
+                    for argument do :; done
+                    report="${argument##* && }"
+                    report="${report#COVERAGE_FILE=/evidence/export.coverage }"
+                    COVERAGE_FILE="$NATIVE_COVERAGE_FILE" sh -c "$report"
+                fi
+                ;;
             *"prepare /proof/fixture /rules"*)
                 for argument do
                     case "$argument" in *:/proof) context="${argument%:/proof}" ;; esac
@@ -161,6 +172,169 @@ esac
         self.assertTrue(
             any("--network none" in line and "replay /export" in line for line in calls)
         )
+
+    def test_workflow_contract_dependencies_are_disposable_and_pinned(self):
+        steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["changes"]["steps"]
+        command = next(
+            step["run"]
+            for step in steps
+            if step.get("name") == "required check contract fixtures"
+        )
+        self.assertIn('docker run --rm -v "$PWD:/repo:ro" -w /repo', command)
+        self.assertIn(
+            "eilandert/goldenimage:ci@sha256:27b404ef4099fc1b9893d5843e0adf603c82b0c451bb89d3af88474147536d32",
+            command,
+        )
+        self.assertIn("sh -ec", command)
+        self.assertIn("python3 -m venv /tmp/workflow-contract", command)
+        self.assertIn("coverage==7.6.0 PyYAML==6.0.2", command)
+        self.assertIn('export PATH="/tmp/workflow-contract/bin:$PATH"', command)
+        self.assertIn("python3 -B ci/workflow_contract_test.py", command)
+
+    def test_real_committed_pr_base_stage_guard(self):
+        repository = self.root / "stage-repository"
+        (repository / "docker").mkdir(parents=True)
+        dockerfile = repository / "docker/Dockerfile"
+        original = (ROOT / "docker/Dockerfile").read_text()
+        dockerfile.write_text(original)
+        git = shutil.which("git", path=os.environ["PATH"])
+
+        def commit():
+            subprocess.run(
+                [git, "-C", str(repository), "add", "docker/Dockerfile"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    git,
+                    "-C",
+                    str(repository),
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    "fixture",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            return subprocess.check_output(
+                [git, "-C", str(repository), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+        subprocess.run([git, "init", str(repository)], check=True, capture_output=True)
+        for key, value in (
+            ("user.name", "Fixture"),
+            ("user.email", "fixture@example.invalid"),
+        ):
+            subprocess.run(
+                [git, "-C", str(repository), "config", key, value],
+                check=True,
+                capture_output=True,
+            )
+        base = commit()
+        guard = self.source.split("<<'STAGES'\n", 1)[1].split("\nSTAGES\n", 1)[0]
+
+        def check(mode="pr-export", reference=base):
+            return subprocess.run(
+                ["python3", "-c", guard, str(repository), mode, reference],
+                capture_output=True,
+                check=False,
+            )
+
+        additive = original.replace(
+            "# ---- rules export", "# ---- rules export\n# fixture additive change", 1
+        )
+        dockerfile.write_text(
+            additive.replace(
+                "# ---- final", "# ---- final\n# fixture ordinary drift", 1
+            )
+        )
+        drift = commit()
+        result = check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            b"ordinary rules/runtime stage changed with export slice", result.stderr
+        )
+        dockerfile.write_text(additive)
+        commit()
+        self.assertEqual(check().returncode, 0)
+        dockerfile.write_text(
+            original.replace(
+                "# ---- final", "# ---- final\n# legitimate ordinary-only change", 1
+            )
+        )
+        commit()
+        self.assertEqual(check().returncode, 0)
+        self.assertEqual(check("callable", "").returncode, 0)
+        head = subprocess.check_output(
+            [git, "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip()
+        for mode, reference, message in (
+            ("", base, b"explicit stage guard mode required"),
+            ("wrong", base, b"explicit stage guard mode required"),
+            ("pr-export", "", b"valid PR base SHA required"),
+            ("pr-export", "wrong", b"valid PR base SHA required"),
+            ("pr-export", "0" * 40, b"PR base unavailable"),
+            ("pr-export", head, b"PR base must differ from HEAD"),
+        ):
+            with self.subTest(mode=mode, reference=reference):
+                result = check(mode, reference)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+        self.assertNotEqual(drift, base)
+        dockerfile.write_text(additive.replace("# ---- final", "# removed boundary", 1))
+        result = check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"stage boundary changed", result.stderr)
+
+    def test_helper_coverage_floor_rejects_actual_partial_coverage(self):
+        source = self.root / "coverage-fixture.py"
+        source.write_text(
+            "import os\nif os.environ.get('COVER_BOTH'):\n    value = 1\nelse:\n    value = 2\n"
+        )
+        data = self.root / "fixture.coverage"
+        coverage_env = self.env | {"COVERAGE_FILE": str(data)}
+        coverage_env.pop("COVER_BOTH", None)
+        command = ["python3", "-m", "coverage", "run", "--branch", str(source)]
+        subprocess.run(command, env=coverage_env, check=True, capture_output=True)
+        self.env["NATIVE_COVERAGE_FILE"] = str(data)
+        partial = self.run_script()
+        self.assertEqual(partial.returncode, 2, partial.stdout + partial.stderr)
+        self.assertIn(b"Coverage failure", partial.stdout + partial.stderr)
+        subprocess.run(
+            command[:4] + ["--append"] + command[4:],
+            env=coverage_env | {"COVER_BOTH": "1"},
+            check=True,
+            capture_output=True,
+        )
+        complete = self.run_script()
+        self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
+        self.assertIn(b"100%", complete.stdout)
+
+    def test_git_stub_rejects_wrong_arguments_and_count(self):
+        exact = ["-C", str(self.root), "show", "HEAD:docker/Dockerfile"]
+        cases = [exact[:index] + ["wrong"] + exact[index + 1 :] for index in range(4)]
+        cases.extend([[], exact[:-1], exact + ["extra"]])
+        valid = subprocess.run(
+            [str(self.bin / "git"), *exact],
+            env=self.env,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertEqual(valid.stdout, (self.root / "baseline-Dockerfile").read_bytes())
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                invalid = subprocess.run(
+                    [str(self.bin / "git"), *arguments],
+                    env=self.env,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(invalid.returncode, 0)
+                self.assertEqual(invalid.stdout, b"")
 
     def test_export_omission_cannot_pass_with_disabled_verifier(self):
         self.env["NATIVE_VERIFY_BYPASS"] = "1"
@@ -428,6 +602,17 @@ class RequiredCheck(unittest.TestCase):
             prereq["run"], "ci/compiler-input-check.sh --prerequisites-only"
         )
         self.assertEqual(steps[-1]["run"], "ci/compiler-input-check.sh")
+        self.assertEqual(steps[0]["with"]["fetch-depth"], 0)
+        self.assertEqual(
+            steps[-1]["env"],
+            {
+                "MX_INPUT_STAGE_MODE": (
+                    "${{ github.event_name == 'pull_request' "
+                    "&& 'pr-export' || 'callable' }}"
+                ),
+                "MX_INPUT_STAGE_BASE": "${{ github.event.pull_request.base.sha }}",
+            },
+        )
         self.assertIn("compiler-inputs", jobs["ci-ok"]["needs"])
         env = jobs["ci-ok"]["steps"][0]["env"]
         self.assertEqual(env["NATIVE_SELECTED"], "${{ needs.changes.outputs.native }}")

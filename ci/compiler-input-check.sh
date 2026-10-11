@@ -16,6 +16,43 @@ if [ "${1-}" = --prerequisites-only ]; then
 	exit 0
 fi
 repo="$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)"
+python3 - "$repo" "${MX_INPUT_STAGE_MODE-}" "${MX_INPUT_STAGE_BASE-}" <<'STAGES'
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+repo = Path(sys.argv[1])
+mode, base = sys.argv[2:]
+if mode == "callable":
+    print("compiler export: callable stage guard explicitly exempt")
+    raise SystemExit(0)
+if mode != "pr-export":
+    raise SystemExit("compiler export: explicit stage guard mode required")
+if not re.fullmatch(r"[0-9a-f]{40}", base):
+    raise SystemExit("compiler export: valid PR base SHA required")
+try:
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    if base == head:
+        raise SystemExit("compiler export: PR base must differ from HEAD")
+    previous = subprocess.check_output(["git", "-C", str(repo), "show", base + ":docker/Dockerfile"], text=True)
+except subprocess.CalledProcessError as error:
+    raise SystemExit("compiler export: PR base unavailable") from error
+current = (repo / "docker/Dockerfile").read_text()
+
+def section(source, start, end):
+    if source.count(start) != 1 or (end and source.count(end) != 1):
+        raise SystemExit("compiler export: stage boundary changed")
+    value = source.split(start, 1)[1]
+    return value.split(end, 1)[0] if end else value
+
+export_start, export_end = "# ---- rules export", "# ---- final"
+if section(current, export_start, export_end) != section(previous, export_start, export_end):
+    for start, end in (("FROM yara AS rules\n", export_start), (export_end, None)):
+        if section(current, start, end) != section(previous, start, end):
+            raise SystemExit("compiler export: ordinary rules/runtime stage changed with export slice")
+print("compiler export: explicit PR base stage guard verified")
+STAGES
 scratch="$(mktemp -d /tmp/mailstrix-input-check.XXXXXXXX)"
 image="mailstrix-input-check:$(basename "$scratch")"
 evidence="${MX_INPUT_EVIDENCE_DIR:-$scratch/evidence}"
@@ -101,7 +138,7 @@ docker run --rm --name "$container" -v "$repo:/repo:ro" "$image" \
 # Coverage tooling is installed only in the disposable test container; the
 # native stage/compiler remains exactly the production build above.
 docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" \
-	sh -c 'apt-get update && apt-get install -y --no-install-recommends python3-coverage && cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report'
+	sh -c 'apt-get update && apt-get install -y --no-install-recommends python3-coverage && cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
 mkdir "$scratch/transfer"
 cp "$repo/docker/export-compiler-inputs.py" "$repo/docker/capture-compiler-inputs.py" "$scratch/transfer/"
 mkdir "$scratch/transfer/docker"
@@ -139,21 +176,10 @@ docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evid
 	python3 -B /repo/ci/compiler_input_export_test.py replay /export /evidence/offline-replays.json
 python3 - "$repo" "$scratch/transfer/rules" "$evidence/restored" <<'UNCHANGED'
 from pathlib import Path
-import subprocess
 import sys
 repo, original, exported = map(Path, sys.argv[1:])
 for name in ('compiled.yac', 'local.yac', 'libyara.version', 'sources.json'):
     if (original / name).read_bytes() != (exported / name).read_bytes():
         raise SystemExit('ordinary root bytes changed: ' + name)
-# Neither original compiler/rules commands nor final runtime COPY semantics
-# may change in this additive export slice.
-current = (repo / 'docker/Dockerfile').read_text()
-previous = subprocess.check_output(['git', '-C', str(repo), 'show', 'HEAD:docker/Dockerfile'], text=True)
-for start, end in (('FROM yara AS rules\n', '# ---- rules export'), ('# ---- final', None)):
-    a, b = current.split(start, 1)[1], previous.split(start, 1)[1]
-    if end:
-        a, b = a.split(end, 1)[0], b.split(end, 1)[0]
-    if a != b:
-        raise SystemExit('ordinary rules/runtime stage changed')
 print('compiler export: complete/omission-red/restored-green, offline main/local and ordinary bytes verified')
 UNCHANGED

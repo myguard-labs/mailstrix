@@ -67,7 +67,18 @@ jobs:
       - name: impact planner regression controls
         run: python3 -B -m unittest discover -s ci -p 'ci_*_test.py'
       - name: required check contract fixtures
-        run: python3 -B ci/workflow_contract_test.py
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo \
+            eilandert/goldenimage:ci@sha256:27b404ef4099fc1b9893d5843e0adf603c82b0c451bb89d3af88474147536d32 \
+            sh -ec '
+              git --version
+              git config --global --add safe.directory /repo
+              python3 -m venv /tmp/workflow-contract
+              /tmp/workflow-contract/bin/python -m pip install --no-cache-dir \
+                coverage==7.6.0 PyYAML==6.0.2
+              export PATH="/tmp/workflow-contract/bin:$PATH"
+              python3 -B ci/workflow_contract_test.py
+            '
       - name: plan affected CI domains
         id: plan
         env:
@@ -83,9 +94,15 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+        with:
+          fetch-depth: 0
       - name: require native compiler proof prerequisites
         run: ci/compiler-input-check.sh --prerequisites-only
       - name: exact compiler input static prerequisites and controls
+        env:
+          MX_INPUT_STAGE_MODE: >-
+            ${{ github.event_name == 'pull_request' && 'pr-export' || 'callable' }}
+          MX_INPUT_STAGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: ci/compiler-input-check.sh
 
   # Authoritative gate: build + test exactly as the production image does (CGO
