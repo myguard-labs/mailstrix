@@ -61,13 +61,15 @@ class ImpactTests(unittest.TestCase):
 
     def test_export_exact_consumers(self):
         helper = impact.plan(["docker/export-compiler-inputs.py"])
-        for key in ("native", "image", "python", "docker"):
+        for key in ("native", "image", "python", "docker", "generate"):
             self.assertTrue(helper[key], key)
         test = impact.plan(["ci/compiler_input_export_test.py"])
         for key in ("native", "scope", "python"):
             self.assertTrue(test[key], key)
         self.assertFalse(helper["go"])
         self.assertFalse(test["image"])
+        self.assertFalse(test["generate"])
+        self.assertFalse(impact.plan(["README.md"])["generate"])
         for path in ("docker/export-unmapped.py", "ci/compiler_input_unmapped_test.py"):
             with self.assertRaisesRegex(ValueError, "unmapped changed path"):
                 impact.plan([path])

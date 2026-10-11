@@ -101,22 +101,6 @@ class NativePrerequisiteTests(unittest.TestCase):
             "Dockerfile",
         ):
             shutil.copyfile(ROOT / "docker" / name, self.root / "docker" / name)
-        (self.root / "baseline-Dockerfile").write_bytes(
-            subprocess.check_output(
-                ["git", "-C", str(ROOT), "show", "HEAD:docker/Dockerfile"]
-            )
-        )
-        self.command(
-            "git",
-            """#!/bin/sh
-set -eu
-if [ "$#" -ne 4 ] || [ "$1" != -C ] || [ "$2" != "$NATIVE_FIXTURE" ] ||
-    [ "$3" != show ] || [ "$4" != HEAD:docker/Dockerfile ]; then
-    exit 1
-fi
-cat "$NATIVE_FIXTURE/baseline-Dockerfile"
-""",
-        )
         self.env = os.environ | {
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "NATIVE_FIXTURE": str(self.root),
@@ -135,6 +119,11 @@ case "$1" in
         cp "$context/deb.myguard.nl.gpg" "$NATIVE_FIXTURE/public-key.gpg"
         cp "$context/Dockerfile" "$NATIVE_FIXTURE/production-stage"
         exit "${NATIVE_BUILD_EXIT:-0}"
+        ;;
+    image)
+        if [ "$2" = save ]; then
+            printf native-image > "$5"
+        fi
         ;;
     run)
         [ "${NATIVE_RUN_EXIT:-0}" = 0 ] || exit "$NATIVE_RUN_EXIT"
@@ -241,6 +230,72 @@ esac
         self.assertTrue(
             any("--network none" in line and "replay /export" in line for line in calls)
         )
+
+    def test_callable_fixture_has_no_git_dependency(self):
+        self.command("git", "#!/bin/sh\necho unexpected-git >&2\nexit 99\n")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(b"unexpected-git", result.stderr)
+
+    def test_default_evidence_skips_image_save(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "docker.log").read_text().splitlines()
+        self.assertFalse(any(line.startswith("image save ") for line in calls))
+        self.assertTrue(any("coverage report" in line for line in calls))
+        self.assertTrue(any("replay /export" in line for line in calls))
+
+    def test_explicit_empty_or_new_evidence_retains_image(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                evidence = self.root / str(existing)
+                if existing:
+                    evidence.mkdir()
+                self.env["MX_INPUT_EVIDENCE_DIR"] = str(evidence)
+                result = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    (evidence / "native-image.tar").read_bytes(), b"native-image"
+                )
+                self.assertTrue((evidence / "native-source/Dockerfile").is_file())
+                calls = (self.root / "docker.log").read_text()
+                self.assertIn("coverage report", calls)
+                self.assertIn("replay /export", calls)
+                before = (evidence / "native-image.tar").read_bytes()
+                repeat = self.run_script()
+                self.assertNotEqual(repeat.returncode, 0)
+                self.assertIn(b"invalid evidence directory", repeat.stderr)
+                self.assertEqual(
+                    (self.root / "docker.log").read_text(),
+                    calls + "info\nbuildx inspect default\n",
+                )
+                self.assertEqual((evidence / "native-image.tar").read_bytes(), before)
+
+    def test_invalid_evidence_rejects_before_owned_resources(self):
+        self.command("mktemp", "#!/bin/sh\ntouch \"$NATIVE_FIXTURE/scratch-created\"\nexit 99\n")
+        occupied = self.root / "occupied"
+        occupied.mkdir()
+        (occupied / ".keep").write_text("preserve")
+        file = self.root / "file"
+        file.write_text("preserve")
+        for evidence in (occupied, file, file / "child"):
+            with self.subTest(evidence=evidence):
+                self.env["MX_INPUT_EVIDENCE_DIR"] = str(evidence)
+                result = self.run_script()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"invalid evidence directory", result.stderr)
+                calls = (self.root / "docker.log").read_text().splitlines()
+                self.assertFalse(
+                    any(
+                        line.startswith(
+                            ("build ", "run ", "container rm ", "image rm ")
+                        )
+                        for line in calls
+                    )
+                )
+                self.assertEqual((occupied / ".keep").read_text(), "preserve")
+                self.assertEqual(file.read_text(), "preserve")
+                self.assertFalse((self.root / "scratch-created").exists())
 
     def test_explicit_daemon_builder_ignores_selection_and_environment(self):
         for selected in ("default", "mailstrix-multi", "unavailable-builder"):
@@ -436,29 +491,6 @@ esac
         complete = self.run_script()
         self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
         self.assertIn(b"100%", complete.stdout)
-
-    def test_git_stub_rejects_wrong_arguments_and_count(self):
-        exact = ["-C", str(self.root), "show", "HEAD:docker/Dockerfile"]
-        cases = [exact[:index] + ["wrong"] + exact[index + 1 :] for index in range(4)]
-        cases.extend([[], exact[:-1], exact + ["extra"]])
-        valid = subprocess.run(
-            [str(self.bin / "git"), *exact],
-            env=self.env,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(valid.returncode, 0, valid.stderr)
-        self.assertEqual(valid.stdout, (self.root / "baseline-Dockerfile").read_bytes())
-        for arguments in cases:
-            with self.subTest(arguments=arguments):
-                invalid = subprocess.run(
-                    [str(self.bin / "git"), *arguments],
-                    env=self.env,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertNotEqual(invalid.returncode, 0)
-                self.assertEqual(invalid.stdout, b"")
 
     def test_export_omission_cannot_pass_with_disabled_verifier(self):
         self.env["NATIVE_VERIFY_BYPASS"] = "1"

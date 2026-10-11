@@ -118,6 +118,7 @@ RULES = {
         "packaging/deb/maintscript_test.sh",
     ],
     "generate": [
+        "docker/export-compiler-inputs.py",
         "ci/generate_rules_count_test.sh",
         "ci/ci_rules_signing_secret_test.py",
         "docker/generate-rules*",

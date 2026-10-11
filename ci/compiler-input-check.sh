@@ -66,10 +66,24 @@ if section(current, export_start, export_end) != section(previous, export_start,
             raise SystemExit("compiler export: ordinary rules/runtime stage changed with export slice")
 print("compiler export: explicit PR base stage guard verified")
 STAGES
+# An explicit destination is a fresh retained proof, never an overwrite target.
+if [ -n "${MX_INPUT_EVIDENCE_DIR:-}" ]; then
+	python3 - "$MX_INPUT_EVIDENCE_DIR" <<'EVIDENCE'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+try:
+    if path.exists() and (not path.is_dir() or any(path.iterdir())):
+        raise ValueError("destination must be a new or empty directory")
+    path.mkdir(parents=True, exist_ok=True)
+except (OSError, ValueError) as error:
+    raise SystemExit(f"native compiler proof: invalid evidence directory: {error}") from error
+EVIDENCE
+fi
 scratch="$(mktemp -d /tmp/mailstrix-input-check.XXXXXXXX)"
 image="mailstrix-input-check:$(basename "$scratch")"
 evidence="${MX_INPUT_EVIDENCE_DIR:-$scratch/evidence}"
-mkdir -p "$evidence"
 container="$(basename "$scratch")"
 cleanup() {
 	docker container rm -f "$container" >/dev/null 2>&1 || :
@@ -77,6 +91,7 @@ cleanup() {
 	rm -rf "${scratch:?}"
 }
 trap cleanup EXIT HUP INT TERM
+mkdir -p "$evidence"
 # Public archive key from ci/goldenimage/deb.myguard.nl.gpg in the MyGuard
 # superrepo, SHA-256 verified against the host public key. Bootstrap only the
 # disposable context; runners need no preinstalled key or host-state writes.
@@ -144,7 +159,9 @@ docker build --builder default --progress=plain -t "$image" "$scratch"
 mkdir "$evidence/native-source"
 cp "$scratch/Dockerfile" "$scratch/deb.myguard.nl.gpg" "$scratch/compiler-input-capture.h" "$scratch/patch-compiler-input-capture.py" "$evidence/native-source/"
 docker image inspect "$image" >"$evidence/native-image.json"
-docker image save "$image" -o "$evidence/native-image.tar"
+if [ -n "${MX_INPUT_EVIDENCE_DIR:-}" ]; then
+	docker image save "$image" -o "$evidence/native-image.tar"
+fi
 docker run --rm --name "$container" -v "$repo:/repo:ro" "$image" \
 	sh -c 'cd /repo && python3 -B ci/compiler_input_retention_test.py -v'
 
