@@ -18,6 +18,8 @@ fi
 repo="$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)"
 scratch="$(mktemp -d /tmp/mailstrix-input-check.XXXXXXXX)"
 image="mailstrix-input-check:$(basename "$scratch")"
+evidence="${MX_INPUT_EVIDENCE_DIR:-$scratch/evidence}"
+mkdir -p "$evidence"
 container="$(basename "$scratch")"
 cleanup() {
 	docker container rm -f "$container" >/dev/null 2>&1 || :
@@ -89,5 +91,69 @@ source = source.replace('COPY docker/compiler-input-capture.h docker/patch-compi
 (scratch / 'Dockerfile').write_text(source)
 PY
 docker build --progress=plain -t "$image" "$scratch"
+mkdir "$evidence/native-source"
+cp "$scratch/Dockerfile" "$scratch/deb.myguard.nl.gpg" "$scratch/compiler-input-capture.h" "$scratch/patch-compiler-input-capture.py" "$evidence/native-source/"
+docker image inspect "$image" >"$evidence/native-image.json"
+docker image save "$image" -o "$evidence/native-image.tar"
 docker run --rm --name "$container" -v "$repo:/repo:ro" "$image" \
 	sh -c 'cd /repo && python3 -B ci/compiler_input_retention_test.py -v'
+
+# Coverage tooling is installed only in the disposable test container; the
+# native stage/compiler remains exactly the production build above.
+docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" \
+	sh -c 'apt-get update && apt-get install -y --no-install-recommends python3-coverage && cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report'
+mkdir "$scratch/transfer"
+cp "$repo/docker/export-compiler-inputs.py" "$repo/docker/capture-compiler-inputs.py" "$scratch/transfer/"
+mkdir "$scratch/transfer/docker"
+cp "$repo/docker/export-compiler-inputs.py" "$scratch/transfer/docker/"
+docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$scratch/transfer:/proof" "$image" \
+	sh -c 'cd /repo && python3 -B ci/compiler_input_export_test.py prepare /proof/fixture /rules && rm -rf /rules/src /rules/local-src && cp -a /rules /proof/rules && chmod -R a+rwX /proof'
+# Extract the actual production export-only branch; only its rules prerequisite
+# is replaced by the exact native fixture. The production RUN/COPY stays verbatim.
+python3 - "$repo" "$scratch/transfer" "$image" <<'TRANSFER'
+from pathlib import Path
+import sys
+repo, context = map(Path, sys.argv[1:3])
+source = (repo / 'docker/Dockerfile').read_text()
+start = source.index('FROM rules AS rules-export-inputs\n')
+end = source.index('# ---- final', start)
+header = '# syntax=docker/dockerfile:1\nFROM ' + sys.argv[3] + ' AS rules\nCOPY rules/ /rules/\nCOPY capture-compiler-inputs.py /usr/local/bin/\n'
+(context / 'Dockerfile').write_text(header + source[start:end])
+(context / 'Dockerfile.omission').write_text(header + 'FROM scratch AS rules-export\nCOPY --from=rules /rules/compiled.yac /compiled.yac\nCOPY --from=rules /rules/libyara.version /libyara.version\nCOPY --from=rules /rules/sources.json /sources.json\n')
+TRANSFER
+docker buildx build --progress=plain --target rules-export --output "type=local,dest=$evidence/complete" "$scratch/transfer"
+docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/complete:/export:ro" "$image" \
+	python3 -B /repo/ci/compiler_input_export_test.py verify /export
+docker buildx build --progress=plain -f "$scratch/transfer/Dockerfile.omission" --target rules-export --output "type=local,dest=$evidence/omission" "$scratch/transfer"
+if docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/omission:/export:ro" "$image" \
+	python3 -B /repo/ci/compiler_input_export_test.py verify /export >"$evidence/omission-red.log" 2>&1; then
+	echo "compiler export omission control survived" >&2
+	exit 1
+fi
+# This exact missing envelope assertion owns the omission-red control.
+grep -F 'compiler-inputs/index.json' "$evidence/omission-red.log"
+docker buildx build --progress=plain --target rules-export --output "type=local,dest=$evidence/restored" "$scratch/transfer"
+docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/restored:/export:ro" "$image" \
+	python3 -B /repo/ci/compiler_input_export_test.py verify /export
+docker run --rm --name "$container" --network none -v "$repo:/repo:ro" -v "$evidence/restored:/export:ro" -v "$evidence:/evidence" "$image" \
+	python3 -B /repo/ci/compiler_input_export_test.py replay /export /evidence/offline-replays.json
+python3 - "$repo" "$scratch/transfer/rules" "$evidence/restored" <<'UNCHANGED'
+from pathlib import Path
+import subprocess
+import sys
+repo, original, exported = map(Path, sys.argv[1:])
+for name in ('compiled.yac', 'local.yac', 'libyara.version', 'sources.json'):
+    if (original / name).read_bytes() != (exported / name).read_bytes():
+        raise SystemExit('ordinary root bytes changed: ' + name)
+# Neither original compiler/rules commands nor final runtime COPY semantics
+# may change in this additive export slice.
+current = (repo / 'docker/Dockerfile').read_text()
+previous = subprocess.check_output(['git', '-C', str(repo), 'show', 'HEAD:docker/Dockerfile'], text=True)
+for start, end in (('FROM yara AS rules\n', '# ---- rules export'), ('# ---- final', None)):
+    a, b = current.split(start, 1)[1], previous.split(start, 1)[1]
+    if end:
+        a, b = a.split(end, 1)[0], b.split(end, 1)[0]
+    if a != b:
+        raise SystemExit('ordinary rules/runtime stage changed')
+print('compiler export: complete/omission-red/restored-green, offline main/local and ordinary bytes verified')
+UNCHANGED

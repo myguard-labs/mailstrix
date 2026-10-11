@@ -34,9 +34,11 @@ class ImpactTests(unittest.TestCase):
             "docker/compiler-input-capture.h",
             "docker/patch-compiler-input-capture.py",
             "docker/capture-compiler-inputs.py",
+            "docker/export-compiler-inputs.py",
             "docker/compile-rules.sh",
             "ci/compiler-input-check.sh",
             "ci/compiler_input_retention_test.py",
+            "ci/compiler_input_export_test.py",
             "ci/compiler-input/io-faults.c",
             "ci/compiler-input/seek.c",
             ".github/workflows/ci.yml",
@@ -57,6 +59,20 @@ class ImpactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unmapped changed path"):
                 impact.plan(["docker/Dockerfile", path])
 
+    def test_export_exact_consumers(self):
+        helper = impact.plan(["docker/export-compiler-inputs.py"])
+        for key in ("native", "image", "python", "docker"):
+            self.assertTrue(helper[key], key)
+        test = impact.plan(["ci/compiler_input_export_test.py"])
+        for key in ("native", "scope", "python"):
+            self.assertTrue(test[key], key)
+        self.assertFalse(helper["go"])
+        self.assertFalse(test["image"])
+        for path in ("docker/export-unmapped.py", "ci/compiler_input_unmapped_test.py"):
+            with self.assertRaisesRegex(ValueError, "unmapped changed path"):
+                impact.plan([path])
+        self.assertFalse(impact.plan(["README.md"])["native"])
+
     def test_exact_compiler_input_consumers_and_unmapped_controls(self):
         native = [
             "docker/compiler-input-capture.h",
@@ -74,6 +90,7 @@ class ImpactTests(unittest.TestCase):
         for path in (
             "ci/compiler-input-check.sh",
             "ci/compiler_input_retention_test.py",
+            "ci/compiler_input_export_test.py",
             "ci/compiler-input/io-faults.c",
             "ci/compiler-input/seek.c",
         ):

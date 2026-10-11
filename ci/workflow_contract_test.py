@@ -35,9 +35,25 @@ class NativePrerequisiteTests(unittest.TestCase):
         for name in (
             "compiler-input-capture.h",
             "patch-compiler-input-capture.py",
+            "capture-compiler-inputs.py",
+            "export-compiler-inputs.py",
             "Dockerfile",
         ):
             shutil.copyfile(ROOT / "docker" / name, self.root / "docker" / name)
+        (self.root / "baseline-Dockerfile").write_bytes(
+            subprocess.check_output(
+                ["git", "-C", str(ROOT), "show", "HEAD:docker/Dockerfile"]
+            )
+        )
+        self.command(
+            "git",
+            """#!/bin/sh
+set -eu
+[ "$1" = -C ] && [ "$2" = "$NATIVE_FIXTURE" ] &&
+    [ "$3" = show ] && [ "$4" = HEAD:docker/Dockerfile ]
+cat "$NATIVE_FIXTURE/baseline-Dockerfile"
+""",
+        )
         self.env = os.environ | {
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "NATIVE_FIXTURE": str(self.root),
@@ -55,7 +71,50 @@ case "$1" in
         cp "$context/Dockerfile" "$NATIVE_FIXTURE/production-stage"
         exit "${NATIVE_BUILD_EXIT:-0}"
         ;;
-    run) exit "${NATIVE_RUN_EXIT:-0}" ;;
+    run)
+        [ "${NATIVE_RUN_EXIT:-0}" = 0 ] || exit "$NATIVE_RUN_EXIT"
+        case "$*" in
+            *"prepare /proof/fixture /rules"*)
+                for argument do
+                    case "$argument" in *:/proof) context="${argument%:/proof}" ;; esac
+                done
+                mkdir "$context/rules"
+                printf main > "$context/rules/compiled.yac"
+                printf local > "$context/rules/local.yac"
+                printf '4.5.2\\n' > "$context/rules/libyara.version"
+                printf '[]\\n' > "$context/rules/sources.json"
+                ;;
+            *"verify /export"*)
+                [ "${NATIVE_VERIFY_BYPASS:-0}" = 0 ] || exit 0
+                for argument do
+                    case "$argument" in *:/export:ro) exported="${argument%:/export:ro}" ;; esac
+                done
+                if [ ! -f "$exported/compiler-inputs/index.json" ]; then
+                    echo 'missing compiler-inputs/index.json' >&2
+                    exit 1
+                fi
+                ;;
+        esac
+        ;;
+    buildx)
+        [ "$2" = build ]
+        for argument do
+            case "$argument" in
+                type=local,dest=*) destination="${argument#type=local,dest=}" ;;
+            esac
+            context="$argument"
+        done
+        mkdir -p "$destination"
+        cp "$context/rules/compiled.yac" "$context/rules/local.yac" \
+            "$context/rules/libyara.version" "$context/rules/sources.json" "$destination/"
+        case "$*" in
+            *Dockerfile.omission*) ;;
+            *)
+                mkdir "$destination/compiler-inputs"
+                printf '{}' > "$destination/compiler-inputs/index.json"
+                ;;
+        esac
+        ;;
 esac
 """,
         )
@@ -96,6 +155,24 @@ esac
         self.assertTrue(any(line.startswith("run --rm ") for line in calls))
         self.assertTrue(any(line.startswith("container rm -f ") for line in calls))
         self.assertTrue(any(line.startswith("image rm ") for line in calls))
+        transfers = [line for line in calls if line.startswith("buildx build ")]
+        self.assertEqual(len(transfers), 3)
+        self.assertEqual(sum("Dockerfile.omission" in line for line in transfers), 1)
+        self.assertTrue(
+            any("--network none" in line and "replay /export" in line for line in calls)
+        )
+
+    def test_export_omission_cannot_pass_with_disabled_verifier(self):
+        self.env["NATIVE_VERIFY_BYPASS"] = "1"
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"compiler export omission control survived", result.stderr)
+        calls = (self.root / "docker.log").read_text().splitlines()
+        self.assertTrue(any("Dockerfile.omission" in line for line in calls))
+        context = Path(
+            next(line for line in calls if line.startswith("build ")).split()[-1]
+        )
+        self.assertFalse(context.exists())
 
     def test_prerequisite_only_and_daemon_failure(self):
         result = self.run_script("--prerequisites-only")

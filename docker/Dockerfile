@@ -240,10 +240,12 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
 # docker/generate-rules.sh can build the publish manifest. A .yac only loads on a
 # matching libyara, so the version is authoritative. Separate from `final` — a
 # normal image build never produces this.
+FROM rules AS rules-export-inputs
+COPY docker/export-compiler-inputs.py /usr/local/bin/
+RUN python3 /usr/local/bin/export-compiler-inputs.py export /rules /rules-export
+
 FROM scratch AS rules-export
-COPY --from=rules /rules/compiled.yac /compiled.yac
-COPY --from=rules /rules/libyara.version /libyara.version
-COPY --from=rules /rules/sources.json /sources.json
+COPY --from=rules-export-inputs /rules-export/ /
 
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
