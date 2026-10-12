@@ -258,6 +258,9 @@ func TestP12ArtifactFallbacks(t *testing.T) {
 				}
 				t.Fatalf("fallback fixture did not reach rejecting guard: %s", kind)
 			}
+			if kind == "metadata-valid-types" && e.Error() != "linked compiler/library ABI mismatch" {
+				t.Fatalf("valid metadata did not reach ABI guard: %v", e)
+			}
 			t.Logf("fallback guard %s: %v", kind, e)
 			s := markerFixtureScanner(t, root, nil)
 			if s.markerRules.Load() != nil || s.markerContent != "" {
