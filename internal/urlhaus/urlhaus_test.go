@@ -2,6 +2,7 @@ package urlhaus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -73,6 +74,52 @@ func TestRefreshSuccessPersistsSnapshot(t *testing.T) {
 		if len(logs) != attempt+1 || logs[attempt] != "urlhaus feed loaded: 2 urls / 2 hosts" {
 			t.Fatalf("successful refresh publication log missing: %v", logs)
 		}
+	}
+}
+
+type p12FailedFeedBody struct {
+	data   string
+	err    error
+	reads  int
+	closed bool
+}
+
+func (b *p12FailedFeedBody) Read(dst []byte) (int, error) {
+	b.reads++
+	return copy(dst, b.data), b.err
+}
+
+func (b *p12FailedFeedBody) Close() error { b.closed = true; return nil }
+
+// A partial valid feed plus a read error must never replace the last good set.
+// This does not rely on a real request being canceled during a background read.
+func TestP12RefreshBodyFailureRetainsSnapshot(t *testing.T) {
+	c := testChecker(t)
+	before := c.rs.Load()
+	c.lastRefresh.Store(123)
+	c.cachePath = filepath.Join(t.TempDir(), "urlhaus.csv")
+	if err := os.WriteFile(c.cachePath, []byte(sampleCSV), 0600); err != nil {
+		t.Fatal(err)
+	}
+	body := &p12FailedFeedBody{
+		data: `"1","2024-01-01","http://partial.example/p","online"` + "\n",
+		err:  errors.New("fixture response body interrupted"),
+	}
+	c.client = &http.Client{Transport: refreshTestRoundTripper(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+	})}
+	if err := c.refreshOnce(context.Background()); !errors.Is(err, body.err) {
+		t.Fatalf("response body error was not preserved: %v", err)
+	}
+	if body.reads != 1 || !body.closed {
+		t.Fatal("failed response body was not read and closed")
+	}
+	if c.rs.Load() != before || c.lastRefresh.Load() != 123 {
+		t.Fatal("partial failed feed replaced the last good snapshot or timestamp")
+	}
+	cache, err := os.ReadFile(c.cachePath)
+	if err != nil || string(cache) != sampleCSV {
+		t.Fatalf("partial failed feed replaced the last good cache: %v", err)
 	}
 }
 
