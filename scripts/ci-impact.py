@@ -32,6 +32,7 @@ RULES = {
         "ci/marker_runtime_fixture.py",
         "ci/prepare_marker_runtime.py",
         "ci/ci_marker_runtime_fixture_test.py",
+        "ci/ci_marker_closure_test.py",
         "ci/compiler-input/io-faults.c",
         "ci/compiler-input/seek.c",
     ],
@@ -92,6 +93,7 @@ RULES = {
         "ci/marker_runtime_fixture.py",
         "ci/prepare_marker_runtime.py",
         "ci/ci_marker_runtime_fixture_test.py",
+        "ci/ci_marker_closure_test.py",
     ],
     "prometheus": [
         "contrib/deploy/prometheus/*",
@@ -117,6 +119,7 @@ RULES = {
         "ci/marker_runtime_fixture.py",
         "ci/prepare_marker_runtime.py",
         "ci/ci_marker_runtime_fixture_test.py",
+        "ci/ci_marker_closure_test.py",
         "ci/compiler-input/io-faults.c",
         "ci/compiler-input/seek.c",
         "ci/ci_go_checks_test.py",
@@ -208,6 +211,7 @@ GO_INPUTS = [
     "ci/marker_runtime_fixture.py",
     "ci/prepare_marker_runtime.py",
     "ci/ci_marker_runtime_fixture_test.py",
+    "ci/ci_marker_closure_test.py",
     "ci/marker_runtime_test.go",
     "ci/testdata/marker-runtime.zip",
     "ci/extraction_memory_test.go",
@@ -336,9 +340,11 @@ def plan(paths, full=False):
                 "ci/marker_runtime_fixture.py",
                 "ci/prepare_marker_runtime.py",
                 "ci/ci_marker_runtime_fixture_test.py",
+                "ci/ci_marker_closure_test.py",
             }:
                 go_paths.add("internal/mailstrix/marker_artifact_test.go")
                 go_paths.add("ci/marker_runtime_test.go")
+                go_paths.add("internal/mailstrix/marker_closure_test.go")
             if path == "ci/testdata/rc4md5-biff.xls":
                 go_paths.add("internal/extract/rc4md5_fixture_test.go")
             selected.add("go")

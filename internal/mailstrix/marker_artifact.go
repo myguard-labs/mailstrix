@@ -717,6 +717,59 @@ func markerValidateManifest(m markerManifest) error {
 	return nil
 }
 
+// markerRuleClosure consumes a validated native graph. Each rule is queued
+// once; references are indexed by source, and namespace globals are expanded
+// once even when that namespace has many markers. Inventory order preserves
+// the producer's marker order and sorted retained indices without map iteration.
+func markerRuleClosure(graph markerGraph) ([]int, []int, map[string]bool) {
+	markers := []int{}
+	retained := make([]bool, len(graph.Inventory))
+	references := make([][]int, len(graph.Inventory))
+	globals := map[string][]int{}
+	for i, rule := range graph.Inventory {
+		if rule.Flags&2 != 0 {
+			globals[rule.Namespace] = append(globals[rule.Namespace], i)
+		}
+		for _, tag := range rule.Tags {
+			if tag == markerTag {
+				markers = append(markers, i)
+				retained[i] = true
+				break
+			}
+		}
+	}
+	for _, edge := range graph.References {
+		references[edge[0]] = append(references[edge[0]], edge[1])
+	}
+	queue := append([]int{}, markers...)
+	enqueue := func(index int) {
+		if !retained[index] {
+			retained[index] = true
+			queue = append(queue, index)
+		}
+	}
+	namespaces := map[string]bool{}
+	for head := 0; head < len(queue); head++ {
+		current := queue[head]
+		namespace := graph.Inventory[current].Namespace
+		namespaces[namespace] = true
+		for _, dependency := range references[current] {
+			enqueue(dependency)
+		}
+		for _, global := range globals[namespace] {
+			enqueue(global)
+		}
+		delete(globals, namespace)
+	}
+	closure := []int{}
+	for i, keep := range retained {
+		if keep {
+			closure = append(closure, i)
+		}
+	}
+	return markers, closure, namespaces
+}
+
 func markerValidateBinding(b markerBinding, main, narrow markerManifest, mainIdentity markerFingerprint, mainManifest, narrowManifest markerFingerprint) error {
 	if e := markerCheck(b.Schema == 1 && b.Construction == "complete-native-namespace-closure/1" && main.Schema == 2 && narrow.Schema == 2 && main.Final.Exit == 0 && narrow.Final.Exit == 0 && b.Main == mainIdentity && b.Main == main.Compiled && b.Marker == narrow.Compiled && b.MainManifest == mainManifest && b.MarkerManifest == narrowManifest, "marker main/graph identity mismatch"); e != nil {
 		return e
@@ -748,42 +801,7 @@ func markerValidateBinding(b markerBinding, main, narrow markerManifest, mainIde
 		return errors.New("binding native inventory mismatch")
 	}
 	graph := main.Final.Graph
-	markers := []int{}
-	retained := map[int]bool{}
-	for i, r := range graph.Inventory {
-		for _, tag := range r.Tags {
-			if tag == markerTag {
-				markers = append(markers, i)
-				retained[i] = true
-				break
-			}
-		}
-	}
-	changed := true
-	for changed {
-		changed = false
-		for index := range retained {
-			for _, edge := range graph.References {
-				if edge[0] == index && !retained[edge[1]] {
-					retained[edge[1]] = true
-					changed = true
-				}
-			}
-			for i, r := range graph.Inventory {
-				if r.Namespace == graph.Inventory[index].Namespace && r.Flags&2 != 0 && !retained[i] {
-					retained[i] = true
-					changed = true
-				}
-			}
-		}
-	}
-	closure := []int{}
-	namespaces := map[string]bool{}
-	for i := range retained {
-		closure = append(closure, i)
-		namespaces[graph.Inventory[i].Namespace] = true
-	}
-	sort.Ints(closure)
+	markers, closure, namespaces := markerRuleClosure(graph)
 	if !markerEqual(markers, b.Closure.Markers) || !markerEqual(closure, b.Closure.Retained) {
 		return errors.New("marker closure mismatch")
 	}
