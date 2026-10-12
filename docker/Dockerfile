@@ -186,7 +186,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # filter-rules.py must sit beside fetch-rules.sh (resolved via $(dirname "$0"))
 # so the `mail` profile per-rule mail-relevance/license filter runs.
-COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/filter-rules.py /usr/local/bin/
+COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py /usr/local/bin/
 # Repo-tracked local rules (our own heuristics, e.g. the mraptor-style maldoc
 # rule) baked alongside the fetched public sets so they ship in the seed .yac.
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
@@ -230,6 +230,7 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
     && mkdir -p /rules/local-src \
     && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/local-src/ \
     && /usr/local/bin/compile-rules.sh /rules/local-src /rules/local.yac \
+    && python3 /usr/local/bin/build-marker-artifact.py /rules \
     && rm -rf /rules/src /rules/local-src \
     && install -d -o 65532 -g 65532 /var/cache/mailstrix \
     && yarac --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 > /rules/libyara.version
@@ -242,7 +243,7 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
 # normal image build never produces this.
 FROM rules AS rules-export-inputs
 COPY docker/export-compiler-inputs.py /usr/local/bin/
-RUN python3 /usr/local/bin/export-compiler-inputs.py export /rules /rules-export
+RUN python3 /usr/local/bin/export-compiler-inputs.py export-marker /rules /rules-export
 
 FROM scratch AS rules-export
 COPY --from=rules-export-inputs /rules-export/ /

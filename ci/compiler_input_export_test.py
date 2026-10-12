@@ -35,7 +35,7 @@ export = module("export_inputs", REPO / "docker/export-compiler-inputs.py")
 retention = module("native_fixture", REPO / "ci/compiler_input_retention_test.py")
 
 
-def prepare(root, source=None):
+def prepare(root, source=None, with_marker=False):
     root.mkdir()
     source = source or root / "source"
     source.mkdir()
@@ -61,7 +61,12 @@ def prepare(root, source=None):
             check=True,
         )
     (source / "libyara.version").write_text("4.5.2\n")
-    export.produce(source, root / "export")
+    if with_marker:
+        before = Path.cwd()
+        export.marker.build(source)
+        if Path.cwd() != before:
+            raise AssertionError("marker builder changed caller cwd")
+    export.produce(source, root / "export", require_marker=with_marker)
     return source, root / "export"
 
 
@@ -608,8 +613,12 @@ class CompilerInputExport(unittest.TestCase):
 
 
 def command(argv):
-    if argv[0] == "prepare":
-        prepare(Path(argv[1]), Path(argv[2]) if len(argv) == 3 else None)
+    if argv[0] in ("prepare", "prepare-marker"):
+        prepare(
+            Path(argv[1]),
+            Path(argv[2]) if len(argv) == 3 else None,
+            argv[0] == "prepare-marker",
+        )
     elif argv[0] == "verify":
         export.verify(Path(argv[1]))
     elif argv[0] == "replay":
@@ -619,7 +628,12 @@ def command(argv):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("prepare", "verify", "replay"):
+    if len(sys.argv) > 1 and sys.argv[1] in (
+        "prepare",
+        "prepare-marker",
+        "verify",
+        "replay",
+    ):
         command(sys.argv[1:])
     else:
         unittest.main()

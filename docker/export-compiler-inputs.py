@@ -23,6 +23,13 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError("capture helper loader unavailable")
 capture = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(capture)
+MARKER_SPEC = importlib.util.spec_from_file_location(
+    "marker_artifact", Path(__file__).with_name("build-marker-artifact.py")
+)
+if MARKER_SPEC is None or MARKER_SPEC.loader is None:
+    raise RuntimeError("marker helper loader unavailable")
+marker = importlib.util.module_from_spec(MARKER_SPEC)
+MARKER_SPEC.loader.exec_module(marker)
 SLOTS = {"main": "compiled.yac", "local": "local.yac"}
 METADATA = ("libyara.version", "sources.json")
 
@@ -160,9 +167,15 @@ def file_entries(entries):
 def verify(root):
     files = inventory(root)
     index = load(root / "compiler-inputs/index.json")
-    keys(index, ("schema", "artifacts", "metadata"), "index fields mismatch")
+    keys(
+        index,
+        ("schema", "artifacts", "metadata")
+        + (("marker",) if index.get("schema") == 2 else ()),
+        "index fields mismatch",
+    )
     require(
-        type(index["schema"]) is int and index["schema"] == 1, "index schema mismatch"
+        type(index["schema"]) is int and index["schema"] in (1, 2),
+        "index schema mismatch",
     )
     keys(index["artifacts"], SLOTS, "artifact slots mismatch")
     keys(index["metadata"], METADATA, "metadata slots mismatch")
@@ -218,10 +231,22 @@ def verify(root):
             "version identity mismatch: " + slot,
         )
         expected.update("compiler-inputs/" + slot + "/" + path for path in actual)
+    marker_names = set()
+    if index["schema"] == 2:
+        keys(index["marker"], ("files",), "marker index fields mismatch")
+        file_entries(index["marker"]["files"])
+        marker_root = root / "marker-artifact"
+        marker_files = inventory(marker_root)
+        require(
+            marker_files == index["marker"]["files"], "marker envelope hash mismatch"
+        )
+        verify_marker(root / "compiler-inputs/main", marker_root)
+        expected.update("marker-artifact/" + path for path in marker_files)
+        marker_names.add("marker-artifact")
     require(set(files) == expected, "export file inventory mismatch")
     require(
         {p.name for p in root.iterdir()}
-        == set(SLOTS.values()) | set(METADATA) | {"compiler-inputs"},
+        == set(SLOTS.values()) | set(METADATA) | {"compiler-inputs"} | marker_names,
         "export root inventory mismatch",
     )
     require(
@@ -232,7 +257,62 @@ def verify(root):
     return index
 
 
-def produce(source, destination):
+def verify_marker(main_root, root):
+    require(
+        {p.name for p in root.iterdir()}
+        == {
+            "markers.yac",
+            "binding.json",
+            "graph",
+            "abi",
+            "main.descriptors",
+            "marker.descriptors",
+        },
+        "marker root inventory mismatch",
+    )
+    main = graph_state(main_root)
+    narrow = graph_state(root / "graph")
+    metadata = load(root / "binding.json")
+    require(
+        fingerprint(regular(root / "markers.yac")) == narrow["compiled"],
+        "marker compiled identity mismatch",
+    )
+    require(Path(narrow["output"]).name == "markers.yac", "marker output slot mismatch")
+    abi = metadata["abi"]
+    keys(
+        abi, ("compiler", "libyara", "descriptor_source"), "marker ABI fields mismatch"
+    )
+    file_entries(abi)
+    require(
+        abi["descriptor_source"] == fingerprint(marker.INSPECTOR.encode()),
+        "marker descriptor ABI mismatch",
+    )
+    require(
+        {p.name for p in (root / "abi").iterdir()} == {"yarac", "libyara.a"},
+        "marker ABI inventory mismatch",
+    )
+    for name, field in (("yarac", "compiler"), ("libyara.a", "libyara")):
+        require(
+            fingerprint(regular(root / "abi" / name)) == abi[field],
+            "marker compiler ABI identity mismatch",
+        )
+    expected = marker.binding(
+        main_root,
+        main,
+        root / "graph",
+        narrow,
+        marker.descriptor(regular(root / "main.descriptors")),
+        marker.descriptor(regular(root / "marker.descriptors")),
+        abi,
+    )
+    require(
+        json.dumps(metadata, sort_keys=True) == json.dumps(expected, sort_keys=True),
+        "marker binding mismatch",
+    )
+    return metadata
+
+
+def produce(source, destination, require_marker=False):
     require(stat.S_ISDIR(source.lstat().st_mode), "source must be a real directory")
     require(
         not destination.exists() and not destination.is_symlink(),
@@ -284,6 +364,22 @@ def produce(source, destination):
             "versions": state["versions"],
             "files": before,
         }
+    marker_root = source / "marker-artifact"
+    if require_marker or marker_root.exists() or marker_root.is_symlink():
+        marker_files = inventory(marker_root)
+        verify_marker(stage / "compiler-inputs/main", marker_root)
+        for relative, entry in marker_files.items():
+            data = regular(marker_root / relative)
+            require(fingerprint(data) == entry, "marker source changed during export")
+            output = stage / "marker-artifact" / relative
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(data)
+        require(
+            inventory(marker_root) == marker_files,
+            "marker source changed during export",
+        )
+        index["schema"] = 2
+        index["marker"] = {"files": marker_files}
     for name in METADATA:
         data = regular(source / name)
         (stage / name).write_bytes(data)
@@ -305,13 +401,19 @@ def main(argv):
     try:
         if len(argv) == 2 and argv[0] == "verify":
             verify(Path(argv[1]))
-        elif len(argv) == 3 and argv[0] == "export":
-            produce(Path(argv[1]).absolute(), Path(argv[2]).absolute())
+        elif len(argv) == 3 and argv[0] in ("export", "export-marker"):
+            produce(
+                Path(argv[1]).absolute(),
+                Path(argv[2]).absolute(),
+                argv[0] == "export-marker",
+            )
         else:
             raise ExportError("usage: export SOURCE DESTINATION | verify EXPORT")
     except (
         ExportError,
+        marker.MarkerError,
         capture.RetentionError,
+        marker.capture.RetentionError,
         OSError,
         ValueError,
         KeyError,
