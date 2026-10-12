@@ -8,6 +8,8 @@ packaging/deb/dist/
 *.test
 *.out
 coverage.txt
+# Generated with the pinned native compiler; prepare before local Go tests.
+/ci/testdata/marker-runtime.zip
 # deploy-time secrets (token file referenced by docker-compose) — never commit
 secrets/
 *.token

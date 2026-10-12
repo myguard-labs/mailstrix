@@ -7,6 +7,15 @@ import (
 	"github.com/myguard-labs/mailstrix/internal/urlcand"
 )
 
+func TestNormalizeHTTPURLRejectsEmptyHostname(t *testing.T) {
+	for _, raw := range []string{"http://.:80/path", "https://.:443/path", "http://.../path"} {
+		norm, host, ip := urlcand.NormalizeHTTPURL(raw)
+		if norm != "" || host != "" || ip != "" {
+			t.Fatalf("empty root-dot hostname must be rejected: %q -> %q %q %q", raw, norm, host, ip)
+		}
+	}
+}
+
 func TestExtractRawBeforeDeobf(t *testing.T) {
 	// Buffer contains both a plain URL and a defanged one.
 	data := []byte("see http://plain.example/a and hxxp://obfuscated[.]example/b")

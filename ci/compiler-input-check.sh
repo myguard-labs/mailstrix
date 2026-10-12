@@ -154,13 +154,16 @@ KEY
 cp "$repo/docker/compiler-input-capture.h" "$repo/docker/patch-compiler-input-capture.py" "$scratch/"
 python3 - "$repo" "$scratch" <<'PY'
 from pathlib import Path
+import re
 import sys
 repo, scratch = map(Path, sys.argv[1:])
 source = (repo / 'docker/Dockerfile').read_text()
-marker = '# ---- go build'
-if source.count(marker) != 1:
+stages = list(re.finditer(r'^FROM[ \t]+[^\n]+', source, re.MULTILINE | re.IGNORECASE))
+if len(stages) < 2 or not re.search(r'\bAS[ \t]+yara[ \t]*$', stages[0].group(), re.IGNORECASE):
     raise SystemExit('production yara-stage boundary changed')
-source = source.split(marker)[0]
+# Only the native prerequisite belongs in this minimal context. Subsequent
+# fixture/build stages have their own COPY inputs and must remain excluded.
+source = source[:stages[1].start()]
 if source.count('RUN apt-get update') != 1:
     raise SystemExit('production yara-stage apt prerequisite changed')
 source = source.replace('RUN apt-get update', '''COPY deb.myguard.nl.gpg /etc/apt/keyrings/deb.myguard.nl.gpg

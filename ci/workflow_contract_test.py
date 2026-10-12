@@ -240,6 +240,55 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(b"unexpected-git", result.stderr)
 
+    def test_native_stage_copy_inputs_fit_minimal_context(self):
+        # Validate the local COPY sources while the real entrypoint's context
+        # exists. Consume the shipped fixture stages rather than restating
+        # their source names: including any of them requires a larger context.
+        validator = self.root / "context_contract.py"
+        validator.write_text(
+            """from pathlib import Path
+import shlex
+import sys
+
+context = Path(sys.argv[1])
+source = (context / 'Dockerfile').read_text().replace('\\\\\\n', ' ')
+for line in source.splitlines():
+    tokens = shlex.split(line, comments=True)
+    if not tokens or tokens[0].upper() != 'COPY':
+        continue
+    if any(token.startswith('--from=') for token in tokens[1:]):
+        continue
+    for name in tokens[1:-1]:
+        if not list(context.glob(name)):
+            raise SystemExit('COPY input missing from native context: ' + name)
+"""
+        )
+        docker = self.bin / "docker"
+        original_command = docker.read_text()
+        docker.write_text(
+            original_command.replace(
+                '        cp "$context/deb.myguard.nl.gpg"',
+                '        python3 "$NATIVE_FIXTURE/context_contract.py" "$context"\n'
+                '        cp "$context/deb.myguard.nl.gpg"',
+                1,
+            )
+        )
+        dockerfile = self.root / "docker/Dockerfile"
+        production = dockerfile.read_text()
+        stages = list(re.finditer(r"^FROM .+", production, re.MULTILINE))
+        fixture_stage = production[stages[1].start() : stages[2].start()]
+        inserted = fixture_stage.replace("AS marker-fixture", "AS inserted-fixture", 1)
+        for source in (
+            production,
+            production[: stages[1].start()]
+            + inserted
+            + production[stages[1].start() :],
+        ):
+            with self.subTest(inserted=source != production):
+                dockerfile.write_text(source)
+                result = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_default_evidence_skips_image_save(self):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -608,7 +657,7 @@ esac
         dockerfile = self.root / "docker/Dockerfile"
         production = dockerfile.read_text()
         for old, marker in (
-            ("# ---- go build", b"production yara-stage boundary changed"),
+            (" AS yara\n", b"production yara-stage boundary changed"),
             ("RUN apt-get update", b"production yara-stage apt prerequisite changed"),
         ):
             with self.subTest(marker=marker):
@@ -617,6 +666,13 @@ esac
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(marker, result.stderr)
                 self.assertNotIn("build ", (self.root / "docker.log").read_text())
+
+        stages = list(re.finditer(r"^FROM .+", production, re.MULTILINE))
+        dockerfile.write_text(production[: stages[1].start()])
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"production yara-stage boundary changed", result.stderr)
+        self.assertNotIn("build ", (self.root / "docker.log").read_text())
 
 
 def workflow_document(path_variable, filename):

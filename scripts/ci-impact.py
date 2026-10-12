@@ -29,6 +29,9 @@ RULES = {
         "ci/compiler_input_retention_test.py",
         "ci/compiler_input_export_test.py",
         "ci/marker_artifact_test.py",
+        "ci/marker_runtime_fixture.py",
+        "ci/prepare_marker_runtime.py",
+        "ci/ci_marker_runtime_fixture_test.py",
         "ci/compiler-input/io-faults.c",
         "ci/compiler-input/seek.c",
     ],
@@ -86,6 +89,9 @@ RULES = {
         "docker/build-marker-artifact.py",
         "ci/compiler_input_export_test.py",
         "ci/marker_artifact_test.py",
+        "ci/marker_runtime_fixture.py",
+        "ci/prepare_marker_runtime.py",
+        "ci/ci_marker_runtime_fixture_test.py",
     ],
     "prometheus": [
         "contrib/deploy/prometheus/*",
@@ -108,6 +114,9 @@ RULES = {
         "ci/compiler_input_retention_test.py",
         "ci/compiler_input_export_test.py",
         "ci/marker_artifact_test.py",
+        "ci/marker_runtime_fixture.py",
+        "ci/prepare_marker_runtime.py",
+        "ci/ci_marker_runtime_fixture_test.py",
         "ci/compiler-input/io-faults.c",
         "ci/compiler-input/seek.c",
         "ci/ci_go_checks_test.py",
@@ -196,6 +205,11 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/marker_runtime_fixture.py",
+    "ci/prepare_marker_runtime.py",
+    "ci/ci_marker_runtime_fixture_test.py",
+    "ci/marker_runtime_test.go",
+    "ci/testdata/marker-runtime.zip",
     "ci/extraction_memory_test.go",
     "ci/rule_generations_test.go",
     "ci/p7_main_retirement_test.go",
@@ -317,6 +331,14 @@ def plan(paths, full=False):
             go_paths.add(path)
             # The binary fixture is read by both the public extraction tests
             # and the internal reference-producer consistency test.
+            if path in {
+                "ci/testdata/marker-runtime.zip",
+                "ci/marker_runtime_fixture.py",
+                "ci/prepare_marker_runtime.py",
+                "ci/ci_marker_runtime_fixture_test.py",
+            }:
+                go_paths.add("internal/mailstrix/marker_artifact_test.go")
+                go_paths.add("ci/marker_runtime_test.go")
             if path == "ci/testdata/rc4md5-biff.xls":
                 go_paths.add("internal/extract/rc4md5_fixture_test.go")
             selected.add("go")

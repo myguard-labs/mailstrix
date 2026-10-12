@@ -46,11 +46,11 @@ func TestRuleGenerationsMetricsReload(t *testing.T) {
 		return 0
 	}
 	before := scrape()
-	if before < 3 {
-		t.Fatalf("main/big/marker count=%d want >=3", before)
+	if before < 2 {
+		t.Fatalf("main/big fallback count=%d want >=2", before)
 	}
-	// Auxiliary failure retains the previous big owner; replaced main and marker
-	// owners retire immediately without requiring GC.
+	// Auxiliary failure retains the previous big owner; replaced main
+	// owner retire immediately without requiring GC.
 	reloadWrite(t, bigPath, "broken rules")
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)

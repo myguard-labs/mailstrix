@@ -95,16 +95,14 @@ type Scanner struct {
 	bigFileScans       atomic.Uint64 // oversized raw buffers scanned against bigRules
 	bigFileStreamScans atomic.Uint64 // oversized extracted streams scanned against bigRules
 
-	// markerRules is the PERF-18 marker-only bundle: the full compiled ruleset with
-	// every non-marker-tagged rule disabled so the out-of-band Markers channel is
-	// scanned against a tiny subset instead of the full ~12k-rule set. Built in
-	// Reload by recompiling the same source and calling Disable() on every rule
-	// that lacks the "marker" tag. A nil pointer means the bundle could not be
-	// built (logged); extractScan.scan then falls back to the full ruleset (no
-	// detection loss). filterMarkerChannel remains as belt-and-suspenders.
-	markerRules     atomic.Pointer[yara.Rules]
-	extractionBytes retainedExtractionHistogram
-	rawScanErrs     atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
+	// markerRules owns the verified narrow artifact matched to this generation's
+	// main bytes. Retained namespace companions preserve native dependencies and
+	// globals. A nil object scans markers against main with channel/deny filtering.
+	markerRules          atomic.Pointer[yara.Rules]
+	preparedMainIdentity markerFingerprint // fresh main snapshot; reloadMu
+	markerSeedRoot       string            // immutable seed artifact location
+	extractionBytes      retainedExtractionHistogram
+	rawScanErrs          atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
 	// Per-channel scanOne counts (PERF-17): which channel each libyara scan ran on,
 	// so /metrics shows where scan cost goes. Totals INCLUDE the big-file subset
 	// (bigFileScans ⊆ rawChannelScans, bigFileStreamScans ⊆ streamChannelScans).
@@ -561,6 +559,9 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 		allowlist:         cfg.RuleAllowlist,
 		topMatches:        newMatchCounter(matchCounterCap),
 	}
+	if cfg.SeedRules != "" {
+		s.markerSeedRoot = filepath.Dir(cfg.SeedRules)
+	}
 	if cfg.CacheDir != "" && filepath.Clean(cfg.RulesPath) == filepath.Join(cfg.CacheDir, cachedRulesName) {
 		s.cacheDir = cfg.CacheDir
 	}
@@ -701,8 +702,13 @@ func (s *Scanner) reloadLockedCache() error {
 
 // loadMainRules loads or compiles the main ruleset from srcFile or srcDir.
 func (s *Scanner) loadMainRules() (*yara.Rules, error) {
+	s.preparedMainIdentity = markerFingerprint{}
 	if s.srcFile != "" {
-		return yara.LoadRules(s.srcFile)
+		rules, identity, err := markerMainSnapshot(s.srcFile)
+		if err == nil {
+			s.preparedMainIdentity = identity
+		}
+		return rules, err
 	}
 	mainRuleFiles, err := validatedRuleFiles(s.srcDir, s.logf)
 	if err != nil {
@@ -774,20 +780,10 @@ func (s *Scanner) reloadBigBundle(deny map[string]struct{}, dlFP string, bigRule
 	return big, bigContent
 }
 
-// reloadMarkerBundle clones the freshly prepared main bundle.
-// PERF-69: clone the main bundle before publication and disable all
-// non-marker-tagged rules. A failure here must NOT fail the reload — retain the
-// previous marker bundle (rules AND identity), or use the full ruleset when
-// there is no previous marker bundle.
-// PERF-30: pass the deny map so denied marker rules are also pre-disabled;
-// a denied rule that happens to carry the "marker" tag should still be skipped.
-func (s *Scanner) reloadMarkerBundle(rules *yara.Rules, deny map[string]struct{}, mainContent string, markerRules *yara.Rules, markerContent string) (*yara.Rules, string) {
-	if mb, mbErr := cloneMarkerBundle(rules, deny, s.logf); mbErr != nil {
-		s.logf("WARNING: PERF-18 marker bundle build failed, keeping previous (or full ruleset fallback): %v", mbErr)
-	} else if mb != nil {
-		return mb, mainContent
-	}
-	return markerRules, markerContent
+// reloadMarkerBundle selects only an authoritative artifact matched to the
+// exact prepared main snapshot. Untagged dependencies remain enabled.
+func (s *Scanner) reloadMarkerBundle(rules *yara.Rules, deny map[string]struct{}, mainContent string, _ *yara.Rules, _ string) (*yara.Rules, string) {
+	return prepareMarkerArtifact(s, rules, deny, mainContent)
 }
 
 // reloadBundle is the set of values published atomically by a reload.
@@ -911,7 +907,13 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	// Record the policy used for native pre-disabling as part of each bundle's
 	// identity. A failed auxiliary load retains BOTH its old rules and identity.
 	dlFP := denylistHash(deny)
-	mainContent := rulesetContentHash(s.srcFile, s.srcDir, "", "") + ":" + dlFP
+	var mainIdentity string
+	if s.srcFile != "" {
+		mainIdentity = s.preparedMainIdentity.SHA256
+	} else {
+		mainIdentity = rulesetContentHash("", s.srcDir, "", "")
+	}
+	mainContent := mainIdentity + ":" + dlFP
 
 	// Retired roots are released after both reload and publication unlock.
 	src := s.srcDir
@@ -927,6 +929,11 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	candidates = append(candidates, observedRuleGenerations.adopt(bigRules))
 	markerRules, markerContent := s.reloadMarkerBundle(rules, deny, mainContent, s.markerRules.Load(), s.markerContent)
 	candidates = append(candidates, observedRuleGenerations.adopt(markerRules))
+	// Adopt before operator callbacks: a callback panic rolls back the fresh
+	// marker allocation along with the other prepared candidates.
+	if markerRules != nil {
+		s.logf("PERF-18: marker artifact loaded: %d rules (deny policy applied)", len(markerRules.GetRules()))
+	}
 
 	// Hash the effective bundles, including retained auxiliaries after a failed
 	// load. Hashing only today's source files would misidentify that fallback.
