@@ -1027,8 +1027,20 @@ class CompilerInputRetention(unittest.TestCase):
                 if not 10 <= k <= 15
             )
             invocation["native_trace"] = capture.store(root, old)
-        capture.verify(root, legacy)
-        capture.restore(root, self.root / "schema2-restored")
+        legacy_root = self.root / "schema1-retained"
+        shutil.copytree(root, legacy_root)
+        capture.save_json(legacy_root / "manifest.json", legacy)
+        capture.verify(legacy_root, legacy)
+        legacy_projection = self.root / "schema1-restored"
+        capture.restore(legacy_root, legacy_projection)
+        for original_path, item in legacy["final_inputs"].items():
+            projected = (
+                legacy_projection / "inputs" / Path(original_path).relative_to("/")
+            )
+            self.assertEqual(projected.read_bytes(), capture.get(legacy_root, item))
+        replay = capture.load_json(legacy_projection / "replay.json")
+        self.assertEqual(replay["argv"], legacy["final"]["argv"])
+        self.assertEqual(replay["cwd"], legacy["final"]["cwd"])
         with self.assertRaisesRegex(capture.RetentionError, "authoritative"):
             capture.authoritative_rule_graph(root, legacy)
         tampered = copy.deepcopy(state)

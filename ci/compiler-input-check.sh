@@ -153,6 +153,8 @@ RUN echo "deb [signed-by=/etc/apt/keyrings/deb.myguard.nl.gpg] http://deb.myguar
 RUN apt-get update''')
 source = source.replace('COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py',
                         'COPY compiler-input-capture.h patch-compiler-input-capture.py')
+# Coverage is a pinned Debian dependency of this disposable proof image only.
+source += "\nRUN apt-get update && apt-get install -y --no-install-recommends python3-coverage=6.5.0+dfsg1-2+b1 && test \"$(dpkg-query -W -f='${Version}' python3-coverage)\" = '6.5.0+dfsg1-2+b1' && python3 -m coverage --version && rm -rf /var/lib/apt/lists/*\n"
 (scratch / 'Dockerfile').write_text(source)
 PY
 docker build --builder default --progress=plain -t "$image" "$scratch"
@@ -221,13 +223,15 @@ OBSERVER
 
 # Enforce complete statement/branch coverage of both production Python helpers,
 # including the strict schema2 verifier and schema1 replay compatibility.
+# Archive native.coverage before copying to the shared export.coverage report
+# prefix used by the workflow contract partial-coverage control.
 docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" \
-	sh -c 'apt-get update && apt-get install -y --no-install-recommends python3-coverage && cd /repo && MX_PROOF_EVIDENCE=/evidence COVERAGE_FILE=/evidence/native.coverage python3 -m coverage run --branch --include=/repo/docker/capture-compiler-inputs.py,/repo/docker/patch-compiler-input-capture.py ci/compiler_input_retention_test.py -v && COVERAGE_FILE=/evidence/native.coverage python3 -m coverage json -o /evidence/native-coverage.json && cp /evidence/native.coverage /evidence/export.coverage && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
+	sh -c 'cd /repo && MX_PROOF_EVIDENCE=/evidence COVERAGE_FILE=/evidence/native.coverage python3 -m coverage run --branch --include=/repo/docker/capture-compiler-inputs.py,/repo/docker/patch-compiler-input-capture.py ci/compiler_input_retention_test.py -v && COVERAGE_FILE=/evidence/native.coverage python3 -m coverage json -o /evidence/native-coverage.json && cp /evidence/native.coverage /evidence/export.coverage && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
 
 # Coverage tooling is installed only in the disposable test container; the
 # native stage/compiler remains exactly the production build above.
 docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" \
-	sh -c 'apt-get update && apt-get install -y --no-install-recommends python3-coverage && cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
+	sh -c 'cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
 mkdir "$scratch/transfer"
 cp "$repo/docker/export-compiler-inputs.py" "$repo/docker/capture-compiler-inputs.py" "$scratch/transfer/"
 mkdir "$scratch/transfer/docker"
