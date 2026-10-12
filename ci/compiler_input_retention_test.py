@@ -5,12 +5,17 @@ Run in the yara stage via compiler-input-check.sh. Original paths are replaced
 only inside this disposable container, after all hashes have been verified.
 """
 
+import contextlib
 import copy
+import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
+import runpy
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -820,7 +825,7 @@ class CompilerInputRetention(unittest.TestCase):
         storage = self.root / "capture"
         storage.mkdir(exist_ok=True)
         (storage / "objects").mkdir(exist_ok=True)
-        observed = capture.parse_trace(storage, native, result.returncode)
+        observed = capture.parse_trace(storage, native, result.returncode, schema=2)
         evidence = os.environ.get("MX_PROOF_EVIDENCE")
         if evidence:
             capture.save_json(
@@ -959,6 +964,526 @@ class CompilerInputRetention(unittest.TestCase):
             path.read_bytes()[8:],
         )
 
+    def test_authoritative_native_resolved_reference_inventory(self):
+        (self.src / "helpers.inc").write_text(
+            "private rule Leaf { condition: VBA == 0 }\n"
+            "rule Bridge { condition: Leaf }\n"
+            "rule wildA { condition: Bridge }\nrule wildB { condition: false }\n"
+        )
+        (self.src / "a.yar").write_text(
+            'include "helpers.inc"\nglobal rule Gate { condition: true }\n'
+            "rule Marker : marker deny { condition: any of (wild*) }\n"
+            'rule Literal { strings: $s="Bridge wildA Leaf" condition: $s }\n'
+        )
+        (self.src / "b.yar").write_text(
+            "global rule Gate { condition: false }\nrule Marker : marker { condition: true }\n"
+        )
+        result = self.compile_bundle()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        root, state = self.state()
+        self.assertEqual(state["schema"], 2)
+        capture.verify(root, state)
+        graph = capture.authoritative_rule_graph(root, state)
+        inventory = graph["inventory"]
+        self.assertEqual(len(inventory), 9)
+        self.assertEqual(graph["completions"], list(range(9)))
+        identities = {(r["namespace"], r["identifier"]): r for r in inventory}
+        self.assertEqual(identities["a.yar", "Leaf"]["flags"], 1)
+        self.assertEqual(identities["a.yar", "Gate"]["flags"], 2)
+        self.assertEqual(identities["a.yar", "Marker"]["tags"], ["marker", "deny"])
+        edges = {tuple(edge) for edge in graph["references"]}
+
+        def targets(namespace, identifier):
+            index = identities[namespace, identifier]["native_index"]
+            return {inventory[t]["identifier"] for s, t in edges if s == index}
+
+        # This assertion uniquely belongs to the edge observer, independent of
+        # completion coverage. The observer-off rebuilt compiler must fail here.
+        self.assertEqual(targets("a.yar", "Marker"), {"wildA", "wildB"})
+        self.assertEqual(targets("a.yar", "Bridge"), {"Leaf"})
+        self.assertEqual(targets("a.yar", "wildA"), {"Bridge"})
+        self.assertEqual(targets("a.yar", "Literal"), set())
+        self.assertEqual(targets("b.yar", "Marker"), set())
+        self.assertEqual(graph["summary"], [9, 4, 9, 3])
+        empty_ns = self.root / "empty-namespace.yar"
+        empty_ns.write_text("rule EmptyNamespace { condition: true }\n")
+        log = self.root / "empty-namespace.native"
+        observed = self.execute(
+            [COMPILER, ":" + str(empty_ns), self.root / "empty.yac"],
+            self.env | {"MAILSTRIX_COMPILER_INPUT_LOG": str(log)},
+        )
+        self.assertEqual(observed.returncode, 0, observed.stderr)
+        parsed = capture.parse_trace(root, log.read_bytes(), 0, persist=False, schema=2)
+        self.assertEqual(parsed["rule_graph"]["inventory"][0]["namespace"], "")
+
+        legacy = copy.deepcopy(state)
+        legacy["schema"] = 1
+        for invocation in legacy["validations"] + [legacy["final"]]:
+            invocation.pop("rule_graph")
+            frames = capture.events(capture.get(root, invocation["native_trace"]))
+            old = b"".join(
+                capture.HEADER.pack(k, len(os.fsencode(n)), len(p)) + os.fsencode(n) + p
+                for k, n, p in frames
+                if not 10 <= k <= 15
+            )
+            invocation["native_trace"] = capture.store(root, old)
+        capture.verify(root, legacy)
+        capture.restore(root, self.root / "schema2-restored")
+        with self.assertRaisesRegex(capture.RetentionError, "authoritative"):
+            capture.authoritative_rule_graph(root, legacy)
+        tampered = copy.deepcopy(state)
+        tampered["final"]["rule_graph"]["inventory"][0]["identifier"] = "wrong"
+        with self.assertRaisesRegex(capture.RetentionError, "native observation"):
+            capture.verify(root, tampered)
+        mutations = (
+            lambda g: g.update(schema=True),
+            lambda g: g.update(complete=1),
+            lambda g: g["inventory"][0].update(native_index=False),
+            lambda g: g["inventory"][0].update(flags=True),
+            lambda g: g["completions"].__setitem__(0, 0.0),
+            lambda g: g["summary"].__setitem__(0, 9.0),
+            lambda g: g.update(unexpected=None),
+        )
+        for mutate in mutations:
+            malformed = copy.deepcopy(state)
+            mutate(malformed["final"]["rule_graph"])
+            with self.assertRaisesRegex(capture.RetentionError, "native observation"):
+                capture.verify(root, malformed)
+        del tampered["final"]["rule_graph"]
+        with self.assertRaises(capture.RetentionError):
+            capture.verify(root, tampered)
+        for legacy in (
+            [],
+            {},
+            {"schema": 1},
+            {"schema": True},
+            {"schema": 3},
+            {"schema": 2},
+            {"schema": 2, "final": {"exit": 0}},
+            {"schema": 2, "final": {"exit": 0, "rule_graph": {}}},
+        ):
+            with self.assertRaisesRegex(capture.RetentionError, "authoritative"):
+                capture.authoritative_rule_graph(root, legacy)
+        failed = copy.deepcopy(state)
+        failed["final"]["exit"] = 1
+        with self.assertRaisesRegex(capture.RetentionError, "authoritative"):
+            capture.authoritative_rule_graph(root, failed)
+        failed = copy.deepcopy(state)
+        failed["final"]["rule_graph"]["complete"] = False
+        with self.assertRaisesRegex(capture.RetentionError, "authoritative"):
+            capture.authoritative_rule_graph(root, failed)
+
+    def test_rule_graph_frame_contract_boundaries_and_negative_controls(self):
+
+        def frame(kind, name="", payload=b""):
+            name = name.encode()
+            return capture.HEADER.pack(kind, len(name), len(payload)) + name + payload
+
+        def pair(source, target):
+            return struct.pack("<QQ", source, target)
+
+        version = frame(10, "mailstrix-rule-graph/1")
+        inventory = frame(13, "ns", struct.pack("<QI", 0, 3) + b"X")
+        complete = frame(12, payload=pair(0, 0))
+        tag = frame(14, "marker", struct.pack("<Q", 0))
+        summary = frame(15, payload=struct.pack("<QQQQ", 1, 1, 1, 1))
+        reference = frame(11, payload=pair(0, 0))
+        source = (
+            frame(8, "4.5.2")
+            + frame(1, "root", b"ns")
+            + frame(2, "root")
+            + frame(3, "root", b"\0" * 4)
+        )
+        status = frame(9, "4.5.2", b"\0" * 4)
+        valid = (
+            version + source + reference + complete + inventory + tag + summary + status
+        )
+        graph = capture.parse_trace(self.root, valid, 0, persist=False, schema=2)[
+            "rule_graph"
+        ]
+        self.assertEqual(graph["inventory"][0]["tags"], ["marker"])
+        self.assertTrue(graph["complete"])
+        for schema in (0, 3, True, "2"):
+            with self.assertRaisesRegex(capture.RetentionError, "schema"):
+                capture.parse_trace(self.root, valid, 0, persist=False, schema=schema)
+        cases = [
+            version + source + reference + complete + inventory + summary + status,
+            source + complete + inventory + summary + status,
+            source + status,
+            version + version + source + status,
+            frame(10, "wrong") + source + status,
+            frame(10, "mailstrix-rule-graph/1", b"x") + source + status,
+            version + source + frame(11, "name", pair(0, 0)) + status,
+            version + source + frame(12, payload=b"short") + status,
+            version + source + frame(12, payload=pair(0, 1)) + status,
+            version + source + inventory + reference + status,
+            version + source + frame(13, "ns", b"short") + status,
+            version
+            + source
+            + frame(13, "n\0s", struct.pack("<QI", 0, 0) + b"X")
+            + status,
+            version
+            + source
+            + frame(13, "ns", struct.pack("<QI", 1, 0) + b"X")
+            + status,
+            version
+            + source
+            + frame(13, "ns", struct.pack("<QI", 0, 4) + b"X")
+            + status,
+            version
+            + source
+            + frame(13, "ns", struct.pack("<QI", 0, 0) + b"X\0")
+            + status,
+            version
+            + source
+            + inventory
+            + frame(13, "ns", struct.pack("<QI", 1, 0) + b"X")
+            + status,
+            version + source + tag + status,
+            version + source + inventory + frame(14, "", struct.pack("<Q", 0)) + status,
+            version
+            + source
+            + inventory
+            + frame(14, "n\0s", struct.pack("<Q", 0))
+            + status,
+            version + source + inventory + frame(14, "marker", b"short") + status,
+            version
+            + source
+            + inventory
+            + frame(14, "marker", struct.pack("<Q", 1))
+            + status,
+            version + source + inventory + tag + tag + status,
+            version + source + frame(15, "bad", b"\0" * 32) + status,
+            version + source + frame(15, payload=b"short") + status,
+            version + source + complete + inventory + tag + status,
+            version
+            + source
+            + complete
+            + inventory
+            + frame(15, payload=struct.pack("<QQQQ", 1, 0, 1, 0))
+            + tag
+            + status,
+            version
+            + source
+            + inventory
+            + frame(15, payload=struct.pack("<QQQQ", 1, 0, 0, 0))
+            + status,
+            version
+            + source
+            + reference
+            + complete
+            + inventory
+            + frame(15, payload=struct.pack("<QQQQ", 2, 1, 1, 0))
+            + status,
+            version
+            + source
+            + frame(11, payload=pair(1, 0))
+            + complete
+            + inventory
+            + tag
+            + summary
+            + status,
+            version
+            + source
+            + frame(11, payload=pair(0, 1))
+            + complete
+            + inventory
+            + tag
+            + summary
+            + status,
+            version
+            + source
+            + frame(11, payload=pair(0, 1))
+            + complete
+            + frame(12, payload=pair(1, 1))
+            + inventory
+            + frame(13, "other", struct.pack("<QI", 1, 0) + b"Y")
+            + frame(15, payload=struct.pack("<QQQQ", 2, 1, 2, 0))
+            + status,
+            version + frame(1, "root", b"ns") + inventory + status,
+            valid[:-1],
+        ]
+        for index, data in enumerate(cases):
+            with self.subTest(case=index), self.assertRaises(capture.RetentionError):
+                capture.parse_trace(self.root, data, 0, persist=False, schema=2)
+        # Failed inputs preserve partial native observations without certifying
+        # incomplete indices or invented inventory as successful closure.
+        failed = (
+            version
+            + frame(1, "root", b"ns")
+            + frame(11, payload=pair(5, 9))
+            + frame(9, "4.5.2", b"\1\0\0\0")
+        )
+        graph = capture.parse_trace(self.root, failed, 1, persist=False, schema=2)[
+            "rule_graph"
+        ]
+        self.assertFalse(graph["complete"])
+        self.assertEqual(graph["references"], [[5, 9]])
+        empty = version + source + frame(15, payload=b"\0" * 32) + status
+        graph = capture.parse_trace(self.root, empty, 0, persist=False, schema=2)[
+            "rule_graph"
+        ]
+        self.assertEqual(graph["inventory"], [])
+        with self.assertRaisesRegex(capture.RetentionError, "outside graph"):
+            capture._RuleGraph().observe(16, "", b"")
+        graph = capture._RuleGraph()
+        graph.observe(10, "mailstrix-rule-graph/1", b"")
+        with self.assertRaisesRegex(capture.RetentionError, "unknown native graph"):
+            graph.observe(16, "", b"")
+
+    def test_native_header_complete_statement_and_branch_controls(self):
+
+        harness = self.root / "header.c"
+        harness.write_text(
+            r"""
+#define _GNU_SOURCE
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <setjmp.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+static jmp_buf failure;
+static int fault, writes, allocations;
+static int fake_open(const char *path, int flags, ...) {
+  (void)path; (void)flags;
+  return fault == 1 ? -1 : 42;
+}
+static int fake_close(int fd) { (void)fd; return fault == 2 ? -1 : 0; }
+static ssize_t fake_write(int fd, const void *bytes, size_t size) {
+  (void)bytes;
+  if (fd == STDERR_FILENO) return (ssize_t)size;
+  ++writes;
+  if (fault == 3) { errno = EIO; return -1; }
+  if (fault == 4) return 0;
+  if (fault == 5 && writes == 1) { errno = EINTR; return -1; }
+  if (fault == 6 && writes == 1) return 1;
+  return (ssize_t)size;
+}
+static void *fake_malloc(size_t size) {
+  ++allocations;
+  errno = ENOMEM;
+  return fault == 7 ? NULL : malloc(size);
+}
+static _Noreturn void fake_exit(int code) { assert(code == 125); longjmp(failure, 1); }
+#define open fake_open
+#define close fake_close
+#define write fake_write
+#define malloc fake_malloc
+#define _exit fake_exit
+#define MAILSTRIX_CAPTURE_IMPLEMENTATION
+#include "compiler-input-capture.h"
+int main(void) {
+  unsetenv("MAILSTRIX_COMPILER_INPUT_LOG");
+  mailstrix_rule_capture(11, 0, 0);
+  mailstrix_input_capture(1, NULL, NULL, 0);
+  mailstrix_rule_inventory(0, 0, "ns", "X");
+  setenv("MAILSTRIX_COMPILER_INPUT_LOG", "", 1);
+  mailstrix_input_capture(1, NULL, NULL, 0);
+  mailstrix_rule_inventory(0, 0, "ns", "X");
+  assert(allocations == 0);
+  setenv("MAILSTRIX_COMPILER_INPUT_LOG", "capture", 1);
+  mailstrix_rule_begin();
+  mailstrix_rule_capture(11, 0, UINT64_MAX);
+  mailstrix_rule_capture(12, 0, 0);
+  mailstrix_rule_tag(UINT64_MAX, "marker");
+  mailstrix_rule_summary(1);
+  errno = EDOM;
+  mailstrix_rule_inventory(UINT64_MAX, UINT32_MAX, "ns", "X");
+  assert(errno == EDOM && allocations == 1);
+  mailstrix_input_capture(2, NULL, NULL, 0);
+  for (int mode = 5; mode <= 6; ++mode) {
+    fault = mode; writes = 0; errno = EDOM;
+    mailstrix_input_capture(2, "root", "bytes", 5);
+    assert(errno == EDOM);
+  }
+  for (int mode = 1; mode <= 4; ++mode) {
+    fault = mode; writes = 0;
+    if (setjmp(failure) == 0) {
+      mailstrix_input_capture(2, "root", "bytes", 5);
+      abort();
+    }
+  }
+  fault = 7;
+  if (setjmp(failure) == 0) {
+    mailstrix_rule_inventory(0, 0, "ns", "X");
+    abort();
+  }
+  return 0;
+}
+"""
+        )
+        binary = self.root / "header"
+        subprocess.run(
+            [
+                "cc",
+                "-std=c11",
+                "-O0",
+                "--coverage",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(REPO / "docker"),
+                str(harness),
+                "-o",
+                str(binary),
+            ],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run([str(binary)], cwd=self.root, check=True, capture_output=True)
+        subprocess.run(
+            [
+                "gcov",
+                "--json-format",
+                "--branch-counts",
+                "--branch-probabilities",
+                "header.c",
+            ],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+        with gzip.open(self.root / "header.gcov.json.gz", "rt") as report:
+            data = json.load(report)
+        header = next(
+            f for f in data["files"] if f["file"].endswith("compiler-input-capture.h")
+        )
+        self.assertTrue(header["lines"])
+        self.assertEqual(
+            [line["line_number"] for line in header["lines"] if not line["count"]], []
+        )
+        self.assertEqual(
+            [
+                (line["line_number"], index)
+                for line in header["lines"]
+                for index, branch in enumerate(line["branches"])
+                if not branch["count"]
+            ],
+            [],
+        )
+        evidence = os.environ.get("MX_PROOF_EVIDENCE")
+        if evidence:
+            capture.save_json(Path(evidence) / "native-header-coverage.json", header)
+
+    def test_native_reference_rejections_retain_partial_proof(self):
+        (self.src / "accepted.yar").write_text("rule Accepted { condition: true }\n")
+        rejected = {
+            "external.yar": "rule X { condition: missing_external }\n",
+            "wildcard.yar": "rule X { condition: any of (missing*) }\n",
+            "forward.yar": "rule X { condition: Later } rule Later { condition: true }\n",
+            "partial.yar": "private rule Leaf { condition: true } "
+            "rule Bad { condition: Leaf and missing_external }\n",
+        }
+        for name, content in rejected.items():
+            (self.src / name).write_text(content)
+        result = self.compile_bundle()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        root, state = self.state()
+        capture.verify(root, state)
+        failed = {
+            Path(v["candidate"]["path"]).name: v
+            for v in state["validations"]
+            if not v["accepted"]
+        }
+        self.assertEqual(set(failed), set(rejected))
+        for name, invocation in failed.items():
+            graph = invocation["rule_graph"]
+            self.assertEqual(invocation["exit"], 1)
+            self.assertFalse(graph["complete"])
+            self.assertEqual(graph["inventory"], [])
+            self.assertIsNone(graph["summary"])
+            self.assertTrue(capture.get(root, invocation["stderr"]))
+            self.assertEqual(
+                capture.get(root, invocation["candidate"]["snapshot"]),
+                rejected[name].encode(),
+            )
+        self.assertEqual(failed["partial.yar"]["rule_graph"]["completions"], [0])
+        self.assertEqual(failed["partial.yar"]["rule_graph"]["references"], [[1, 0]])
+        self.assertEqual(
+            capture.authoritative_rule_graph(root, state)["inventory"][0]["identifier"],
+            "Accepted",
+        )
+
+    def test_versioned_capture_command_dispatch_and_failure(self):
+
+        output = self.root / "dispatch.yac"
+        candidate = self.src / "dispatch.yar"
+        candidate.write_text("rule Dispatch { condition: true }\n")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.assertEqual(capture.main(["begin", str(output), str(self.src)]), 0)
+        root = Path(printed.getvalue().strip())
+        ext = [
+            v
+            for e in capture.EXTERNALS
+            for v in ("-d", e["name"] + "=" + str(e["value"]))
+        ]
+        self.assertEqual(
+            capture.main(
+                [
+                    "run",
+                    str(root),
+                    "validation",
+                    "dispatch.yar",
+                    str(candidate),
+                    str(COMPILER),
+                    *ext,
+                    "dispatch.yar:" + str(candidate),
+                    str(output),
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(
+            capture.main(
+                [
+                    "run",
+                    str(root),
+                    "final",
+                    "",
+                    "",
+                    str(COMPILER),
+                    *ext,
+                    "dispatch.yar:" + str(candidate),
+                    str(output),
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(capture.main(["finish", str(root)]), 0)
+        self.assertEqual(capture.main(["verify", str(root)]), 0)
+        self.assertEqual(
+            capture.main(["restore", str(root), str(self.root / "dispatch-restored")]),
+            0,
+        )
+        with self.assertRaisesRegex(capture.RetentionError, "new destination"):
+            capture.restore(root, self.root)
+        for command, code in ((["verify", str(root)], 0), (["unknown"], 125)):
+            with (
+                mock.patch.object(sys, "argv", [str(HELPER), *command]),
+                self.assertRaises(SystemExit) as caught,
+            ):
+                runpy.run_path(str(HELPER), run_name="__main__")
+            self.assertEqual(caught.exception.code, code)
+        abnormal = self.root / "abnormal"
+        abnormal.mkdir()
+        capture.write_cursor(abnormal, 0, False)
+        for code, message in (
+            (2, "complete normally"),
+            (125, "native retention failed"),
+        ):
+            with (
+                mock.patch.object(
+                    capture.subprocess, "run", return_value=mock.Mock(returncode=code)
+                ),
+                self.assertRaisesRegex(capture.RetentionError, message),
+            ):
+                capture.run(abnormal, "final", "", "", ["yarac", "out"])
+
     def test_pinned_capture_patch_is_fail_closed(self):
         archive = Path("/opt/compiler-input-proof/yara.tar.gz")
         self.assertTrue(
@@ -972,7 +1497,12 @@ class CompilerInputRetention(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         before = {
             name: (source / name).read_bytes()
-            for name in ("libyara/compiler.c", "libyara/lexer.c", "cli/yarac.c")
+            for name in (
+                "libyara/compiler.c",
+                "libyara/lexer.c",
+                "libyara/parser.c",
+                "cli/yarac.c",
+            )
         }
         repeat = self.execute(
             ["python3", "-B", REPO / "docker/patch-compiler-input-capture.py", source]
@@ -989,6 +1519,21 @@ class CompilerInputRetention(unittest.TestCase):
         assert patch_spec is not None and patch_spec.loader is not None
         patch_module = importlib.util.module_from_spec(patch_spec)
         patch_spec.loader.exec_module(patch_module)
+        direct = self.root / "direct-patch"
+        direct.mkdir()
+        subprocess.run(["tar", "-xzf", str(archive), "-C", str(direct)], check=True)
+        patch_module.patch(direct / "yara-4.5.2")
+        with self.assertRaisesRegex(ValueError, "unsupported YARA capture source"):
+            patch_module.patch(direct / "yara-4.5.2")
+        cli = self.root / "cli-patch"
+        cli.mkdir()
+        subprocess.run(["tar", "-xzf", str(archive), "-C", str(cli)], check=True)
+
+        with mock.patch.object(sys, "argv", ["patch", str(cli / "yara-4.5.2")]):
+            runpy.run_path(
+                str(REPO / "docker/patch-compiler-input-capture.py"),
+                run_name="__main__",
+            )
         compiler_source = source / "libyara/compiler.c"
         compiler_source.write_text(
             compiler_source.read_text().replace(

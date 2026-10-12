@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 HASHES = {
+    "libyara/parser.c": "a85e6352bea135af8c43681878282c9a585512e112d95c05a4218b9a2229ec17",
     "libyara/lexer.c": "015c0d1d8126274ef84a4bceefbd59ead11c51799fe925b42a4f49211dddf820",
     "libyara/compiler.c": "62705fc9703947ffb41918e50f1bb489d941f57fff341a75fe96e03682a8d131",
     "cli/yarac.c": "ef83dd39038f9663fb3d6bf8883ddb24e4d8c2af7248a8ffc58450e14b034ed0",
@@ -84,6 +85,43 @@ def patch(root):
         "cli/yarac.c",
         "  return result;\n}",
         "  mailstrix_input_capture(9, YR_VERSION, &result, sizeof(result));\n  return result;\n}",
+    )
+    replace(
+        "libyara/parser.c",
+        "#include <yara/parser.h>",
+        '#include "compiler-input-capture.h"\n#include <yara/parser.h>',
+    )
+    replace(
+        "libyara/parser.c",
+        "        sizeof(int64_t),\n        argument_ref);\n\n  return result;",
+        "        sizeof(int64_t),\n        argument_ref);\n"
+        "  if (result == ERROR_SUCCESS &&\n"
+        "      (instruction == OP_PUSH_RULE || instruction == OP_MATCH_RULE))\n"
+        "    mailstrix_rule_capture(instruction == OP_PUSH_RULE ? 11 : 12,\n"
+        "        yyget_extra(yyscanner)->current_rule_idx, (uint64_t) argument);\n"
+        "\n  return result;",
+    )
+    replace(
+        "cli/yarac.c",
+        "  if (!compile_files(compiler, argc, argv))",
+        "  mailstrix_rule_begin();\n  if (!compile_files(compiler, argc, argv))",
+    )
+    replace(
+        "cli/yarac.c",
+        "  // Not using yr_rules_save because it does not have support for unicode",
+        "  {\n"
+        "    YR_RULE* rule;\n"
+        "    const char* tag;\n"
+        "    uint64_t index = 0;\n"
+        "    yr_rules_foreach(rules, rule) {\n"
+        "      mailstrix_rule_inventory(index, rule->flags, rule->ns->name, rule->identifier);\n"
+        "      yr_rule_tags_foreach(rule, tag)\n"
+        "        mailstrix_rule_tag(index, tag);\n"
+        "      ++index;\n"
+        "    }\n"
+        "    mailstrix_rule_summary(index);\n"
+        "  }\n\n"
+        "  // Not using yr_rules_save because it does not have support for unicode",
     )
     header = Path(__file__).with_name("compiler-input-capture.h")
     for folder in ("libyara", "cli"):
