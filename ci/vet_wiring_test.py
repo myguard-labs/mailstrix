@@ -12,17 +12,46 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def test_stage_command():
-    text = (ROOT / "docker/Dockerfile").read_text()
+def test_stage_command(text=None):
+    if text is None:
+        text = (ROOT / "docker/Dockerfile").read_text()
     stage = text.split("FROM build AS test\n", 1)[1].split("\nFROM ", 1)[0]
-    lines = iter(stage.splitlines())
-    command = next(line[4:] for line in lines if line.startswith("RUN "))
-    while command.endswith("\\"):
-        command = command[:-1] + next(lines)
+    commands = [
+        line[4:]
+        for line in stage.replace("\\\n", " ").splitlines()
+        if line.startswith("RUN ") and re.search(r"\bgo\s+vet\b", line)
+    ]
+    assert len(commands) == 1, "expected exactly one Docker vet/test RUN"
+    command = commands[0]
+    assert re.search(r"\bgo\s+test\b", command), "Docker vet RUN has no go test"
     return re.sub(r"--mount=\S+\s*", "", command)
 
 
 class VetWiringTests(unittest.TestCase):
+    def test_extracts_vet_run_after_count_gate(self):
+        command = test_stage_command()
+        self.assertIn("go vet -tags yara_static", command)
+        self.assertIn("go test -race", command)
+        self.assertNotIn("--native-ci", command)
+        self.assertNotIn("--mount=", command)
+
+    def test_missing_ambiguous_and_incomplete_vet_run_are_rejected(self):
+        source = (ROOT / "docker/Dockerfile").read_text()
+        for text, message in (
+            (source.replace("go vet", "go version"), "exactly one"),
+            (
+                source.replace(
+                    "FROM build AS test\n", "FROM build AS test\nRUN go vet ./...\n"
+                ),
+                "exactly one",
+            ),
+            (source.replace("go test", "go version"), "has no go test"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                AssertionError, message
+            ):
+                test_stage_command(text)
+
     def invoke(
         self,
         scope,

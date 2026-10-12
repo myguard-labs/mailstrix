@@ -151,18 +151,12 @@ class ClosureScalingTests(unittest.TestCase):
 
     def test_indexed_work_and_legacy_negative_control(self):
         profile = "mode: count\nexample/marker_artifact.go:2.1,2.2 2 16\n"
-        visits, bound = traversal_work(profile, self.source, self.graph)
-        self.assertLessEqual(visits, bound)
+        assert_linear(profile, self.source, self.graph)
         legacy = profile.replace("2 16", "2 1000")
-        visits, bound = traversal_work(legacy, self.source, self.graph)
         with self.assertRaisesRegex(
             AssertionError, "indexed closure traversal exceeds linear statement bound"
         ):
-            self.assertLessEqual(
-                visits,
-                bound,
-                "indexed closure traversal exceeds linear statement bound",
-            )
+            assert_linear(legacy, self.source, self.graph)
 
     def test_native_ci_lane_is_wired_before_race(self):
         repo = Path(__file__).resolve().parents[1]

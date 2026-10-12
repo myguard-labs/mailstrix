@@ -48,6 +48,18 @@ def go_test_args(command):
     raise AssertionError("go test command not found")
 
 
+def docker_test_command(stage):
+    commands = [
+        line[4:]
+        for line in stage.replace("\\\n", " ").splitlines()
+        if line.startswith("RUN ") and re.search(r"\bgo\s+vet\b", line)
+    ]
+    assert len(commands) == 1, "expected exactly one Docker vet/test RUN"
+    command = commands[0]
+    assert re.search(r"\bgo\s+test\b", command), "Docker vet RUN has no go test"
+    return command
+
+
 def build_tags(args):
     for index, arg in enumerate(args):
         if arg == "-tags":
@@ -58,7 +70,24 @@ def build_tags(args):
     return set()
 
 
-docker_args = go_test_args(stage_match.group(1))
+stage = stage_match.group(1)
+docker_command = docker_test_command(stage)
+docker_args = go_test_args(docker_command)
+# Comments and earlier RUNs are Docker syntax, not part of the selected shell.
+assert docker_test_command(
+    "# testscope's go vet comment\nRUN echo count-gate\n" + stage
+) == docker_command
+for malformed in (
+    stage.replace("go vet", "go version"),
+    "RUN go vet ./...\n" + stage,
+    stage.replace("go test", "go version"),
+):
+    try:
+        docker_test_command(malformed)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("Docker vet/test RUN negative control accepted malformed stage")
 benchmark_args = go_test_args(benchmark)
 docker_tags = build_tags(docker_args)
 benchmark_tags = build_tags(benchmark_args)
@@ -69,7 +98,6 @@ assert "-race" in docker_args, "Docker test stage no longer runs the race detect
 # The test stage either runs ./... directly or runs the package set chosen by
 # tools/testscope, which falls back to ./... whenever no PR file list is given
 # (release workflow_call) or a change cannot be mapped to packages safely.
-stage = stage_match.group(1)
 scoped = any(a.rstrip(";") == "$pkgs" for a in docker_args) and "go run ./tools/testscope ${CHANGED_FILES}" in stage
 assert "./..." in docker_args or scoped, \
     "Docker test stage no longer covers every Go package (directly or via tools/testscope)"
