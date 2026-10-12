@@ -208,6 +208,26 @@ die()  { note "ERROR: $*"; _FAILURE_EXIT=1; shout_fail "$*"; exit 1; }
 HERE="$(cd "$(dirname "$0")/.." && pwd)"   # canonical repo root for builds
 NOTIFY="${HERE}/../../tools/discord-notify.py"
 
+# Cron's deliberately small PATH does not include the host Go installation.
+# Accept PATH resolution only when it yields an absolute executable, so a
+# caller with `.` in PATH cannot silently run ./go from the checkout. Fall back
+# to the host's standard installation paths for the unattended publisher.
+RULESIGN_GO="$(command -v go 2>/dev/null || true)"
+case "$RULESIGN_GO" in
+    /*) [ -x "$RULESIGN_GO" ] || RULESIGN_GO="" ;;
+    *) RULESIGN_GO="" ;;
+esac
+if [ -z "$RULESIGN_GO" ]; then
+    for candidate in /usr/local/bin/go /usr/local/go/bin/go /usr/bin/go; do
+        if [ -x "$candidate" ]; then
+            RULESIGN_GO="$candidate"
+            break
+        fi
+    done
+fi
+[ -n "$RULESIGN_GO" ] \
+    || die "missing required tool: go (checked PATH and /usr/local/bin/go, /usr/local/go/bin/go, /usr/bin/go)"
+
 # The one reader of /etc/myguard-build-env. build-env is mode 600 root-only
 # (since 2026-07-26), so a plain `[ -r ]` test is FALSE for the cron user
 # (eilander) and the old sourcing block was skipped SILENTLY. Read it via
@@ -289,6 +309,21 @@ WORK="$(mktemp -d)"
 for bin in docker gh jq sha256sum python3; do
     command -v "$bin" >/dev/null 2>&1 || die "missing required tool: $bin"
 done
+
+# Build the exact helper once, then make it prove both key usability and client
+# trust before the expensive rules images are built. This is a real signing
+# operation rather than `-print-public`: that mode intentionally exits before
+# -require-trusted is enforced. The throwaway bytes never leave WORK.
+RULESIGN_BIN="${WORK}/rulessign"
+( cd "$HERE" && GOTOOLCHAIN=local "$RULESIGN_GO" build -o "$RULESIGN_BIN" ./cmd/rulessign ) \
+    || die "building the manifest signer failed; refusing to start the rules build"
+PREFLIGHT_MANIFEST="${WORK}/signing-preflight.json"
+PREFLIGHT_SIG="${PREFLIGHT_MANIFEST}.sig"
+printf '%s\n' '{"schema":"mailstrix-rules-signing-preflight-v1"}' >"$PREFLIGHT_MANIFEST"
+"$RULESIGN_BIN" -require-trusted -manifest "$PREFLIGHT_MANIFEST" -out "$PREFLIGHT_SIG" \
+    || die "signing-key preflight failed; refusing to start the rules build"
+[ -s "$PREFLIGHT_SIG" ] \
+    || die "signing-key preflight produced an empty signature; refusing to start the rules build"
 
 # 1) Build the rules-export stage and extract the .yac + the libyara version.
 # Forward every documented rule-source build-arg that is set in the environment
@@ -439,7 +474,7 @@ MANIFEST_SIG="${MANIFEST}.sig"
 # the client binary. Without it a rotated or wrong key would publish a perfectly
 # valid signature that every deployed strixd refuses, i.e. a silently dead
 # updater discovered only by users.
-( cd "$HERE" && go run ./cmd/rulessign -require-trusted -manifest "$MANIFEST" -out "$MANIFEST_SIG" ) \
+"$RULESIGN_BIN" -require-trusted -manifest "$MANIFEST" -out "$MANIFEST_SIG" \
     || die "signing the manifest failed; refusing to publish an unsigned manifest"
 [ -s "$MANIFEST_SIG" ] || die "manifest signature is empty; refusing to publish"
 

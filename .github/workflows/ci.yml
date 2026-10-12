@@ -366,7 +366,9 @@ jobs:
 
       - name: rules publication ordering and isolated verifier failure
         if: needs.changes.outputs.generate == 'true'
-        run: bash docker/generate-rules_test.sh
+        run: |
+          bash ci/generate_rules_cron_signer_test.sh
+          bash docker/generate-rules_test.sh
 
       - name: Prometheus rule behaviour
         if: needs.changes.outputs.prometheus == 'true'

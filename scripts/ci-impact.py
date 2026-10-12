@@ -139,6 +139,7 @@ RULES = {
         "docker/export-compiler-inputs.py",
         "docker/build-marker-artifact.py",
         "ci/generate_rules_count_test.sh",
+        "ci/generate_rules_cron_signer_test.sh",
         "ci/ci_rules_signing_secret_test.py",
         "docker/generate-rules*",
         "cmd/strixd/*",

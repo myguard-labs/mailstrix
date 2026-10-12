@@ -105,14 +105,28 @@ case "${2:-}" in
 esac
 STUB
 
-# `go run ./cmd/rulessign` is stubbed: this harness covers the publisher's
-# orchestration (signature produced, uploaded, and ordered before the manifest).
+# The Go compiler and its built `rulessign` helper are stubbed: this harness
+# covers the publisher's orchestration (preflight, signature produced, uploaded,
+# and ordered before the manifest).
 # The signing and verification crypto itself is covered by the Go unit tests in
-# cmd/rulessign and internal/mailstrix.
+# cmd/rulessign, internal/mailstrix, and ci/generate_rules_cron_signer_test.sh.
 cat >"$test_root/bin/go" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'go %s\n' "$*" >> "$EVENTS"
+printf 'go-build %s\n' "$*" >> "$EVENTS"
+out=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift ;;
+    esac
+    shift
+done
+[ -n "$out" ] || { printf 'go: build -o missing\n' >&2; exit 2; }
+cat >"$out" <<'SIGNER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'rulessign-bin %s\n' "$0" >> "$EVENTS"
+printf 'rulessign %s\n' "$*" >> "$EVENTS"
 [ -n "${MAILSTRIX_RULES_SIGNING_KEY:-}" ] || { printf 'rulessign: key missing from the environment\n' >&2; exit 2; }
 # Record the SHAPE of the key the signer received — armour and line count — so a
 # test can prove the build-env fallback delivered a decoded multi-line PEM rather
@@ -130,14 +144,19 @@ case " $* " in
 esac
 [ "${FAIL_SIGN:-0}" -eq 0 ] || exit 3
 out=""
+manifest=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        -manifest) manifest="$2"; shift ;;
         -out) out="$2"; shift ;;
     esac
     shift
 done
+[ "${FAIL_FINAL_SIGN:-0}" -eq 0 ] || [[ "$manifest" != */compiled.yac.manifest.json ]] || exit 3
 [ -n "$out" ] || { printf 'rulessign: -out missing\n' >&2; exit 2; }
 printf 'ZmFrZS1zaWduYXR1cmUtZml4dHVyZQ==\n' > "$out"
+SIGNER
+chmod +x "$out"
 STUB
 
 # /etc/myguard-build-env is root-owned mode 600, so the publisher reads it with
@@ -737,16 +756,47 @@ grep -F 'MAILSTRIX_RULES_SIGNING_KEY is not set' "$test_root/log" >/dev/null \
     || assert_event 'missing signing key was not diagnosed'
 
 assert_unsigned_publication_is_refused signing-failure FAIL_SIGN=1
-grep -F 'signing the manifest failed' "$test_root/log" >/dev/null \
-    || assert_event 'signing failure was not diagnosed'
+grep -F 'signing-key preflight failed' "$test_root/log" >/dev/null \
+    || assert_event 'signing preflight failure was not diagnosed'
 
-# The key reaches the signer through the environment only; it must never appear
-# in a recorded command line.
+# The preflight can succeed and the exact final-manifest signing operation can
+# still fail. That later failure remains build-stage and must precede every
+# release mutation, upload, and remote verifier invocation.
+assert_unsigned_publication_is_refused final-signing-failure FAIL_FINAL_SIGN=1
+grep -F 'signing the manifest failed; refusing to publish an unsigned manifest' "$test_root/log" >/dev/null \
+    || assert_event 'final manifest signing failure was not diagnosed'
+[ "$(grep -c '^rulessign ' "$EVENTS")" -eq 2 ] \
+    || assert_event 'final signing failure did not follow a successful preflight'
+grep -E '^rulessign -require-trusted -manifest .*/compiled\.yac\.manifest\.json -out .*/compiled\.yac\.manifest\.json\.sig$' "$EVENTS" >/dev/null \
+    || assert_event 'final signing failure did not exercise the exact manifest argv'
+
+# The key reaches the signer through the environment only. Build the helper
+# exactly once, use that same executable for the preflight first and the exact
+# final manifest second, and never put key material in a recorded command line.
 run_script
 grep -n 'fixture-not-a-signing-key' "$EVENTS" >/dev/null \
     && assert_event 'the signing key appeared in a command line'
-grep -F 'go run ./cmd/rulessign -require-trusted' "$EVENTS" >/dev/null \
-    || assert_event 'the publisher did not invoke the signing helper'
+assert_signer_reuse_contract() {
+    local built
+    local -a binaries invocations
+    mapfile -t binaries <<<"$(sed -n '/^rulessign-bin /p' "$EVENTS")"
+    mapfile -t invocations <<<"$(sed -n '/^rulessign /p' "$EVENTS")"
+    [ "$(grep -c '^go-build ' "$EVENTS")" -eq 1 ] \
+        || assert_event 'the publisher did not build exactly one signing helper'
+    built="$(sed -n 's/^go-build build -o \([^ ]*\) \.\/cmd\/rulessign$/\1/p' "$EVENTS")"
+    [ -n "$built" ] || assert_event 'the publisher signer build argv changed'
+    if [ "${#binaries[@]}" -ne 2 ] \
+        || [ "${binaries[0]:-}" != "rulessign-bin ${built}" ] \
+        || [ "${binaries[1]:-}" != "rulessign-bin ${built}" ]; then
+        assert_event 'the publisher did not reuse its built signing helper'
+    fi
+    [ "${#invocations[@]}" -eq 2 ] || assert_event 'the publisher signer invocation count changed'
+    [[ "${invocations[0]}" == "rulessign -require-trusted -manifest ${built%/rulessign}/signing-preflight.json -out ${built%/rulessign}/signing-preflight.json.sig" ]] \
+        || assert_event 'the trusted signing preflight argv or order changed'
+    [[ "${invocations[1]}" == "rulessign -require-trusted -manifest ${built%/rulessign}/compiled.yac.manifest.json -out ${built%/rulessign}/compiled.yac.manifest.json.sig" ]] \
+        || assert_event 'the final exact-manifest signing argv or order changed'
+}
+assert_signer_reuse_contract
 
 # AUD-06c-f2: the rolling release has no atomic activation (assets are clobbered
 # one by one), so an interrupted publication cannot leave the previously
@@ -869,7 +919,7 @@ assert_build_env_key_refused() {  # assert_build_env_key_refused <case> <diagnos
     [ "$actual" -eq 1 ] || assert_event "${name}: exit ${actual}, want 1"
     assert_receipt build failed
     assert_notification "$name" build failed
-    [ "$(grep -Ec '^(create$|upload |verify |count |go )' "$EVENTS" || true)" -eq 0 ] \
+    [ "$(grep -Ec '^(create$|upload |verify |count |go-build |rulessign )' "$EVENTS" || true)" -eq 0 ] \
         || assert_event "${name}: an unresolved signing key reached the build or publication"
     grep -F -- "$diagnostic" "$test_root/log" >/dev/null \
         || assert_event "${name}: missing diagnostic: ${diagnostic}"
@@ -951,7 +1001,7 @@ assert_missing_build_env_token_dies() {
     assert_notification missing-build-env-token build failed
     grep -F 'GITHUB_ORG_LAB_TOKEN not readable from /etc/myguard-build-env' "$test_root/log" >/dev/null \
         || assert_event 'missing-build-env-token: diagnostic changed'
-    [ "$(grep -Ec '^(create$|upload |verify |count |go )' "$EVENTS" || true)" -eq 0 ] \
+    [ "$(grep -Ec '^(create$|upload |verify |count |go-build |rulessign )' "$EVENTS" || true)" -eq 0 ] \
         || assert_event 'missing-build-env-token: a tokenless run reached the build or publication'
 }
 assert_missing_build_env_token_dies

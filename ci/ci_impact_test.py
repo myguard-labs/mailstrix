@@ -182,6 +182,11 @@ class ImpactTests(unittest.TestCase):
                 ["generate", "shell"],
                 ["go", "image", "parity", "postfix"],
             ),
+            (
+                "ci/generate_rules_cron_signer_test.sh",
+                ["generate", "shell"],
+                ["go", "image", "parity", "postfix"],
+            ),
             ("internal/verdict/verdict.go", ["go", "image", "postfix"], ["rspamd"]),
             ("internal/extract/pdf_test.go", ["go"], ["image", "parity", "postfix"]),
             (
