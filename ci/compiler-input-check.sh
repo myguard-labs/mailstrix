@@ -153,6 +153,8 @@ RUN echo "deb [signed-by=/etc/apt/keyrings/deb.myguard.nl.gpg] http://deb.myguar
 RUN apt-get update''')
 source = source.replace('COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py',
                         'COPY compiler-input-capture.h patch-compiler-input-capture.py')
+# Coverage is a pinned Debian dependency of this disposable proof image only.
+source += "\nRUN apt-get update && apt-get install -y --no-install-recommends python3-coverage=6.5.0+dfsg1-2+b1 && test \"$(dpkg-query -W -f='${Version}' python3-coverage)\" = '6.5.0+dfsg1-2+b1' && python3 -m coverage --version && rm -rf /var/lib/apt/lists/*\n"
 (scratch / 'Dockerfile').write_text(source)
 PY
 docker build --builder default --progress=plain -t "$image" "$scratch"
@@ -162,13 +164,74 @@ docker image inspect "$image" >"$evidence/native-image.json"
 if [ -n "${MX_INPUT_EVIDENCE_DIR:-}" ]; then
 	docker image save "$image" -o "$evidence/native-image.tar"
 fi
-docker run --rm --name "$container" -v "$repo:/repo:ro" "$image" \
+docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" -e MX_PROOF_EVIDENCE=/evidence "$image" \
 	sh -c 'cd /repo && python3 -B ci/compiler_input_retention_test.py -v'
+
+# Independently rebuild the entire edge observer off while retaining every
+# OP_MATCH_RULE completion. A missing-completion failure is not this control.
+docker run --rm -i -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" python3 - <<'OBSERVER'
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+
+source = Path('/tmp/yara-4.5.2/libyara/parser.c')
+original = source.read_text()
+anchor = '(instruction == OP_PUSH_RULE || instruction == OP_MATCH_RULE)'
+if original.count(anchor) != 1:
+    raise SystemExit('edge observer control anchor mismatch')
+binary = source.parents[1] / 'yarac'
+command = ['python3', '-B', '/repo/ci/compiler_input_retention_test.py',
+           'CompilerInputRetention.test_authoritative_native_resolved_reference_inventory', '-v']
+rows = []
+
+def test(name, expected):
+    env = {**os.environ, 'MX_CAPTURE_YARAC': str(binary)}
+    with Path('/evidence', name + '.log').open('wb') as log:
+        result = subprocess.run(command, cwd='/repo', env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
+    stat = binary.stat()
+    rows.append({'name': name, 'argv': command, 'exit': result.returncode,
+                 'binary_mtime_ns': stat.st_mtime_ns, 'binary_size': stat.st_size,
+                 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()})
+    if result.returncode != expected:
+        raise SystemExit('unexpected edge observer control result: ' + name)
+
+def rebuild(name):
+    with Path('/evidence', name + '-build.log').open('wb') as log:
+        result = subprocess.run(['make', '-j4'], cwd=source.parents[1], stdout=log, stderr=subprocess.STDOUT, check=False)
+    if result.returncode:
+        raise SystemExit('edge observer rebuild failed: ' + name)
+
+test('observer-before-green', 0)
+try:
+    source.write_text(original.replace(anchor, '(instruction == OP_MATCH_RULE)'))
+    rebuild('observer-noedges')
+    test('observer-noedges-red', 1)
+    failure = Path('/evidence/observer-noedges-red.log').read_text()
+    if ('wildA' not in failure or 'wildB' not in failure
+            or 'native rule completion coverage mismatch' in failure
+            or 'AssertionError: Items in the second set but not the first:' not in failure):
+        raise SystemExit('edge observer control failed for the wrong assertion')
+finally:
+    source.write_text(original)
+    rebuild('observer-restored')
+test('observer-restored-green', 0)
+Path('/evidence/observer-mutation-result.json').write_text(json.dumps(rows, indent=2) + '\n')
+print('native rule graph: edge-only observer-off red / restored green; completions retained')
+OBSERVER
+
+# Enforce complete statement/branch coverage of both production Python helpers,
+# including the strict schema2 verifier and schema1 replay compatibility.
+# Archive native.coverage before copying to the shared export.coverage report
+# prefix used by the workflow contract partial-coverage control.
+docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" \
+	sh -c 'cd /repo && MX_PROOF_EVIDENCE=/evidence COVERAGE_FILE=/evidence/native.coverage python3 -m coverage run --branch --include=/repo/docker/capture-compiler-inputs.py,/repo/docker/patch-compiler-input-capture.py ci/compiler_input_retention_test.py -v && COVERAGE_FILE=/evidence/native.coverage python3 -m coverage json -o /evidence/native-coverage.json && cp /evidence/native.coverage /evidence/export.coverage && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
 
 # Coverage tooling is installed only in the disposable test container; the
 # native stage/compiler remains exactly the production build above.
 docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" \
-	sh -c 'apt-get update && apt-get install -y --no-install-recommends python3-coverage && cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
+	sh -c 'cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
 mkdir "$scratch/transfer"
 cp "$repo/docker/export-compiler-inputs.py" "$repo/docker/capture-compiler-inputs.py" "$scratch/transfer/"
 mkdir "$scratch/transfer/docker"

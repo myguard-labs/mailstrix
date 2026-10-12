@@ -89,6 +89,126 @@ def events(data):
         yield kind, name, payload
 
 
+class _RuleGraph:
+    """Versioned resolved native bytecode observations, bound to final inventory.
+
+    Schema1 source graphs may still be replayed, but carry no rule-closure proof.
+    Only a successful schema2 invocation with all frames can certify a graph.
+    Failed compilations retain partial observations without claiming completeness.
+
+    Frame v1: 10 starts mailstrix-rule-graph/1; 11/12 carry little-endian
+    uint64 source/target indices (12 is completion); 13 carries namespace in
+    the name and uint64 index/uint32 flags/identifier bytes in its payload;
+    14 carries a tag name and uint64 rule index; 15 seals four uint64 counts
+    (inventory, references, completions, tags). Raw repeated references remain
+    intact. Flags 1/2 mean private/global: closure consumers must also include
+    implicit global rules in each visited rule's namespace, even with no edges.
+    """
+
+    def __init__(self):
+        self.started = self.sealed = False
+        self.references, self.completions, self.inventory = [], [], []
+        self.summary = None
+        self.identities = set()
+
+    def observe(self, kind, name, payload):
+        if kind == 10:
+            if self.started or name != "mailstrix-rule-graph/1" or payload:
+                raise RetentionError("invalid native rule graph version")
+            self.started = True
+            return
+        if not self.started or self.sealed:
+            raise RetentionError("rule observation outside graph")
+        handlers = {
+            11: self.opcode,
+            12: self.opcode,
+            13: self.rule,
+            14: self.tag,
+            15: self.seal,
+        }
+        handler = handlers.get(kind)
+        if handler is None:
+            raise RetentionError("unknown native graph frame")
+        handler(kind, name, payload)
+
+    def opcode(self, kind, name, payload):
+        if name or len(payload) != 16 or self.inventory:
+            raise RetentionError("invalid native rule opcode frame")
+        source, target = struct.unpack("<QQ", payload)
+        if kind == 11:
+            self.references.append([source, target])
+        else:
+            if source != target:
+                raise RetentionError("native completion index mismatch")
+            self.completions.append(source)
+
+    def rule(self, _kind, name, payload):
+        if len(payload) <= 12 or "\0" in name:
+            raise RetentionError("invalid native rule inventory frame")
+        index, flags = struct.unpack_from("<QI", payload)
+        identifier = os.fsdecode(payload[12:])
+        if index != len(self.inventory) or flags & ~3 or "\0" in identifier:
+            raise RetentionError("native inventory index/flags/identifier mismatch")
+        if (name, identifier) in self.identities:
+            raise RetentionError("duplicate native rule identity")
+        self.identities.add((name, identifier))
+        self.inventory.append(
+            {
+                "native_index": index,
+                "namespace": name,
+                "identifier": identifier,
+                "flags": flags,
+                "tags": [],
+            }
+        )
+
+    def tag(self, _kind, name, payload):
+        if len(payload) != 8 or not name or "\0" in name or not self.inventory:
+            raise RetentionError("invalid native rule tag frame")
+        (index,) = struct.unpack("<Q", payload)
+        tags = self.inventory[-1]["tags"]
+        if index != self.inventory[-1]["native_index"] or name in tags:
+            raise RetentionError("native tag inventory binding mismatch")
+        tags.append(name)
+
+    def seal(self, _kind, name, payload):
+        if name or len(payload) != 32:
+            raise RetentionError("invalid native graph summary")
+        self.summary = list(struct.unpack("<QQQQ", payload))
+        self.sealed = True
+
+    def result(self, code):
+        if not self.started:
+            raise RetentionError("missing native rule graph proof")
+        if code == 0:
+            count = len(self.inventory)
+            if not self.sealed or self.summary != [
+                count,
+                len(self.references),
+                len(self.completions),
+                sum(len(rule["tags"]) for rule in self.inventory),
+            ]:
+                raise RetentionError("missing/incomplete native rule graph summary")
+            if self.completions != list(range(count)):
+                raise RetentionError("native rule completion coverage mismatch")
+            for source, target in self.references:
+                if source >= count or target >= count:
+                    raise RetentionError("reference index out of native inventory")
+                if (
+                    self.inventory[source]["namespace"]
+                    != self.inventory[target]["namespace"]
+                ):
+                    raise RetentionError("native reference namespace mismatch")
+        return {
+            "schema": 1,
+            "complete": code == 0,
+            "inventory": self.inventory,
+            "references": self.references,
+            "completions": self.completions,
+            "summary": self.summary,
+        }
+
+
 class _Trace:
     """Native framing state: one active root; completion closes the invocation."""
 
@@ -180,7 +300,10 @@ class _Trace:
         }
 
 
-def parse_trace(root, data, code, persist=True):
+def parse_trace(root, data, code, persist=True, schema=1):
+    if type(schema) is not int or schema not in (1, 2):
+        raise RetentionError("unsupported retained graph schema")
+    graph = _RuleGraph() if schema == 2 else None
     trace = _Trace(root, code, persist)
     handlers = {
         1: trace.begin,
@@ -193,11 +316,19 @@ def parse_trace(root, data, code, persist=True):
     for kind, name, payload in events(data):
         if trace.complete:
             raise RetentionError("native frames after compiler completion")
+        if graph is not None and 10 <= kind <= 15:
+            if kind != 10 and trace.active and kind >= 13:
+                raise RetentionError("inventory before root completion")
+            graph.observe(kind, name, payload)
+            continue
         handler = handlers.get(kind)
         if handler is None:
             raise RetentionError("unknown native frame")
         handler(name, payload)
-    return trace.result()
+    result = trace.result()
+    if graph is not None:
+        result["rule_graph"] = graph.result(code)
+    return result
 
 
 def read_cursor(root):
@@ -255,7 +386,7 @@ def begin(out, src):
     save_json(
         root / "pending.json",
         {
-            "schema": 1,
+            "schema": 2,
             "source_directory": src,
             "output": str(Path(out).absolute()),
             "cwd": os.getcwd(),
@@ -294,7 +425,7 @@ def run(root, phase, namespace, filename, argv):
     if result.returncode not in (0, 1):
         raise RetentionError(f"compiler did not complete normally: {result.returncode}")
     native = trace.read_bytes()
-    observed = parse_trace(root, native, result.returncode)
+    observed = parse_trace(root, native, result.returncode, schema=2)
     invocation = {
         "argv": argv,
         "exit": result.returncode,
@@ -423,13 +554,29 @@ def verify_contract(state):
 
 
 def verify(root, state):
-    if state["schema"] != 1 or state["external_definitions"] != EXTERNALS:
+    if (
+        type(state["schema"]) is not int
+        or state["schema"] not in (1, 2)
+        or state["external_definitions"] != EXTERNALS
+    ):
         raise RetentionError("retained input contract mismatch")
     for invocation in state["validations"] + [state["final"]]:
+        if type(invocation["exit"]) is not int or invocation["exit"] not in (0, 1):
+            raise RetentionError("invalid compiler exit status")
         native = get(root, invocation["native_trace"])
-        observed = parse_trace(root, native, invocation["exit"], persist=False)
-        for field in ("sources", "includes", "yarac_version", "libyara_version"):
-            if invocation[field] != observed[field]:
+        observed = parse_trace(
+            root, native, invocation["exit"], persist=False, schema=state["schema"]
+        )
+        for field, value in observed.items():
+            if field not in invocation:
+                raise RetentionError("manifest disagrees with native observation")
+            actual = invocation[field]
+            if field == "rule_graph":
+                # JSON type identity matters: bool/float indices cannot be
+                # accepted merely because Python compares them equal to ints.
+                actual = json.dumps(actual, sort_keys=True, allow_nan=False)
+                value = json.dumps(value, sort_keys=True, allow_nan=False)
+            if actual != value:
                 raise RetentionError("manifest disagrees with native observation")
         for item in invocation["sources"] + invocation["includes"]:
             get(root, item["observed"])
@@ -445,6 +592,26 @@ def verify(root, state):
     for item in state["final_inputs"].values():
         get(root, item)
     return state
+
+
+def authoritative_rule_graph(root, state):
+    """Verify new complete proof; legacy source replay never permits narrowing."""
+    if (
+        not isinstance(state, dict)
+        or type(state.get("schema")) is not int
+        or state["schema"] != 2
+    ):
+        raise RetentionError("no authoritative native rule graph")
+    final = state.get("final")
+    if (
+        not isinstance(final, dict)
+        or final.get("exit") != 0
+        or not isinstance(final.get("rule_graph"), dict)
+        or final["rule_graph"].get("complete") is not True
+    ):
+        raise RetentionError("no authoritative native rule graph")
+    verify(root, state)
+    return final["rule_graph"]
 
 
 def restore(root, destination):
