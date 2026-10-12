@@ -211,3 +211,13 @@ func TestSelectGraphWithRootPackage(t *testing.T) {
 		t.Fatalf("unrelated root package selected: %v", got)
 	}
 }
+
+func TestMarkerRuntimeFixtureConsumers(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m/ci", Dir: "/r/ci"})
+	for _, file := range []string{"ci/testdata/marker-runtime.zip", "ci/marker_runtime_fixture.py", "ci/prepare_marker_runtime.py", "ci/ci_marker_runtime_fixture_test.py"} {
+		got, err := selectChangedPackages([]string{file}, graph, "/r")
+		if err != nil || strings.Join(got, " ") != "example.com/m/ci example.com/m/internal/mailstrix" {
+			t.Fatalf("fixture consumers: %s got=%v error=%v", file, got, err)
+		}
+	}
+}

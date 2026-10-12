@@ -1,13 +1,80 @@
 package urlhaus
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/myguard-labs/mailstrix/internal/urlcand"
 )
+
+type refreshTestRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f refreshTestRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestRefreshSuccessPersistsSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != "/downloads/csv_online/" || req.Header.Get("Auth-Key") != "fixture-key" || req.Header.Get("Accept") != "text/csv" {
+			t.Errorf("refresh request contract changed: %s %s auth=%q accept=%q", req.Method, req.URL.Path, req.Header.Get("Auth-Key"), req.Header.Get("Accept"))
+		}
+		if _, err := w.Write([]byte(sampleCSV)); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := server.Client()
+	logs := []string{}
+	c := &Checker{
+		key:       "fixture-key",
+		cachePath: filepath.Join(t.TempDir(), "urlhaus.csv"),
+		logf:      func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		client: &http.Client{Transport: refreshTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if req.URL.String() != feedURL || req.Method != http.MethodGet {
+				t.Errorf("original feed endpoint changed: %s %s", req.Method, req.URL)
+			}
+			// Rewrite only this private client's cloned request to the real loopback
+			// server. Production endpoint/headers and the global transport stay intact.
+			local := req.Clone(req.Context())
+			copyURL := *req.URL
+			copyURL.Scheme, copyURL.Host = target.Scheme, target.Host
+			local.URL = &copyURL
+			return client.Do(local)
+		})},
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		before := time.Now().Unix()
+		if err := c.refreshOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		hits := c.Check([]byte("http://evil.example/malware.exe"), 64)
+		if len(hits) != 1 || hits[0].URL != "http://evil.example/malware.exe" || hits[0].Host || hits[0].Rule() != "URLHAUS_MALWARE_URL" {
+			t.Fatalf("successful refresh must publish actual URL detection: %+v", hits)
+		}
+		if refreshed := c.lastRefresh.Load(); refreshed < before || refreshed > time.Now().Unix() {
+			t.Fatalf("successful refresh timestamp missing: %d", refreshed)
+		}
+		cached, err := os.ReadFile(c.cachePath)
+		if err != nil || string(cached) != sampleCSV {
+			t.Fatalf("successful refresh must persist actual feed bytes: %v", err)
+		}
+		if len(logs) != attempt+1 || logs[attempt] != "urlhaus feed loaded: 2 urls / 2 hosts" {
+			t.Fatalf("successful refresh publication log missing: %v", logs)
+		}
+	}
+}
 
 // TestWarmStartFromCache: a persisted feed snapshot in cacheDir is loaded into
 // the set at New() time, so a lookup hits before any network refresh. (New's

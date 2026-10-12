@@ -1,14 +1,13 @@
 package mailstrix
 
 import (
-	"errors"
 	yara "github.com/hillu/go-yara/v4"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -102,16 +101,9 @@ func TestRuleGenerationPinnedReload(t *testing.T) {
 	prior := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(prior)
 	awaitObserverCount(t, &observedRuleGenerations, 0)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "observer.yar")
-	write := func(source string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(source), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("rule Observer : marker { condition: true }")
-	s, err := NewScanner(&Config{RulesDir: dir}, func(string, ...any) {})
+	root := markerArtifactFixture(t)
+	path := filepath.Join(root, "compiled.yac")
+	s, err := NewScanner(&Config{RulesPath: path}, func(string, ...any) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +112,9 @@ func TestRuleGenerationPinnedReload(t *testing.T) {
 	awaitObserverCount(t, &observedRuleGenerations, 2)
 	old := s.rules.Load()
 	oldMarker := s.markerRules.Load()
-	write("invalid yara source")
+	if err := os.WriteFile(path, []byte("invalid yara source"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Reload(); err == nil {
 		t.Fatal("malformed main reload succeeded")
 	}
@@ -167,28 +161,22 @@ func TestRuleGenerationMarkerFailureAlias(t *testing.T) {
 	prior := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(prior)
 	awaitObserverCount(t, &observedRuleGenerations, 0)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "observer.yar")
-	if err := os.WriteFile(path, []byte("rule Observer : marker { condition: true }"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := NewScanner(&Config{RulesDir: dir}, func(string, ...any) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	root := markerArtifactFixture(t)
+	s := markerFixtureScanner(t, root, nil)
 	marker := s.markerRules.Load()
-	saved := serializeRules
-	serializeRules = func(*yara.Rules, io.Writer) error { return errors.New("forced serialization failure") }
-	defer func() { serializeRules = saved }()
+	owner := p8Owner(t, s, marker)
+	if err := os.Remove(filepath.Join(root, "marker-artifact/binding.json")); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if s.markerRules.Load() != marker || s.RuleGenerations() != 2 {
-		t.Fatal("failed marker reload changed alias or double-counted retained native object")
+	if s.markerRules.Load() != nil || s.RuleGenerations() != 1 {
+		t.Fatal("unmatched marker retained or native generation double-counted")
 	}
-	if _, err := s.Scan([]byte("fixture"), ScanMeta{}); err != nil {
-		t.Fatal(err)
+	p7Dead(t, owner)
+	if names := ruleNames(markerArtifactMatches(t, s)); !strings.Contains(names, "MarkerPrivate") {
+		t.Fatalf("fallback marker detection lost: %s", names)
 	}
 	runtime.KeepAlive(marker)
 	runtime.KeepAlive(s)

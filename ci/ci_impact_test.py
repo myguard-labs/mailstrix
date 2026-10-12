@@ -21,6 +21,21 @@ SPEC.loader.exec_module(impact)
 
 
 class ImpactTests(unittest.TestCase):
+    def test_marker_runtime_fixture_real_consumers(self):
+        for path in (
+            "ci/testdata/marker-runtime.zip",
+            "ci/marker_runtime_fixture.py",
+            "ci/prepare_marker_runtime.py",
+            "ci/ci_marker_runtime_fixture_test.py",
+        ):
+            result = impact.plan([path])
+            self.assertTrue(result["go"])
+            self.assertIn(
+                "internal/mailstrix/marker_artifact_test.go", result["changed_files"]
+            )
+            self.assertIn("ci/marker_runtime_test.go", result["changed_files"])
+        self.assertFalse(impact.plan(["README.md"])["go"])
+
     def test_memory_alert_fixture_selects_prometheus_only(self):
         result = impact.plan(["ci/mailstrix_memory_alerts_test.yml"])
         self.assertTrue(result["prometheus"])

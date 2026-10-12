@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,8 +12,6 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
-
-	yara "github.com/hillu/go-yara/v4"
 )
 
 // A cache barrier stops the real handler AFTER it forms its key. Reload and
@@ -317,37 +314,34 @@ func TestGenerationCoalescingCancellation(t *testing.T) {
 }
 
 func TestGenerationAuxiliaryFailureIdentity(t *testing.T) {
-	dir := writeRules(t, "rule Main { condition: false } rule Marker : marker { condition: true }")
+	root := markerArtifactFixture(t)
 	bigDir := writeRules(t, "rule Big { condition: true }")
-	s, err := NewScanner(&Config{RulesDir: dir, BigFileRules: bigDir, BigFileThreshold: 1}, func(string, ...any) {})
+	s, err := NewScanner(&Config{RulesPath: filepath.Join(root, "compiled.yac"), BigFileRules: bigDir, BigFileThreshold: 1}, func(string, ...any) {})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
 	oldFP, oldBig, oldMarker := s.Fingerprint(), s.bigRules.Load(), s.markerRules.Load()
-	oldBigID, oldMarkerID := s.bigContent, s.markerContent
-	generationWrite(t, dir, "rule NewMain { condition: true } rule NewMarker : marker { condition: true }")
+	oldBigID := s.bigContent
+	pin := s.acquireScanLease()
+	defer pin.release()
+	markerFixtureReplaceMain(t, s, "rule NewMain { condition: true } rule NewMarker : marker { condition: true }")
 	generationWrite(t, bigDir, "malformed big source")
-	// Marker preparation no longer rereads the source. Fail native serialization
-	// to exercise the same retained-auxiliary identity contract.
-	original := serializeRules
-	serializeRules = func(*yara.Rules, io.Writer) error { return fmt.Errorf("injected marker serialization failure") }
-	t.Cleanup(func() { serializeRules = original })
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if s.bigRules.Load() != oldBig || s.markerRules.Load() != oldMarker || s.bigContent != oldBigID || s.markerContent != oldMarkerID {
-		t.Fatal("failed auxiliary load discarded retained rules or their identity")
+	if s.bigRules.Load() != oldBig || s.bigContent != oldBigID || s.markerRules.Load() != nil || s.markerContent != "" {
+		t.Fatal("big retention or new-main marker fallback identity changed")
 	}
 	if s.Fingerprint() == oldFP {
-		t.Fatal("new main bundle did not update the generation identity")
+		t.Fatal("new main bundle did not update generation identity")
 	}
 	matches, err := s.Scan([]byte("ordinary"), ScanMeta{})
 	if err != nil || ruleNames(matches) != "[Big]" {
 		t.Fatalf("big fallback service: %v %v", matches, err)
 	}
-	matches, err = s.scanOne(s.markerRules.Load(), []byte("ordinary"), scanVars{}, 0)
-	if err != nil || ruleNames(matches) != "[Marker]" {
-		t.Fatalf("marker fallback service: %v %v", matches, err)
+	matches, err = s.scanOne(oldMarker, []byte("ordinary"), scanVars{}, 0)
+	if err != nil || ruleNames(matches) != "[Gate, Marker, PublicDependency]" {
+		t.Fatalf("old pinned marker service: %v %v", matches, err)
 	}
 }

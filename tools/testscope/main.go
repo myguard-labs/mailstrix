@@ -96,6 +96,8 @@ func selectChangedPackages(changed []string, pkgs []pkg, root string) ([]string,
 // documentation or script handling. Keep these in step with the tests reading them.
 func externalInputs(f string) []string {
 	switch {
+	case f == "ci/testdata/marker-runtime.zip", f == "ci/marker_runtime_fixture.py", f == "ci/prepare_marker_runtime.py", f == "ci/ci_marker_runtime_fixture_test.py":
+		return []string{"internal/mailstrix/marker_artifact_test.go", "ci/marker_runtime_test.go"}
 	case f == "internal/mailstrix/CAPE.md", f == "contrib/clamd/test_clients.py":
 		return []string{"internal/mailstrix/input_test.go"}
 	case f == "internal/cape/STORE.md", f == "internal/mailstrix/CAPE-OPERATIONS.md":

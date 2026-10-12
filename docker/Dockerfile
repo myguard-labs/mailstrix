@@ -42,6 +42,19 @@ RUN mkdir -p /opt/compiler-input-proof \
     && python3 /tmp/capture/patch-compiler-input-capture.py . \
     && make -j"$(nproc)" && make install && ldconfig
 
+# ---- generated native test fixture -----------------------------------------
+# Run the reviewed generator against this exact instrumented compiler. The
+# export is a build artifact, never a tracked opaque fixture or synthetic graph.
+FROM yara AS marker-fixture
+WORKDIR /src
+COPY docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/export-compiler-inputs.py /src/docker/
+COPY ci/marker_runtime_fixture.py /src/ci/
+RUN mkdir /fixture && python3 /src/ci/marker_runtime_fixture.py \
+    && test -s /fixture/marker-runtime.zip
+
+FROM scratch AS marker-fixture-export
+COPY --from=marker-fixture /fixture/marker-runtime.zip /marker-runtime.zip
+
 # ---- go build ---------------------------------------------------------------
 FROM golang:${GO_VERSION}-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # bring in the statically built libyara
 COPY --from=yara /usr/local/lib/libyara.a /usr/local/lib/
+COPY --from=yara /usr/local/bin/yarac /opt/marker-compiler/yarac
 COPY --from=yara /usr/local/include/yara.h /usr/local/include/
 COPY --from=yara /usr/local/include/yara/ /usr/local/include/yara/
 COPY --from=yara /usr/local/lib/pkgconfig/yara.pc /usr/local/lib/pkgconfig/
@@ -86,8 +100,10 @@ ARG YARA_VERSION
 # compiled packages instead of recompiling cold every CI run.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -tags yara_static \
-        -ldflags "-s -w -X main.version=${VERSION} -X main.libyaraVersion=${YARA_VERSION}" \
+    marker_library=$(sha256sum /usr/local/lib/libyara.a | cut -d " " -f1) \
+    && marker_compiler=$(sha256sum /opt/marker-compiler/yarac | cut -d " " -f1) \
+    && go build -tags yara_static \
+        -ldflags "-s -w -X main.version=${VERSION} -X main.libyaraVersion=${YARA_VERSION} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeLibYaraSHA256=${marker_library} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeCompilerSHA256=${marker_compiler} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeVersion=${YARA_VERSION}" \
         -o /out/strixd ./cmd/strixd \
     && CGO_ENABLED=0 go build \
         -ldflags "-s -w -X main.version=${VERSION}" \
@@ -98,6 +114,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # ---- tests (built into the image build so CI fails on a bad commit) ---------
 FROM build AS test
+COPY --from=marker-fixture /fixture/marker-runtime.zip /src/ci/testdata/marker-runtime.zip
 # CHANGED_FILES narrows tests and vet to changed packages and real consumers.
 # No list preserves full release/maintenance coverage. Explicit unknown inputs
 # fail selection; documentation without a test contract selects no packages.
@@ -271,14 +288,13 @@ COPY --from=build /out/strix-milter /usr/local/bin/strix-milter
 # nonroot service user must NOT be able to modify it even on a writable overlay
 # rootfs (only /var/cache/mailstrix is service-writable). No --chown = root:root; the
 # file stays world-readable (0644 from yarac) so nonroot can still read it to seed.
-COPY --from=rules /rules/compiled.yac /usr/share/mailstrix/compiled.yac
+# The verified transaction includes the bound native marker artifact and graph.
+COPY --from=rules-export-inputs /rules-export/ /usr/share/mailstrix/
 # local.yac = ONLY the in-repo high-signal local rules, compiled separately. It is
 # the targeted ruleset for the oversized-buffer cost gate (MAILSTRIX_BIGFILE_THRESHOLD):
 # a multi-MB buffer scanned against the full ~12k-rule bundle is unbounded and can
 # time out (fail-open => malware MISSED), so over the threshold strixd scans the raw
 # bytes against this small set instead — fast + the local dropper heuristics fire.
-COPY --from=rules /rules/local.yac /usr/share/mailstrix/local.yac
-COPY --from=rules /rules/sources.json /usr/share/mailstrix/sources.json
 COPY --from=build /src/NOTICE /usr/share/mailstrix/NOTICE
 # A writable cache dir owned by nonroot, so strixd can seed even with no bindmount
 # (a bindmount or tmpfs at /var/cache/mailstrix simply overlays it).

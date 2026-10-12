@@ -1,18 +1,13 @@
 package mailstrix
 
 import (
-	"errors"
 	"fmt"
+	yara "github.com/hillu/go-yara/v4"
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
-	"sort"
 	"strings"
 	"testing"
-	"weak"
-
-	yara "github.com/hillu/go-yara/v4"
 )
 
 const cloneFixture = `
@@ -26,21 +21,15 @@ rule DeniedPlain { condition: true }
 rule DormantMarker : marker { condition: true }
 `
 
-func cloneNativeNames(t *testing.T, r *yara.Rules) []string {
-	t.Helper()
-	names := matchRuleNames(scanOneRules(t, r, []byte("harmless fixture")))
-	sort.Strings(names)
-	return names
-}
-
+// An unbound source/.yac uses main directly, without a second compilation or
+// serialization. Validate and compile the source exactly once per reload.
 func TestReloadMarkerCompileCount(t *testing.T) {
 	for _, compiled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("compiled=%v", compiled), func(t *testing.T) {
 			mainDir := writeRules(t, cloneFixture)
 			bigDir := writeRules(t, `rule BigKeep { condition: true }`)
-			// Invalid files must still be validated and skipped once, before compilation.
-			if err := os.WriteFile(filepath.Join(mainDir, "bad.yar"), []byte("rule broken {"), 0600); err != nil {
-				t.Fatal(err)
+			if e := os.WriteFile(filepath.Join(mainDir, "bad.yar"), []byte("rule broken {"), 0600); e != nil {
+				t.Fatal(e)
 			}
 			cfg := &Config{RulesDir: mainDir, BigFileRules: bigDir, BigFileThreshold: 1}
 			if compiled {
@@ -48,30 +37,31 @@ func TestReloadMarkerCompileCount(t *testing.T) {
 					dir string
 					dst *string
 				}{{mainDir, &cfg.RulesPath}, {bigDir, &cfg.BigFileRules}} {
-					r, err := compileDir(entry.dir, func(string, ...any) {})
-					if err != nil {
-						t.Fatal(err)
+					r, e := compileDir(entry.dir, func(string, ...any) {})
+					if e != nil {
+						t.Fatal(e)
 					}
 					path := filepath.Join(entry.dir, "bundle.yac")
-					if err := r.Save(path); err != nil {
-						t.Fatal(err)
+					if e = r.Save(path); e != nil {
+						t.Fatal(e)
 					}
 					r.Destroy()
 					*entry.dst = path
 				}
 			}
-			compile, validate := compileRuleFiles, validateRuleFile
+			compile, validate, serialize := compileRuleFiles, validateRuleFile, serializeRules
 			calls := map[string]int{}
-			validations := 0
+			validations, serializations := 0, 0
 			compileRuleFiles = func(dir string, files []string, logf func(string, ...any)) (*yara.Rules, error) {
 				calls[dir]++
 				return compile(dir, files, logf)
 			}
 			validateRuleFile = func(path string) error { validations++; return validate(path) }
-			t.Cleanup(func() { compileRuleFiles = compile; validateRuleFile = validate })
-			s, err := NewScanner(cfg, func(string, ...any) {})
-			if err != nil {
-				t.Fatal(err)
+			serializeRules = func(r *yara.Rules, w io.Writer) error { serializations++; return serialize(r, w) }
+			t.Cleanup(func() { compileRuleFiles = compile; validateRuleFile = validate; serializeRules = serialize })
+			s, e := NewScanner(cfg, func(string, ...any) {})
+			if e != nil {
+				t.Fatal(e)
 			}
 			defer s.Close()
 			for reload := 1; reload <= 2; reload++ {
@@ -79,28 +69,27 @@ func TestReloadMarkerCompileCount(t *testing.T) {
 				if compiled {
 					want = 0
 				}
-				if calls[mainDir] != want || calls[bigDir] != want {
-					t.Fatalf("production source compilations: main=%d big=%d, want %d each", calls[mainDir], calls[bigDir], want)
+				if calls[mainDir] != want || calls[bigDir] != want || validations != 3*want || serializations != 0 {
+					t.Fatalf("main/big compilations=%v validations=%d serialization=%d want=%d", calls, validations, serializations, want)
 				}
-				if validations != 3*want {
-					t.Fatalf("validation calls=%d want %d", validations, 3*want)
+				if s.markerRules.Load() != nil || s.markerContent != "" {
+					t.Fatal("unbound source published an unauthorized marker object")
 				}
-				if s.markerRules.Load() == nil || s.markerRules.Load() == s.rules.Load() || s.markerRules.Load() == s.bigRules.Load() {
-					t.Fatal("marker bundle missing or aliases main/big rules")
+				if got := ruleNames(markerArtifactMatches(t, s)); !strings.Contains(got, "AllowedMarker") || !strings.Contains(got, "IndependentMarker") {
+					t.Fatalf("full-main fallback lost dependency marker detections: %s", got)
 				}
-				if got := cloneNativeNames(t, s.bigRules.Load()); !reflect.DeepEqual(got, []string{"BigKeep"}) {
-					t.Fatalf("marker pruning affected big rules: %v", got)
+				if got := ruleNames(scanOneRules(t, s.bigRules.Load(), []byte("fixture"))); got != "[BigKeep]" {
+					t.Fatalf("marker selection changed big set: %s", got)
 				}
 				if reload == 1 {
-					if err := s.Reload(); err != nil {
-						t.Fatal(err)
+					if e := s.Reload(); e != nil {
+						t.Fatal(e)
 					}
 				}
 			}
 		})
 	}
 }
-
 func TestReloadMarkerCloneNativeParity(t *testing.T) {
 	for _, compiled := range []bool{false, true} {
 		for _, gate := range []bool{false, true} {
@@ -109,9 +98,9 @@ func TestReloadMarkerCloneNativeParity(t *testing.T) {
 				deny := map[string]struct{}{"gate": {}, "dependency": {}, "deniedmarker": {}, "deniedplain": {}}
 				cfg := &Config{RulesDir: dir, RuleDenylist: deny}
 				if compiled {
-					r, err := compileDir(dir, func(string, ...any) {})
-					if err != nil {
-						t.Fatal(err)
+					r, e := compileDir(dir, func(string, ...any) {})
+					if e != nil {
+						t.Fatal(e)
 					}
 					for _, rule := range r.GetRules() {
 						if rule.Identifier() == "DormantMarker" {
@@ -119,164 +108,53 @@ func TestReloadMarkerCloneNativeParity(t *testing.T) {
 						}
 					}
 					cfg.RulesPath = filepath.Join(dir, "main.yac")
-					if err := r.Save(cfg.RulesPath); err != nil {
-						t.Fatal(err)
+					if e = r.Save(cfg.RulesPath); e != nil {
+						t.Fatal(e)
 					}
 					r.Destroy()
 				}
-				s, err := NewScanner(cfg, func(string, ...any) {})
-				if err != nil {
-					t.Fatal(err)
+				s, e := NewScanner(cfg, func(string, ...any) {})
+				if e != nil {
+					t.Fatal(e)
 				}
 				defer s.Close()
-				main, marker := s.rules.Load(), s.markerRules.Load()
-				if marker == nil || marker == main {
-					t.Fatal("marker clone missing or shares Rules ownership")
+				if s.markerRules.Load() != nil {
+					t.Fatal("unbound input did not select full-main fallback")
 				}
-				reference, err := buildMarkerBundle(cfg.RulesPath, cfg.RulesDir, deny, func(string, ...any) {})
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer reference.Destroy()
-				got, want := cloneNativeNames(t, marker), cloneNativeNames(t, reference)
-				if !reflect.DeepEqual(got, want) {
-					t.Fatalf("clone/recompile native parity: got %v want %v", got, want)
-				}
+				names := ruleNames(markerArtifactMatches(t, s))
 				if gate {
-					// The legacy builder disables untagged private dependencies; retain
-					// that behavior while an independent marker proves the set is live.
-					expected := []string{"Gate", "IndependentMarker"}
-					if !compiled {
-						expected = []string{"DormantMarker", "Gate", "IndependentMarker"}
+					for _, name := range []string{"AllowedMarker", "IndependentMarker", "AllowedPlain"} {
+						if !strings.Contains(names, name) {
+							t.Fatalf("fallback disabled retained dependency/global: %s", names)
+						}
 					}
-					if !reflect.DeepEqual(got, expected) {
-						t.Fatalf("marker dependency or deny state changed: %v want %v", got, expected)
+					if strings.Contains(names, "Denied") {
+						t.Fatalf("deny policy lost: %s", names)
 					}
-					names := cloneNativeNames(t, main)
-					if !strings.Contains(strings.Join(names, ","), "AllowedPlain") || strings.Contains(strings.Join(names, ","), "Denied") {
-						t.Fatalf("marker pruning changed main rules or lost native deny: %v", names)
+					if strings.Contains(names, "DormantMarker") == compiled {
+						t.Fatalf("original compiled disabled marker state changed: %s", names)
 					}
-				} else if len(got) != 0 {
-					t.Fatalf("false global gate matched: %v", got)
-				}
-				// Native destruction of the clone must not invalidate the main allocation.
-				before := cloneNativeNames(t, main)
-				s.markerRules.Store(nil)
-				observedRuleGenerations.destroy(marker, weak.Make(marker))
-				if got := cloneNativeNames(t, main); !reflect.DeepEqual(got, before) {
-					t.Fatalf("destroying marker changed main: %v want %v", got, before)
+				} else if names != "[]" {
+					t.Fatalf("false global gate matched: %s", names)
 				}
 			})
 		}
 	}
 }
-
-func TestReloadMarkerCloneFailure(t *testing.T) {
-	for _, compiled := range []bool{false, true} {
-		for _, retained := range []bool{false, true} {
-			for _, readFailure := range []bool{false, true} {
-				t.Run(fmt.Sprintf("compiled=%v/retained=%v/read=%v", compiled, retained, readFailure), func(t *testing.T) {
-					dir := writeRules(t, `rule Marker : marker { strings: $a = "EXT-MISMATCH" condition: $a }
-rule Plain { condition: true }`)
-					cfg := &Config{RulesDir: dir}
-					if compiled {
-						r, err := compileDir(dir, func(string, ...any) {})
-						if err != nil {
-							t.Fatal(err)
-						}
-						cfg.RulesPath = filepath.Join(dir, "main.yac")
-						if err := r.Save(cfg.RulesPath); err != nil {
-							t.Fatal(err)
-						}
-						r.Destroy()
-					}
-					original := serializeRules
-					t.Cleanup(func() { serializeRules = original })
-					inject := func() {
-						serializeRules = func(_ *yara.Rules, w io.Writer) error {
-							if readFailure {
-								_, err := w.Write([]byte("truncated"))
-								return err
-							}
-							return errors.New("injected write failure")
-						}
-					}
-					var log strings.Builder
-					logf := func(format string, args ...any) { fmt.Fprintf(&log, format, args...) }
-					if !retained {
-						inject()
-					}
-					s, err := NewScanner(cfg, logf)
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer s.Close()
-					if retained {
-						previous, identity, fp := s.markerRules.Load(), s.markerContent, s.Fingerprint()
-						inject()
-						denied := map[string]struct{}{"plain": {}}
-						if err := s.reloadLockedCacheDeny(&denied); err != nil {
-							t.Fatal(err)
-						}
-						if s.markerRules.Load() != previous || s.markerContent != identity {
-							t.Fatal("clone failure changed retained marker rules or identity")
-						}
-						if s.Fingerprint() == fp {
-							t.Fatal("new main deny policy did not change generation fingerprint")
-						}
-						if got := cloneNativeNames(t, s.rules.Load()); len(got) != 0 {
-							t.Fatalf("new main deny state lost: %v", got)
-						}
-					} else if s.markerRules.Load() != nil || s.markerContent != "" {
-						t.Fatal("first clone failure published a marker bundle or identity")
-					}
-					if !strings.Contains(log.String(), "marker bundle build failed") {
-						t.Fatalf("missing clone failure warning: %s", log.String())
-					}
-					matches, err := s.Scan([]byte(`{\rtf1 harmless}`), ScanMeta{Extension: ".jpg"})
-					if err != nil {
-						t.Fatal(err)
-					}
-					found := false
-					for _, m := range matches {
-						found = found || m.Rule == "Marker"
-					}
-					if !found || s.MarkerChannelScans() == 0 {
-						t.Fatalf("marker fallback did not scan extracted marker: %v", matches)
-					}
-					serializeRules = original
-					if err := s.Reload(); err != nil {
-						t.Fatal(err)
-					}
-					if s.markerRules.Load() == nil || s.markerContent == "" {
-						t.Fatal("marker bundle did not recover")
-					}
-				})
-			}
-		}
-	}
-}
-
 func TestReloadMarkerUntaggedGlobalAndEmpty(t *testing.T) {
-	for _, source := range []string{
-		`global rule Gate { condition: true } rule Marker : marker { condition: true }`,
-		`rule Plain { condition: true }`,
-	} {
+	for _, marker := range []bool{false, true} {
+		source := `global rule Gate { condition: true } rule Plain { condition: true }`
+		if marker {
+			source += ` rule Marker : marker { strings: $a="EXT-MISMATCH" condition: $a }`
+		}
 		s := newScanner(t, writeRules(t, source))
 		defer s.Close()
-		reference, err := buildMarkerBundle("", s.srcDir, nil, func(string, ...any) {})
-		if err != nil {
-			t.Fatal(err)
+		if s.markerRules.Load() != nil {
+			t.Fatal("unbound global source did not use fallback")
 		}
-		got, want := cloneNativeNames(t, s.markerRules.Load()), cloneNativeNames(t, reference)
-		reference.Destroy()
-		// Existing pruning disables even an untagged global gate, suppressing its
-		// namespace. This optimization deliberately preserves that legacy behavior.
-		if len(got) != 0 || !reflect.DeepEqual(got, want) {
-			t.Fatalf("empty marker/untagged global parity: got %v want %v", got, want)
-		}
-		if len(cloneNativeNames(t, s.rules.Load())) == 0 {
-			t.Fatal("marker pruning disabled the main set")
+		names := ruleNames(markerArtifactMatches(t, s))
+		if strings.Contains(names, "Marker") != marker || !strings.Contains(names, "Plain") {
+			t.Fatalf("untagged global/empty fallback detections: %s", names)
 		}
 	}
 }

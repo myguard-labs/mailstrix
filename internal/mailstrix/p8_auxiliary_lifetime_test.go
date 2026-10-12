@@ -1,8 +1,7 @@
 package mailstrix
 
 import (
-	"errors"
-	"io"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -15,7 +14,8 @@ import (
 
 func p8Scanner(t *testing.T) *Scanner {
 	t.Helper()
-	s, e := NewScanner(&Config{RulesDir: writeRules(t, "rule Main { condition: false } rule Marker : marker { condition: true }"), BigFileRules: writeRules(t, "rule Big { condition: true }"), BigFileThreshold: 1}, func(string, ...any) {})
+	root := markerArtifactFixture(t)
+	s, e := NewScanner(&Config{RulesPath: filepath.Join(root, "compiled.yac"), BigFileRules: writeRules(t, "rule Big { condition: true }"), BigFileThreshold: 1}, func(string, ...any) {})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -53,7 +53,7 @@ func TestP8PinnedAuxiliaryRetirement(t *testing.T) {
 	if m, e := lease.scan([]byte("ordinary"), ScanMeta{}); e != nil || ruleNames(m) != "[Big]" {
 		t.Fatalf("old auxiliary scan: %v %v", m, e)
 	}
-	if m, e := s.scanOne(marker, []byte("ordinary"), scanVars{}, 0); e != nil || ruleNames(m) != "[Marker]" {
+	if m, e := s.scanOne(marker, []byte("ordinary"), scanVars{}, 0); e != nil || ruleNames(m) != "[Gate, Marker, PublicDependency]" {
 		t.Fatalf("old marker scan: %v %v", m, e)
 	}
 	lease.release()
@@ -65,32 +65,33 @@ func TestP8FailedAuxiliaryRetainsOwnerAndIdentity(t *testing.T) {
 	s := p8Scanner(t)
 	big, marker := s.bigRules.Load(), s.markerRules.Load()
 	bo, mo := p8Owner(t, s, big), p8Owner(t, s, marker)
-	bigID, markerID := s.bigContent, s.markerContent
+	bigID := s.bigContent
+	old := s.acquireScanLease()
+	defer old.release()
 	generationWrite(t, s.bigSrcDir, "malformed big source")
-	saved := serializeRules
-	serializeRules = func(*yara.Rules, io.Writer) error { return errors.New("forced marker failure") }
-	defer func() { serializeRules = saved }()
 	for range 2 {
-		generationWrite(t, s.srcDir, "rule Changed { condition: false }")
+		markerFixtureReplaceMain(t, s, "rule Changed { condition: false }")
 		if e := s.Reload(); e != nil {
 			t.Fatal(e)
 		}
-		if s.bigRules.Load() != big || s.markerRules.Load() != marker || s.bigContent != bigID || s.markerContent != markerID {
-			t.Fatal("failed auxiliary reload changed retained pointer or identity")
+		if s.bigRules.Load() != big || s.bigContent != bigID || s.markerRules.Load() != nil || s.markerContent != "" {
+			t.Fatal("failed big did not retain identity or unmatched marker was retained")
 		}
-		if p8Owner(t, s, big) != bo || p8Owner(t, s, marker) != mo {
-			t.Fatal("failed auxiliary reload replaced owner")
+		if p8Owner(t, s, big) != bo {
+			t.Fatal("failed big reload replaced owner")
 		}
 		p7Alive(t, bo, "retained big")
-		p7Alive(t, mo, "retained marker")
+		p7Alive(t, mo, "pinned old marker")
 		if m, e := s.Scan([]byte("ordinary"), ScanMeta{}); e != nil || ruleNames(m) != "[Big]" {
 			t.Fatalf("retained big scan: %v %v", m, e)
 		}
-		if m, e := s.scanOne(marker, []byte("ordinary"), scanVars{}, 0); e != nil || ruleNames(m) != "[Marker]" {
-			t.Fatalf("retained marker scan: %v %v", m, e)
+		if m, e := s.scanOne(marker, []byte("ordinary"), scanVars{}, 0); e != nil || ruleNames(m) != "[Gate, Marker, PublicDependency]" {
+			t.Fatalf("pinned old marker scan: %v %v", m, e)
 		}
 	}
 	s.Close()
+	p7Alive(t, mo, "old marker across close")
+	old.release()
 	p7Dead(t, bo)
 	p7Dead(t, mo)
 	s.Close()
@@ -164,8 +165,8 @@ func TestP8CandidateRollbackAndDestructionLocks(t *testing.T) {
 		existing[key] = true
 	}
 	observedRuleGenerations.mu.Unlock()
-	saved := serializeRules
-	serializeRules = func(main *yara.Rules, _ io.Writer) error {
+	saved := prepareMarkerArtifact
+	prepareMarkerArtifact = func(_ *Scanner, main *yara.Rules, _ map[string]struct{}, _ string) (*yara.Rules, string) {
 		hookMu.Lock()
 		candidates[main] = 0
 		observedRuleGenerations.mu.Lock()
@@ -191,7 +192,7 @@ func TestP8CandidateRollbackAndDestructionLocks(t *testing.T) {
 		done.Wait()
 		panic("P8 marker preparation rollback")
 	}
-	defer func() { serializeRules = saved }()
+	defer func() { prepareMarkerArtifact = saved }()
 	observedRuleGenerations.mu.Lock()
 	observedRuleGenerations.beforeDestroy = func(r *yara.Rules) {
 		hookMu.Lock()
