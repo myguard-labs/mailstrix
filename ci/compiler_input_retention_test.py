@@ -964,6 +964,45 @@ class CompilerInputRetention(unittest.TestCase):
             path.read_bytes()[8:],
         )
 
+    def test_manifest_exit_status_requires_exact_supported_integer(self):
+        self.fixture()
+        result = self.compile_bundle()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        root, state = self.state()
+        self.assertEqual(capture.verify(root, state), state)
+        capture.authoritative_rule_graph(root, state)
+        successful = next(
+            i for i, v in enumerate(state["validations"]) if v["exit"] == 0
+        )
+        failed = next(i for i, v in enumerate(state["validations"]) if v["exit"] == 1)
+        for position, index in (
+            ("final", None),
+            ("validation", successful),
+            ("validation", failed),
+        ):
+            for value in (0.0, False, 1.0, True, -1, 2, "0", "1", None):
+                malformed = copy.deepcopy(state)
+                invocation = (
+                    malformed["final"]
+                    if index is None
+                    else malformed["validations"][index]
+                )
+                invocation["exit"] = value
+                for verifier in (capture.verify, capture.authoritative_rule_graph):
+                    with (
+                        self.subTest(
+                            position=position,
+                            index=index,
+                            value=value,
+                            kind=type(value).__name__,
+                            verifier=verifier.__name__,
+                        ),
+                        self.assertRaises(capture.RetentionError),
+                    ):
+                        verifier(root, malformed)
+        self.assertEqual(capture.verify(root, state), state)
+        capture.authoritative_rule_graph(root, state)
+
     def test_authoritative_native_resolved_reference_inventory(self):
         (self.src / "helpers.inc").write_text(
             "private rule Leaf { condition: VBA == 0 }\n"

@@ -561,6 +561,8 @@ def verify(root, state):
     ):
         raise RetentionError("retained input contract mismatch")
     for invocation in state["validations"] + [state["final"]]:
+        if type(invocation["exit"]) is not int or invocation["exit"] not in (0, 1):
+            raise RetentionError("invalid compiler exit status")
         native = get(root, invocation["native_trace"])
         observed = parse_trace(
             root, native, invocation["exit"], persist=False, schema=state["schema"]
