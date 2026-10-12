@@ -182,6 +182,11 @@ class ImpactTests(unittest.TestCase):
                 ["generate", "shell"],
                 ["go", "image", "parity", "postfix"],
             ),
+            (
+                "ci/generate_rules_cron_signer_test.sh",
+                ["generate", "shell", "scope"],
+                ["go", "image", "parity", "postfix"],
+            ),
             ("internal/verdict/verdict.go", ["go", "image", "postfix"], ["rspamd"]),
             ("internal/extract/pdf_test.go", ["go"], ["image", "parity", "postfix"]),
             (
@@ -234,6 +239,22 @@ class ImpactTests(unittest.TestCase):
                     self.assertTrue(result[key], key)
                 for key in unrelated:
                     self.assertFalse(result[key], key)
+
+    def test_cron_signer_test_reaches_its_generate_job(self):
+        lint_predicate = (
+            "if: ${{ needs.changes.outputs.go == 'true' || "
+            "needs.changes.outputs.scope == 'true' }}"
+        )
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertEqual(workflow.count(lint_predicate), 1)
+        result = impact.plan(["ci/generate_rules_cron_signer_test.sh"])
+        self.assertTrue(result["generate"])
+        self.assertTrue(result["shell"])
+        self.assertFalse(result["go"])
+        self.assertTrue(
+            result["go"] or result["scope"],
+            "the lint job containing the generate step must be selected",
+        )
 
     def test_decode_scalar_native_go_consumer(self):
         path = "ci/decode_scalar_test.go"

@@ -15,7 +15,9 @@ assert_loaded_rules_count() {
     [[ "$count_event" == *'--read-only --network none --tmpfs /tmp:rw,nosuid,nodev,size=2g'* ]] || assert_event 'local load isolation'
     [[ "$count_event" == *'--mount type=bind,src='*'/compiled.yac,dst=/compiled.yac,readonly'* ]] || assert_event 'local load exact exported bundle'
     [[ "$count_event" == *"--entrypoint /usr/local/bin/strixd sha256:fixture check-rules -rules /compiled.yac -cache-dir  -seed-rules "* ]] || assert_event 'local load command'
-    [ "$(head -n1 "$EVENTS")" = "$count_event" ] || assert_event 'local load must precede publication'
+    [ "$(grep -n -m1 '^count ' "$EVENTS" | cut -d: -f1)" -lt \
+      "$(grep -n -m1 -E '^(create$|upload )' "$EVENTS" | cut -d: -f1)" ] \
+        || assert_event 'local load must precede publication'
 }
 
 assert_bad_count_stops_publication() {
