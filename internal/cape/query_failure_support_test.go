@@ -112,6 +112,40 @@ func TestP10SchedulerWrapQueryFailure(t *testing.T) {
 	}
 }
 
+// Query failures must not depend on cancellation winning the Run loop's race
+// between maintenance and dispatch. Inject the initial read failure directly.
+func TestP12SchedulerInitialQueryFailure(t *testing.T) {
+	for _, mode := range []string{"store", "dispatch"} {
+		t.Run(mode, func(t *testing.T) {
+			conn := &p10QueryConn{failAt: 1}
+			db := sql.OpenDB(p10QueryConnector{conn})
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			store := &Store{db: db, schedulerCursor: "z"}
+			if mode == "store" {
+				jobs, err := store.schedulerJobs(context.Background())
+				if jobs != nil || !errors.Is(err, ErrStoreUnavailable) {
+					t.Fatalf("initial query must return unavailable without jobs: jobs=%v error=%v", jobs, err)
+				}
+			} else {
+				q := &Scheduler{store: store, workers: 1}
+				live := map[string]schedulerLive{}
+				results := make(chan schedulerResult, 1)
+				q.dispatch(context.Background(), live, results)
+				if len(live) != 0 || len(results) != 0 {
+					t.Fatal("initial query failure dispatched work")
+				}
+			}
+			if store.schedulerCursor != "z" || conn.calls != 1 || len(conn.cursors) != 1 || conn.cursors[0] != "z" || len(conn.limits) != 1 || conn.limits[0] != maintenanceBatchSize {
+				t.Fatal("initial query failure advanced cursor or retried the read")
+			}
+		})
+	}
+}
+
 func TestP10MaintenanceQuerySuccess(t *testing.T) {
 	for _, states := range []string{deadlineStates, cleanupStates, cleanupDeadlineStates} {
 		for _, cursor := range []string{"", "z"} {
