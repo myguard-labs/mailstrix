@@ -31,13 +31,15 @@ class CheckoutCredentialContract(unittest.TestCase):
                 job.get("permissions", workflow["permissions"])["contents"], "read"
             )
             checkouts = [
-                step for step in job["steps"]
+                step
+                for step in job["steps"]
                 if step.get("uses", "").startswith("actions/checkout@")
             ]
             self.assertTrue(checkouts, name + " requires a checkout")
             for checkout in checkouts:
                 self.assertIs(
-                    checkout.get("with", {}).get("persist-credentials"), False,
+                    checkout.get("with", {}).get("persist-credentials"),
+                    False,
                     name + " checkout must explicitly disable persisted credentials",
                 )
 
@@ -98,6 +100,7 @@ class NativePrerequisiteTests(unittest.TestCase):
             "patch-compiler-input-capture.py",
             "capture-compiler-inputs.py",
             "export-compiler-inputs.py",
+            "build-marker-artifact.py",
             "Dockerfile",
         ):
             shutil.copyfile(ROOT / "docker" / name, self.root / "docker" / name)
@@ -136,7 +139,7 @@ case "$1" in
                     COVERAGE_FILE="$NATIVE_COVERAGE_FILE" sh -c "$report"
                 fi
                 ;;
-            *"prepare /proof/fixture /rules"*)
+            *"prepare-marker /proof/fixture /rules"*)
                 for argument do
                     case "$argument" in *:/proof) context="${argument%:/proof}" ;; esac
                 done
@@ -272,7 +275,9 @@ esac
                 self.assertEqual((evidence / "native-image.tar").read_bytes(), before)
 
     def test_invalid_evidence_rejects_before_owned_resources(self):
-        self.command("mktemp", "#!/bin/sh\ntouch \"$NATIVE_FIXTURE/scratch-created\"\nexit 99\n")
+        self.command(
+            "mktemp", '#!/bin/sh\ntouch "$NATIVE_FIXTURE/scratch-created"\nexit 99\n'
+        )
         occupied = self.root / "occupied"
         occupied.mkdir()
         (occupied / ".keep").write_text("preserve")
@@ -462,6 +467,32 @@ esac
                 result = check(mode, reference)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
+        # The marker mode grants only the two explicit construction additions;
+        # both legacy and already-integrated baselines retain ordinary guards.
+        marker_copy = "docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py"
+        marker_run = (
+            "    && python3 /usr/local/bin/build-marker-artifact.py /rules "
+            + chr(92)
+            + chr(10)
+        )
+        dockerfile.write_text(additive)
+        commit()
+        self.assertEqual(check("pr-marker").returncode, 0)
+        for boundary in ("FROM yara AS rules\n", "# ---- final"):
+            dockerfile.write_text(
+                additive.replace(boundary, boundary + "\n# unrelated drift\n", 1)
+            )
+            result = check("pr-marker")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                b"ordinary rules/runtime stage changed with export slice", result.stderr
+            )
+        for added in (marker_copy, marker_run):
+            dockerfile.write_text(additive.replace(added, "", 1))
+            result = check("pr-marker")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"marker stage addition missing or duplicated", result.stderr)
+        dockerfile.write_text(additive)
         self.assertNotEqual(drift, base)
         dockerfile.write_text(additive.replace("# ---- final", "# removed boundary", 1))
         result = check()
@@ -766,7 +797,7 @@ class RequiredCheck(unittest.TestCase):
             {
                 "MX_INPUT_STAGE_MODE": (
                     "${{ github.event_name == 'pull_request' "
-                    "&& 'pr-export' || 'callable' }}"
+                    "&& 'pr-marker' || 'callable' }}"
                 ),
                 "MX_INPUT_STAGE_BASE": "${{ github.event.pull_request.base.sha }}",
             },

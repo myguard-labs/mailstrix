@@ -127,6 +127,8 @@ func workflowInput(f string) bool {
 
 var contractFiles = map[string]bool{
 	"docker/capture-compiler-inputs.py": true,
+	"docker/build-marker-artifact.py":   true,
+	"docker/export-compiler-inputs.py":  true,
 	"ci/compiler-input/io-faults.c":     true, "ci/compiler-input/seek.c": true,
 	"ci/testscope_test.sh": true, "docker/Dockerfile.release": true, "docker/docker-compose.yml": true,
 }

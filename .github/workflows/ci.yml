@@ -103,7 +103,7 @@ jobs:
       - name: exact compiler input static prerequisites and controls
         env:
           MX_INPUT_STAGE_MODE: >-
-            ${{ github.event_name == 'pull_request' && 'pr-export' || 'callable' }}
+            ${{ github.event_name == 'pull_request' && 'pr-marker' || 'callable' }}
           MX_INPUT_STAGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: ci/compiler-input-check.sh
 

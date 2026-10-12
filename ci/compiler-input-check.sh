@@ -40,7 +40,7 @@ mode, base = sys.argv[2:]
 if mode == "callable":
     print("compiler export: callable stage guard explicitly exempt")
     raise SystemExit(0)
-if mode != "pr-export":
+if mode not in ("pr-export", "pr-marker"):
     raise SystemExit("compiler export: explicit stage guard mode required")
 if not re.fullmatch(r"[0-9a-f]{40}", base):
     raise SystemExit("compiler export: valid PR base SHA required")
@@ -52,6 +52,21 @@ try:
 except subprocess.CalledProcessError as error:
     raise SystemExit("compiler export: PR base unavailable") from error
 current = (repo / "docker/Dockerfile").read_text()
+if mode == "pr-marker":
+    # Only these two named rules-stage additions are authorized. Removal of
+    # either addition fails, as do unrelated rule or final-stage changes.
+    additions = (
+        ("docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py", "docker/capture-compiler-inputs.py docker/filter-rules.py"),
+        ("    && python3 /usr/local/bin/build-marker-artifact.py /rules " + chr(92) + chr(10), ""),
+    )
+    for added, original in additions:
+        if current.count(added) != 1:
+            raise SystemExit("compiler export: marker stage addition missing or duplicated")
+        current = current.replace(added, original, 1)
+        if added in previous:
+            if previous.count(added) != 1:
+                raise SystemExit("compiler export: marker baseline addition duplicated")
+            previous = previous.replace(added, original, 1)
 
 def section(source, start, end):
     if source.count(start) != 1 or (end and source.count(end) != 1):
@@ -231,13 +246,13 @@ docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence"
 # Coverage tooling is installed only in the disposable test container; the
 # native stage/compiler remains exactly the production build above.
 docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$evidence:/evidence" "$image" \
-	sh -c 'cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
+	sh -c 'cd /repo && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --branch --include=/repo/docker/export-compiler-inputs.py,/repo/docker/build-marker-artifact.py ci/compiler_input_export_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage run --append --branch --include=/repo/docker/export-compiler-inputs.py,/repo/docker/build-marker-artifact.py ci/marker_artifact_test.py -v && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage json -o /evidence/export-coverage.json && COVERAGE_FILE=/evidence/export.coverage python3 -m coverage report --fail-under=100'
 mkdir "$scratch/transfer"
-cp "$repo/docker/export-compiler-inputs.py" "$repo/docker/capture-compiler-inputs.py" "$scratch/transfer/"
+cp "$repo/docker/export-compiler-inputs.py" "$repo/docker/capture-compiler-inputs.py" "$repo/docker/build-marker-artifact.py" "$scratch/transfer/"
 mkdir "$scratch/transfer/docker"
 cp "$repo/docker/export-compiler-inputs.py" "$scratch/transfer/docker/"
 docker run --rm --name "$container" -v "$repo:/repo:ro" -v "$scratch/transfer:/proof" "$image" \
-	sh -c 'cd /repo && python3 -B ci/compiler_input_export_test.py prepare /proof/fixture /rules && rm -rf /rules/src /rules/local-src && cp -a /rules /proof/rules && chmod -R a+rwX /proof'
+	sh -c 'cd /repo && python3 -B ci/compiler_input_export_test.py prepare-marker /proof/fixture /rules && rm -rf /rules/src /rules/local-src && cp -a /rules /proof/rules && chmod -R a+rwX /proof'
 # Extract the actual production export-only branch; only its rules prerequisite
 # is replaced by the exact native fixture. The production RUN/COPY stays verbatim.
 python3 - "$repo" "$scratch/transfer" "$image" <<'TRANSFER'
@@ -247,7 +262,7 @@ repo, context = map(Path, sys.argv[1:3])
 source = (repo / 'docker/Dockerfile').read_text()
 start = source.index('FROM rules AS rules-export-inputs\n')
 end = source.index('# ---- final', start)
-header = '# syntax=docker/dockerfile:1\nFROM ' + sys.argv[3] + ' AS rules\nCOPY rules/ /rules/\nCOPY capture-compiler-inputs.py /usr/local/bin/\n'
+header = '# syntax=docker/dockerfile:1\nFROM ' + sys.argv[3] + ' AS rules\nCOPY rules/ /rules/\nCOPY capture-compiler-inputs.py build-marker-artifact.py /usr/local/bin/\n'
 (context / 'Dockerfile').write_text(header + source[start:end])
 (context / 'Dockerfile.omission').write_text(header + 'FROM scratch AS rules-export\nCOPY --from=rules /rules/compiled.yac /compiled.yac\nCOPY --from=rules /rules/libyara.version /libyara.version\nCOPY --from=rules /rules/sources.json /sources.json\n')
 TRANSFER
