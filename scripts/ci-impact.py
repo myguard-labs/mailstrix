@@ -112,6 +112,7 @@ RULES = {
         "ci/testscope_test.sh",
         "scripts/ci-*",
         "ci/ci_impact_test.py",
+        "ci/generate_rules_cron_signer_test.sh",
         "ci/compiler-input-check.sh",
         "ci/compiler_input_retention_test.py",
         "ci/compiler_input_export_test.py",

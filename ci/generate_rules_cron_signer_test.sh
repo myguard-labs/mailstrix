@@ -27,7 +27,7 @@ cp -R "$repo/internal/rulespin" "$base/internal/"
 
 # The publisher runs with this PATH. It deliberately has no `go`; only the
 # script's standard absolute fallback can reach the compiler.
-for tool in bash base64 cp dirname jq mktemp python3 rm sed sha256sum stat tail tr; do
+for tool in bash base64 cp date dirname jq mktemp python3 rm sed sha256sum stat tail tr; do
 	resolved="$(command -v "$tool")"
 	ln -s "$resolved" "$test_root/minimal-bin/$tool"
 done
@@ -40,16 +40,36 @@ cat >"$test_root/minimal-bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'docker\n' >>"$EVENTS"
+cachebust=""
+work=""
 while [ "$#" -gt 0 ]; do
-	if [ "$1" = --output ]; then
-		work="${2#type=local,dest=}"
-		cp "$work/signing-preflight.json" "$CAPTURE_DIR/"
-		cp "$work/signing-preflight.json.sig" "$CAPTURE_DIR/"
-		stat -c '%Y %s %n' "$work/rulessign" >"$CAPTURE_DIR/rulessign.stat"
-		break
-    fi
-    shift
+	case "$1" in
+		--build-arg)
+			case "${2:-}" in
+				CACHEBUST=*) cachebust="${2#CACHEBUST=}" ;;
+			esac
+			shift 2
+			;;
+		--output)
+			work="${2#type=local,dest=}"
+			shift 2
+			;;
+		*) shift ;;
+	esac
 done
+case "$cachebust" in
+	''|*[!0-9]*)
+		printf 'docker fixture: CACHEBUST must be a non-empty integer\n' >&2
+		exit 74
+		;;
+esac
+[ -n "$work" ] || {
+	printf 'docker fixture: missing local output destination\n' >&2
+	exit 75
+}
+cp "$work/signing-preflight.json" "$CAPTURE_DIR/"
+cp "$work/signing-preflight.json.sig" "$CAPTURE_DIR/"
+stat -c '%Y %s %n' "$work/rulessign" >"$CAPTURE_DIR/rulessign.stat"
 exit 73
 EOF
 chmod +x "$test_root/minimal-bin/gh" "$test_root/minimal-bin/docker"
@@ -149,6 +169,15 @@ assert_no_docker() {
 	}
 }
 
+assert_no_command_not_found() {
+	if grep -F 'command not found' "$log" >/dev/null; then
+		cat "$log" >&2
+		printf 'FAIL: %s emitted an unexpected command-not-found diagnostic\n' \
+			"$(basename "$case_dir")" >&2
+		exit 1
+	fi
+}
+
 record_case() { # Copies only public diagnostics/artifacts, never generated keys.
 	[ -n "${EVIDENCE_DIR:-}" ] || return 0
 	local destination
@@ -176,6 +205,7 @@ run_publisher "$trusted_key"
 	printf 'FAIL: positive path did not reach Docker once\n' >&2
 	exit 1
 }
+assert_no_command_not_found
 TEST_PUBLIC_KEY="$trusted_public" \
 	TEST_MANIFEST="$capture/signing-preflight.json" \
 	TEST_SIGNATURE="$capture/signing-preflight.json.sig" \
@@ -202,6 +232,7 @@ PUBLISH_PATH=".:$test_root/minimal-bin" run_publisher "$trusted_key"
 	printf 'FAIL: checkout-local Go executable ran\n' >&2
 	exit 1
 }
+assert_no_command_not_found
 record_case
 
 # Missing Go: transform only the three audited fallback constants in a private
