@@ -11,6 +11,34 @@ import (
 	ms "github.com/myguard-labs/mailstrix/internal/mailstrix"
 )
 
+const markerBundleLogFormat = "PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; eligible rules pre-disabled by denylist: %d"
+const markerArtifactLogFormat = "PERF-18: marker artifact loaded: %d total rules in separate compiled object (main ruleset: %d rules; deny policy applied)"
+
+func TestP13MarkerBundleLogContract(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "internal", "mailstrix", "scanner.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted := fmt.Sprintf("%q", markerBundleLogFormat)
+	if !strings.Contains(string(source), quoted) {
+		t.Fatalf("legacy full-bundle log no longer reports total allocation and separate ownership: want %s", quoted)
+	}
+	parity, err := os.ReadFile(filepath.Join("..", "tools", "parity", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(parity), quoted) {
+		t.Fatalf("parity scanner does not accept the exact full-bundle success log: want %s", quoted)
+	}
+	if strings.Contains(string(source), "producing a tiny") || strings.Contains(string(source), "marker rules active") {
+		t.Fatal("legacy full-bundle description again implies a small allocation or ignores deny-disabled markers")
+	}
+	artifactQuoted := fmt.Sprintf("%q", markerArtifactLogFormat)
+	if !strings.Contains(string(source), artifactQuoted) {
+		t.Fatalf("native artifact log does not label artifact and main totals separately: want %s", artifactQuoted)
+	}
+}
+
 func TestReloadMarkerUsesPreparedMain(t *testing.T) {
 	for _, compiled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("compiled=%v", compiled), func(t *testing.T) {

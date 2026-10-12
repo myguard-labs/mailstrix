@@ -102,6 +102,28 @@ func markerArtifactMatches(t *testing.T, s *Scanner) []Match {
 	}
 	return out
 }
+func TestP13NativeMarkerArtifactLogArguments(t *testing.T) {
+	root := markerArtifactFixture(t)
+	var gotFormat string
+	var gotArgs []any
+	s, e := NewScanner(&Config{RulesPath: filepath.Join(root, "compiled.yac")}, func(format string, args ...any) {
+		if strings.HasPrefix(format, "PERF-18: marker artifact loaded:") {
+			gotFormat = format
+			gotArgs = append([]any(nil), args...)
+		}
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	wantFormat := "PERF-18: marker artifact loaded: %d total rules in separate compiled object (main ruleset: %d rules; deny policy applied)"
+	if gotFormat != wantFormat {
+		t.Fatalf("marker artifact log format = %q, want %q", gotFormat, wantFormat)
+	}
+	if got := fmt.Sprint(gotArgs); got != "[9 10]" {
+		t.Fatalf("marker artifact log arguments = %s, want [artifact-total=9 main-total=10]", got)
+	}
+}
 func TestP12MatchedArtifactSelection(t *testing.T) {
 	root := markerArtifactFixture(t)
 	for _, deny := range []map[string]struct{}{nil, {"privatedependency": {}, "gate": {}, "publicdependency": {}, "markerfilename": {}}} {
