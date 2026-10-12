@@ -113,10 +113,62 @@ for count in (2048, 16384):
         (retained / "objects" / final["native_trace"]["sha256"]).read_bytes()
     )
     (destination / "invocation.json").write_text(json.dumps(final, sort_keys=True))
+# Closure scaling uses genuine captured compiler references, including a deep
+# private chain, many marker roots, late global dependencies and native namespace
+# isolation. Expectations come from the production indexed producer.
+closure_inventory = ROOT / "native-closure"
+closure_inventory.mkdir()
+for depth in (512, 2048):
+    inputs = ROOT / ("closure-src-" + str(depth))
+    inputs.mkdir()
+    chain = ["private rule Chain_0 { condition: true }\n"]
+    chain.extend(
+        f"private rule Chain_{index} {{ condition: Chain_{index - 1} }}\n"
+        for index in range(1, depth)
+    )
+    chain.extend(
+        f"rule Marker_{index} : marker {{ condition: Chain_{depth - 1} }}\n"
+        for index in range(depth)
+    )
+    # These dependencies are reachable only through namespace globals, after
+    # every marker has been discovered. The other namespace repeats identifiers.
+    chain.append("private rule GlobalDependency { condition: true }\n")
+    chain.append("global rule Gate { condition: GlobalDependency }\n")
+    (inputs / "a.yar").write_text("".join(chain))
+    (inputs / "b.yar").write_text(
+        "private rule Chain_0 { condition: true }\n"
+        "global rule Gate { condition: Chain_0 }\n"
+        "rule Plain { condition: Gate }\n"
+    )
+    output = ROOT / ("closure-" + str(depth) + ".yac")
+    subprocess.run(
+        ["sh", str(REPO / "docker/compile-rules.sh"), str(inputs), str(output)],
+        check=True,
+    )
+    retained = Path(str(output) + ".inputs")
+    final = json.loads((retained / "manifest.json").read_text())["final"]
+    graph = final["rule_graph"]
+    proof = export.marker.closure(graph)
+    assert len(proof["markers"]) == depth
+    assert len(proof["retained"]) == 2 * depth + 2
+    destination = closure_inventory / str(depth)
+    destination.mkdir()
+    (destination / "native").write_bytes(
+        (retained / "objects" / final["native_trace"]["sha256"]).read_bytes()
+    )
+    (destination / "invocation.json").write_text(json.dumps(final, sort_keys=True))
+    proof["namespaces"] = ["a.yar"]
+    (destination / "closure.json").write_text(json.dumps(proof, sort_keys=True))
 with zipfile.ZipFile(
     ROOT / "marker-runtime.zip", "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
 ) as archive:
-    for path in sorted([*(ROOT / "envelope").rglob("*"), *inventory.rglob("*")]):
+    for path in sorted(
+        [
+            *(ROOT / "envelope").rglob("*"),
+            *inventory.rglob("*"),
+            *closure_inventory.rglob("*"),
+        ]
+    ):
         if path.is_file():
             base = ROOT / "envelope" if path.is_relative_to(ROOT / "envelope") else ROOT
             info = zipfile.ZipInfo(

@@ -36,6 +36,22 @@ class ImpactTests(unittest.TestCase):
             self.assertIn("ci/marker_runtime_test.go", result["changed_files"])
         self.assertFalse(impact.plan(["README.md"])["go"])
 
+    def test_marker_closure_exact_consumers(self):
+        result = impact.plan(["ci/ci_marker_closure_test.py"])
+        for key in ("native", "python", "scope", "go"):
+            self.assertTrue(result[key], key)
+        self.assertIn(
+            "internal/mailstrix/marker_closure_test.go", result["changed_files"]
+        )
+        self.assertFalse(result["image"])
+        for path in ("ci/unmapped_test.py", "ci/marker_closure_unmapped.py"):
+            with (
+                self.subTest(path=path),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([path])
+        self.assertFalse(impact.plan(["README.md"])["go"])
+
     def test_memory_alert_fixture_selects_prometheus_only(self):
         result = impact.plan(["ci/mailstrix_memory_alerts_test.yml"])
         self.assertTrue(result["prometheus"])

@@ -115,6 +115,18 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ---- tests (built into the image build so CI fails on a bad commit) ---------
 FROM build AS test
 COPY --from=marker-fixture /fixture/marker-runtime.zip /src/ci/testdata/marker-runtime.zip
+# The count-mode gate must precede the race suite: a quadratic traversal still
+# returns the right closure, but atomically covering it can take unbounded work.
+COPY ci/ci_marker_closure_test.py /src/ci/ci_marker_closure_test.py
+ARG CHANGED_FILES=""
+# CHANGED_FILES intentionally expands to testscope's selector arguments.
+# hadolint ignore=SC2086
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    pkgs="$(go run ./tools/testscope ${CHANGED_FILES})" \
+    && case " $pkgs " in \
+        *" $(go list -m)/internal/mailstrix "*) python3 ci/ci_marker_closure_test.py --native-ci ;; \
+    esac
 # CHANGED_FILES narrows tests and vet to changed packages and real consumers.
 # No list preserves full release/maintenance coverage. Explicit unknown inputs
 # fail selection; documentation without a test contract selects no packages.
@@ -127,7 +139,6 @@ COPY --from=marker-fixture /fixture/marker-runtime.zip /src/ci/testdata/marker-r
 # -coverpkg=./... it exceeds the 30m test timeout (about 4x slower). Every
 # selected package is tested exactly once; a failing test run stops the RUN
 # before the coverage gate, which runs only when the covered run succeeded.
-ARG CHANGED_FILES=""
 # CHANGED_FILES, pkgs, rest and cipkg are space-separated lists: word splitting
 # is intended.
 # hadolint ignore=SC2086

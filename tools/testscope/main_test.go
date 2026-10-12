@@ -221,3 +221,16 @@ func TestMarkerRuntimeFixtureConsumers(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkerClosureCIConsumer(t *testing.T) {
+	got, err := selectChangedPackages([]string{"ci/ci_marker_closure_test.py"}, testGraph(), "/r")
+	if err != nil || strings.Join(got, " ") != "example.com/m/internal/mailstrix" {
+		t.Fatalf("closure bridge consumer: got=%v error=%v", got, err)
+	}
+	for _, path := range []string{"ci/unmapped_test.py", "ci/marker_closure_unmapped.py"} {
+		got, err := selectChangedPackages([]string{path}, testGraph(), "/r")
+		if err == nil || !strings.Contains(err.Error(), "unmapped changed paths") || len(got) != 0 {
+			t.Fatalf("unmapped closure input must fail closed: %s %v %v", path, got, err)
+		}
+	}
+}
