@@ -886,6 +886,7 @@ func fromMSI(ole *oleparse.OLEFile, res *Result, deadline time.Time) bool {
 		if len(b) > maxBytesPerMSIStream {
 			b = b[:maxBytesPerMSIStream]
 		}
+		res.recordRetained(b)
 		res.Streams = append(res.Streams, b)
 		total += len(b)
 	}
@@ -983,6 +984,7 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		if len(b) > maxBytesPerMSGAttach {
 			b = b[:maxBytesPerMSGAttach]
 		}
+		res.recordRetained(b)
 		res.Streams = append(res.Streams, b)
 		total += len(b)
 		emitted++

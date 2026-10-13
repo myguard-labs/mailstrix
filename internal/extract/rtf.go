@@ -195,7 +195,9 @@ func detectRTFDDE(buf []byte, res *Result, deadline time.Time) {
 		upper := strings.ToUpper(instr)
 		if (strings.HasPrefix(upper, "DDEAUTO ") || strings.HasPrefix(upper, "DDE ") ||
 			upper == "DDEAUTO" || upper == "DDE") && len(res.Streams) < maxStreams {
-			res.Streams = append(res.Streams, []byte("RTF-DDE-FIELD "+instr))
+			field := []byte("RTF-DDE-FIELD " + instr)
+			res.recordRetained(field)
+			res.Streams = append(res.Streams, field)
 			count++
 		}
 	}
@@ -218,7 +220,9 @@ func detectRTFDDE(buf []byte, res *Result, deadline time.Time) {
 				}
 			}
 			label := strings.ToUpper(kw[1:]) // "DDEAUTO" or "DDE"
-			res.Streams = append(res.Streams, []byte("RTF-DDE-FIELD "+label))
+			field := []byte("RTF-DDE-FIELD " + label)
+			res.recordRetained(field)
+			res.Streams = append(res.Streams, field)
 			count++
 			search = search[after:]
 		}
@@ -241,7 +245,9 @@ func fromRTF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	// \objupdate detection — Word auto-fetches the remote OLE link on open
 	// (CVE-2017-0199 vector). Emit a marker so YARA can match.
 	if bytes.Contains(buf, []byte("\\objupdate")) {
-		res.Streams = append(res.Streams, []byte("RTF-OBJUPDATE"))
+		marker := []byte("RTF-OBJUPDATE")
+		res.recordRetained(marker)
+		res.Streams = append(res.Streams, marker)
 	}
 
 	var total, objs, groups int
@@ -553,6 +559,7 @@ func carveRTFObject(blob []byte, res *Result, bud *archiveBudget, depth int, dea
 	if data := carveOle10Native(blob); len(data) > 0 {
 		res.IsOLEPackage = true
 		payload := append([]byte(nil), data...)
+		res.recordRetained(payload)
 		res.Streams = append(res.Streams, payload)
 		// Blob already charged to bud at function entry; just crack the dropped
 		// file's own carrier layer if it is one (depth+1). See nested.go.

@@ -114,6 +114,7 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 		}
 		if n > 0 {
 			b := append([]byte(nil), data[:n]...)
+			res.recordRetained(b)
 			res.Streams = append(res.Streams, b)
 			total += len(b)
 			emitted++

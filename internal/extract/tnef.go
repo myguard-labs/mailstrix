@@ -71,6 +71,7 @@ func fromTNEF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline t
 			b = b[:maxBytesPerTNEFPart]
 		}
 		s := append([]byte(nil), b...)
+		res.recordRetained(s)
 		res.Streams = append(res.Streams, s)
 		total += len(s)
 		// Recurse an attachment as a child carrier so a nested zip/OLE2/OOXML/

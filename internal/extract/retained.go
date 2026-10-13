@@ -48,6 +48,15 @@ func (b *retainedBudget) recordBytes(data []byte) (retainedToken, bool) {
 	return b.record(uint64(len(data)))
 }
 
+// recordRetained records one stream at its current emitted length. A Result
+// built directly by a package test has no request ledger and remains usable.
+func (r *Result) recordRetained(data []byte) (retainedToken, bool) {
+	if r == nil || r.childOpts == nil {
+		return retainedToken{}, false
+	}
+	return r.childOpts.retained.recordBytes(data)
+}
+
 func (b *retainedBudget) owns(token retainedToken) bool {
 	return b != nil && token.owner == b && token.serial > 0 && token.serial <= b.admissions
 }

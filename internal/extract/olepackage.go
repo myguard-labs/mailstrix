@@ -89,6 +89,7 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 			data = data[:maxBytesPerPackage]
 		}
 		payload := append([]byte(nil), data...)
+		res.recordRetained(payload)
 		res.Streams = append(res.Streams, payload)
 		res.IsOLEPackage = true
 		total += len(data)

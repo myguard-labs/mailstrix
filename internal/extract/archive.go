@@ -223,6 +223,9 @@ func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, dep
 			if len(fields) != 0 {
 				b.members++
 				b.total += len(data)
+				for _, field := range fields {
+					res.recordRetained(field)
+				}
 				res.Streams = append(res.Streams, fields...)
 				continue
 			}
@@ -236,6 +239,7 @@ func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, dep
 		}
 		b.members++
 		b.total += len(data)
+		res.recordRetained(data)
 		res.Streams = append(res.Streams, data)
 		extractChild(data, res, b, depth+1, deadline)
 	}
@@ -352,6 +356,7 @@ func emitMember(data []byte, res *Result, b *archiveBudget, depth int, deadline 
 	}
 	b.members++
 	b.total += len(data)
+	res.recordRetained(data)
 	res.Streams = append(res.Streams, data)
 	res.IsArchive = true
 	// Recurse: a member may be a nested archive OR another carrier we know how to
