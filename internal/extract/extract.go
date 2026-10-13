@@ -1110,20 +1110,20 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// "OOXML-EXTERNAL-REL <Type> <Target>" stream so YARA rules can match it.
 	// Fail-open: malformed .rels parts are silently skipped.
 	lenBeforeRels := len(out)
-	fromOOXMLRels(zr, &out, deadline)
+	fromOOXMLRels(zr, &out, deadline, res)
 	hasExtRel := len(out) > lenBeforeRels
 	// Scan word/document.xml (and related parts) for DDE/DDEAUTO field
 	// instructions. Each hit appends a synthetic "OOXML-DDE-FIELD <instr>" stream.
 	// Fail-open: malformed XML is silently skipped.
 	lenBeforeDDE := len(out)
-	fromOOXMLDDE(zr, &out, deadline)
+	fromOOXMLDDE(zr, &out, deadline, res)
 	hasDDE := len(out) > lenBeforeDDE
 	// Detect hidden Excel-4.0 macrosheets in OOXML workbooks (xlsm/xlsb/xlam).
 	// Each hidden/veryHidden sheet coinciding with an xl/macrosheets/ part appends
 	// a synthetic "XLM-HIDDEN-MACROSHEET <state> <name>" stream.
 	// Fail-open: any parse error is silently ignored.
 	lenBeforeXLM := len(out)
-	fromOOXMLXLM(idx, hasMacrosheet, &out, deadline)
+	fromOOXMLXLM(idx, hasMacrosheet, &out, deadline, res)
 	// Capture the hidden-macrosheet result HERE, right after fromOOXMLXLM, before
 	// XLMFold/docProps append. The fold contribution is tracked separately by
 	// res.HasXLMFold below; measuring len(out) > lenBeforeXLM at the END would also
@@ -1133,15 +1133,15 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// obfuscated CHAR()&CHAR()&"..." concatenations into cleartext so
 	// keyword/URL/IOC YARA rules fire. Also emits XLM-DANGEROUS-FUNC markers.
 	prevLen := len(out)
-	fromOOXMLXLMFold(zr, &out, deadline, opts)
+	fromOOXMLXLMFold(zr, &out, deadline, opts, res)
 	// .xlsb stores macrosheets as BIFF12 binary parts (xl/macrosheets/sheet*.bin)
 	// rather than XML <f> elements, so fromOOXMLXLMFold (which only reads .xml)
 	// misses them. Fold the BIFF12 ptg token streams too (XLM-4).
-	fromXLSBXLMFold(zr, &out, deadline, opts)
+	fromXLSBXLMFold(zr, &out, deadline, opts, res)
 	// CSV-DDE-XLSB: a DDE supporting book (BrtBeginSupBook sbt=1) in
 	// xl/externalLinks/*.bin carries a command-exec server/topic as UTF-16LE in
 	// a binary record, invisible to the plain-text/XML passes.
-	fromXLSBExternalDDE(zr, &out, deadline)
+	fromXLSBExternalDDE(zr, &out, deadline, res)
 	if len(out) > prevLen {
 		res.HasXLMFold = true
 	}
@@ -1149,7 +1149,7 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// (docProps/core.xml, docProps/app.xml, docProps/custom.xml,
 	// customXml/item*.xml) and word/settings.xml docVars.
 	// Emits "DOCPROPS-STRINGS" marker + extracted strings.
-	fromOOXMLDocProps(zr, &out, deadline)
+	fromOOXMLDocProps(zr, &out, deadline, res)
 	if hasDocPropsMarker(out) {
 		res.HasDocProps = true
 	}
@@ -1209,7 +1209,8 @@ var externalRelSchemes = []string{"http://", "https://", "smb://", "file://\\\\"
 // Fail-open contract: a .rels file that cannot be read or parsed is silently
 // skipped — it must never cause the whole extract to fail. Bounded by
 // maxRelsFiles + maxExternalRels + maxBytesPerRels.
-func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	// xmlRel is the schema for a single <Relationship> element.
 	type xmlRel struct {
 		Type       string `xml:"Type,attr"`
@@ -1279,6 +1280,7 @@ func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			// (not instead of) the generic marker when the inner scheme is remote.
 			if hasMHTMLScheme(target) {
 				stream := []byte("OOXML-MHTML-REL " + typLabel + " " + target)
+				res.recordRetained(stream)
 				*out = append(*out, stream)
 				continue
 			}
@@ -1286,6 +1288,7 @@ func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 				continue
 			}
 			stream := []byte("OOXML-EXTERNAL-REL " + typLabel + " " + target)
+			res.recordRetained(stream)
 			*out = append(*out, stream)
 			extRels++
 		}
@@ -1384,7 +1387,7 @@ const maxBytesPerDocXML = 4 << 20
 //
 // Fail-open contract: a part that cannot be read or parsed is silently skipped.
 // Bounded by maxDDEFields + maxBytesPerDocXML; respects expired(deadline).
-func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time, results ...*Result) {
 	// Walk the directory once, scanning every word-processing part that may carry
 	// a DDE field (isDDEDocPart globs document*/header*/footer*/footnotes/endnotes/
 	// comments*) — not a fixed four-name list that missed header2+, footnotes, etc.
@@ -1416,7 +1419,7 @@ func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			continue
 		}
 		priorLen := len(*out)
-		parseDDEFields(raw, out, deadline)
+		parseDDEFields(raw, out, deadline, retainedResult(results))
 		ddeCount += len(*out) - priorLen
 	}
 }
@@ -1426,7 +1429,8 @@ func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 // finds. It handles both w:fldSimple/@w:instr (single-attribute instructions)
 // and concatenated w:instrText run text (split-run instructions). Malformed
 // XML is silently ignored (fail-open).
-func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time) {
+func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	// We stream-parse with encoding/xml to avoid loading the whole DOM.
 	// State machine: inside a w:fldChar complex field, we accumulate
 	// w:instrText content until w:fldChar w:fldCharType="end".
@@ -1481,7 +1485,9 @@ func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time) {
 		if tail := strings.TrimSpace(norm[cut:]); tail != "" {
 			emit += " " + tail
 		}
-		*out = append(*out, []byte("OOXML-DDE-FIELD "+emit))
+		stream := []byte("OOXML-DDE-FIELD " + emit)
+		res.recordRetained(stream)
+		*out = append(*out, stream)
 		ddeFields++
 	}
 
@@ -1626,6 +1632,7 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 			b = []byte(m.Code[:n])
 		}
 		out = append(out, b)
+		res.recordRetained(b)
 		// Record this as genuine VBA macro source so the scanner sets the VBA
 		// external ONLY for these streams. Without it the scanner set VBA=true on
 		// EVERY extracted stream (PDF text, archive members, decoded blobs, markers)

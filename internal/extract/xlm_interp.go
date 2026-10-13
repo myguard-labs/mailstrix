@@ -82,7 +82,8 @@ func stripOuterQuotes(s string) string {
 //
 // PASS 1 builds a coord→string value map.
 // PASS 2 folds each formula and substitutes one level of A1 refs.
-func interpretXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline time.Time) {
+func interpretXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	if len(cells) == 0 {
 		return
 	}
@@ -147,13 +148,13 @@ func interpretXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadlin
 				return
 			}
 			resolved := substituteRefs(folded, vals)
-			if !emitFoldedFormula(resolved, out, totalOutput, true) {
+			if !emitFoldedFormula(resolved, out, totalOutput, true, res) {
 				return // per-document output cap reached
 			}
 		} else if cell.value != "" {
 			// Pre-computed value with no formula — emit directly (no dangerous
 			// marker scan; matches prior <v> behaviour).
-			if !emitFoldedFormula(cell.value, out, totalOutput, false) {
+			if !emitFoldedFormula(cell.value, out, totalOutput, false, res) {
 				return
 			}
 		}

@@ -57,6 +57,16 @@ func (r *Result) recordRetained(data []byte) (retainedToken, bool) {
 	return r.childOpts.retained.recordBytes(data)
 }
 
+// retainedResult returns the request result explicitly threaded through local
+// output helpers. The variadic form preserves the existing nil/direct helper
+// callers while scoped production paths pass exactly one request result.
+func retainedResult(results []*Result) *Result {
+	if len(results) == 0 {
+		return nil
+	}
+	return results[0]
+}
+
 func (b *retainedBudget) owns(token retainedToken) bool {
 	return b != nil && token.owner == b && token.serial > 0 && token.serial <= b.admissions
 }

@@ -68,7 +68,7 @@ var xlmDangerousFuncs = []string{
 // markers for dangerous XLM function names found in the folded output.
 // Fail-open: any read/parse error silently returns. Bounded; respects deadline.
 // opts carries the per-request sheet/formula caps; nil uses package defaults.
-func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Options) {
+func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Options, results ...*Result) {
 	if expired(deadline) {
 		return
 	}
@@ -95,7 +95,7 @@ func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *O
 		if expired(deadline) || len(*out) >= maxStreams {
 			return
 		}
-		processXLMFoldSheet(sf, out, &totalOutput, deadline, formulaCap)
+		processXLMFoldSheet(sf, out, &totalOutput, deadline, formulaCap, retainedResult(results))
 	}
 }
 
@@ -103,7 +103,7 @@ func fromOOXMLXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *O
 // formulas (<f>), and pre-computed values (<v>), then runs the two-pass
 // XLM cell-reference interpreter (XLM-6) before emitting results.
 // formulaCap limits how many cells are collected (effort-scaled).
-func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int) {
+func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int, results ...*Result) {
 	if sf.UncompressedSize64 > maxBytesWorkbookXML {
 		return
 	}
@@ -190,7 +190,7 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 	}
 
 	// Bounded XLM emulator (D6). Zero-output fallback to interpreter inside emulateXLMCells.
-	emulateXLMCells(cells, out, totalOutput, deadline)
+	emulateXLMCells(cells, out, totalOutput, deadline, retainedResult(results))
 }
 
 // emitFoldedFormula is the shared emit sink for folded/precomputed XLM strings.
@@ -200,7 +200,7 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 // the future BIFF8 ptg front-end (XLM-2/3) feed this sink so they cannot drift on
 // the floor, the cap, or marker emission. Returns false when the output cap is
 // reached, signalling the caller to stop emitting.
-func emitFoldedFormula(s string, out *[][]byte, totalOutput *int, checkDangerous bool) bool {
+func emitFoldedFormula(s string, out *[][]byte, totalOutput *int, checkDangerous bool, results ...*Result) bool {
 	if len(s) < minXLMFoldResult {
 		return true // below the noise floor — skip, but keep scanning
 	}
@@ -208,23 +208,29 @@ func emitFoldedFormula(s string, out *[][]byte, totalOutput *int, checkDangerous
 		return false // per-document output cap reached
 	}
 	*totalOutput += len(s)
-	*out = append(*out, []byte(s))
+	stream := []byte(s)
+	res := retainedResult(results)
+	res.recordRetained(stream)
+	*out = append(*out, stream)
 	if checkDangerous {
-		emitDangerousMarkers(s, out)
+		emitDangerousMarkers(s, out, res)
 	}
 	return true
 }
 
 // emitDangerousMarkers appends XLM-DANGEROUS-FUNC markers for any dangerous
 // XLM functions found in the folded string.
-func emitDangerousMarkers(folded string, out *[][]byte) {
+func emitDangerousMarkers(folded string, out *[][]byte, results ...*Result) {
+	res := retainedResult(results)
 	upper := strings.ToUpper(folded)
 	for _, fn := range xlmDangerousFuncs {
 		if len(*out) >= maxStreams {
 			return
 		}
 		if strings.Contains(upper, "="+fn+"(") {
-			*out = append(*out, []byte("XLM-DANGEROUS-FUNC "+fn))
+			marker := []byte("XLM-DANGEROUS-FUNC " + fn)
+			res.recordRetained(marker)
+			*out = append(*out, marker)
 		}
 	}
 }

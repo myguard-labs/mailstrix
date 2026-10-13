@@ -75,7 +75,7 @@ const (
 // .xls/.xlsm on the minlen floor, output cap, or dangerous-func markers).
 // Fail-open: any read/parse error silently returns. Bounded; respects deadline.
 // opts carries the per-request sheet/formula caps; nil uses package defaults.
-func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Options) {
+func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Options, results ...*Result) {
 	if expired(deadline) {
 		return
 	}
@@ -102,7 +102,7 @@ func fromXLSBXLMFold(zr *zip.Reader, out *[][]byte, deadline time.Time, opts *Op
 		if expired(deadline) || len(*out) >= maxStreams {
 			return
 		}
-		processXLSBSheet(sf, sst, out, &totalOutput, deadline, formulaCap)
+		processXLSBSheet(sf, sst, out, &totalOutput, deadline, formulaCap, retainedResult(results))
 	}
 }
 
@@ -122,7 +122,7 @@ const (
 // DDE supporting book (BrtBeginSupBook, sbt=1) and emits an "XLSB-DDE
 // <server>|<topic>" marker for each. Bounded + fail-open: a malformed record
 // stream yields whatever was found so far and never panics.
-func fromXLSBExternalDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+func fromXLSBExternalDDE(zr *zip.Reader, out *[][]byte, deadline time.Time, results ...*Result) {
 	if expired(deadline) {
 		return
 	}
@@ -148,13 +148,14 @@ func fromXLSBExternalDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		if err != nil || len(raw) == 0 {
 			continue
 		}
-		scanXLSBSupBookDDE(raw, out)
+		scanXLSBSupBookDDE(raw, out, retainedResult(results))
 	}
 }
 
 // scanXLSBSupBookDDE walks one externalLink .bin BIFF12 record stream and emits
 // a DDE marker for every BrtBeginSupBook with sbt=1.
-func scanXLSBSupBookDDE(raw []byte, out *[][]byte) {
+func scanXLSBSupBookDDE(raw []byte, out *[][]byte, results ...*Result) {
+	res := retainedResult(results)
 	records := 0
 	pos := 0
 	ddeCount := countXLSBDDE(*out)
@@ -196,7 +197,9 @@ func scanXLSBSupBookDDE(raw []byte, out *[][]byte) {
 		if len(marker) > maxBIFF12RecordLen {
 			marker = marker[:maxBIFF12RecordLen]
 		}
-		*out = append(*out, []byte(marker))
+		stream := []byte(marker)
+		res.recordRetained(stream)
+		*out = append(*out, stream)
 		ddeCount++
 	}
 }
@@ -337,7 +340,8 @@ type biff12FormulaCollected struct {
 // feeds them to the emulator. If the emulator produces no output the original
 // one-by-one fold path is used as fallback (defense-in-depth).
 // formulaCap limits how many formula records are collected (effort-scaled).
-func processXLSBSheet(sf *zip.File, sst []string, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int) {
+func processXLSBSheet(sf *zip.File, sst []string, out *[][]byte, totalOutput *int, deadline time.Time, formulaCap int, results ...*Result) {
+	res := retainedResult(results)
 	if sf.UncompressedSize64 > maxBytesWorkbookXML {
 		return
 	}
@@ -435,14 +439,14 @@ func processXLSBSheet(sf *zip.File, sst []string, out *[][]byte, totalOutput *in
 
 	priorLen := len(*out)
 	if len(xlmCells) > 0 {
-		emulateXLMCells(xlmCells, out, totalOutput, deadline)
+		emulateXLMCells(xlmCells, out, totalOutput, deadline, res)
 	}
 
 	if !xlmEmulatorProducedPayload(*out, priorLen) {
 		// Emulator produced no output — fall back to one-by-one fold.
 		for _, bc := range collected {
 			folded := parseBIFF12Formula(bc.rgce)
-			if !emitFoldedFormula(folded, out, totalOutput, true) {
+			if !emitFoldedFormula(folded, out, totalOutput, true, res) {
 				return // per-document output cap reached
 			}
 		}

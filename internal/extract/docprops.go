@@ -60,7 +60,8 @@ var ooxmlPropParts = []string{
 // Fail-open; respects deadline and maxStreams / maxDocPropsStreams caps.
 // Uses the same *[][]byte convention as the other fromOOXML* helpers so it
 // slots into the fromOOXML local-out accumulator without an extra allocation.
-func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	if expired(deadline) {
 		return
 	}
@@ -214,10 +215,13 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		if len(*out) >= maxStreams {
 			break
 		}
+		res.recordRetained(s)
 		*out = append(*out, s)
 	}
 	if len(*out) < maxStreams {
-		*out = append(*out, joinMarkerPayload(docPropsMarker, carved))
+		marker := joinMarkerPayload(docPropsMarker, carved)
+		res.recordRetained(marker)
+		*out = append(*out, marker)
 	}
 }
 
