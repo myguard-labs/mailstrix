@@ -245,10 +245,13 @@ func fromUserForms(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if len(res.Streams) >= maxStreams {
 			break
 		}
+		res.recordRetained(s)
 		res.Streams = append(res.Streams, s)
 	}
 	if len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, joinMarkerPayload(userFormMarker, carved))
+		marker := joinMarkerPayload(userFormMarker, carved)
+		res.recordRetained(marker)
+		res.Streams = append(res.Streams, marker)
 	}
 }
 

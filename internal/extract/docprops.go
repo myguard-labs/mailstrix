@@ -267,7 +267,9 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if name == "\x05SummaryInformation" {
 			if v, ok := docSecurityFlags(data); ok {
 				if len(res.Streams) < maxStreams {
-					res.Streams = append(res.Streams, []byte(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v)))
+					marker := []byte(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v))
+					res.recordRetained(marker)
+					res.Streams = append(res.Streams, marker)
 				}
 			}
 			metaMarkers = append(metaMarkers, oleSummaryMetaMarkers(data)...)
@@ -288,7 +290,9 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		for i, m := range metaMarkers {
 			bufs[i] = []byte(m)
 		}
-		res.Streams = append(res.Streams, joinMarkerPayload(oleMetaTag, bufs))
+		marker := joinMarkerPayload(oleMetaTag, bufs)
+		res.recordRetained(marker)
+		res.Streams = append(res.Streams, marker)
 		res.HasDocProps = true
 	}
 
@@ -304,10 +308,13 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if len(res.Streams) >= maxStreams {
 			break
 		}
+		res.recordRetained(s)
 		res.Streams = append(res.Streams, s)
 	}
 	if len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, joinMarkerPayload(docPropsMarker, carved))
+		marker := joinMarkerPayload(docPropsMarker, carved)
+		res.recordRetained(marker)
+		res.Streams = append(res.Streams, marker)
 	}
 }
 

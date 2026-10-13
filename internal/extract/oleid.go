@@ -66,7 +66,9 @@ func fromOLEIndicators(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		// ObjectPool is a storage entry (Mse == 1) named "ObjectPool".
 		if !objectPoolSeen && d.Header.Mse == 1 && d.Name == "ObjectPool" {
 			objectPoolSeen = true
-			res.Streams = append(res.Streams, []byte("OLEID-OBJECTPOOL"))
+			marker := []byte("OLEID-OBJECTPOOL")
+			res.recordRetained(marker)
+			res.Streams = append(res.Streams, marker)
 			continue
 		}
 
@@ -78,7 +80,9 @@ func fromOLEIndicators(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			for _, m := range swfMagics {
 				if bytes.HasPrefix(head, m) {
 					flashSeen = true
-					res.Streams = append(res.Streams, []byte("OLEID-FLASH"))
+					marker := []byte("OLEID-FLASH")
+					res.recordRetained(marker)
+					res.Streams = append(res.Streams, marker)
 					break
 				}
 			}

@@ -621,6 +621,7 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// buffer is XLM-STACK-prefixed so splitPureMarkers routes it to the Markers
 	// channel; the individual entries stay in Streams for the self-contained rules.
 	if xb := joinXLMStackerMarkers(res.Streams); xb != nil {
+		res.recordRetained(xb)
 		res.Streams = append(res.Streams, xb)
 	}
 
@@ -630,11 +631,14 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// rule) still scores. Source markers stay in Streams — this only adds a
 	// stacking verdict. Built AFTER the XLM stacker so XLM presence can count.
 	if bs := joinBehaviorScore(res.Streams); bs != nil {
+		res.recordRetained(bs)
 		res.Streams = append(res.Streams, bs)
 	}
 
 	for _, kind := range res.CapHits {
-		res.Streams = append(res.Streams, []byte(capHitMarkerPrefix+kind))
+		marker := []byte(capHitMarkerPrefix + kind)
+		res.recordRetained(marker)
+		res.Streams = append(res.Streams, marker)
 	}
 
 	if preDecodeLen < 0 || preDecodeLen > len(res.Streams) {
@@ -835,12 +839,16 @@ func fromOLEExtraData(ole *oleparse.OLEFile, buf []byte, res *Result, deadline t
 	if len(tail) < extraDataMinBytes || allZero(tail) {
 		return // sub-sector padding or free-sector zeros — not an appended payload
 	}
-	res.Streams = append(res.Streams, []byte("OLE2-EXTRA-DATA"))
+	marker := []byte("OLE2-EXTRA-DATA")
+	res.recordRetained(marker)
+	res.Streams = append(res.Streams, marker)
 	if len(tail) > maxExtraDataCarve {
 		tail = tail[:maxExtraDataCarve]
 	}
 	if len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, append([]byte(nil), tail...))
+		stream := append([]byte(nil), tail...)
+		res.recordRetained(stream)
+		res.Streams = append(res.Streams, stream)
 	}
 }
 
