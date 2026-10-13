@@ -187,9 +187,10 @@ func TestP16eCompleteOLEParity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			entries := append([]cfbEntry{{name: "Root Entry", mse: 5}}, tc.entries...)
 			o := parseP16bOLE(t, buildCFB(t, entries))
-			var r Result
-			tc.emit(o, &r)
-			finalizeStreams(&r, len(r.Streams))
+			r, b := p16bResult()
+			tc.emit(o, r)
+			finalizeStreams(r, len(r.Streams))
+			assertP16eClosure(t, r, b)
 			encoded, err := json.Marshal(r)
 			if err != nil {
 				t.Fatal(err)
