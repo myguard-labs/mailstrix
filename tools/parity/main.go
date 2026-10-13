@@ -196,7 +196,7 @@ func newParityScanner(cfg *mailstrix.Config) (*mailstrix.Scanner, *atomic.Bool, 
 		// Unknown diagnostics fail closed, including skipped/rejected files.
 		switch format {
 		case "loaded %d YARA rules from %s (fp=%s, deny-disabled=%d)",
-			"PERF-18: marker bundle built: %d rules disabled, %d marker rules active; %d pre-disabled by denylist":
+			"PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): %d":
 			return
 		default:
 			diagnostic.Store(true)

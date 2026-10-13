@@ -16,6 +16,23 @@ func TestNormalizeHTTPURLRejectsEmptyHostname(t *testing.T) {
 	}
 }
 
+func TestNormalizeHTTPURLPorts(t *testing.T) {
+	for _, tc := range []struct {
+		raw, wantNorm, wantHost, wantIP string
+	}{
+		{"http://Example.com:8080/a", "http://example.com:8080/a", "example.com", ""},
+		{"https://Example.com:8443/a", "https://example.com:8443/a", "example.com", ""},
+		{"http://1.2.3.4:80/a", "http://1.2.3.4/a", "1.2.3.4", "1.2.3.4"},
+		{"https://Example.com.:443/a", "https://example.com/a", "example.com", ""},
+		{"http://example.com:bad/a", "", "", ""},
+	} {
+		norm, host, ip := urlcand.NormalizeHTTPURL(tc.raw)
+		if norm != tc.wantNorm || host != tc.wantHost || ip != tc.wantIP {
+			t.Errorf("NormalizeHTTPURL(%q) = (%q, %q, %q), want (%q, %q, %q)", tc.raw, norm, host, ip, tc.wantNorm, tc.wantHost, tc.wantIP)
+		}
+	}
+}
+
 func TestExtractRawBeforeDeobf(t *testing.T) {
 	// Buffer contains both a plain URL and a defanged one.
 	data := []byte("see http://plain.example/a and hxxp://obfuscated[.]example/b")

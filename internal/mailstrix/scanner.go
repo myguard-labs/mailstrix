@@ -932,7 +932,7 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	// Adopt before operator callbacks: a callback panic rolls back the fresh
 	// marker allocation along with the other prepared candidates.
 	if markerRules != nil {
-		s.logf("PERF-18: marker artifact loaded: %d rules (deny policy applied)", len(markerRules.GetRules()))
+		s.logf("PERF-18: marker artifact loaded: %d total rules in separate compiled object (main ruleset: %d rules; deny policy applied)", len(markerRules.GetRules()), len(list))
 	}
 
 	// Hash the effective bundles, including retained auxiliaries after a failed
@@ -1295,10 +1295,11 @@ func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 }
 
 // buildMarkerBundle compiles the same ruleset as the main set (from srcFile or
-// srcDir) and disables every rule that is NOT tagged "marker", producing a tiny
-// bundle used by PERF-18 to scan the out-of-band Markers channel cheaply. The
-// main *yara.Rules and the bundle are separate C objects (separate compilations),
-// so Disable calls on one do not affect the other.
+// srcDir) and disables every rule that is NOT tagged "marker". The resulting
+// bundle still contains the full rule allocation; only its enabled rule set is
+// narrowed for PERF-18 marker-channel scans. The main *yara.Rules and the bundle
+// are separate C objects (separate compilations), so Disable calls on one do not
+// affect the other.
 //
 // Completeness argument: filterMarkerChannel keeps ONLY marker-tagged hits from
 // the Markers channel. Therefore the only rules that contribute matches on that
@@ -1373,8 +1374,8 @@ func disableNonMarkerRules(bundle *yara.Rules, deny map[string]struct{}, logf fu
 	// post-match authority; this only avoids unnecessary C scanning work.
 	// Global/private rules are intentionally skipped (dependency hazard).
 	mbDisabled := disableDeniedRules(bundle, deny)
-	logf("PERF-18: marker bundle built: %d rules disabled, %d marker rules active; %d pre-disabled by denylist",
-		disabled, total-disabled, mbDisabled)
+	logf("PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): %d",
+		total, disabled, total-disabled, mbDisabled)
 }
 
 var validateRuleFile = fileCompiles

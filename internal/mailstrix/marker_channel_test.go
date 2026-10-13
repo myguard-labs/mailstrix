@@ -154,6 +154,52 @@ func scanOneRules(t *testing.T, rules *yara.Rules, buf []byte) []Match {
 	return m
 }
 
+func TestP13MarkerBundleLogArguments(t *testing.T) {
+	dir := writeRules(t, perf18Rules)
+	wantFormat := "PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): %d"
+	for _, tc := range []struct {
+		name, wantArgs, wantLog string
+		deny                    map[string]struct{}
+	}{
+		{
+			name:     "marker-only",
+			deny:     map[string]struct{}{"marker_deepdecode": {}},
+			wantArgs: "[3 1 2 1]",
+			wantLog:  "PERF-18: marker bundle built: 3 total rules in separate compiled object; 1 non-marker rules disabled, 2 marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): 1",
+		},
+		{
+			name:     "marker-and-already-disabled-plain",
+			deny:     map[string]struct{}{"marker_deepdecode": {}, "control_content": {}},
+			wantArgs: "[3 1 2 2]",
+			wantLog:  "PERF-18: marker bundle built: 3 total rules in separate compiled object; 1 non-marker rules disabled, 2 marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): 2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotFormat string
+			var gotArgs []any
+			bundle, err := buildMarkerBundle("", dir, tc.deny, func(format string, args ...any) {
+				if strings.HasPrefix(format, "PERF-18: marker bundle built:") {
+					gotFormat = format
+					gotArgs = append([]any(nil), args...)
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer bundle.Destroy()
+			if gotFormat != wantFormat {
+				t.Fatalf("marker bundle log format = %q, want %q", gotFormat, wantFormat)
+			}
+			if got := fmt.Sprint(gotArgs); got != tc.wantArgs {
+				t.Fatalf("marker bundle log arguments = %s, want %s", got, tc.wantArgs)
+			}
+			if got := fmt.Sprintf(gotFormat, gotArgs...); got != tc.wantLog {
+				t.Fatalf("marker bundle log = %q, want %q", got, tc.wantLog)
+			}
+		})
+	}
+}
+
 // TestBuildMarkerBundle_DisablesNonMarker verifies that buildMarkerBundle
 // disables all non-marker-tagged rules while keeping marker-tagged ones active.
 func TestBuildMarkerBundle_DisablesNonMarker(t *testing.T) {
