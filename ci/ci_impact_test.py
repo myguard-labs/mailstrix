@@ -407,9 +407,10 @@ class ImpactTests(unittest.TestCase):
             impact.plan([path])
         self.assertEqual(impact.plan([path]), result)
 
-        pattern = "ci/extraction-budget/*"
+        pattern = "ci/extraction-budget/*_test.go"
         for path in (
             "ci/extraction-budget/p16a_test.go",
+            "ci/extraction-budget/p16b_test.go",
             "ci/extraction-budget/future_boundary_test.go",
         ):
             with self.subTest(path=path):
@@ -430,6 +431,9 @@ class ImpactTests(unittest.TestCase):
                     impact.plan([path])
 
         for unrelated in (
+            "ci/extraction-budget/helper.py",
+            "ci/extraction-budget/fixture.json",
+            "ci/extraction-budget/helper.go",
             "ci/extraction-budgetary/p16a_test.go",
             "ci/extraction-budget_test.go",
             "ci/unmapped_test.go",

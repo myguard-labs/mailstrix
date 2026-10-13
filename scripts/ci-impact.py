@@ -217,7 +217,7 @@ GO_INPUTS = [
     "ci/marker_runtime_test.go",
     "ci/testdata/marker-runtime.zip",
     "ci/extraction_memory_test.go",
-    "ci/extraction-budget/*",
+    "ci/extraction-budget/*_test.go",
     "ci/rule_generations_test.go",
     "ci/p7_main_retirement_test.go",
     "ci/memory_metrics_test.go",

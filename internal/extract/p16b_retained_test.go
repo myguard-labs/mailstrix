@@ -43,6 +43,9 @@ func assertP16bAccounting(t *testing.T, res *Result, ledger *retainedBudget) {
 	for _, stream := range res.Streams {
 		want += uint64(len(stream))
 	}
+	if want == 0 {
+		t.Fatal("positive carrier fixture emitted no streams")
+	}
 	if got := ledger.snapshot().Bytes(); got != want {
 		t.Fatalf("source-bound retained bytes=%d want emitted stream bytes=%d", got, want)
 	}
