@@ -152,7 +152,9 @@ func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *arch
 	complete = complete && completeAncestor
 	attachment := isMIMEAttachment(h)
 	admitted := len(data) >= minMemberBytes && len(data) <= maxTotalArchive-b.total
+	var admission retainedToken
 	if attachment && complete && admitted {
+		admission, _ = res.recordRetained(data)
 		res.MIMEAttachments = append(res.MIMEAttachments, data)
 	}
 	if len(data) == 0 {
@@ -173,7 +175,7 @@ func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *arch
 		walkMIMEMessage(data, res, b, depth+1, deadline, parts, complete)
 		return
 	}
-	emitMIMEPart(data, res, b, depth, deadline)
+	emitMIMEPart(data, res, b, depth, deadline, admission)
 }
 
 // isMIMEAttachment requires explicit, successfully parsed file metadata.
@@ -240,9 +242,12 @@ func (f *base64Filter) Read(p []byte) (int, error) {
 
 // emitMIMEPart appends one decoded part and dispatches it like an archive
 // member, but without flagging the input as an archive.
-func emitMIMEPart(data []byte, res *Result, b *archiveBudget, depth int, deadline time.Time) {
+func emitMIMEPart(data []byte, res *Result, b *archiveBudget, depth int, deadline time.Time, admission retainedToken) {
 	if len(data) < minMemberBytes || b.spent() || len(res.Streams) >= maxStreams {
 		return
+	}
+	if res.childOpts == nil || !res.childOpts.retained.owns(admission) {
+		res.recordRetained(data)
 	}
 	b.members++
 	b.total += len(data)
