@@ -431,16 +431,22 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 	// reHTMLDownloadAttr is now (?i) so it runs against the original head.
 	hasDownload := reHTMLDownloadAttr.Match(head) || bytes.Contains(head, []byte(".click("))
 	if hasBlobAPI && hasDownload && len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, []byte("HTML-SMUGGLING-BLOB"))
+		stream := []byte("HTML-SMUGGLING-BLOB")
+		res.recordRetained(stream)
+		res.Streams = append(res.Streams, stream)
 	}
 
 	// Signal 4: javascript:/vbscript: URI in a navigational attribute.
 	plainURI, obfURI := scanScriptURIAttr(head, deadline)
 	if plainURI && len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, []byte("HTML-SCRIPT-URI"))
+		stream := []byte("HTML-SCRIPT-URI")
+		res.recordRetained(stream)
+		res.Streams = append(res.Streams, stream)
 	}
 	if obfURI && len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, []byte("HTML-SCRIPT-URI-OBFUSCATED"))
+		stream := []byte("HTML-SCRIPT-URI-OBFUSCATED")
+		res.recordRetained(stream)
+		res.Streams = append(res.Streams, stream)
 	}
 
 	// Signal 3: scripted SVG. Only when an <svg> root is present AND it carries
@@ -451,7 +457,9 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 			asciiContainsFold(head, []byte("onload=")) ||
 			asciiContainsFold(head, []byte("<foreignobject")) {
 			if len(res.Streams) < maxStreams {
-				res.Streams = append(res.Streams, []byte("SVG-SCRIPT"))
+				stream := []byte("SVG-SCRIPT")
+				res.recordRetained(stream)
+				res.Streams = append(res.Streams, stream)
 			}
 		}
 		// SVG-deepen: carve base64 payloads embedded in <image href|xlink:href=
@@ -472,11 +480,14 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 				continue
 			}
 			if svgCarved == 0 && len(res.Streams) < maxStreams {
-				res.Streams = append(res.Streams, []byte("SVG-EMBEDDED-PAYLOAD"))
+				stream := []byte("SVG-EMBEDDED-PAYLOAD")
+				res.recordRetained(stream)
+				res.Streams = append(res.Streams, stream)
 			}
 			svgCarved++
 			extractChild(dec, res, b, depth+1, deadline)
 			if len(res.Streams) < maxStreams {
+				res.recordRetained(dec)
 				res.Streams = append(res.Streams, dec)
 			}
 		}
@@ -514,7 +525,9 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 			continue
 		}
 		if carved == 0 && len(res.Streams) < maxStreams {
-			res.Streams = append(res.Streams, []byte(dataURIMarker))
+			stream := []byte(dataURIMarker)
+			res.recordRetained(stream)
+			res.Streams = append(res.Streams, stream)
 		}
 		carved++
 		// If the decoded bytes carry a container magic, route them through the
@@ -524,6 +537,7 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 			extractChild(dec, res, b, depth+1, deadline)
 		}
 		if len(res.Streams) < maxStreams {
+			res.recordRetained(dec)
 			res.Streams = append(res.Streams, dec)
 		}
 	}

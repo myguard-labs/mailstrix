@@ -90,13 +90,15 @@ func fromSLK(buf []byte, res *Result, deadline time.Time) {
 		// DDE command form: =cmd|'/c calc'!A1 — surface a marker regardless of
 		// whether the constant-folder recognises it as an XLM call.
 		if isSLKDDE(formula) {
-			res.Streams = append(res.Streams, []byte("SLK-DDE "+formula))
+			stream := []byte("SLK-DDE " + formula)
+			res.recordRetained(stream)
+			res.Streams = append(res.Streams, stream)
 		}
 		folded := foldXLMFormulaDepth(formula, 0, deadline)
 		if folded == "" {
 			folded = formula // emit the raw formula so keyword/URL rules still see it
 		}
-		if !emitFoldedFormula(folded, &res.Streams, &totalOutput, true) {
+		if !emitFoldedFormula(folded, &res.Streams, &totalOutput, true, res) {
 			break // per-document output cap reached
 		}
 	}

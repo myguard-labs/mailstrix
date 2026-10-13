@@ -192,6 +192,7 @@ func fromEncodedScript(buf []byte, res *Result, deadline time.Time) {
 		}
 		clear := decodeScript(body[:end])
 		if len(clear) > 0 {
+			res.recordRetained(clear)
 			res.Streams = append(res.Streams, clear)
 			res.EncodedScript = true
 			emitted++

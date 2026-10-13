@@ -724,6 +724,7 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 		if u16Blobs >= maxDecodedBlobs || u16Cum+len(u8) > maxCumulativeDecoded {
 			break
 		}
+		res.recordRetained(u8)
 		res.Streams = append(res.Streams, u8)
 		sources = append(sources, u8)
 		u16Blobs++
@@ -781,6 +782,7 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 				// so the defang path can't bypass maxDecodedBlobs/maxCumulativeDecoded.
 				if defangBlobs < maxDecodedBlobs && defangCum+len(ud) <= maxCumulativeDecoded &&
 					len(res.Streams) < maxStreams {
+					res.recordRetained(ud)
 					res.Streams = append(res.Streams, ud)
 					defangBlobs++
 					defangCum += len(ud)
@@ -908,6 +910,7 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 			if st.blobs >= maxDecodedBlobs || len(res.Streams) >= maxStreams || st.cum+len(b) > maxCumulativeDecoded {
 				return false
 			}
+			res.recordRetained(b)
 			res.Streams = append(res.Streams, b)
 			curChildren = append(curChildren, b)
 			st.seen.add(h, b)
@@ -949,7 +952,9 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 			break
 		}
 		if states[i].maxLayer >= deepDecodeLayer {
-			res.Streams = append(res.Streams, []byte("MSD-DEEPDECODE depth="+strconv.Itoa(states[i].maxLayer)))
+			stream := []byte("MSD-DEEPDECODE depth=" + strconv.Itoa(states[i].maxLayer))
+			res.recordRetained(stream)
+			res.Streams = append(res.Streams, stream)
 			total++
 		}
 	}
@@ -1033,6 +1038,7 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 		if blobs >= maxDecodedBlobs || len(res.Streams) >= maxStreams || cum+len(b) > maxCumulativeDecoded {
 			return false // budget hit — NOT recorded as seen, so a later distinct blob isn't masked
 		}
+		res.recordRetained(b)
 		res.Streams = append(res.Streams, b)
 		children = append(children, b)
 		seen.add(h, b) // record only accepted blobs
@@ -1101,7 +1107,9 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 	// bypasses dedup/re-enqueue) but still honours maxStreams, and is counted in
 	// the returned blob total so the caller's DecodedStreams metric stays exact.
 	if maxLayer >= deepDecodeLayer && len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, []byte("MSD-DEEPDECODE depth="+strconv.Itoa(maxLayer)))
+		stream := []byte("MSD-DEEPDECODE depth=" + strconv.Itoa(maxLayer))
+		res.recordRetained(stream)
+		res.Streams = append(res.Streams, stream)
 		blobs++
 	}
 	return blobs
