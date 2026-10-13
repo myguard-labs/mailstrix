@@ -54,6 +54,10 @@ const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmpl
 type Options struct {
 	Deadline time.Time // zero == no wall-clock limit (mirrors the old deadline arg)
 
+	// retained is request-owned accounting state. ExtractWithOptions always
+	// replaces it on a request-local Options copy; nested copies preserve it.
+	retained *retainedBudget
+
 	// DecodeDepth caps the MSD multi-layer static-decode recursion (decodeSourceTree).
 	// DecodeIterations caps worklist dequeues per source stream. Both are floored
 	// to 1 at the read-site. Effort scales these: a low level unwraps fewer layers.
@@ -371,6 +375,10 @@ type Result struct {
 	// hit as an incomplete scan, so a capped walk is never cached as clean.
 	CapHits []string
 
+	// Retained is a read-only snapshot of this request's logical retained-output
+	// accounting. P16 records only; it never refuses or rewrites output.
+	Retained RetainedAccounting
+
 	// childOpts carries the request's effort Options down the nested-carrier walk
 	// (extractChild) so a nested PDF honors the same PDFDeepen / DecodeDepth /
 	// DecodeIterations caps as a top-level one. nil => FullOptions (top-level
@@ -421,6 +429,9 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 	if opts == nil {
 		opts = FullOptions(time.Time{})
 	}
+	requestOpts := *opts
+	requestOpts.retained = &retainedBudget{}
+	opts = &requestOpts
 	deadline := opts.Deadline
 	res.childOpts = opts
 	// oleparse walks attacker-controlled binary offsets; a malformed document can
@@ -441,6 +452,7 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 				finalizeStreams(&res, preDecodeLen)
 			}()
 		}
+		res.Retained = opts.retained.snapshot()
 	}()
 
 	// One shared nested-carrier budget for the whole input: archive members,

@@ -21,6 +21,8 @@
 !ci
 ci/**
 !ci/*_test.go
+!ci/extraction-budget
+!ci/extraction-budget/**
 !ci/generate_rules_count_test.sh
 !ci/go_coverage.sh
 !ci/rules_polling_test.sh
