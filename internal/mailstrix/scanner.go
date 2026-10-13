@@ -1374,7 +1374,7 @@ func disableNonMarkerRules(bundle *yara.Rules, deny map[string]struct{}, logf fu
 	// post-match authority; this only avoids unnecessary C scanning work.
 	// Global/private rules are intentionally skipped (dependency hazard).
 	mbDisabled := disableDeniedRules(bundle, deny)
-	logf("PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; eligible rules pre-disabled by denylist: %d",
+	logf("PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): %d",
 		total, disabled, total-disabled, mbDisabled)
 }
 
