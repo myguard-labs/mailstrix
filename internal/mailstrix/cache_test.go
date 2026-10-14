@@ -1,10 +1,14 @@
 package mailstrix
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +21,19 @@ func newLRU(t *testing.T, ttl time.Duration, size int) Cache {
 	cfg := &Config{CacheTTL: ttl, CacheSize: size}
 	cfg.sanitize()
 	return NewCache(cfg, func(string, ...any) {})
+}
+
+func newLRUBytes(t *testing.T, ttl time.Duration, size int, maxBytes uint64) *lruCache {
+	t.Helper()
+	if maxBytes > uint64(math.MaxInt64) {
+		t.Fatalf("test byte budget %d exceeds int64", maxBytes)
+	}
+	c := NewCache(&Config{CacheTTL: ttl, CacheSize: size, CacheMaxBytes: int64(maxBytes)}, func(string, ...any) {}) // #nosec G115 -- range checked above.
+	lru, ok := c.(*lruCache)
+	if !ok {
+		t.Fatalf("NewCache returned %T, want *lruCache", c)
+	}
+	return lru
 }
 
 func TestRedisBreaker(t *testing.T) {
@@ -121,6 +138,247 @@ func TestCacheConcurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait() // -race catches data races here
+}
+
+func TestCacheByteEvictionBeforeCount(t *testing.T) {
+	matches := []Match{{
+		Rule:      strings.Repeat("rule", 64),
+		Namespace: "fat-ruleset",
+		Tags:      []string{"malware", "document"},
+		Meta:      map[string]string{"description": strings.Repeat("x", 128)},
+	}}
+	one := cacheEntryRetainedBytes("a", matches)
+	c := newLRUBytes(t, time.Minute, 10, one*2-1)
+	c.Put("a", matches)
+	c.Put("b", matches)
+	if _, ok := c.Get("a"); ok {
+		t.Fatal("byte budget retained the least-recently-used fat entry")
+	}
+	if got, ok := c.Get("b"); !ok || !reflect.DeepEqual(got, matches) {
+		t.Fatalf("new complete entry missing or changed: ok=%v got=%+v", ok, got)
+	}
+	if c.ll.Len() >= c.max {
+		t.Fatalf("byte eviction did not occur before count limit: len=%d max=%d", c.ll.Len(), c.max)
+	}
+	if c.Bytes() > c.maxBytes || c.Evictions() != 1 || c.ByteEvictions() != 1 || c.CountEvictions() != 0 {
+		t.Fatalf("byte eviction stats bytes=%d/%d total=%d byte=%d count=%d", c.Bytes(), c.maxBytes, c.Evictions(), c.ByteEvictions(), c.CountEvictions())
+	}
+}
+
+func TestCacheSimultaneousLimitsUseByteCause(t *testing.T) {
+	matches := []Match{{Rule: strings.Repeat("x", 32)}}
+	one := cacheEntryRetainedBytes("a", matches)
+	c := newLRUBytes(t, time.Minute, 1, one*2-1)
+	c.Put("a", matches)
+	c.Put("b", matches)
+	if c.Evictions() != 1 || c.ByteEvictions() != 1 || c.CountEvictions() != 0 {
+		t.Fatalf("simultaneous breach cause total=%d byte=%d count=%d", c.Evictions(), c.ByteEvictions(), c.CountEvictions())
+	}
+}
+
+func TestCacheReplacementGrowthShrinkAccounting(t *testing.T) {
+	small := []Match{{Rule: "s"}}
+	large := []Match{{Rule: strings.Repeat("L", 512), Meta: map[string]string{"detail": strings.Repeat("m", 256)}}}
+	smallSize := cacheEntryRetainedBytes("a", small)
+	largeSize := cacheEntryRetainedBytes("a", large)
+	c := newLRUBytes(t, time.Minute, 10, largeSize+smallSize-1)
+	c.Put("a", small)
+	c.Put("b", small)
+	c.Put("a", large)
+	if _, ok := c.Get("b"); ok {
+		t.Fatal("replacement growth should evict the LRU entry to satisfy bytes")
+	}
+	if got := c.Bytes(); got != largeSize {
+		t.Fatalf("bytes after growth=%d want=%d", got, largeSize)
+	}
+	c.Put("a", small)
+	if got := c.Bytes(); got != smallSize {
+		t.Fatalf("bytes after shrink=%d want=%d", got, smallSize)
+	}
+}
+
+func TestCacheRemovalAccounting(t *testing.T) {
+	t.Run("expiry", func(t *testing.T) {
+		c := newLRUBytes(t, time.Nanosecond, 10, 1<<20)
+		c.Put("k", []Match{{Rule: "R"}})
+		time.Sleep(time.Millisecond)
+		if _, ok := c.Get("k"); ok {
+			t.Fatal("expired entry hit")
+		}
+		if c.Bytes() != 0 || c.Evictions() != 0 {
+			t.Fatalf("expiry accounting bytes=%d evictions=%d", c.Bytes(), c.Evictions())
+		}
+	})
+	t.Run("flush", func(t *testing.T) {
+		c := newLRUBytes(t, time.Minute, 10, 1<<20)
+		c.Put("k", []Match{{Rule: "R"}})
+		c.Flush()
+		if c.Bytes() != 0 || c.ll.Len() != 0 || len(c.items) != 0 {
+			t.Fatalf("flush accounting bytes=%d list=%d items=%d", c.Bytes(), c.ll.Len(), len(c.items))
+		}
+	})
+}
+
+func TestCacheOversizedEntryDoesNotEvictUnrelated(t *testing.T) {
+	keep := []Match{{Rule: "keep"}}
+	limit := cacheEntryRetainedBytes("keep", keep)
+	c := newLRUBytes(t, time.Minute, 10, limit)
+	c.Put("keep", keep)
+	c.Put("huge", []Match{{Rule: strings.Repeat("x", 4096)}})
+	if _, ok := c.Get("keep"); !ok {
+		t.Fatal("oversized insertion evicted unrelated entry")
+	}
+	if _, ok := c.Get("huge"); ok {
+		t.Fatal("oversized entry was retained")
+	}
+	if c.Evictions() != 0 {
+		t.Fatalf("unretained new oversized entry counted as eviction: %d", c.Evictions())
+	}
+
+	c.Put("keep", []Match{{Rule: strings.Repeat("y", 4096)}})
+	if _, ok := c.Get("keep"); ok {
+		t.Fatal("oversized replacement left stale value cached")
+	}
+	if c.Bytes() != 0 || c.ByteEvictions() != 1 || c.Evictions() != 1 {
+		t.Fatalf("oversized replacement bytes=%d total=%d byte=%d", c.Bytes(), c.Evictions(), c.ByteEvictions())
+	}
+}
+
+func TestCacheEntryAccountingIncludesCapacityTails(t *testing.T) {
+	backing := []Match{
+		{Rule: "visible", Tags: []string{"visible"}},
+		{Rule: strings.Repeat("tail", 20), Tags: []string{"tail"}, Meta: map[string]string{"tail-key": "tail-value"}},
+	}
+	matches := backing[:1] // #nosec G602 -- literal backing has two elements.
+	withTail := cacheEntryRetainedBytes("k", matches)
+	withoutTail := cacheEntryRetainedBytes("k", append([]Match(nil), matches...))
+	if withTail <= withoutTail {
+		t.Fatalf("capacity-tail retention not charged: with=%d without=%d", withTail, withoutTail)
+	}
+	if got := saturatingAdd(^uint64(0)-1, 2); got != ^uint64(0) {
+		t.Fatalf("saturatingAdd overflow=%d", got)
+	}
+}
+
+func TestCacheEntryAccountingIncludesMetaPayloadBytes(t *testing.T) {
+	const (
+		keyGrowth   = 128
+		valueGrowth = 4096
+	)
+	makeMatches := func(keyBytes, valueBytes int) []Match {
+		return []Match{{
+			Rule:      "same-rule",
+			Namespace: "same-namespace",
+			Tags:      []string{"same-tag"},
+			Meta: map[string]string{
+				strings.Repeat("k", keyBytes): strings.Repeat("v", valueBytes),
+			},
+		}}
+	}
+	base := makeMatches(1, 1)
+	for _, tc := range []struct {
+		name       string
+		matches    []Match
+		wantGrowth uint64
+	}{
+		{name: "key", matches: makeMatches(1+keyGrowth, 1), wantGrowth: keyGrowth},
+		{name: "value", matches: makeMatches(1, 1+valueGrowth), wantGrowth: valueGrowth},
+		{name: "key and value", matches: makeMatches(1+keyGrowth, 1+valueGrowth), wantGrowth: keyGrowth + valueGrowth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.matches) != len(base) || cap(tc.matches) != cap(base) ||
+				len(tc.matches[0].Tags) != len(base[0].Tags) || cap(tc.matches[0].Tags) != cap(base[0].Tags) ||
+				len(tc.matches[0].Meta) != len(base[0].Meta) {
+				t.Fatal("metadata payload fixture changed retained container shape")
+			}
+			baseBytes := cacheEntryRetainedBytes("same-key", base)
+			gotBytes := cacheEntryRetainedBytes("same-key", tc.matches)
+			if gotBytes < baseBytes || gotBytes-baseBytes != tc.wantGrowth {
+				t.Fatalf("metadata payload growth=%d want=%d (base=%d grown=%d)", gotBytes-baseBytes, tc.wantGrowth, baseBytes, gotBytes)
+			}
+		})
+	}
+}
+
+func TestCacheAccountingBoundaryBranches(t *testing.T) {
+	if got := saturatingMul(^uint64(0), 2); got != ^uint64(0) {
+		t.Fatalf("saturatingMul overflow=%d", got)
+	}
+	if got := saturatingMul(0, ^uint64(0)); got != 0 {
+		t.Fatalf("saturatingMul zero=%d", got)
+	}
+	if nilSize, emptySize := cacheEntryRetainedBytes("k", nil), cacheEntryRetainedBytes("k", []Match{}); nilSize != emptySize {
+		t.Fatalf("nil/empty match accounting differs: nil=%d empty=%d", nilSize, emptySize)
+	}
+	nilMeta := cacheEntryRetainedBytes("k", []Match{{Rule: "r"}})
+	emptyMeta := cacheEntryRetainedBytes("k", []Match{{Rule: "r", Meta: map[string]string{}}})
+	if emptyMeta <= nilMeta {
+		t.Fatalf("allocated empty Meta map not charged: nil=%d empty=%d", nilMeta, emptyMeta)
+	}
+	meta := make(map[string]string, 8)
+	for i := 0; i < 8; i++ {
+		meta[fmt.Sprintf("k%d", i)] = fmt.Sprintf("v%d", i)
+	}
+	if multi := cacheEntryRetainedBytes("k", []Match{{Meta: meta}}); multi <= emptyMeta+metaBucketBytes {
+		t.Fatalf("multi-bucket Meta accounting too small: multi=%d empty=%d bucket=%d", multi, emptyMeta, metaBucketBytes)
+	}
+
+	t.Run("invalid list value", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("non-entry list value did not panic")
+			}
+		}()
+		cacheEntryFromElement(list.New().PushBack("not-an-entry"))
+	})
+	t.Run("defensive byte floor", func(t *testing.T) {
+		c := newLRUBytes(t, time.Minute, 10, 1<<20)
+		c.Put("replace", []Match{{Rule: "old"}})
+		c.bytes = 0 // simulate corrupted accounting; replacement must recover
+		c.Put("replace", []Match{{Rule: "new"}})
+		want := cacheEntryRetainedBytes("replace", []Match{{Rule: "new"}})
+		if c.Bytes() != want {
+			t.Fatalf("replacement recovery bytes=%d want=%d", c.Bytes(), want)
+		}
+		c.bytes = 0 // removal must also floor rather than underflow
+		c.mu.Lock()
+		c.removeElement(c.ll.Front())
+		c.removeElement(nil)
+		c.mu.Unlock()
+		if c.Bytes() != 0 {
+			t.Fatalf("removal recovery bytes=%d", c.Bytes())
+		}
+	})
+}
+
+func TestCacheCompleteValueParity(t *testing.T) {
+	want := []Match{{Rule: "A", Namespace: "full.yar", Tags: []string{"tag-a", "tag-b"}, Meta: map[string]string{"author": "test", "score": "9"}}, {Rule: "B"}}
+	c := newLRUBytes(t, time.Minute, 10, 1<<20)
+	c.Put("k", want)
+	got, ok := c.Get("k")
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("complete cache value changed: ok=%v got=%+v want=%+v", ok, got, want)
+	}
+}
+
+func TestNewCacheNormalizesInvalidDirectLimits(t *testing.T) {
+	for _, cfg := range []*Config{
+		{CacheTTL: time.Minute},
+		{CacheTTL: time.Minute, CacheSize: -1, CacheMaxBytes: -1},
+	} {
+		cache := NewCache(cfg, func(string, ...any) {})
+		c, ok := cache.(*lruCache)
+		if !ok {
+			t.Fatalf("NewCache returned %T, want *lruCache", cache)
+		}
+		if c.max != 65536 || c.maxBytes != uint64(defaultCacheMaxBytes) {
+			t.Fatalf("direct config limits max=%d bytes=%d", c.max, c.maxBytes)
+		}
+		c.Put("k", nil)
+		if _, ok := c.Get("k"); !ok {
+			t.Fatal("normalized direct config did not cache empty value")
+		}
+	}
 }
 
 func TestFlightCoalesces(t *testing.T) {

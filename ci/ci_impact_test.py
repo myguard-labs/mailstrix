@@ -174,6 +174,12 @@ class ImpactTests(unittest.TestCase):
             ("ci/rules_polling_config_test.go", ["go"], ["image", "parity"]),
             ("ci/config_auto_derive_test.go", ["go"], ["image", "parity"]),
             ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
+            ("ci/cache_distribution/main.go", ["go"], ["image", "parity", "postfix"]),
+            (
+                "ci/docker_context_selector_test.sh",
+                ["dockerignore", "shell"],
+                ["go", "image", "parity", "postfix"],
+            ),
             ("ci/go_coverage_test.py", ["go"], ["image", "parity", "postfix"]),
             ("ci/go_coverage.sh", ["go", "shell"], ["image", "parity", "postfix"]),
             ("ci/streamdedupkey_test.go", ["go"], ["image", "parity", "postfix"]),
@@ -424,6 +430,28 @@ class ImpactTests(unittest.TestCase):
         without_memory = [name for name in impact.GO_INPUTS if name != path]
         with (
             mock.patch.object(impact, "GO_INPUTS", without_memory),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+        self.assertEqual(impact.plan([path]), result)
+
+    def test_cache_byte_bound_native_go_consumer(self):
+        path = "ci/cache_byte_bound_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/cache_byte_bound_test.py"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+        without_path = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_path),
             self.assertRaisesRegex(ValueError, "unmapped changed path"),
         ):
             impact.plan([path])

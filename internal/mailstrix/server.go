@@ -243,9 +243,9 @@ func (s *Server) logStartup(addr string) {
 	if s.cfg.BigFileThreshold > 0 {
 		bigfile = strconv.FormatInt(s.cfg.BigFileThreshold, 10) + "B"
 	}
-	s.logf("listening on %s (rules=%d, timeout=%s, scan_timeout=%s, max_concurrent=%d, max_inflight=%d, max_body=%dB, bigfile_threshold=%s, cache=%s ttl=%s size=%d, effort=%s/%d, auth=%t)",
+	s.logf("listening on %s (rules=%d, timeout=%s, scan_timeout=%s, max_concurrent=%d, max_inflight=%d, max_body=%dB, bigfile_threshold=%s, cache=%s ttl=%s size=%d max_bytes=%d, effort=%s/%d, auth=%t)",
 		addr, s.engine.RuleCount(), s.cfg.BackendTimeout, s.cfg.ScanTimeout,
-		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, bigfile, cache, s.cfg.CacheTTL, s.cfg.CacheSize, effort, s.cfg.EffortMax, s.authRequired())
+		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, bigfile, cache, s.cfg.CacheTTL, s.cfg.CacheSize, s.cfg.CacheMaxBytes, effort, s.cfg.EffortMax, s.authRequired())
 
 	// Lower bound for peak memory: startup RSS plus request buffers bounded by
 	// the admission gate (MaxInflight). Extraction streams and ICAP pre-admission
@@ -897,6 +897,11 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("raw_scan_errs_total", "raw scans that failed (timeout/libyara error) and fell through to extraction instead of aborting the request", s.engine.RawScanErrs())
 	if lru, ok := s.cache.(*lruCache); ok {
 		fm("cache_evictions_total", "L1 LRU evictions (capacity-driven; not TTL expiry)", lru.Evictions())
+		b.WriteString("# HELP mailstrix_cache_limit_evictions_total L1 LRU evictions by limit that triggered them: cause=byte_limit (retained-byte limit) or cause=count_limit (entry-count limit)\n")
+		b.WriteString("# TYPE mailstrix_cache_limit_evictions_total counter\n")
+		b.WriteString("mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"} " + strconv.FormatUint(lru.ByteEvictions(), 10) + "\n")
+		b.WriteString("mailstrix_cache_limit_evictions_total{cause=\"count_limit\"} " + strconv.FormatUint(lru.CountEvictions(), 10) + "\n")
+		fg("cache_bytes", "estimated retained bytes in the L1 verdict cache", lru.Bytes())
 	}
 	b.WriteString("# HELP mailstrix_rules loaded YARA rule count\n")
 	b.WriteString("# TYPE mailstrix_rules gauge\n")

@@ -205,11 +205,14 @@ RULES = {
     "dockerignore": [
         ".dockerignore",
         "*Dockerfile*",
+        "ci/docker_context_selector_test.sh",
         "packaging/deb/dockerignore_test.sh",
         "packaging/deb/dockerignore_collision_test.sh",
     ],
 }
 GO_INPUTS = [
+    "ci/cache_distribution/*.go",
+    "ci/cache_byte_bound_test.go",
     "ci/marker_runtime_fixture.py",
     "ci/prepare_marker_runtime.py",
     "ci/ci_marker_runtime_fixture_test.py",

@@ -28,6 +28,8 @@ import (
 // polling and the standalone fetch command.
 const DefaultRulesURL = "https://github.com/myguard-labs/mailstrix/releases/download/rules-current"
 
+const defaultCacheMaxBytes int64 = 256 << 20
+
 // Config is yarad's runtime configuration, populated from the environment by
 // LoadConfig. Field comments name the env var each value comes from. The
 // env-helper style mirrors gozer so the two backends configure identically.
@@ -125,10 +127,11 @@ type Config struct {
 	// one body to N recipients, MTA retries), so caching SHA256(body) -> matches
 	// turns most scans into a microsecond lookup. The in-process LRU is always
 	// on; RedisURL adds a shared layer across replicas (empty => LRU only).
-	CacheTTL    time.Duration // MAILSTRIX_CACHE_TTL    (default 3600s; 0 disables caching)
-	CacheSize   int           // MAILSTRIX_CACHE_SIZE   (default 65536 in-memory entries)
-	RedisURL    string        // MAILSTRIX_REDIS_URL    (empty -> in-process LRU only)
-	RedisPrefix string        // MAILSTRIX_REDIS_PREFIX (default yara:scan:)
+	CacheTTL      time.Duration // MAILSTRIX_CACHE_TTL    (default 3600s; 0 disables caching)
+	CacheSize     int           // MAILSTRIX_CACHE_SIZE   (default 65536 in-memory entries)
+	CacheMaxBytes int64         // MAILSTRIX_CACHE_MAX_BYTES (default 256 MiB estimated retained L1 bytes)
+	RedisURL      string        // MAILSTRIX_REDIS_URL    (empty -> in-process LRU only)
+	RedisPrefix   string        // MAILSTRIX_REDIS_PREFIX (default yara:scan:)
 	// RedisMACKey (MAILSTRIX_REDIS_MAC_KEY[_FILE]) enables an HMAC-SHA256 over
 	// every Redis L2 value; a missing or bad MAC is a cache miss. Empty = off.
 	RedisMACKey string
@@ -271,6 +274,7 @@ func LoadConfig() *Config {
 		BigFileRules:          strings.TrimSpace(os.Getenv("MAILSTRIX_BIGFILE_RULES")),
 		CacheTTL:              envDur("MAILSTRIX_CACHE_TTL", 3600),
 		CacheSize:             envInt("MAILSTRIX_CACHE_SIZE", 65536),
+		CacheMaxBytes:         envInt64("MAILSTRIX_CACHE_MAX_BYTES", defaultCacheMaxBytes),
 		RedisURL:              strings.TrimSpace(os.Getenv("MAILSTRIX_REDIS_URL")),
 		RedisPrefix:           envStr("MAILSTRIX_REDIS_PREFIX", "yara:scan:"),
 		RedisMACKey:           envOrFile("MAILSTRIX_REDIS_MAC_KEY"),
@@ -412,6 +416,9 @@ func (c *Config) sanitize() {
 	}
 	if c.CacheSize < 1 {
 		c.CacheSize = 65536
+	}
+	if c.CacheMaxBytes < 1 {
+		c.CacheMaxBytes = defaultCacheMaxBytes
 	}
 	if c.CacheTTL < 0 {
 		c.CacheTTL = 0 // negative is nonsensical; 0 disables the cache
