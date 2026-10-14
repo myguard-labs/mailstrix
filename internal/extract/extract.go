@@ -37,7 +37,12 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16+mimeidentity+xxh3key"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16+mimeidentity+retainedlimit+xxh3key"
+
+// DefaultRetainedBytesLimit is the calibrated per-extraction logical-output
+// ceiling. P17a propagates and identities the policy; enforcement is added by
+// the later budget packet.
+const DefaultRetainedBytesLimit int64 = 2621440
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
 // budget. It is resolved once per scan from the effort level and threaded to the
@@ -53,6 +58,10 @@ const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmpl
 // behaviour rather than an unbounded or zero-depth walk.
 type Options struct {
 	Deadline time.Time // zero == no wall-clock limit (mirrors the old deadline arg)
+	// RetainedBytesLimit caps logical retained extraction output for one request.
+	// Zero and negative values select DefaultRetainedBytesLimit. ExtractWithOptions
+	// normalizes this on a request-local copy and never mutates the caller's value.
+	RetainedBytesLimit int64
 
 	// retained is request-owned accounting state. ExtractWithOptions always
 	// replaces it on a request-local Options copy; nested copies preserve it.
@@ -95,12 +104,13 @@ type Options struct {
 // effort scaling. Values mirror the extract package's own ceilings.
 func FullOptions(deadline time.Time) *Options {
 	return &Options{
-		Deadline:         deadline,
-		DecodeDepth:      maxDecodeDepth,
-		DecodeIterations: maxDecodeIterations,
-		PDFDeepen:        true,
-		XLMFoldSheets:    maxXLMFoldSheets,
-		XLMFoldFormulas:  maxXLMFoldFormulas,
+		Deadline:           deadline,
+		RetainedBytesLimit: DefaultRetainedBytesLimit,
+		DecodeDepth:        maxDecodeDepth,
+		DecodeIterations:   maxDecodeIterations,
+		PDFDeepen:          true,
+		XLMFoldSheets:      maxXLMFoldSheets,
+		XLMFoldFormulas:    maxXLMFoldFormulas,
 	}
 }
 
@@ -397,6 +407,18 @@ func Extract(buf []byte, deadline time.Time) Result {
 	return ExtractWithOptions(buf, FullOptions(deadline))
 }
 
+func normalizeRequestOptions(opts *Options) Options {
+	if opts == nil {
+		opts = FullOptions(time.Time{})
+	}
+	requestOpts := *opts
+	if requestOpts.RetainedBytesLimit <= 0 {
+		requestOpts.RetainedBytesLimit = DefaultRetainedBytesLimit
+	}
+	requestOpts.retained = &retainedBudget{}
+	return requestOpts
+}
+
 // Result.TopType values: the container type the top-level dispatch matched.
 const (
 	TopTypeOLE           = "ole"
@@ -426,11 +448,7 @@ const (
 // pass. A nil opts degrades to FullOptions (no time limit, full depth). The
 // cumulative byte/count caps still apply regardless.
 func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
-	if opts == nil {
-		opts = FullOptions(time.Time{})
-	}
-	requestOpts := *opts
-	requestOpts.retained = &retainedBudget{}
+	requestOpts := normalizeRequestOptions(opts)
 	opts = &requestOpts
 	deadline := opts.Deadline
 	res.childOpts = opts

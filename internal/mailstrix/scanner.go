@@ -101,8 +101,11 @@ type Scanner struct {
 	markerRules          atomic.Pointer[yara.Rules]
 	preparedMainIdentity markerFingerprint // fresh main snapshot; reloadMu
 	markerSeedRoot       string            // immutable seed artifact location
-	extractionBytes      retainedExtractionHistogram
-	rawScanErrs          atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
+
+	extractionRetainedBytes int64 // immutable validated logical-output ceiling
+
+	extractionBytes retainedExtractionHistogram
+	rawScanErrs     atomic.Uint64 // raw-scan failures that fell through to extraction instead of aborting
 	// Per-channel scanOne counts (PERF-17): which channel each libyara scan ran on,
 	// so /metrics shows where scan cost goes. Totals INCLUDE the big-file subset
 	// (bigFileScans ⊆ rawChannelScans, bigFileStreamScans ⊆ streamChannelScans).
@@ -538,6 +541,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 // rules is a misconfiguration the operator must see at startup, not a silent
 // "everything is clean".
 func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
+	extractionRetainedBytes := validatedExtractionRetainedBytes(cfg.ExtractionRetainedBytes)
 	s := &Scanner{
 		scanTimeout:       cfg.ScanTimeout,
 		bigFileThreshold:  cfg.BigFileThreshold,
@@ -554,10 +558,13 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 		archivePW:         cfg.ArchivePW,
 		archivePWDefaults: archivePWBaseDefaults(cfg.ArchivePW),
 		archivePWWordlist: archivePWBaseWordlist(cfg.ArchivePW, cfg.ArchivePWords),
-		baseDenylist:      cfg.RuleDenylist,
-		denylistFile:      cfg.DenylistFile,
-		allowlist:         cfg.RuleAllowlist,
-		topMatches:        newMatchCounter(matchCounterCap),
+
+		extractionRetainedBytes: extractionRetainedBytes,
+
+		baseDenylist: cfg.RuleDenylist,
+		denylistFile: cfg.DenylistFile,
+		allowlist:    cfg.RuleAllowlist,
+		topMatches:   newMatchCounter(matchCounterCap),
 	}
 	if cfg.SeedRules != "" {
 		s.markerSeedRoot = filepath.Dir(cfg.SeedRules)
@@ -1002,6 +1009,7 @@ func (s *Scanner) policyFingerprint() string {
 
 func (s *Scanner) scoringPolicyHash() string {
 	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "extraction_retained_bytes=%d\n", validatedExtractionRetainedBytes(s.extractionRetainedBytes))
 	if s.canary {
 		_, _ = h.Write([]byte("canary=1\n"))
 	} else {
@@ -1857,6 +1865,7 @@ func newMatchSeen(out []Match) map[matchKey]struct{} {
 // the archive-password candidates.
 func (s *Scanner) buildExtractOptions(meta ScanMeta, profile EffortProfile, extractDeadline time.Time) *extract.Options {
 	xopts := profile.ExtractOptions(extractDeadline)
+	xopts.RetainedBytesLimit = validatedExtractionRetainedBytes(s.extractionRetainedBytes)
 	if s.archivePW {
 		// Effective candidate list, ORDERED most-signal-first so the size cap drops
 		// the low-signal tail: per-message candidates (body-header passwords, then
@@ -1872,6 +1881,13 @@ func (s *Scanner) buildExtractOptions(meta ScanMeta, profile EffortProfile, extr
 		xopts.ArchivePWEnabled = len(xopts.PWCandidates) > 0
 	}
 	return xopts
+}
+
+func validatedExtractionRetainedBytes(n int64) int64 {
+	if n < 1024 || n > 128*1024*1024 {
+		return extract.DefaultRetainedBytesLimit
+	}
+	return n
 }
 
 // extractionIncomplete records the extraction metrics and reports whether the
