@@ -189,19 +189,28 @@ func joinAdmissionFixtureServerWaiters(t *testing.T, waiters []<-chan struct{}) 
 	}
 }
 
+// admissionFixtureWaiterFrame intentionally binds the causal assertion to the
+// production admission gate. A rename or relocation must update this fixture.
+const admissionFixtureWaiterFrame = "github.com/myguard-labs/mailstrix/internal/mailstrix.(*Server).acquireOn"
+
 func waitForAdmissionFixtureWaiters(t *testing.T, want int) {
 	t.Helper()
-	const frame = "github.com/myguard-labs/mailstrix/internal/mailstrix.(*Server).acquireOn"
 	stack := make([]byte, 1<<20)
-	deadline := time.Now().Add(admissionFixtureTimeout)
-	for time.Now().Before(deadline) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(admissionFixtureTimeout)
+	defer deadline.Stop()
+	for {
 		n := runtime.Stack(stack, true)
-		if bytes.Count(stack[:n], []byte(frame)) >= want {
+		if bytes.Count(stack[:n], []byte(admissionFixtureWaiterFrame)) >= want {
 			return
 		}
-		runtime.Gosched()
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("observed-before-admission assertion: %d requests sent full bodies, but fewer than %d handlers reached expected frame %q", want, want, admissionFixtureWaiterFrame)
+		}
 	}
-	t.Fatalf("observed-before-admission assertion: %d requests sent full bodies, but fewer than %d handlers reached acquireOn", want, want)
 }
 
 func TestICAPAdmissionBuffersBeforeGate(t *testing.T) {

@@ -35,7 +35,7 @@ func TestICAPAdmissionOrderingFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("go", "test", "-count=1", "-race", "-p=1",
+	cmd := exec.Command("go", "test", "-v", "-count=1", "-race", "-p=1",
 		"-overlay="+overlay,
 		"-run=^TestICAPAdmission(BuffersBeforeGate|PreReadFailureCleanup)$",
 		"./internal/mailstrix")
@@ -45,7 +45,24 @@ func TestICAPAdmissionOrderingFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("private ICAP admission fixture failed: %v\n%s", err, out)
 	}
-	if text := string(out); !strings.Contains(text, "ok  \tgithub.com/myguard-labs/mailstrix/internal/mailstrix") {
+	text := string(out)
+	if !strings.Contains(text, "ok  \tgithub.com/myguard-labs/mailstrix/internal/mailstrix") {
 		t.Fatalf("private ICAP admission fixture did not report its package verdict:\n%s", out)
+	}
+	for _, name := range []string{
+		"TestICAPAdmissionBuffersBeforeGate",
+		"TestICAPAdmissionPreReadFailureCleanup",
+	} {
+		passPrefix := "--- PASS: " + name + " ("
+		found := false
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, passPrefix) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("private ICAP admission fixture did not report top-level PASS for %s:\n%s", name, out)
+		}
 	}
 }
