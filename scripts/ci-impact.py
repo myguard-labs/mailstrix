@@ -210,6 +210,8 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/icap_admission_ordering_test.go",
+    "ci/testdata/icap_admission_ordering_test.go",
     "ci/marker_runtime_fixture.py",
     "ci/prepare_marker_runtime.py",
     "ci/ci_marker_runtime_fixture_test.py",
