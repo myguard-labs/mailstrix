@@ -29,7 +29,7 @@ func TestP16cParentChildAndMalformedDuplicateParity(t *testing.T) {
 	if gotJSON, wantJSON := p16bResultJSON(t, res), p16bResultJSON(t, want); gotJSON != wantJSON {
 		t.Fatalf("complete Result changed\n got: %s\nwant: %s", gotJSON, wantJSON)
 	}
-	wantRetained := uint64(len(inner) + len("OOXML-DDE-FIELD DDEAUTO cmd /c calc"))
+	wantRetained := uint64(len(inner) + len("OOXML-DDE-FIELD DDEAUTO cmd /c calc") + len("OLEID-DDE"))
 	if got := res.Retained.Bytes(); got != wantRetained {
 		t.Fatalf("parent+child retained bytes=%d want=%d", got, wantRetained)
 	}

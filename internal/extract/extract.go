@@ -1166,10 +1166,10 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// is only appended when not already present (dedup guard) and never causes
 	// extraction failure (fail-open). The OLE path (oleid.go) emits OLEID-OBJECTPOOL
 	// and OLEID-FLASH only; these four markers are OOXML-exclusive, no overlap.
-	out = appendOLEIDMarker(out, "OLEID-VBA-PRESENT", vbaProduced)
-	out = appendOLEIDMarker(out, "OLEID-EXTREL", hasExtRel)
-	out = appendOLEIDMarker(out, "OLEID-DDE", hasDDE)
-	out = appendOLEIDMarker(out, "OLEID-XLM-PRESENT", xlmHidden || res.HasXLMFold)
+	out = appendOLEIDMarker(res, out, "OLEID-VBA-PRESENT", vbaProduced)
+	out = appendOLEIDMarker(res, out, "OLEID-EXTREL", hasExtRel)
+	out = appendOLEIDMarker(res, out, "OLEID-DDE", hasDDE)
+	out = appendOLEIDMarker(res, out, "OLEID-XLM-PRESENT", xlmHidden || res.HasXLMFold)
 	res.Streams = out
 	// Every .bin we tried failed to parse and nothing came out: a document that
 	// looks macro-bearing but yields no usable VBA (obfuscated/corrupt/hostile).
@@ -1183,7 +1183,7 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 
 // appendOLEIDMarker appends a []byte stream containing marker to out if cond is
 // true and the marker is not already present. Fail-open: always returns out.
-func appendOLEIDMarker(out [][]byte, marker string, cond bool) [][]byte {
+func appendOLEIDMarker(res *Result, out [][]byte, marker string, cond bool) [][]byte {
 	if !cond {
 		return out
 	}
@@ -1193,6 +1193,7 @@ func appendOLEIDMarker(out [][]byte, marker string, cond bool) [][]byte {
 			return out
 		}
 	}
+	res.recordRetained(mb)
 	return append(out, mb)
 }
 

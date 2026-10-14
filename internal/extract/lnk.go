@@ -113,6 +113,7 @@ func fromLNK(buf []byte, res *Result) {
 			return // truncated/malformed: stop, keep what we have
 		}
 		if len(s) > 0 {
+			res.recordRetained(s)
 			res.Streams = append(res.Streams, s)
 			if len(res.Streams) >= maxStreams {
 				return

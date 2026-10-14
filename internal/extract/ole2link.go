@@ -64,6 +64,7 @@ func fromOLE2Link(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			continue
 		}
 		marker := append([]byte("OLE2LINK-URL "), url...)
+		res.recordRetained(marker)
 		res.Streams = append(res.Streams, marker)
 		return // first moniker URL is enough
 	}
