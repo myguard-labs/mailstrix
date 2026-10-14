@@ -156,6 +156,18 @@ func cacheEntryFromElement(el *list.Element) *entry {
 	return e
 }
 
+// maxInitialMapHint caps the map size hint so construction (and Flush) does not
+// allocate buckets for the full entry capacity; the map grows lazily with use.
+// Entry and byte bounds are enforced by the LRU, not by the map pre-size.
+const maxInitialMapHint = 256
+
+func initialMapHint(capacity int) int {
+	if capacity < 0 {
+		return 0
+	}
+	return min(capacity, maxInitialMapHint)
+}
+
 // NewCache builds the verdict cache from cfg. TTL<=0 returns a noop cache. When
 // RedisURL is set, a shared L2 is attached; a Redis that fails at runtime is
 // treated as a miss (fail-open to scanning), never an error to the caller.
@@ -176,7 +188,7 @@ func NewCache(cfg *Config, logf func(string, ...any)) Cache {
 		max:      maxEntries,
 		maxBytes: uint64(maxBytes),
 		ll:       list.New(),
-		items:    make(map[string]*list.Element, maxEntries),
+		items:    make(map[string]*list.Element, initialMapHint(maxEntries)),
 	}
 	if cfg.RedisURL != "" {
 		if rl, err := newRedisLayer(cfg, logf); err != nil {
@@ -272,7 +284,7 @@ func (c *lruCache) putLocal(key string, matches []Match) {
 func (c *lruCache) Flush() {
 	c.mu.Lock()
 	c.ll.Init()
-	c.items = make(map[string]*list.Element, c.max)
+	c.items = make(map[string]*list.Element, initialMapHint(c.max))
 	c.bytes = 0
 	c.mu.Unlock()
 }
