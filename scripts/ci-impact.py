@@ -213,6 +213,7 @@ RULES = {
 GO_INPUTS = [
     "ci/cache_distribution/*.go",
     "ci/cache_byte_bound_test.go",
+    "ci/feed_set_bytes_test.go",
     "ci/marker_runtime_fixture.py",
     "ci/prepare_marker_runtime.py",
     "ci/ci_marker_runtime_fixture_test.py",
