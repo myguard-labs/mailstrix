@@ -175,6 +175,11 @@ class ImpactTests(unittest.TestCase):
             ("ci/config_auto_derive_test.go", ["go"], ["image", "parity"]),
             ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
             ("ci/cache_distribution/main.go", ["go"], ["image", "parity", "postfix"]),
+            (
+                "ci/docker_context_selector_test.sh",
+                ["dockerignore", "shell"],
+                ["go", "image", "parity", "postfix"],
+            ),
             ("ci/go_coverage_test.py", ["go"], ["image", "parity", "postfix"]),
             ("ci/go_coverage.sh", ["go", "shell"], ["image", "parity", "postfix"]),
             ("ci/streamdedupkey_test.go", ["go"], ["image", "parity", "postfix"]),

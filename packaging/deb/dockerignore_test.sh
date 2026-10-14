@@ -31,6 +31,7 @@ for sentinel in tools/private-corpus.sentinel.json \
     tools/parity/private-corpus.sentinel.json \
     tools/parity/testdata/private-corpus.sentinel.json \
     tools/parity/private-corpus-sentinel \
+    ci/cache_distribution/private-corpus.sentinel.json \
     ci/testdata/private-corpus.sentinel; do
     if [ -e "$root/$sentinel" ] || [ -L "$root/$sentinel" ]; then
         echo "FAIL - private-corpus sentinel path already exists: $sentinel"
@@ -49,6 +50,7 @@ cleanup() {
           "$root/tools/parity/private-corpus.sentinel.json" \
           "$root/tools/parity/testdata/private-corpus.sentinel.json" \
           "$root/tools/parity/private-corpus-sentinel/sample.go" \
+          "$root/ci/cache_distribution/private-corpus.sentinel.json" \
           "$root/ci/testdata/private-corpus.sentinel" \
           "$root/build.log.sentinel" 2>/dev/null || true
     rmdir "$root/secrets-sentinel" 2>/dev/null || true
@@ -73,6 +75,7 @@ echo "inert" > "$root/tools/private-corpus.sentinel.json"
 echo "inert" > "$root/tools/parity/private-corpus.sentinel.json"
 echo "inert" > "$root/tools/parity/testdata/private-corpus.sentinel.json"
 echo "inert" > "$root/tools/parity/private-corpus-sentinel/sample.go"
+echo "inert" > "$root/ci/cache_distribution/private-corpus.sentinel.json"
 echo "inert" > "$root/ci/testdata/private-corpus.sentinel"
 
 probe_dockerfile="$tmpdir/Dockerfile.probe"
@@ -114,6 +117,7 @@ check_absent 'tools/private-corpus\.sentinel\.json' 'private tools manifest sent
 check_absent 'tools/parity/private-corpus\.sentinel\.json' 'private parity manifest sentinel'
 check_absent 'tools/parity/testdata/private-corpus\.sentinel\.json' 'private parity testdata sentinel'
 check_absent 'tools/parity/private-corpus-sentinel' 'private parity subtree sentinel'
+check_absent 'ci/cache_distribution/private-corpus\.sentinel\.json' 'private cache-distribution corpus sentinel'
 check_absent 'ci/ci_impact_test\.py' 'host-only CI Python tests'
 check_absent 'ci/testscope_test\.sh' 'host-only CI shell tests'
 check_absent 'ci/testdata/private-corpus\.sentinel' 'unlisted CI fixture sentinel'
@@ -156,6 +160,22 @@ check_present 'tools/parity/parity_test\.go' 'parity Go tests'
 check_present 'tools/parity/comparator-pins\.json' 'embedded comparator pins'
 check_present 'tools/parity/comparator_runner\.py' 'embedded comparator runner'
 check_present 'tools/parity/testdata/synthetic-baseline-v1\.json' 'synthetic parity expectation'
+
+# Exercise the real selector from the exact context Docker received. The helper
+# also rejects malformed invocation and binds exported Go bytes to this checkout.
+selector_usage="$tmpdir/selector-usage.log"
+if sh ci/docker_context_selector_test.sh >"$selector_usage" 2>&1; then
+    echo "FAIL - context selector helper accepted missing arguments"; fail=1
+elif ! grep -Fx 'usage: docker_context_selector_test.sh EXPORTED_CONTEXT SOURCE_ROOT' "$selector_usage" >/dev/null; then
+    echo "FAIL - context selector helper missing-argument diagnostic changed"; fail=1
+else
+    echo "ok   - context selector helper rejects missing arguments"
+fi
+mkdir "$tmpdir/export"
+tar xf "$tmpdir/ctx.tar" -C "$tmpdir/export"
+if ! sh ci/docker_context_selector_test.sh "$tmpdir/export/ctx" "$root"; then
+    fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
     echo "ALL OK"

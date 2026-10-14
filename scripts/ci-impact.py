@@ -205,6 +205,7 @@ RULES = {
     "dockerignore": [
         ".dockerignore",
         "*Dockerfile*",
+        "ci/docker_context_selector_test.sh",
         "packaging/deb/dockerignore_test.sh",
         "packaging/deb/dockerignore_collision_test.sh",
     ],
