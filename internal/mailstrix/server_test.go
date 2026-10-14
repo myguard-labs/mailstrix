@@ -633,6 +633,35 @@ func TestMetrics(t *testing.T) {
 	}
 }
 
+func TestCacheByteAndEvictionCauseMetrics(t *testing.T) {
+	s := newCachingServer(&fakeEngine{count: 1}, "tok")
+	lru, ok := s.cache.(*lruCache)
+	if !ok {
+		t.Fatalf("cache type=%T, want *lruCache", s.cache)
+	}
+	lru.max = 1
+	lru.maxBytes = cacheEntryRetainedBytes("a", nil)*2 - 1
+	lru.Put("a", nil)
+	lru.Put("b", nil) // both limits breach; bytes has deterministic precedence
+	body := get(s, "/metrics").Body.String()
+	for _, want := range []string{
+		"# TYPE mailstrix_cache_bytes gauge\n",
+		"# TYPE mailstrix_cache_evictions_total counter\n",
+		"# TYPE mailstrix_cache_evictions_bytes_total counter\n",
+		"# TYPE mailstrix_cache_evictions_count_total counter\n",
+		"mailstrix_cache_evictions_total 1\n",
+		"mailstrix_cache_evictions_bytes_total 1\n",
+		"mailstrix_cache_evictions_count_total 0\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cache metrics missing %q in:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "mailstrix_cache_bytes 0\n") {
+		t.Fatalf("retained cache bytes unexpectedly zero:\n%s", body)
+	}
+}
+
 // When the MalwareBazaar checker is enabled, /metrics must surface its gauges
 // and counters; when disabled they must be absent (no zero-value noise).
 func TestMetricsMalwareBazaar(t *testing.T) {

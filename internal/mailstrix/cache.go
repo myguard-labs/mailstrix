@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -49,24 +50,110 @@ func (noopCache) Put(string, []Match)        {}
 func (noopCache) Flush()                     {}
 func (noopCache) Degraded() string           { return "" }
 
-// lruCache is the always-on in-process layer: a TTL'd LRU bounded to CacheSize
-// entries. Concurrency is a single mutex — Get/Put are O(1) and hold it only for
-// the map/list ops, never across a scan. Under load the lock is uncontended
-// relative to scan cost.
+// lruCache is the always-on in-process layer: a TTL'd LRU bounded by both entry
+// count and an estimated retained-byte budget. Concurrency is a single mutex —
+// Get/Put hold it only for map/list/accounting operations, never across a scan.
 type lruCache struct {
-	mu        sync.Mutex
-	ttl       time.Duration
-	max       int
-	ll        *list.List               // front = most recently used
-	items     map[string]*list.Element // key -> element
-	redis     *redisLayer              // optional shared L2 (nil when no MAILSTRIX_REDIS_URL)
-	evictions atomic.Uint64            // LRU evictions (capacity-driven, not TTL expiry)
+	mu             sync.Mutex
+	ttl            time.Duration
+	max            int
+	maxBytes       uint64
+	bytes          uint64
+	ll             *list.List               // front = most recently used
+	items          map[string]*list.Element // key -> element
+	redis          *redisLayer              // optional shared L2 (nil when no MAILSTRIX_REDIS_URL)
+	evictions      atomic.Uint64            // LRU evictions (capacity-driven, not TTL expiry)
+	byteEvictions  atomic.Uint64
+	countEvictions atomic.Uint64
 }
 
 type entry struct {
 	key     string
 	matches []Match
 	expires time.Time
+	size    uint64
+}
+
+var (
+	entryFixedBytes = uint64(unsafe.Sizeof(entry{})) + uint64(unsafe.Sizeof(list.Element{})) +
+		uint64(unsafe.Sizeof(string(""))) + uint64(unsafe.Sizeof((*list.Element)(nil)))
+	matchBytes      = uint64(unsafe.Sizeof(Match{}))
+	stringSlotBytes = uint64(unsafe.Sizeof(string("")))
+	// The Meta allowance is a fixed, architecture-scaled model: 8 scalar bytes,
+	// one int and four pointer slots for map-level state, then eight hash bytes,
+	// eight key headers, eight value headers and one pointer per modeled bucket.
+	// It deliberately does not describe or depend on Go's runtime map layout.
+	metaHeaderBytes = uint64(8 + unsafe.Sizeof(int(0)) + 4*unsafe.Sizeof(uintptr(0)))
+	metaBucketBytes = uint64(8 + 16*unsafe.Sizeof(string("")) + unsafe.Sizeof(uintptr(0)))
+)
+
+func saturatingAdd(a, b uint64) uint64 {
+	if ^uint64(0)-a < b {
+		return ^uint64(0)
+	}
+	return a + b
+}
+
+func saturatingMul(a, b uint64) uint64 {
+	if a != 0 && b > ^uint64(0)/a {
+		return ^uint64(0)
+	}
+	return a * b
+}
+
+// cacheEntryRetainedBytes returns a deterministic accounting estimate for the
+// cache-owned key/index, entry/list nodes and everything reachable through the
+// retained Match and Tags slice capacities and Meta maps. It intentionally does
+// no JSON serialization or deep copy. String backing-store sharing, allocator
+// size classes, map overflow buckets and pre-growth history are not observable;
+// counting each reachable string separately makes the estimate conservative for
+// common sharing cases, but this is not an exact heap or RSS measurement.
+func cacheEntryRetainedBytes(key string, matches []Match) uint64 {
+	total := saturatingAdd(entryFixedBytes, uint64(len(key)))
+	total = saturatingAdd(total, saturatingMul(uint64(cap(matches)), matchBytes))
+	if matches == nil || cap(matches) == 0 {
+		return total
+	}
+	for _, match := range matches[:cap(matches)] {
+		total = saturatingAdd(total, uint64(len(match.Rule)))
+		total = saturatingAdd(total, uint64(len(match.Namespace)))
+		total = saturatingAdd(total, saturatingMul(uint64(cap(match.Tags)), stringSlotBytes))
+		if cap(match.Tags) > 0 {
+			for _, tag := range match.Tags[:cap(match.Tags)] {
+				total = saturatingAdd(total, uint64(len(tag)))
+			}
+		}
+		if match.Meta == nil {
+			continue
+		}
+		total = saturatingAdd(total, metaHeaderBytes)
+		if len(match.Meta) > 0 {
+			buckets := uint64(1)
+			for uint64(len(match.Meta)) > saturatingMul(buckets, 13)/2 {
+				// A map length is bounded by MaxInt, so the loop exits by
+				// buckets=2^(word size-2); this guard documents the arithmetic
+				// invariant and remains unreachable for a valid Go map.
+				if buckets > ^uint64(0)/2 {
+					return ^uint64(0)
+				}
+				buckets *= 2
+			}
+			total = saturatingAdd(total, saturatingMul(buckets, metaBucketBytes))
+		}
+		for k, v := range match.Meta {
+			total = saturatingAdd(total, uint64(len(k)))
+			total = saturatingAdd(total, uint64(len(v)))
+		}
+	}
+	return total
+}
+
+func cacheEntryFromElement(el *list.Element) *entry {
+	e, ok := el.Value.(*entry)
+	if !ok {
+		panic("mailstrix: non-entry value in verdict LRU")
+	}
+	return e
 }
 
 // NewCache builds the verdict cache from cfg. TTL<=0 returns a noop cache. When
@@ -76,11 +163,20 @@ func NewCache(cfg *Config, logf func(string, ...any)) Cache {
 	if cfg.CacheTTL <= 0 {
 		return noopCache{}
 	}
+	maxEntries := cfg.CacheSize
+	if maxEntries < 1 {
+		maxEntries = 65536
+	}
+	maxBytes := cfg.CacheMaxBytes
+	if maxBytes < 1 {
+		maxBytes = defaultCacheMaxBytes
+	}
 	c := &lruCache{
-		ttl:   cfg.CacheTTL,
-		max:   cfg.CacheSize,
-		ll:    list.New(),
-		items: make(map[string]*list.Element, cfg.CacheSize),
+		ttl:      cfg.CacheTTL,
+		max:      maxEntries,
+		maxBytes: uint64(maxBytes),
+		ll:       list.New(),
+		items:    make(map[string]*list.Element, maxEntries),
 	}
 	if cfg.RedisURL != "" {
 		if rl, err := newRedisLayer(cfg, logf); err != nil {
@@ -100,7 +196,7 @@ func NewCache(cfg *Config, logf func(string, ...any)) Cache {
 func (c *lruCache) Get(key string) ([]Match, bool) {
 	c.mu.Lock()
 	if el, ok := c.items[key]; ok {
-		e := el.Value.(*entry)
+		e := cacheEntryFromElement(el)
 		if time.Now().Before(e.expires) {
 			c.ll.MoveToFront(el)
 			m := e.matches
@@ -134,21 +230,39 @@ func (c *lruCache) Put(key string, matches []Match) {
 
 // putLocal stores matches in the in-process LRU only.
 func (c *lruCache) putLocal(key string, matches []Match) {
+	size := cacheEntryRetainedBytes(key, matches)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if size > c.maxBytes {
+		// An oversized replacement invalidates the old value for this key, but
+		// must not evict unrelated entries in a futile attempt to make room.
+		if el, ok := c.items[key]; ok {
+			c.removeElement(el)
+			c.recordEviction(true)
+		}
+		return
+	}
 	if el, ok := c.items[key]; ok {
-		e := el.Value.(*entry)
+		e := cacheEntryFromElement(el)
+		if e.size > c.bytes {
+			c.bytes = 0
+		} else {
+			c.bytes -= e.size
+		}
 		e.matches = matches
 		e.expires = time.Now().Add(c.ttl)
+		e.size = size
+		c.bytes = saturatingAdd(c.bytes, size)
 		c.ll.MoveToFront(el)
-		c.mu.Unlock()
 	} else {
-		el := c.ll.PushFront(&entry{key: key, matches: matches, expires: time.Now().Add(c.ttl)})
+		el := c.ll.PushFront(&entry{key: key, matches: matches, expires: time.Now().Add(c.ttl), size: size})
 		c.items[key] = el
-		for c.ll.Len() > c.max {
-			c.removeElement(c.ll.Back())
-			c.evictions.Add(1)
-		}
-		c.mu.Unlock()
+		c.bytes = saturatingAdd(c.bytes, size)
+	}
+	for c.bytes > c.maxBytes || c.ll.Len() > c.max {
+		byteCause := c.bytes > c.maxBytes // byte wins when both limits are exceeded
+		c.removeElement(c.ll.Back())
+		c.recordEviction(byteCause)
 	}
 }
 
@@ -159,6 +273,7 @@ func (c *lruCache) Flush() {
 	c.mu.Lock()
 	c.ll.Init()
 	c.items = make(map[string]*list.Element, c.max)
+	c.bytes = 0
 	c.mu.Unlock()
 }
 
@@ -173,8 +288,28 @@ func (l *lruCache) Degraded() string {
 }
 
 // Evictions returns the total number of LRU capacity-evictions since start.
-// TTL expiry is not counted; only entries pushed out by new insertions into a full cache.
+// TTL expiry and rejected new oversized values are not counted. Insertions and
+// replacements that remove a retained entry to satisfy a capacity limit are.
 func (c *lruCache) Evictions() uint64 { return c.evictions.Load() }
+
+func (c *lruCache) ByteEvictions() uint64 { return c.byteEvictions.Load() }
+
+func (c *lruCache) CountEvictions() uint64 { return c.countEvictions.Load() }
+
+func (c *lruCache) Bytes() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bytes
+}
+
+func (c *lruCache) recordEviction(byteCause bool) {
+	c.evictions.Add(1)
+	if byteCause {
+		c.byteEvictions.Add(1)
+	} else {
+		c.countEvictions.Add(1)
+	}
+}
 
 // removeElement must be called with the lock held.
 func (c *lruCache) removeElement(el *list.Element) {
@@ -182,7 +317,13 @@ func (c *lruCache) removeElement(el *list.Element) {
 		return
 	}
 	c.ll.Remove(el)
-	delete(c.items, el.Value.(*entry).key)
+	e := cacheEntryFromElement(el)
+	delete(c.items, e.key)
+	if e.size > c.bytes {
+		c.bytes = 0
+	} else {
+		c.bytes -= e.size
+	}
 }
 
 // --- optional Redis L2 ---
