@@ -78,6 +78,7 @@ func (h Hit) Rule() string { return "MALWAREBAZAAR_MALWARE" }
 type Metrics struct {
 	Enabled         bool
 	FeedHashes      int64
+	SetBytes        int64 // estimated resident bytes of the loaded set
 	LastRefreshUnix int64
 	RefreshFailures uint64
 	Lookups         uint64 // buffers hashed and checked
@@ -100,6 +101,7 @@ type Checker struct {
 	cachePath string // persisted feed snapshot ("" disables persistence)
 
 	lastRefresh atomic.Int64
+	setBytes    atomic.Int64 // estimate for the loaded digest set, updated with each swap
 	failures    atomic.Uint64
 	lookups     atomic.Uint64
 	hits        atomic.Uint64
@@ -203,6 +205,7 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 		return err
 	}
 	c.set.Store(hs)
+	c.setBytes.Store(feedrefresh.DigestSetBytes(len(hs.m), sha256.Size))
 	c.lastRefresh.Store(time.Now().Unix())
 	if c.cachePath != "" {
 		if err := atomicio.WriteWithBackup(c.cachePath, body, 0o600); err != nil {
@@ -229,6 +232,7 @@ func (c *Checker) warmStart() {
 		return
 	}
 	c.set.Store(hs)
+	c.setBytes.Store(feedrefresh.DigestSetBytes(len(hs.m), sha256.Size))
 	c.logf("malwarebazaar warm-start from cache: %d hashes", len(hs.m))
 }
 
@@ -368,6 +372,7 @@ func (c *Checker) Metrics() Metrics {
 	return Metrics{
 		Enabled:         true,
 		FeedHashes:      int64(n),
+		SetBytes:        c.setBytes.Load(),
 		LastRefreshUnix: c.lastRefresh.Load(),
 		RefreshFailures: c.failures.Load(),
 		Lookups:         c.lookups.Load(),

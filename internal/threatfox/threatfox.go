@@ -69,6 +69,7 @@ type Metrics struct {
 	Enabled         bool
 	FeedURLs        int64
 	FeedDomains     int64
+	SetBytes        int64 // estimated resident bytes of the loaded set
 	LastRefreshUnix int64
 	RefreshFailures uint64
 	Lookups         uint64
@@ -90,6 +91,7 @@ type Checker struct {
 	cachePath string
 
 	lastRefresh atomic.Int64
+	setBytes    atomic.Int64 // estimate for the loaded ruleset, updated with each swap
 	failures    atomic.Uint64
 	lookups     atomic.Uint64
 	hits        atomic.Uint64
@@ -152,6 +154,7 @@ func (c *Checker) warmStart() {
 		return
 	}
 	c.rs.Store(rs)
+	c.setBytes.Store(rulesetBytes(rs))
 	c.logf("threatfox warm-start from cache: %d urls / %d domains", len(rs.urls), len(rs.domains))
 }
 
@@ -201,6 +204,7 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 		return err
 	}
 	c.rs.Store(rs)
+	c.setBytes.Store(rulesetBytes(rs))
 	c.lastRefresh.Store(time.Now().Unix())
 	if c.cachePath != "" {
 		if err := atomicio.WriteWithBackup(c.cachePath, body, 0o600); err != nil {
@@ -352,6 +356,11 @@ func normalizeURL(raw string) (norm, host string) {
 	return norm, host
 }
 
+// rulesetBytes estimates the resident bytes of both URL and domain sets.
+func rulesetBytes(rs *ruleset) int64 {
+	return feedrefresh.StringSetBytes(rs.urls) + feedrefresh.StringSetBytes(rs.domains)
+}
+
 // Metrics returns a snapshot for /metrics.
 func (c *Checker) Metrics() Metrics {
 	rs := c.rs.Load()
@@ -363,6 +372,7 @@ func (c *Checker) Metrics() Metrics {
 		Enabled:         true,
 		FeedURLs:        int64(nu),
 		FeedDomains:     int64(nd),
+		SetBytes:        c.setBytes.Load(),
 		LastRefreshUnix: c.lastRefresh.Load(),
 		RefreshFailures: c.failures.Load(),
 		Lookups:         c.lookups.Load(),

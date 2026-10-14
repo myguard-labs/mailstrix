@@ -70,6 +70,7 @@ type Metrics struct {
 	Enabled         bool
 	FeedURLs        int64
 	FeedHosts       int64
+	SetBytes        int64 // estimated resident bytes of the loaded set
 	LastRefreshUnix int64
 	RefreshFailures uint64
 	Lookups         uint64 // buffers checked
@@ -92,6 +93,7 @@ type Checker struct {
 	cachePath string // persisted feed snapshot ("" disables persistence)
 
 	lastRefresh atomic.Int64
+	setBytes    atomic.Int64 // estimate for the loaded ruleset, updated with each swap
 	failures    atomic.Uint64
 	lookups     atomic.Uint64
 	hits        atomic.Uint64
@@ -159,6 +161,7 @@ func (c *Checker) warmStart() {
 		return
 	}
 	c.rs.Store(rs)
+	c.setBytes.Store(rulesetBytes(rs))
 	c.logf("urlhaus warm-start from cache: %d urls / %d hosts", len(rs.urls), len(rs.hosts))
 }
 
@@ -213,6 +216,7 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 		return err
 	}
 	c.rs.Store(rs)
+	c.setBytes.Store(rulesetBytes(rs))
 	c.lastRefresh.Store(time.Now().Unix())
 	// Persist the snapshot for warm-start on the next boot (best-effort: a write
 	// failure does not fail the refresh — the in-memory set is already updated).
@@ -345,6 +349,11 @@ func normalizeURL(raw string) (norm, host string) {
 	return norm, host
 }
 
+// rulesetBytes estimates the resident bytes of both URL and host sets.
+func rulesetBytes(rs *ruleset) int64 {
+	return feedrefresh.StringSetBytes(rs.urls) + feedrefresh.StringSetBytes(rs.hosts)
+}
+
 // Metrics returns a snapshot for /metrics.
 func (c *Checker) Metrics() Metrics {
 	rs := c.rs.Load()
@@ -356,6 +365,7 @@ func (c *Checker) Metrics() Metrics {
 		Enabled:         true,
 		FeedURLs:        int64(nu),
 		FeedHosts:       int64(nh),
+		SetBytes:        c.setBytes.Load(),
 		LastRefreshUnix: c.lastRefresh.Load(),
 		RefreshFailures: c.failures.Load(),
 		Lookups:         c.lookups.Load(),
