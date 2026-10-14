@@ -297,6 +297,19 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_clamd_admission_fixture_has_exact_go_consumers(self):
+        for path in [
+            "ci/clamd_admission_ordering_test.go",
+            "ci/testdata/clamd_admission_ordering_test.go",
+        ]:
+            with self.subTest(path=path):
+                result = impact.plan([path])
+                self.assertEqual(
+                    {key for key, value in result.items() if value is True},
+                    {"go", "docker"},
+                )
+                self.assertEqual(result["changed_files"], "--changed -- " + path)
+
     def test_release_tag_contract_is_a_named_dockerfile_consumer(self):
         path = "ci/ci_release_tag_test.py"
         result = impact.plan([path])
