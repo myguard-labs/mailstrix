@@ -251,6 +251,9 @@ func parseFeed(body []byte) (*hashSet, error) {
 	cr.Comment = '#'
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
+	// The live dump separates fields with ", "; without this the quoted sha256
+	// keeps its quotes and every row is dropped.
+	cr.TrimLeadingSpace = true
 	cr.ReuseRecord = true
 	for {
 		rec, err := cr.Read()
