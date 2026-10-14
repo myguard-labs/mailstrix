@@ -897,8 +897,10 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("raw_scan_errs_total", "raw scans that failed (timeout/libyara error) and fell through to extraction instead of aborting the request", s.engine.RawScanErrs())
 	if lru, ok := s.cache.(*lruCache); ok {
 		fm("cache_evictions_total", "L1 LRU evictions (capacity-driven; not TTL expiry)", lru.Evictions())
-		fm("cache_evictions_bytes_total", "L1 LRU evictions attributed to the retained-byte limit", lru.ByteEvictions())
-		fm("cache_evictions_count_total", "L1 LRU evictions attributed to the entry-count limit", lru.CountEvictions())
+		b.WriteString("# HELP mailstrix_cache_limit_evictions_total L1 LRU evictions by limit that triggered them: cause=byte_limit (retained-byte limit) or cause=count_limit (entry-count limit)\n")
+		b.WriteString("# TYPE mailstrix_cache_limit_evictions_total counter\n")
+		b.WriteString("mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"} " + strconv.FormatUint(lru.ByteEvictions(), 10) + "\n")
+		b.WriteString("mailstrix_cache_limit_evictions_total{cause=\"count_limit\"} " + strconv.FormatUint(lru.CountEvictions(), 10) + "\n")
 		fg("cache_bytes", "estimated retained bytes in the L1 verdict cache", lru.Bytes())
 	}
 	b.WriteString("# HELP mailstrix_rules loaded YARA rule count\n")

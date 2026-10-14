@@ -647,11 +647,10 @@ func TestCacheByteAndEvictionCauseMetrics(t *testing.T) {
 	for _, want := range []string{
 		"# TYPE mailstrix_cache_bytes gauge\n",
 		"# TYPE mailstrix_cache_evictions_total counter\n",
-		"# TYPE mailstrix_cache_evictions_bytes_total counter\n",
-		"# TYPE mailstrix_cache_evictions_count_total counter\n",
+		"# TYPE mailstrix_cache_limit_evictions_total counter\n",
 		"mailstrix_cache_evictions_total 1\n",
-		"mailstrix_cache_evictions_bytes_total 1\n",
-		"mailstrix_cache_evictions_count_total 0\n",
+		"mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"} 1\n",
+		"mailstrix_cache_limit_evictions_total{cause=\"count_limit\"} 0\n",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("cache metrics missing %q in:\n%s", want, body)

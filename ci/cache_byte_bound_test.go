@@ -113,8 +113,7 @@ func TestCacheByteBoundCompleteResponseAndMetrics(t *testing.T) {
 	for _, typ := range []string{
 		"# TYPE mailstrix_cache_bytes gauge\n",
 		"# TYPE mailstrix_cache_evictions_total counter\n",
-		"# TYPE mailstrix_cache_evictions_bytes_total counter\n",
-		"# TYPE mailstrix_cache_evictions_count_total counter\n",
+		"# TYPE mailstrix_cache_limit_evictions_total counter\n",
 	} {
 		if !strings.Contains(metrics, typ) {
 			t.Fatalf("missing metric type %q", typ)
@@ -123,10 +122,10 @@ func TestCacheByteBoundCompleteResponseAndMetrics(t *testing.T) {
 	if values["mailstrix_cache_bytes"] == 0 || values["mailstrix_cache_bytes"] > 2500 {
 		t.Fatalf("cache bytes=%d budget=%d", values["mailstrix_cache_bytes"], cfg.CacheMaxBytes)
 	}
-	if values["mailstrix_cache_evictions_bytes_total"] == 0 || values["mailstrix_cache_evictions_count_total"] != 0 {
-		t.Fatalf("eviction causes byte=%d count=%d", values["mailstrix_cache_evictions_bytes_total"], values["mailstrix_cache_evictions_count_total"])
+	if values["mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"}"] == 0 || values["mailstrix_cache_limit_evictions_total{cause=\"count_limit\"}"] != 0 {
+		t.Fatalf("eviction causes byte=%d count=%d", values["mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"}"], values["mailstrix_cache_limit_evictions_total{cause=\"count_limit\"}"])
 	}
-	if values["mailstrix_cache_evictions_total"] != values["mailstrix_cache_evictions_bytes_total"]+values["mailstrix_cache_evictions_count_total"] {
+	if values["mailstrix_cache_evictions_total"] != values["mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"}"]+values["mailstrix_cache_limit_evictions_total{cause=\"count_limit\"}"] {
 		t.Fatalf("total eviction compatibility metric disagrees with causes: %+v", values)
 	}
 }
@@ -147,7 +146,7 @@ func TestCacheEntryCountEvictionCause(t *testing.T) {
 	if metrics == "" {
 		t.Fatal("empty metrics response")
 	}
-	if values["mailstrix_cache_evictions_count_total"] != 1 || values["mailstrix_cache_evictions_bytes_total"] != 0 || values["mailstrix_cache_evictions_total"] != 1 {
+	if values["mailstrix_cache_limit_evictions_total{cause=\"count_limit\"}"] != 1 || values["mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"}"] != 0 || values["mailstrix_cache_evictions_total"] != 1 {
 		t.Fatalf("count eviction metrics: %+v", values)
 	}
 }
