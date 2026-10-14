@@ -652,6 +652,14 @@ func warnInvalidEnv(name, raw string) {
 	log.Printf("[mailstrix] WARNING: invalid %s=%q (not a number); using the default", name, raw) // #nosec G706 -- name is a constant env var name; %q escapes the operator-set value, so no control bytes or newlines reach the log
 }
 
+func warnInvalidInt64Env(name, raw string, min, max int64) {
+	log.Printf("[mailstrix] WARNING: invalid %s=%q (invalid base-10 integer; allowed range %d..%d); using the default", name, raw, min, max) // #nosec G706 -- name is a constant env var name; %q escapes the operator-set value, so no control bytes or newlines reach the log
+}
+
+func warnInt64EnvRange(name, raw string, min, max int64) {
+	log.Printf("[mailstrix] WARNING: invalid %s=%q (outside allowed range %d..%d); using the default", name, raw, min, max) // #nosec G706 -- name is a constant env var name; %q escapes the operator-set value, so no control bytes or newlines reach the log
+}
+
 func envInt(name string, def int) int {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -701,8 +709,16 @@ func envInt64Range(name string, def, min, max int64) int64 {
 		return def
 	}
 	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n < min || n > max {
-		warnInvalidEnv(name, raw)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			warnInt64EnvRange(name, raw, min, max)
+		} else {
+			warnInvalidInt64Env(name, raw, min, max)
+		}
+		return def
+	}
+	if n < min || n > max {
+		warnInt64EnvRange(name, raw, min, max)
 		return def
 	}
 	return n
