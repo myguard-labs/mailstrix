@@ -49,12 +49,20 @@ func TestClamdAdmissionBeforeRead(t *testing.T) {
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(body)))
+	// Header and body are separate writes: net.Pipe delivers a write only to a
+	// matching Read, so a blocked header write proves not even the 4-byte chunk
+	// length was consumed (no bufio prefetch can cross write boundaries).
 	chunkDone := make(chan error, 1)
+	headerDone := make(chan struct{})
 	go func() {
-		_, err := client.Write(append(header[:], body...))
+		if _, err := client.Write(header[:]); err != nil {
+			chunkDone <- err
+			return
+		}
+		close(headerDone)
+		_, err := client.Write(body)
 		chunkDone <- err
 	}()
-
 	stack := make([]byte, 1<<20)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -63,6 +71,8 @@ func TestClamdAdmissionBeforeRead(t *testing.T) {
 			break
 		}
 		select {
+		case <-headerDone:
+			t.Fatal("INSTREAM chunk length consumed before admission: body would be buffered while saturated")
 		case err := <-chunkDone:
 			t.Fatalf("INSTREAM chunk consumed (err=%v) before admission: body would be buffered while saturated", err)
 		case <-time.After(time.Millisecond):
@@ -72,6 +82,8 @@ func TestClamdAdmissionBeforeRead(t *testing.T) {
 		}
 	}
 	select {
+	case <-headerDone:
+		t.Fatal("INSTREAM chunk length consumed while admission was saturated")
 	case err := <-chunkDone:
 		t.Fatalf("INSTREAM chunk consumed (err=%v) while admission was saturated", err)
 	case <-time.After(100 * time.Millisecond):
