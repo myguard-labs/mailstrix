@@ -213,7 +213,7 @@ func waitForAdmissionFixtureWaiters(t *testing.T, want int) {
 	}
 }
 
-func TestICAPAdmissionBuffersBeforeGate(t *testing.T) {
+func TestICAPAdmissionBoundedByGate(t *testing.T) {
 	const (
 		maxInflight = 1
 		maxConns    = 3
@@ -288,20 +288,26 @@ func TestICAPAdmissionBuffersBeforeGate(t *testing.T) {
 
 	for i := 1; i < maxConns; i++ {
 		body := bytes.Repeat([]byte{byte('A' + i)}, maxBody)
-		request := startAdmissionFixtureRequest(clients[i], body)
-		requests = append(requests, request)
-		awaitAdmissionFixtureSignal(t, fmt.Sprintf("observed-before-admission connection %d 100 Continue", i+1), request.continued, request.err)
-		awaitAdmissionFixtureSignal(t, fmt.Sprintf("observed-before-admission body %d", i+1), request.sent, request.err)
+		requests = append(requests, startAdmissionFixtureRequest(clients[i], body))
 	}
 	waitForAdmissionFixtureWaiters(t, maxConns-maxInflight)
+	for i := 1; i < maxConns; i++ {
+		select {
+		case <-requests[i].continued:
+			t.Fatalf("connection %d received 100 Continue before admission: body would be buffered while saturated", i+1)
+		case <-requests[i].sent:
+			t.Fatalf("connection %d body was consumed before admission", i+1)
+		default:
+		}
+	}
 	if got := engine.calls.Load(); got != maxInflight {
 		t.Fatalf("scanner entries before causal release = %d, want exactly %d", got, maxInflight)
 	}
-	logicalRetained := int64(maxConns * maxBody)
-	if want := int64(s.cfg.ICAPMaxConns) * s.cfg.MaxBody; logicalRetained != want {
-		t.Fatalf("logical retained bytes = %d, want ICAPMaxConns*MaxBody=%d", logicalRetained, want)
+	logicalRetained := int64(maxInflight * maxBody)
+	if want := int64(s.cfg.MaxInflight) * s.cfg.MaxBody; logicalRetained != want {
+		t.Fatalf("logical retained bytes = %d, want MaxInflight*MaxBody=%d", logicalRetained, want)
 	}
-	t.Logf("observed %d logical bytes before admission: first admitted body plus %d waiting bodies, each MaxBody=%d", logicalRetained, maxConns-maxInflight, maxBody)
+	t.Logf("retained %d logical bytes while saturated: only the admitted body; %d waiting connections hold none", logicalRetained, maxConns-maxInflight)
 	for i, request := range requests {
 		select {
 		case response := <-request.response:

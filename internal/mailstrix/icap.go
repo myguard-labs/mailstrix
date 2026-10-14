@@ -409,6 +409,24 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		}
 	}
 
+	// Take the admission slot BEFORE reading any body chunk, so at most
+	// MaxInflight bodies are buffered at once instead of ICAPMaxConns*MaxBody.
+	// The client sends its preview without waiting for us and "100 Continue" is
+	// only written after this point, so waiting here cannot deadlock with the
+	// preview exchange (RFC 3507 §4.5). acquireOn caps the wait at BackendTimeout.
+	if hasBody {
+		admitCtx, admitCancel := context.WithTimeout(context.Background(), s.cfg.BackendTimeout)
+		ok := s.acquireOn(admitCtx, s.admit)
+		admitCancel()
+		if !ok {
+			s.metrics.busy.Add(1)
+			s.errf("ICAP 503 busy (max_inflight=%d reached)", s.cfg.MaxInflight)
+			_ = s.icapWriteStatus(w, 503, "Service Unavailable", "")
+			return errors.New("icap busy")
+		}
+		defer func() { <-s.admit }()
+	}
+
 	// Read body (chunked per RFC 3507 §4.5).
 	var buf []byte
 	if hasBody {
@@ -461,19 +479,12 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	}
 
 	// The ICAP conn has no request-scoped context like the HTTP path
-	// (server.go:476), so bound the request here. Slot acquisition is already
-	// capped at BackendTimeout by acquireOn; the context must also outlive a
+	// (server.go:476), so bound the request here. The context must outlive a
 	// leader's whole scan, or a coalesced follower gives up after BackendTimeout
-	// while an identical leader is still scanning (COR-02).
+	// while an identical leader is still scanning (COR-02). The admission slot
+	// was acquired before the body read above.
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.BackendTimeout+s.cfg.ScanTimeout+clamdScanSlack)
 	defer cancel()
-	if !s.acquireOn(ctx, s.admit) {
-		s.metrics.busy.Add(1)
-		s.errf("ICAP 503 busy (max_inflight=%d reached)", s.cfg.MaxInflight)
-		_ = s.icapWriteStatus(w, 503, "Service Unavailable", "")
-		return errors.New("icap busy")
-	}
-	defer func() { <-s.admit }()
 
 	t0 := time.Now()
 	// Effort follows the configured level and auto load shedding, as the clamd

@@ -37,7 +37,7 @@ func TestICAPAdmissionOrderingFixture(t *testing.T) {
 
 	cmd := exec.Command("go", "test", "-v", "-count=1", "-race", "-p=1",
 		"-overlay="+overlay,
-		"-run=^TestICAPAdmission(BuffersBeforeGate|PreReadFailureCleanup)$",
+		"-run=^TestICAPAdmission(BoundedByGate|PreReadFailureCleanup)$",
 		"./internal/mailstrix")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
@@ -50,7 +50,7 @@ func TestICAPAdmissionOrderingFixture(t *testing.T) {
 		t.Fatalf("private ICAP admission fixture did not report its package verdict:\n%s", out)
 	}
 	for _, name := range []string{
-		"TestICAPAdmissionBuffersBeforeGate",
+		"TestICAPAdmissionBoundedByGate",
 		"TestICAPAdmissionPreReadFailureCleanup",
 	} {
 		passPrefix := "--- PASS: " + name + " ("
