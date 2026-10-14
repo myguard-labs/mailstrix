@@ -85,8 +85,7 @@ func detectStompingModules(mods []*oleparse.VBAModule, result *Result, deadline 
 		marker := fmt.Sprintf("VBA-STOMPED %s pcode=%d src=%d",
 			name, pcodeLen, srcEffective)
 		markerBytes := []byte(marker)
-		result.recordRetained(markerBytes)
-		result.Streams = append(result.Streams, markerBytes)
+		result.appendStream(&markerBytes)
 	}
 }
 

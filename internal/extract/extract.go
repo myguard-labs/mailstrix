@@ -415,7 +415,7 @@ func normalizeRequestOptions(opts *Options) Options {
 	if requestOpts.RetainedBytesLimit <= 0 {
 		requestOpts.RetainedBytesLimit = DefaultRetainedBytesLimit
 	}
-	requestOpts.retained = &retainedBudget{}
+	requestOpts.retained = newRetainedBudget(requestOpts.RetainedBytesLimit)
 	return requestOpts
 }
 
@@ -639,8 +639,7 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// buffer is XLM-STACK-prefixed so splitPureMarkers routes it to the Markers
 	// channel; the individual entries stay in Streams for the self-contained rules.
 	if xb := joinXLMStackerMarkers(res.Streams); xb != nil {
-		res.recordRetained(xb)
-		res.Streams = append(res.Streams, xb)
+		res.appendStream(&xb)
 	}
 
 	// olevba-style "weight of evidence": when several independent LOW-confidence
@@ -649,14 +648,12 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// rule) still scores. Source markers stay in Streams — this only adds a
 	// stacking verdict. Built AFTER the XLM stacker so XLM presence can count.
 	if bs := joinBehaviorScore(res.Streams); bs != nil {
-		res.recordRetained(bs)
-		res.Streams = append(res.Streams, bs)
+		res.appendStream(&bs)
 	}
 
 	for _, kind := range res.CapHits {
 		marker := []byte(capHitMarkerPrefix + kind)
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 	}
 
 	if preDecodeLen < 0 || preDecodeLen > len(res.Streams) {
@@ -858,15 +855,13 @@ func fromOLEExtraData(ole *oleparse.OLEFile, buf []byte, res *Result, deadline t
 		return // sub-sector padding or free-sector zeros — not an appended payload
 	}
 	marker := []byte("OLE2-EXTRA-DATA")
-	res.recordRetained(marker)
-	res.Streams = append(res.Streams, marker)
+	res.appendStream(&marker)
 	if len(tail) > maxExtraDataCarve {
 		tail = tail[:maxExtraDataCarve]
 	}
 	if len(res.Streams) < maxStreams {
 		stream := append([]byte(nil), tail...)
-		res.recordRetained(stream)
-		res.Streams = append(res.Streams, stream)
+		res.appendStream(&stream)
 	}
 }
 
@@ -912,8 +907,7 @@ func fromMSI(ole *oleparse.OLEFile, res *Result, deadline time.Time) bool {
 		if len(b) > maxBytesPerMSIStream {
 			b = b[:maxBytesPerMSIStream]
 		}
-		res.recordRetained(b)
-		res.Streams = append(res.Streams, b)
+		res.appendStreamOwned(&b)
 		total += len(b)
 	}
 	return true
@@ -1010,8 +1004,7 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		if len(b) > maxBytesPerMSGAttach {
 			b = b[:maxBytesPerMSGAttach]
 		}
-		res.recordRetained(b)
-		res.Streams = append(res.Streams, b)
+		res.appendStreamOwned(&b)
 		total += len(b)
 		emitted++
 		// Charge the shared nested-carrier budget so a .msg → carrier fan-out is
@@ -1211,8 +1204,8 @@ func appendOLEIDMarker(res *Result, out [][]byte, marker string, cond bool) [][]
 			return out
 		}
 	}
-	res.recordRetained(mb)
-	return append(out, mb)
+	res.appendOut(&out, &mb, false)
+	return out
 }
 
 // externalRelSchemes lists the URI schemes that indicate an attacker-controlled
@@ -1307,16 +1300,14 @@ func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time, results ..
 			// (not instead of) the generic marker when the inner scheme is remote.
 			if hasMHTMLScheme(target) {
 				stream := []byte("OOXML-MHTML-REL " + typLabel + " " + target)
-				res.recordRetained(stream)
-				*out = append(*out, stream)
+				res.appendOut(out, &stream, false)
 				continue
 			}
 			if !hasSuspiciousScheme(target) {
 				continue
 			}
 			stream := []byte("OOXML-EXTERNAL-REL " + typLabel + " " + target)
-			res.recordRetained(stream)
-			*out = append(*out, stream)
+			res.appendOut(out, &stream, false)
 			extRels++
 		}
 	}
@@ -1513,8 +1504,7 @@ func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time, results ...*R
 			emit += " " + tail
 		}
 		stream := []byte("OOXML-DDE-FIELD " + emit)
-		res.recordRetained(stream)
-		*out = append(*out, stream)
+		res.appendOut(out, &stream, false)
 		ddeFields++
 	}
 
@@ -1658,8 +1648,10 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 			}
 			b = []byte(m.Code[:n])
 		}
-		out = append(out, b)
-		res.recordRetained(b)
+		// Admit once; the accepted array backs both the output and the VBA alias.
+		if !res.appendOut(&out, &b, len(m.CodeBytes) > 0) {
+			break
+		}
 		// Record this as genuine VBA macro source so the scanner sets the VBA
 		// external ONLY for these streams. Without it the scanner set VBA=true on
 		// EVERY extracted stream (PDF text, archive members, decoded blobs, markers)

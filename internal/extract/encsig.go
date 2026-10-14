@@ -74,8 +74,7 @@ func fromOLEEncType(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			}
 			res.Encrypted = true
 			markerBytes := []byte(marker)
-			res.recordRetained(markerBytes)
-			res.Streams = append(res.Streams, markerBytes)
+			res.appendStream(&markerBytes)
 			return
 		}
 		// EOF (0x000A) ends the workbook globals substream; FILEPASS, if present,
@@ -96,8 +95,7 @@ func fromOLEEncInfo(ole *oleparse.OLEFile, res *Result) {
 		return
 	}
 	marker := []byte("ENCRYPTION-AES")
-	res.recordRetained(marker)
-	res.Streams = append(res.Streams, marker)
+	res.appendStream(&marker)
 }
 
 // fromWordFibEncryption reads the FibBase (MS-DOC 2.5.1) from the WordDocument
@@ -125,8 +123,7 @@ func fromWordFibEncryption(ole *oleparse.OLEFile, res *Result) {
 	if binary.LittleEndian.Uint16(wd[10:])&0x0100 != 0 { // fEncrypted
 		res.Encrypted = true
 		marker := []byte("ENCRYPTION-RC4")
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 	}
 }
 
@@ -141,8 +138,7 @@ func fromPPTEncryptedSummary(ole *oleparse.OLEFile, res *Result) {
 	if ole.FindStreamByName("EncryptedSummary") != nil {
 		res.Encrypted = true
 		marker := []byte("ENCRYPTION-RC4")
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 	}
 }
 
@@ -157,8 +153,7 @@ func fromOLEDigSig(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 	for _, name := range []string{"_signatures", "_xmlsignatures"} {
 		if ole.FindStreamByName(name) != nil {
 			marker := []byte("DIGITAL-SIGNATURE")
-			res.recordRetained(marker)
-			res.Streams = append(res.Streams, marker)
+			res.appendStream(&marker)
 			return
 		}
 	}

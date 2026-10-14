@@ -215,13 +215,11 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time, result
 		if len(*out) >= maxStreams {
 			break
 		}
-		res.recordRetained(s)
-		*out = append(*out, s)
+		res.appendOut(out, &s, true)
 	}
 	if len(*out) < maxStreams {
 		marker := joinMarkerPayload(docPropsMarker, carved)
-		res.recordRetained(marker)
-		*out = append(*out, marker)
+		res.appendOut(out, &marker, false)
 	}
 }
 
@@ -268,8 +266,7 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			if v, ok := docSecurityFlags(data); ok {
 				if len(res.Streams) < maxStreams {
 					marker := []byte(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v))
-					res.recordRetained(marker)
-					res.Streams = append(res.Streams, marker)
+					res.appendStream(&marker)
 				}
 			}
 			metaMarkers = append(metaMarkers, oleSummaryMetaMarkers(data)...)
@@ -291,8 +288,7 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			bufs[i] = []byte(m)
 		}
 		marker := joinMarkerPayload(oleMetaTag, bufs)
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 		res.HasDocProps = true
 	}
 
@@ -308,13 +304,11 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if len(res.Streams) >= maxStreams {
 			break
 		}
-		res.recordRetained(s)
-		res.Streams = append(res.Streams, s)
+		res.appendStreamOwned(&s)
 	}
 	if len(res.Streams) < maxStreams {
 		marker := joinMarkerPayload(docPropsMarker, carved)
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 	}
 }
 

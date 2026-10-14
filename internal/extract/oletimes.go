@@ -95,8 +95,7 @@ func fromOLETimes(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		// Report against real time so a baked image is reproducible only up to the
 		// stamp itself; the marker carries the offending FILETIMEs, not "now".
 		marker := []byte(fmt.Sprintf("OLETIMES-FUTURE create=%#016x modify=%#016x", futureC, futureM))
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 	}
 	// Emit in a deterministic order (Go map iteration is randomized): sort the
 	// over-threshold pairs by (create,modify) so the marker stream is stable
@@ -115,7 +114,6 @@ func fromOLETimes(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 	})
 	for _, p := range hits {
 		marker := []byte(fmt.Sprintf("OLETIMES-SYNTHETIC count=%d create=%#016x modify=%#016x", identical[p], p.c, p.m))
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 	}
 }

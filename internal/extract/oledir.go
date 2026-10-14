@@ -71,8 +71,7 @@ func fromOLEOrphans(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			b = b[:size]
 		}
 		if len(b) > 0 {
-			res.recordRetained(b)
-			res.Streams = append(res.Streams, b)
+			res.appendStreamOwned(&b)
 			carved++
 		}
 	}

@@ -82,8 +82,7 @@ func analyzeBinaries(buf []byte, res *Result) {
 		if !emitted[m] && len(res.Streams) < maxStreams {
 			emitted[m] = true
 			marker := []byte(m)
-			res.recordRetained(marker)
-			res.Streams = append(res.Streams, marker)
+			res.appendStream(&marker)
 		}
 	}
 

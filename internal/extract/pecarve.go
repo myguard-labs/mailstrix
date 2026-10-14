@@ -52,13 +52,11 @@ func carveEmbeddedPEs(res *Result, start int) {
 		// Re-slice (no copy): s is a decoded blob owned by res.Streams and stays
 		// intact for its own rules; the aligned view is read-only to the scanner.
 		view := s[off:]
-		res.recordRetained(view)
-		res.Streams = append(res.Streams, view)
+		res.appendStream(&view)
 		carved++
 	}
 	if carved > 0 && len(res.Streams) < maxStreams {
 		marker := []byte(b64PECarveMarker)
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 	}
 }

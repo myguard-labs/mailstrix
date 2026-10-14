@@ -223,10 +223,7 @@ func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, dep
 			if len(fields) != 0 {
 				b.members++
 				b.total += len(data)
-				for _, field := range fields {
-					res.recordRetained(field)
-				}
-				res.Streams = append(res.Streams, fields...)
+				res.appendStreams(fields, false)
 				continue
 			}
 		}
@@ -237,10 +234,11 @@ func fromOfficeZipCarriersZip(zr *zip.Reader, res *Result, b *archiveBudget, dep
 		if !isNestedCarrier(data) {
 			continue
 		}
+		if !res.appendStreamOwned(&data) {
+			continue
+		}
 		b.members++
 		b.total += len(data)
-		res.recordRetained(data)
-		res.Streams = append(res.Streams, data)
 		extractChild(data, res, b, depth+1, deadline)
 	}
 }
@@ -282,8 +280,7 @@ func markEncryptedArchive(res *Result) {
 	}
 	res.EncryptedArchive = true
 	marker := []byte("ARCHIVE-ENCRYPTED")
-	res.recordRetained(marker)
-	res.Streams = append(res.Streams, marker)
+	res.appendStream(&marker)
 }
 
 // isArchive reports whether buf starts with a supported archive magic. zip is
@@ -356,10 +353,11 @@ func emitMember(data []byte, res *Result, b *archiveBudget, depth int, deadline 
 		archiveCapHit(res, b)
 		return
 	}
+	if !res.appendStreamOwned(&data) {
+		return
+	}
 	b.members++
 	b.total += len(data)
-	res.recordRetained(data)
-	res.Streams = append(res.Streams, data)
 	res.IsArchive = true
 	// Recurse: a member may be a nested archive OR another carrier we know how to
 	// crack (OLE2 macro doc / MSI / .msg, OOXML, OneNote, PDF, RTF, .lnk, encoded

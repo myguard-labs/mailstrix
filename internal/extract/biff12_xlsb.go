@@ -198,8 +198,7 @@ func scanXLSBSupBookDDE(raw []byte, out *[][]byte, results ...*Result) {
 			marker = marker[:maxBIFF12RecordLen]
 		}
 		stream := []byte(marker)
-		res.recordRetained(stream)
-		*out = append(*out, stream)
+		res.appendOut(out, &stream, false)
 		ddeCount++
 	}
 }

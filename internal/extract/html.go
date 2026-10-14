@@ -432,21 +432,18 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 	hasDownload := reHTMLDownloadAttr.Match(head) || bytes.Contains(head, []byte(".click("))
 	if hasBlobAPI && hasDownload && len(res.Streams) < maxStreams {
 		stream := []byte("HTML-SMUGGLING-BLOB")
-		res.recordRetained(stream)
-		res.Streams = append(res.Streams, stream)
+		res.appendStream(&stream)
 	}
 
 	// Signal 4: javascript:/vbscript: URI in a navigational attribute.
 	plainURI, obfURI := scanScriptURIAttr(head, deadline)
 	if plainURI && len(res.Streams) < maxStreams {
 		stream := []byte("HTML-SCRIPT-URI")
-		res.recordRetained(stream)
-		res.Streams = append(res.Streams, stream)
+		res.appendStream(&stream)
 	}
 	if obfURI && len(res.Streams) < maxStreams {
 		stream := []byte("HTML-SCRIPT-URI-OBFUSCATED")
-		res.recordRetained(stream)
-		res.Streams = append(res.Streams, stream)
+		res.appendStream(&stream)
 	}
 
 	// Signal 3: scripted SVG. Only when an <svg> root is present AND it carries
@@ -458,8 +455,7 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 			asciiContainsFold(head, []byte("<foreignobject")) {
 			if len(res.Streams) < maxStreams {
 				stream := []byte("SVG-SCRIPT")
-				res.recordRetained(stream)
-				res.Streams = append(res.Streams, stream)
+				res.appendStream(&stream)
 			}
 		}
 		// SVG-deepen: carve base64 payloads embedded in <image href|xlink:href=
@@ -481,14 +477,23 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 			}
 			if svgCarved == 0 && len(res.Streams) < maxStreams {
 				stream := []byte("SVG-EMBEDDED-PAYLOAD")
-				res.recordRetained(stream)
-				res.Streams = append(res.Streams, stream)
+				res.appendStream(&stream)
 			}
 			svgCarved++
+			// Admit the decoded blob before recursing so a refused blob is never
+			// recursed into; the stream is appended after its children as before.
+			if len(res.Streams) >= maxStreams {
+				extractChild(dec, res, b, depth+1, deadline)
+				continue
+			}
+			if _, ok := res.admitStream(&dec, true); !ok {
+				continue
+			}
 			extractChild(dec, res, b, depth+1, deadline)
 			if len(res.Streams) < maxStreams {
-				res.recordRetained(dec)
 				res.Streams = append(res.Streams, dec)
+			} else {
+				res.releaseRetained(dec)
 			}
 		}
 	}
@@ -526,19 +531,28 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 		}
 		if carved == 0 && len(res.Streams) < maxStreams {
 			stream := []byte(dataURIMarker)
-			res.recordRetained(stream)
-			res.Streams = append(res.Streams, stream)
+			res.appendStream(&stream)
 		}
 		carved++
 		// If the decoded bytes carry a container magic, route them through the
 		// nested extractor so the reconstructed dropper is fully scanned; either
 		// way the decoded blob is added as a stream for the rule set.
+		if len(res.Streams) >= maxStreams {
+			if isContainer {
+				extractChild(dec, res, b, depth+1, deadline)
+			}
+			continue
+		}
+		if _, ok := res.admitStream(&dec, true); !ok {
+			continue
+		}
 		if isContainer {
 			extractChild(dec, res, b, depth+1, deadline)
 		}
 		if len(res.Streams) < maxStreams {
-			res.recordRetained(dec)
 			res.Streams = append(res.Streams, dec)
+		} else {
+			res.releaseRetained(dec)
 		}
 	}
 }

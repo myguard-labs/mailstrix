@@ -210,8 +210,7 @@ func emitFoldedFormula(s string, out *[][]byte, totalOutput *int, checkDangerous
 	*totalOutput += len(s)
 	stream := []byte(s)
 	res := retainedResult(results)
-	res.recordRetained(stream)
-	*out = append(*out, stream)
+	res.appendOut(out, &stream, false)
 	if checkDangerous {
 		emitDangerousMarkers(s, out, res)
 	}
@@ -229,8 +228,7 @@ func emitDangerousMarkers(folded string, out *[][]byte, results ...*Result) {
 		}
 		if strings.Contains(upper, "="+fn+"(") {
 			marker := []byte("XLM-DANGEROUS-FUNC " + fn)
-			res.recordRetained(marker)
-			*out = append(*out, marker)
+			res.appendOut(out, &marker, false)
 		}
 	}
 }

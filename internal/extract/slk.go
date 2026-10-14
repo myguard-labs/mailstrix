@@ -91,8 +91,7 @@ func fromSLK(buf []byte, res *Result, deadline time.Time) {
 		// whether the constant-folder recognises it as an XLM call.
 		if isSLKDDE(formula) {
 			stream := []byte("SLK-DDE " + formula)
-			res.recordRetained(stream)
-			res.Streams = append(res.Streams, stream)
+			res.appendStream(&stream)
 		}
 		folded := foldXLMFormulaDepth(formula, 0, deadline)
 		if folded == "" {

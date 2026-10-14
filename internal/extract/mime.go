@@ -154,7 +154,12 @@ func walkMIMEEntity(h textproto.MIMEHeader, body io.Reader, res *Result, b *arch
 	admitted := len(data) >= minMemberBytes && len(data) <= maxTotalArchive-b.total
 	var admission retainedToken
 	if attachment && complete && admitted {
-		admission, _ = res.recordRetained(data)
+		// One admission and one owned array serve both the attachment index and
+		// the stream. A refused file is never published as a complete identity.
+		var ok bool
+		if admission, ok = res.admitStream(&data, true); !ok {
+			return
+		}
 		res.MIMEAttachments = append(res.MIMEAttachments, data)
 	}
 	if len(data) == 0 {
@@ -247,7 +252,9 @@ func emitMIMEPart(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		return
 	}
 	if res.childOpts == nil || !res.childOpts.retained.owns(admission) {
-		res.recordRetained(data)
+		if _, ok := res.admitStream(&data, true); !ok {
+			return
+		}
 	}
 	b.members++
 	b.total += len(data)

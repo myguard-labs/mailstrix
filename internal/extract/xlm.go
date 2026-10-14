@@ -139,8 +139,7 @@ func fromOOXMLXLM(idx map[string]*zip.File, hasMacrosheet bool, out *[][]byte, d
 		}
 		// Emit marker — we already confirmed xl/macrosheets/ exists.
 		marker := []byte("XLM-HIDDEN-MACROSHEET " + state + " " + sheetName)
-		res.recordRetained(marker)
-		*out = append(*out, marker)
+		res.appendOut(out, &marker, false)
 		markers++
 	}
 }
@@ -521,12 +520,10 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 					switch payload[14] {
 					case 0x01:
 						marker := []byte("XLM-AUTO-OPEN")
-						res.recordRetained(marker)
-						res.Streams = append(res.Streams, marker)
+						res.appendStream(&marker)
 					case 0x02:
 						marker := []byte("XLM-AUTO-CLOSE")
-						res.recordRetained(marker)
-						res.Streams = append(res.Streams, marker)
+						res.appendStream(&marker)
 					}
 				}
 			} else {
@@ -577,8 +574,7 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 		// Decode the sheet name.
 		name := biffSheetName(payload[6:])
 		marker := []byte("XLM-HIDDEN-MACROSHEET " + stateLabel + " " + name)
-		res.recordRetained(marker)
-		res.Streams = append(res.Streams, marker)
+		res.appendStream(&marker)
 		xlmMarkers++
 	}
 

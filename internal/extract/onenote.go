@@ -114,8 +114,7 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 		}
 		if n > 0 {
 			b := append([]byte(nil), data[:n]...)
-			res.recordRetained(b)
-			res.Streams = append(res.Streams, b)
+			admitted := res.appendStream(&b)
 			total += len(b)
 			emitted++
 			// Recurse the embedded file as a child carrier so a nested
@@ -125,7 +124,7 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 			// shared archive budget for this member (like fromArchive/
 			// fromOfficeZipCarriers) and stop recursing once it is spent, so a
 			// chain of OneNote carriers can't outrun the cross-carrier cap.
-			if bud != nil && !bud.spent() {
+			if admitted && bud != nil && !bud.spent() {
 				bud.members++
 				bud.total += len(b)
 				extractChild(b, res, bud, depth+1, deadline)

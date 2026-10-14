@@ -71,8 +71,7 @@ func fromTNEF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline t
 			b = b[:maxBytesPerTNEFPart]
 		}
 		s := append([]byte(nil), b...)
-		res.recordRetained(s)
-		res.Streams = append(res.Streams, s)
+		admitted := res.appendStream(&s)
 		total += len(s)
 		// Recurse an attachment as a child carrier so a nested zip/OLE2/OOXML/
 		// PDF/LNK payload is unwrapped, not just raw-scanned. nil bud (direct
@@ -80,7 +79,7 @@ func fromTNEF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline t
 		// keyword/PE signal. Charge the shared archive budget for this member
 		// (like fromArchive/fromOfficeZipCarriers) and stop recursing once it is
 		// spent, so many TNEF attachments can't outrun the cross-carrier cap.
-		if recurse && bud != nil && !bud.spent() {
+		if admitted && recurse && bud != nil && !bud.spent() {
 			bud.members++
 			bud.total += len(s)
 			extractChild(s, res, bud, depth+1, deadline)

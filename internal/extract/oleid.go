@@ -67,8 +67,7 @@ func fromOLEIndicators(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if !objectPoolSeen && d.Header.Mse == 1 && d.Name == "ObjectPool" {
 			objectPoolSeen = true
 			marker := []byte("OLEID-OBJECTPOOL")
-			res.recordRetained(marker)
-			res.Streams = append(res.Streams, marker)
+			res.appendStream(&marker)
 			continue
 		}
 
@@ -81,8 +80,7 @@ func fromOLEIndicators(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 				if bytes.HasPrefix(head, m) {
 					flashSeen = true
 					marker := []byte("OLEID-FLASH")
-					res.recordRetained(marker)
-					res.Streams = append(res.Streams, marker)
+					res.appendStream(&marker)
 					break
 				}
 			}

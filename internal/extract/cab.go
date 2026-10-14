@@ -127,8 +127,7 @@ func unpackCab(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 			if !cabUnsupportedEmitted {
 				cabUnsupportedEmitted = true
 				marker := []byte("CAB-COMPRESSION-UNSUPPORTED")
-				res.recordRetained(marker)
-				res.Streams = append(res.Streams, marker)
+				res.appendStream(&marker)
 			}
 			continue
 		}

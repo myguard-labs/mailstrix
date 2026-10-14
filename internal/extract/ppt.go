@@ -119,8 +119,7 @@ func emitPPTVBAMarkerIfProduced(res *Result, streamsBefore int) {
 		return
 	}
 	marker := []byte("PPT-VBA-EXTRACTED")
-	res.recordRetained(marker)
-	res.Streams = append(res.Streams, marker)
+	res.appendStream(&marker)
 }
 
 // pptExtractEOS decompresses (if needed) one ExternalObjectStorage body and

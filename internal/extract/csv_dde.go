@@ -203,8 +203,7 @@ func emitIfCSVDDE(cell []byte, res *Result) {
 		c = c[:maxCSVDDECell]
 	}
 	stream := append([]byte("CSV-DDE "), c...)
-	res.recordRetained(stream)
-	res.Streams = append(res.Streams, stream)
+	res.appendStream(&stream)
 }
 
 // normCSVCell strips surrounding whitespace and a single layer of CSV double
