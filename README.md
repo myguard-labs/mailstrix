@@ -707,6 +707,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_ARCHIVE_PW_FILE` | — | optional newline wordlist of extra candidate passwords, loaded once at boot (capped, fail-open) and appended to the per-mail candidates. Consulted only when `MAILSTRIX_ARCHIVE_PW=1`. |
 | `MAILSTRIX_CACHE_TTL` | `3600` (s) | verdict cache TTL; `0` disables caching |
 | `MAILSTRIX_CACHE_SIZE` | `65536` | in-memory LRU entries |
+| `MAILSTRIX_CACHE_MAX_BYTES` | `268435456` (256 MiB) | estimated retained bytes for complete in-memory LRU entries; values <=0 use the default. Accounting includes cache key/index and entry/list storage, slice capacities, strings and Meta map data; it is not an exact Go heap/RSS or Redis bound |
 | `MAILSTRIX_REDIS_URL` | — | optional shared L2 cache, e.g. `redis://host:6379/6` |
 | `MAILSTRIX_REDIS_PREFIX` | `yara:scan:` | Redis key prefix |
 | `MAILSTRIX_REDIS_MAC_KEY` (or `_FILE`) | — | optional HMAC-SHA256 key (>= 32 bytes) over Redis L2 values, bound to the Redis key; a missing or bad MAC is a cache miss. Unset = no MAC. Roll the key out on all replicas; values written before the rollout read as misses and repopulate |

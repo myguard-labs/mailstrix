@@ -24,6 +24,11 @@ ci/**
 !ci/generate_rules_count_test.sh
 !ci/go_coverage.sh
 !ci/rules_polling_test.sh
+# Native package selection needs this nested Go package in the Docker context.
+# Re-deny the subtree before allowing Go sources so reports/corpora stay local.
+!ci/cache_distribution
+ci/cache_distribution/**
+!ci/cache_distribution/*.go
 # Synthetic RC4MD5 fixture read by ci/rc4md5_extract_test.go.
 !ci/testdata
 ci/testdata/**

@@ -18,7 +18,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 		"MAILSTRIX_HOST", "MAILSTRIX_PORT", "MAILSTRIX_BACKEND_TIMEOUT", "MAILSTRIX_MAX_CONCURRENT",
 		"MAILSTRIX_MAX_BODY", "MAILSTRIX_TOKEN", "MAILSTRIX_TOKEN_FILE", "MAILSTRIX_RULES_DIR",
 		"MAILSTRIX_RULES", "MAILSTRIX_SCAN_TIMEOUT", "MAILSTRIX_VERBOSE", "MAILSTRIX_LOG_STDOUT",
-		"MAILSTRIX_RULES_FETCH_TIMEOUT",
+		"MAILSTRIX_RULES_FETCH_TIMEOUT", "MAILSTRIX_CACHE_SIZE", "MAILSTRIX_CACHE_MAX_BYTES",
 	} {
 		t.Setenv(k, "")
 		if e := os.Unsetenv(k); e != nil {
@@ -41,6 +41,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if c.RulesDir != "/rules" {
 		t.Errorf("rules dir = %s", c.RulesDir)
 	}
+	if c.CacheSize != 65536 || c.CacheMaxBytes != defaultCacheMaxBytes {
+		t.Errorf("cache limits = %d/%d, want 65536/%d", c.CacheSize, c.CacheMaxBytes, defaultCacheMaxBytes)
+	}
 }
 
 func TestLoadConfigEnvOverride(t *testing.T) {
@@ -51,6 +54,8 @@ func TestLoadConfigEnvOverride(t *testing.T) {
 	t.Setenv("MAILSTRIX_RULES_FETCH_TIMEOUT", "180")
 	t.Setenv("MAILSTRIX_TOKEN", "sekrit")
 	t.Setenv("MAILSTRIX_VERBOSE", "yes")
+	t.Setenv("MAILSTRIX_CACHE_SIZE", "123")
+	t.Setenv("MAILSTRIX_CACHE_MAX_BYTES", "456789")
 	c := LoadConfig()
 	if c.Host != "127.0.0.1" || c.Port != 9999 || c.MaxConcurrent != 32 {
 		t.Errorf("override failed: %+v", c)
@@ -63,6 +68,20 @@ func TestLoadConfigEnvOverride(t *testing.T) {
 	}
 	if c.Token != "sekrit" || !c.Verbose {
 		t.Errorf("token/verbose = %q/%t", c.Token, c.Verbose)
+	}
+	if c.CacheSize != 123 || c.CacheMaxBytes != 456789 {
+		t.Errorf("cache override = %d/%d", c.CacheSize, c.CacheMaxBytes)
+	}
+}
+
+func TestCacheByteLimitInvalidValuesUseDefault(t *testing.T) {
+	for _, value := range []string{"0", "-1", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("MAILSTRIX_CACHE_MAX_BYTES", value)
+			if got := LoadConfig().CacheMaxBytes; got != defaultCacheMaxBytes {
+				t.Fatalf("MAILSTRIX_CACHE_MAX_BYTES=%q produced %d, want %d", value, got, defaultCacheMaxBytes)
+			}
+		})
 	}
 }
 
