@@ -917,6 +917,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_streams_total", "decompressed macro streams scanned", ex.Streams)
 	fm("extract_failed_total", "container parse attempts that errored", ex.Failed)
 	fm("extract_panicked_total", "parser panics recovered (subset of failed)", ex.Panicked)
+	fm("extract_retained_budget_truncated_total", "extractions whose retained-output ceiling refused a nonempty entry (scan marked incomplete)", ex.Truncated)
 	fm("extract_encrypted_total", "ECMA-376 encrypted OOXML seen (not decrypted)", ex.Encrypted)
 	fm("extract_msi_total", "OLE2 buffers recognised as MSI installers (streams dumped)", ex.MSI)
 	fm("extract_msg_total", "OLE2 buffers recognised as Outlook .msg (nested attachments extracted)", ex.MSG)

@@ -169,6 +169,7 @@ type Scanner struct {
 	exDocProps                                                        atomic.Uint64 // documents with doc-property strings extracted
 	exXLMFold                                                         atomic.Uint64 // documents with XLM formula constant-folding applied
 	exExtMismatch                                                     atomic.Uint64 // attachments whose real container type contradicts a benign-looking extension (renamed dropper)
+	exRetTrunc                                                        atomic.Uint64 // extractions that hit the retained-output ceiling
 
 	// Rule-reload observability (see ReloadMetrics).
 	reloadAttempts, reloadOK, reloadFail atomic.Uint64
@@ -482,6 +483,7 @@ type ExtractMetrics struct {
 	MacroDocs        uint64 // documents that yielded >=1 macro stream
 	Failed           uint64 // container parse attempts that errored
 	Panicked         uint64 // parser panics recovered (subset of Failed)
+	Truncated        uint64 // extractions that hit the retained-output ceiling
 	Encrypted        uint64 // ECMA-376 encrypted OOXML (not decrypted)
 	MSI              uint64 // OLE2 buffers recognised as MSI installers (streams dumped)
 	MSG              uint64 // OLE2 buffers recognised as Outlook .msg (attachments extracted)
@@ -515,6 +517,7 @@ func (s *Scanner) ExtractMetrics() ExtractMetrics {
 		MacroDocs:        s.exMacroDocs.Load(),
 		Failed:           s.exFailed.Load(),
 		Panicked:         s.exPanicked.Load(),
+		Truncated:        s.exRetTrunc.Load(),
 		Encrypted:        s.exEncrypted.Load(),
 		MSI:              s.exMSI.Load(),
 		MSG:              s.exMSG.Load(),
@@ -1912,6 +1915,11 @@ func (s *Scanner) extractionIncomplete(res *extract.Result, extractDeadline time
 	}
 	// COR-07b: an extraction cap stopped the walk with input left, so members
 	// past the cap were never scanned; the verdict is partial like a panic.
+	// RetainedTruncated is authoritative on its own (set even if finalization
+	// failed); CapHits normally carries the same kind and supplies the log line.
+	if res.RetainedTruncated {
+		incomplete = true
+	}
 	if len(res.CapHits) > 0 {
 		s.logf("extraction cap hit (%s); scan marked incomplete", strings.Join(res.CapHits, ","))
 		incomplete = true
@@ -2524,6 +2532,7 @@ func (s *Scanner) recordExtractMetrics(res *extract.Result) {
 		{res.Encrypted, &s.exEncrypted},
 		{res.Failed, &s.exFailed},
 		{res.Panicked, &s.exPanicked},
+		{res.RetainedTruncated, &s.exRetTrunc},
 		{res.IsMSI, &s.exMSI},
 		{res.IsMSG, &s.exMSG},
 		{res.IsOneNote, &s.exOneNote},

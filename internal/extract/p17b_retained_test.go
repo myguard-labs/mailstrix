@@ -249,10 +249,10 @@ func TestP17bExtractionRespectsCeilingEndToEnd(t *testing.T) {
 		t.Fatal("no stream admitted below the ceiling")
 	}
 	if !p17bWithinBound(&res, uint64(limit)) {
-		t.Fatalf("retained %d exceeds E=%d", res.Retained.Bytes(), limit)
+		t.Fatalf("retained %d (ordinary %d) exceeds E=%d", res.Retained.Bytes(), ordinaryDebit(&res), limit)
 	}
-	if res.Retained.Bytes() > ordinary {
-		t.Fatalf("ordinary debit %d exceeds E-D=%d", res.Retained.Bytes(), ordinary)
+	if res.Retained.Bytes() > ordinary+retainedReserveBytes || ordinaryDebit(&res) > ordinary {
+		t.Fatalf("ordinary debit %d exceeds E-D=%d", ordinaryDebit(&res), ordinary)
 	}
 	// Whole members only: every admitted stream is a complete original member.
 	for _, s := range res.Streams {
@@ -369,8 +369,8 @@ func TestP17bPanicExitKeepsAcceptedAndStaysBounded(t *testing.T) {
 	if !hasStream(res.Streams, accepted) || hasStream(res.Streams, refused) {
 		t.Fatalf("streams after panic %q", res.Streams)
 	}
-	if !p17bWithinBound(&res, uint64(limit)) || res.Retained.Bytes() != ordinary {
-		t.Fatalf("panic exit retained=%d E=%d", res.Retained.Bytes(), limit)
+	if !p17bWithinBound(&res, uint64(limit)) || ordinaryDebit(&res) != ordinary {
+		t.Fatalf("panic exit retained=%d ordinary=%d E=%d", res.Retained.Bytes(), ordinaryDebit(&res), limit)
 	}
 }
 
@@ -466,4 +466,13 @@ func TestP17bHTMLUnpublishedBlobIsReleased(t *testing.T) {
 			t.Fatalf("%s: streams=%d ledger=%d published=%d", name, len(r.Streams), ledger.snapshot().Bytes(), retained)
 		}
 	}
+}
+
+// ordinaryDebit is the logical debit excluding the single reserved marker.
+func ordinaryDebit(res *Result) uint64 {
+	d := res.Retained.Bytes()
+	if res.RetainedTruncated && d >= retainedReserveBytes {
+		d -= retainedReserveBytes
+	}
+	return d
 }

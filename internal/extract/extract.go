@@ -385,6 +385,11 @@ type Result struct {
 	// hit as an incomplete scan, so a capped walk is never cached as clean.
 	CapHits []string
 
+	// RetainedTruncated is true when the request's retained-output ceiling
+	// refused a real nonempty entry. It is authoritative on its own (set even if
+	// a parser or finalizer failed) and the scanner treats it as incomplete.
+	RetainedTruncated bool `json:",omitempty"`
+
 	// Retained is a read-only snapshot of this request's logical retained-output
 	// accounting. P16 records only; it never refuses or rewrites output.
 	Retained RetainedAccounting
@@ -470,6 +475,7 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 				finalizeStreams(&res, preDecodeLen)
 			}()
 		}
+		res.noteRetainedTruncation()
 		res.Retained = opts.retained.snapshot()
 	}()
 
@@ -651,9 +657,19 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 		res.appendStream(&bs)
 	}
 
+	// Other cap markers need normal admission; the retained-bytes marker is
+	// emitted last, from the reserve, once every refusal (including this
+	// finalizer's own) is known.
 	for _, kind := range res.CapHits {
+		if kind == retainedBytesKind {
+			continue
+		}
 		marker := []byte(capHitMarkerPrefix + kind)
 		res.appendStream(&marker)
+	}
+	res.noteRetainedTruncation()
+	if res.RetainedTruncated && res.childOpts.retained.admitReserve() {
+		res.Streams = append(res.Streams, []byte(capHitMarkerPrefix+retainedBytesKind))
 	}
 
 	if preDecodeLen < 0 || preDecodeLen > len(res.Streams) {
@@ -1667,6 +1683,20 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 // capHitMarkerPrefix tags the PURE marker emitted once per CapHits kind; the
 // kind is a yarad literal, never attacker bytes.
 const capHitMarkerPrefix = "EXTRACT-CAP-HIT kind="
+
+// retainedBytesKind is the CapHits kind for retained-output exhaustion.
+const retainedBytesKind = "retained-bytes"
+
+// noteRetainedTruncation latches the observable truncation flag and cap hit
+// from the request ledger. It is idempotent, so normal and panic-recover exits
+// may both call it.
+func (r *Result) noteRetainedTruncation() {
+	if r == nil || r.childOpts == nil || r.childOpts.retained == nil || !r.childOpts.retained.exhausted {
+		return
+	}
+	r.RetainedTruncated = true
+	r.capHit(retainedBytesKind)
+}
 
 // capHit records that the cap named kind stopped extraction while input was
 // left. Repeats of a kind are ignored.
