@@ -838,7 +838,7 @@ func readBoundedLine(r *bufio.Reader, limit int) (string, error) {
 			acc = append(acc, frag[:len(frag)-1]...)
 			return strings.TrimRight(string(acc), "\r"), nil
 		}
-		if err != bufio.ErrBufferFull {
+		if !errors.Is(err, bufio.ErrBufferFull) {
 			return "", err
 		}
 		acc = append(acc, frag...)

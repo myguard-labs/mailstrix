@@ -254,9 +254,10 @@ func TestCAPEDaemonTLSConcreteConnAndAcceptLifecycle(t *testing.T) {
 	}
 	defer func() { _ = over.Close() }()
 	_ = over.SetReadDeadline(time.Now().Add(time.Second))
+	var netErr net.Error
 	if _, err := over.Read(make([]byte, 1)); err == nil {
 		t.Fatal("post-response keep-alive connection permitted over-cap acceptance")
-	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+	} else if errors.As(err, &netErr) && netErr.Timeout() {
 		t.Fatal("over-cap connection was held instead of refused")
 	}
 	client.CloseIdleConnections()
