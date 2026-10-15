@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	yara "github.com/hillu/go-yara/v4"
 )
 
 // scanT is a thin test alias for Scan (kept so existing call sites read clearly;
@@ -970,5 +972,42 @@ func TestFastModeScannerPath(t *testing.T) {
 	}
 	if len(m) != 1 || m[0].Rule != "FastMode_Repeat" {
 		t.Fatalf("scanner-path many-match = %+v, want one FastMode_Repeat", m)
+	}
+}
+
+func TestDeclareExternalsPropagatesDefineFailure(t *testing.T) {
+	boom := errors.New("boom")
+	// Positive control: every definer call succeeding yields nil and declares all 7.
+	var names []string
+	if err := declareExternals(func(n string, _ interface{}) error { names = append(names, n); return nil }); err != nil || len(names) != 7 {
+		t.Fatalf("clean define: err=%v names=%v", err, names)
+	}
+	// Failure on the first (VBA) and on a later variable must surface, wrapped.
+	for _, failAt := range []int{0, 1, 6} {
+		i := 0
+		err := declareExternals(func(string, interface{}) error {
+			defer func() { i++ }()
+			if i == failAt {
+				return boom
+			}
+			return nil
+		})
+		if !errors.Is(err, boom) {
+			t.Fatalf("failAt=%d: error not propagated: %v", failAt, err)
+		}
+	}
+}
+
+func TestDefineExternalsRealDuplicateFails(t *testing.T) {
+	c, err := yara.NewCompiler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Destroy()
+	if err := defineExternals(c); err != nil {
+		t.Fatalf("first define: %v", err)
+	}
+	if err := defineExternals(c); err == nil {
+		t.Fatal("redefining externals on the same compiler must fail loudly")
 	}
 }

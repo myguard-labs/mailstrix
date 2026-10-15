@@ -1273,7 +1273,10 @@ var compileRuleFiles = func(dir string, files []string, logf func(string, ...any
 	if err != nil {
 		return nil, fmt.Errorf("new compiler: %w", err)
 	}
-	defineExternals(c)
+	if err := defineExternals(c); err != nil {
+		c.Destroy()
+		return nil, err
+	}
 	added, skipped := 0, 0
 	for _, f := range files {
 		fh, err := os.Open(f) // #nosec G304 -- operator rules dir, not attacker input
@@ -1416,7 +1419,9 @@ func fileCompiles(path string) error {
 		return err
 	}
 	defer c.Destroy()
-	defineExternals(c)
+	if err := defineExternals(c); err != nil {
+		return err
+	}
 	fh, err := os.Open(path) // #nosec G304 -- operator rules dir, not attacker input
 	if err != nil {
 		return err
@@ -1445,11 +1450,25 @@ func fileCompiles(path string) error {
 //     is inert on raw bytes, and Scan flips it true ONLY for decompressed macro
 //     streams (see scanOne). This must mirror compile-rules.sh's yarac `-d` flags
 //     so the precompiled .yac and this in-process path behave identically.
-func defineExternals(c *yara.Compiler) {
-	_ = c.DefineVariable("VBA", false)
-	for _, v := range []string{"filename", "filepath", "extension", "filetype", "file_type", "owner"} {
-		_ = c.DefineVariable(v, "")
+//
+// A failed declaration (libyara: out of memory, or a duplicate/invalid external)
+// is returned so compilation fails with the real cause instead of every rule
+// file later being skipped for an "undefined identifier".
+func defineExternals(c *yara.Compiler) error {
+	return declareExternals(c.DefineVariable)
+}
+
+// declareExternals is defineExternals over an injectable definer.
+func declareExternals(define func(string, interface{}) error) error {
+	if err := define("VBA", false); err != nil {
+		return fmt.Errorf("define external VBA: %w", err)
 	}
+	for _, v := range []string{"filename", "filepath", "extension", "filetype", "file_type", "owner"} {
+		if err := define(v, ""); err != nil {
+			return fmt.Errorf("define external %s: %w", v, err)
+		}
+	}
+	return nil
 }
 
 // ScanMeta carries the per-message context the rspamd plugin knows but the raw
