@@ -81,15 +81,7 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		// Falls back to FullOptions when childOpts is unset (top-level Extract /
 		// tests that build Result directly). The current call's deadline overrides
 		// childOpts.Deadline so the live budget is always respected.
-		{
-			opts := FullOptions(deadline)
-			if res.childOpts != nil {
-				o := *res.childOpts
-				o.Deadline = deadline
-				opts = &o
-			}
-			fromPDF(data, res, opts)
-		}
+		fromPDF(data, res, res.optionsForChild(deadline))
 	case isRTF(data):
 		fromRTF(data, res, b, depth, deadline)
 	case isLNK(data):
@@ -130,6 +122,19 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 	}
 }
 
+// optionsForChild returns a request-local nested copy. The copy may override
+// per-child values such as Deadline, but retains the owning request's ledger.
+func (res *Result) optionsForChild(deadline time.Time) *Options {
+	if res.childOpts == nil {
+		opts := FullOptions(deadline)
+		opts.retained = &retainedBudget{}
+		return opts
+	}
+	opts := *res.childOpts
+	opts.Deadline = deadline
+	return &opts
+}
+
 // depthDefaultContent reports whether the default-branch extractors (encoded
 // script, CSV DDE, HTML smuggling, batch dropper, launcher fields) would have
 // extracted anything from data had the depth limit not stopped them. It runs
@@ -141,7 +146,11 @@ func depthDefaultContent(data []byte, res *Result, depth int, deadline time.Time
 	if batchWouldCarve(data) {
 		return true
 	}
-	scratch := &Result{childOpts: res.childOpts, probe: true}
+	scratchOpts := res.optionsForChild(deadline)
+	// Probe output is never promoted. Keep its accounting isolated so testing
+	// whether content exists cannot consume the parent request's ledger.
+	scratchOpts.retained = &retainedBudget{}
+	scratch := &Result{childOpts: scratchOpts, probe: true}
 	scratchB := &archiveBudget{}
 	// Stop at the first extractor that yields a stream; order is unchanged.
 	fromEncodedScript(data, scratch, deadline)

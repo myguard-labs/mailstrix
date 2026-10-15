@@ -263,7 +263,8 @@ func fromURLShortcut(buf []byte, res *Result, deadline time.Time) {
 		if len(val) > maxLauncherValue {
 			val = val[:maxLauncherValue]
 		}
-		res.Streams = append(res.Streams, []byte(urlShortcutMarker+key+"="+val))
+		stream := []byte(urlShortcutMarker + key + "=" + val)
+		res.appendStream(&stream)
 		emitted++
 	}
 }
@@ -293,7 +294,7 @@ func fromSettingContent(buf []byte, res *Result, deadline time.Time) {
 	rootSeen, nested := false, false
 	marker := ""
 	publishFields := func() {
-		res.Streams = append(res.Streams, fields...)
+		res.appendStreams(fields, false)
 	}
 	for tokens := 0; tokens < maxLauncherTokens; tokens++ {
 		if expired(deadline) {

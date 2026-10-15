@@ -111,9 +111,15 @@ func fromPPTVBA(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 
 	// Emit the marker exactly once, only when at least one extraction produced
 	// new VBA streams.
-	if len(res.Streams) > streamsBefore {
-		res.Streams = append(res.Streams, []byte("PPT-VBA-EXTRACTED"))
+	emitPPTVBAMarkerIfProduced(res, streamsBefore)
+}
+
+func emitPPTVBAMarkerIfProduced(res *Result, streamsBefore int) {
+	if len(res.Streams) <= streamsBefore {
+		return
 	}
+	marker := []byte("PPT-VBA-EXTRACTED")
+	res.appendStream(&marker)
 }
 
 // pptExtractEOS decompresses (if needed) one ExternalObjectStorage body and

@@ -76,7 +76,8 @@ var xlmHiddenStateLabel = [4]string{
 //
 // idx is the shared name→entry map built by fromOOXML; hasMacrosheet is
 // precomputed by the same map-building pass (avoids re-scanning zr.File).
-func fromOOXMLXLM(idx map[string]*zip.File, hasMacrosheet bool, out *[][]byte, deadline time.Time) {
+func fromOOXMLXLM(idx map[string]*zip.File, hasMacrosheet bool, out *[][]byte, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	if expired(deadline) {
 		return
 	}
@@ -137,7 +138,8 @@ func fromOOXMLXLM(idx map[string]*zip.File, hasMacrosheet bool, out *[][]byte, d
 			continue
 		}
 		// Emit marker — we already confirmed xl/macrosheets/ exists.
-		*out = append(*out, []byte("XLM-HIDDEN-MACROSHEET "+state+" "+sheetName))
+		marker := []byte("XLM-HIDDEN-MACROSHEET " + state + " " + sheetName)
+		res.appendOut(out, &marker, false)
 		markers++
 	}
 }
@@ -359,14 +361,14 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 
 		priorLen := len(res.Streams)
 		if len(xlmCells) > 0 {
-			emulateXLMCells(xlmCells, &res.Streams, &xlmOutput, deadline)
+			emulateXLMCells(xlmCells, &res.Streams, &xlmOutput, deadline, res)
 		}
 
 		if !xlmEmulatorProducedPayload(res.Streams, priorLen) {
 			// Emulator produced no output — fall back to one-by-one fold.
 			for _, bc := range cells {
 				folded := parseBIFF8Formula(bc.rgce)
-				emitFoldedFormula(folded, &res.Streams, &xlmOutput, true)
+				emitFoldedFormula(folded, &res.Streams, &xlmOutput, true, res)
 			}
 		}
 	}
@@ -517,9 +519,11 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 				if grbit&0x0020 != 0 && payload[3] == 1 { // fBuiltin + single-byte name
 					switch payload[14] {
 					case 0x01:
-						res.Streams = append(res.Streams, []byte("XLM-AUTO-OPEN"))
+						marker := []byte("XLM-AUTO-OPEN")
+						res.appendStream(&marker)
 					case 0x02:
-						res.Streams = append(res.Streams, []byte("XLM-AUTO-CLOSE"))
+						marker := []byte("XLM-AUTO-CLOSE")
+						res.appendStream(&marker)
 					}
 				}
 			} else {
@@ -569,7 +573,8 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 
 		// Decode the sheet name.
 		name := biffSheetName(payload[6:])
-		res.Streams = append(res.Streams, []byte("XLM-HIDDEN-MACROSHEET "+stateLabel+" "+name))
+		marker := []byte("XLM-HIDDEN-MACROSHEET " + stateLabel + " " + name)
+		res.appendStream(&marker)
 		xlmMarkers++
 	}
 

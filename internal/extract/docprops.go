@@ -60,7 +60,8 @@ var ooxmlPropParts = []string{
 // Fail-open; respects deadline and maxStreams / maxDocPropsStreams caps.
 // Uses the same *[][]byte convention as the other fromOOXML* helpers so it
 // slots into the fromOOXML local-out accumulator without an extra allocation.
-func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	if expired(deadline) {
 		return
 	}
@@ -214,10 +215,11 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 		if len(*out) >= maxStreams {
 			break
 		}
-		*out = append(*out, s)
+		res.appendOut(out, &s, true)
 	}
 	if len(*out) < maxStreams {
-		*out = append(*out, joinMarkerPayload(docPropsMarker, carved))
+		marker := joinMarkerPayload(docPropsMarker, carved)
+		res.appendOut(out, &marker, false)
 	}
 }
 
@@ -263,7 +265,8 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if name == "\x05SummaryInformation" {
 			if v, ok := docSecurityFlags(data); ok {
 				if len(res.Streams) < maxStreams {
-					res.Streams = append(res.Streams, []byte(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v)))
+					marker := []byte(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v))
+					res.appendStream(&marker)
 				}
 			}
 			metaMarkers = append(metaMarkers, oleSummaryMetaMarkers(data)...)
@@ -284,7 +287,8 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		for i, m := range metaMarkers {
 			bufs[i] = []byte(m)
 		}
-		res.Streams = append(res.Streams, joinMarkerPayload(oleMetaTag, bufs))
+		marker := joinMarkerPayload(oleMetaTag, bufs)
+		res.appendStream(&marker)
 		res.HasDocProps = true
 	}
 
@@ -300,10 +304,11 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if len(res.Streams) >= maxStreams {
 			break
 		}
-		res.Streams = append(res.Streams, s)
+		res.appendStreamOwned(&s)
 	}
 	if len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, joinMarkerPayload(docPropsMarker, carved))
+		marker := joinMarkerPayload(docPropsMarker, carved)
+		res.appendStream(&marker)
 	}
 }
 

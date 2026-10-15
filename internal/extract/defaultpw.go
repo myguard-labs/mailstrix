@@ -311,8 +311,13 @@ func hasDecryptedMarker(res *Result) bool {
 // emitDecrypted appends the DEFAULTPW-DECRYPTED marker and feeds the
 // plaintext to the BIFF XLM scanner. Used by RC4 and XOR paths.
 func emitDecrypted(res *Result, plaintext []byte, deadline time.Time) {
-	res.Streams = append(res.Streams, []byte("DEFAULTPW-DECRYPTED"))
+	emitDefaultPWMarker(res)
 	scanBIFFXLMStream(plaintext, res, deadline)
+}
+
+func emitDefaultPWMarker(res *Result) {
+	marker := []byte("DEFAULTPW-DECRYPTED")
+	res.appendStream(&marker)
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,7 +1097,7 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 			if len(plain) == 0 {
 				return
 			}
-			res.Streams = append(res.Streams, []byte("DEFAULTPW-DECRYPTED"))
+			emitDefaultPWMarker(res)
 			fromOOXML(plain, res, deadline, nil)
 			return
 		}
@@ -1114,7 +1119,7 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 			if len(plain) == 0 {
 				return
 			}
-			res.Streams = append(res.Streams, []byte("DEFAULTPW-DECRYPTED"))
+			emitDefaultPWMarker(res)
 			fromOOXML(plain, res, deadline, nil)
 			return
 		}
@@ -1211,7 +1216,7 @@ func fromDefaultPWXOR(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			if len(decrypted) == 0 {
 				return
 			}
-			res.Streams = append(res.Streams, []byte("DEFAULTPW-DECRYPTED"))
+			emitDefaultPWMarker(res)
 			scanBIFFXLMStream(decrypted, res, deadline)
 			return
 		}

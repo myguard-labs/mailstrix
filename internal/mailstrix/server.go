@@ -247,33 +247,23 @@ func (s *Server) logStartup(addr string) {
 		addr, s.engine.RuleCount(), s.cfg.BackendTimeout, s.cfg.ScanTimeout,
 		s.cfg.MaxConcurrent, s.cfg.MaxInflight, s.cfg.MaxBody, bigfile, cache, s.cfg.CacheTTL, s.cfg.CacheSize, s.cfg.CacheMaxBytes, effort, s.cfg.EffortMax, s.authRequired())
 
-	// Lower bound for peak memory: startup RSS plus request buffers bounded by
-	// the admission gate (MaxInflight). Extraction streams and ICAP pre-admission
-	// buffers are unaccounted for. Warn above 3/4 of a known container limit to
-	// leave room for GC headroom and bursts.
-	bufMiB := (int64(s.cfg.MaxInflight) * s.cfg.MaxBody) >> 20
-	// RSS at startup already holds the loaded rules + mbazaar feed (both built
-	// before ListenAndServe), so it captures the two terms the buffers-only
-	// estimate omits. peakMiB is a lower bound: resident base + request buffers; when
-	// RSS is unknown (0) fall back to buffers alone.
-	// Reclaim temporary Go allocations from startup rule/feed loading before
-	// sampling the resident base. Native rule owners keep their own lifetime;
-	// this forced collection must never run on reload or scan paths.
+	// Lower bound for peak memory: RSS + max_inflight x (max_body + retained
+	// extraction ceiling), computed by EstimatePeakBytes. Startup RSS already
+	// holds the loaded rules and mbazaar feed. Reclaim temporary Go allocations
+	// from startup rule/feed loading before sampling the resident base; this
+	// forced collection must never run on reload or scan paths.
 	debug.FreeOSMemory()
-	rssMiB := procRSSMiB()
-	peakMiB := bufMiB + rssMiB
-	if rssMiB > 0 {
-		s.logf("lower bound for peak memory ~%d MiB (rules+feed RSS=%d MiB + max_inflight=%d × max_body=%d MiB buffers; excludes extraction streams and ICAP pre-admission buffers)",
-			peakMiB, rssMiB, s.cfg.MaxInflight, s.cfg.MaxBody>>20)
-	} else {
-		s.logf("lower bound for peak request-buffer memory ~%d MiB (max_inflight=%d × max_body=%d MiB) on top of rules RSS; excludes extraction streams and ICAP pre-admission buffers",
-			bufMiB, s.cfg.MaxInflight, s.cfg.MaxBody>>20)
+	est := startupPeakEstimate(procRSSBytes(), s.cfg.MaxInflight, s.cfg.MaxBody, s.cfg.ExtractionRetainedBytes)
+	s.logf("%s", est.info)
+	limitBytes := cgroupMemLimitBytes()
+	if est.overflow {
+		s.errf("WARNING: configured peak memory estimate overflows (%s); lower MAILSTRIX_MAX_INFLIGHT, MAILSTRIX_MAX_BODY or MAILSTRIX_EXTRACTION_RETAINED_BYTES", est.info)
 	}
-	if limitMiB := cgroupMemLimitMiB(); limitMiB > 0 && peakMiB > (limitMiB*3)/4 {
-		s.errf("WARNING: lower bound for peak memory (~%d MiB: %d MiB RSS + %d MiB buffers) exceeds 3/4 of the %d MiB container limit; excludes extraction streams and ICAP pre-admission buffers; lower MAILSTRIX_MAX_INFLIGHT or MAILSTRIX_MAX_BODY, or raise mem_limit",
-			peakMiB, rssMiB, bufMiB, limitMiB)
-	} else if limitMiB == 0 && peakMiB > 512 {
-		s.errf("WARNING: lower bound for peak memory ~%d MiB (%d MiB RSS + %d MiB buffers); excludes extraction streams and ICAP pre-admission buffers; lower MAILSTRIX_MAX_INFLIGHT/MAILSTRIX_MAX_BODY or set a container mem_limit", peakMiB, rssMiB, bufMiB)
+	if est.checkable && limitBytes > 0 && est.bytes > uint64(limitBytes)/4*3 { // #nosec G115 -- limitBytes > 0
+		s.errf("WARNING: lower bound for peak memory (%s) exceeds 3/4 of the %d MiB container limit; %s; lower MAILSTRIX_MAX_INFLIGHT, MAILSTRIX_MAX_BODY or MAILSTRIX_EXTRACTION_RETAINED_BYTES, or raise mem_limit",
+			est.detail, limitBytes>>20, peakExclusions)
+	} else if est.checkable && limitBytes == 0 && est.bytes > 512<<20 {
+		s.errf("WARNING: lower bound for peak memory (%s); %s; lower MAILSTRIX_MAX_INFLIGHT, MAILSTRIX_MAX_BODY or MAILSTRIX_EXTRACTION_RETAINED_BYTES or set a container mem_limit", est.detail, peakExclusions)
 	}
 	if quota := cgroupCPUQuota(); quota > 0 && float64(s.cfg.MaxConcurrent) > quota*1.5 {
 		s.errf("WARNING: max_concurrent=%d but cgroup cpu.max grants only %.1f CPUs; "+
@@ -297,13 +287,9 @@ const HomeURL = "https://mailstrix.com"
 // License is yarad's SPDX license id, surfaced by `yarad info`.
 const License = "MIT"
 
-// cgroupMemLimitMiB returns the container memory limit in MiB, or 0 if there is
+// cgroupMemLimitBytes returns the container memory limit in bytes, or 0 if there is
 // no enforced limit or it can't be read. Supports cgroup v2 (memory.max) and v1
 // (memory.limit_in_bytes); "max" or the kernel's no-limit sentinel is unlimited.
-func cgroupMemLimitMiB() int64 {
-	return cgroupMemLimitBytes() >> 20
-}
-
 func cgroupMemLimitBytes() int64 {
 	return cgroupMemLimitBytesFrom(
 		"/sys/fs/cgroup/memory.max",                   // cgroup v2
@@ -923,6 +909,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 	fm("extract_streams_total", "decompressed macro streams scanned", ex.Streams)
 	fm("extract_failed_total", "container parse attempts that errored", ex.Failed)
 	fm("extract_panicked_total", "parser panics recovered (subset of failed)", ex.Panicked)
+	fm("extract_retained_budget_truncated_total", "extractions whose retained-output ceiling refused a nonempty entry (scan marked incomplete)", ex.Truncated)
 	fm("extract_encrypted_total", "ECMA-376 encrypted OOXML seen (not decrypted)", ex.Encrypted)
 	fm("extract_msi_total", "OLE2 buffers recognised as MSI installers (streams dumped)", ex.MSI)
 	fm("extract_msg_total", "OLE2 buffers recognised as Outlook .msg (nested attachments extracted)", ex.MSG)
@@ -1313,4 +1300,44 @@ func msSince(t time.Time) float64 { return float64(time.Since(t).Microseconds())
 // whole scan, not only the backend budget (COR-18).
 func (s *Server) httpWriteTimeout() time.Duration {
 	return s.cfg.BackendTimeout + s.cfg.ScanTimeout + clamdScanSlack + 25*time.Second
+}
+
+// peakExclusions names what the startup peak figure does not cover.
+const peakExclusions = "excludes ICAP pre-admission buffers, extraction decoder transients, mbazaar feed refresh spikes, verdict cache growth, libyara C allocations made after startup and allocator slack"
+
+type peakReport struct {
+	info   string // startup info line
+	detail string // arithmetic breakdown, empty unless ok
+	bytes  uint64 // RSS-based estimate, or the retained allowance alone when RSS is unknown
+	ok     bool   // bytes is a real RSS-based estimate
+	// checkable: bytes is a valid lower bound to compare against the limit.
+	checkable bool
+	overflow  bool // the configured allowance overflows uint64
+}
+
+// startupPeakEstimate renders RSS + N*(B+E) via EstimatePeakBytes. Unknown RSS
+// (rssBytes <= 0) or an overflow yields a message without a bogus figure.
+func startupPeakEstimate(rssBytes int64, n int, body, retained int64) peakReport {
+	e := validatedExtractionRetainedBytes(retained)
+	b := int64(n)
+	if rssBytes <= 0 {
+		rssBytes = -1
+	}
+	total, err := EstimatePeakBytes(rssBytes, b, body, e)
+	switch {
+	case errors.Is(err, ErrEstimateRSSUnknown):
+		msg := "peak memory estimate unavailable: RSS unknown"
+		a, aerr := EstimatePeakBytes(0, b, body, e)
+		if aerr == nil {
+			msg += fmt.Sprintf("; retained allowance max_inflight=%d x (max_body=%d B + extraction_retained=%d B) = %d MiB on top of RSS", n, body, e, a>>20)
+		} else {
+			msg += fmt.Sprintf("; retained allowance unavailable: %v", aerr)
+		}
+		return peakReport{info: msg + "; " + peakExclusions, detail: fmt.Sprintf("retained allowance alone ~%d MiB, RSS unknown", a>>20), bytes: a, checkable: aerr == nil, overflow: errors.Is(aerr, ErrEstimateOverflow)}
+	case err != nil:
+		return peakReport{overflow: errors.Is(err, ErrEstimateOverflow), info: fmt.Sprintf("peak memory estimate unavailable: %v (max_inflight=%d, max_body=%d B, extraction_retained=%d B)", err, n, body, e)}
+	}
+	detail := fmt.Sprintf("~%d MiB: RSS=%d MiB + max_inflight=%d x (max_body=%d B + extraction_retained=%d B) retained allowance=%d MiB",
+		total>>20, rssBytes>>20, n, body, e, (total-uint64(rssBytes))>>20) // #nosec G115 -- rssBytes > 0
+	return peakReport{info: "lower bound for peak memory " + detail + "; " + peakExclusions, detail: detail, bytes: total, ok: true, checkable: true}
 }

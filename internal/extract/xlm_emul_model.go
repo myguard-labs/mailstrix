@@ -68,10 +68,11 @@ type xlmMachine struct {
 	deadline      time.Time
 	out           *[][]byte
 	totalOutput   *int
+	retained      *Result
 }
 
 // newMachine creates an empty xlmMachine ready for cell population.
-func newMachine(out *[][]byte, totalOutput *int, deadline time.Time) *xlmMachine {
+func newMachine(out *[][]byte, totalOutput *int, deadline time.Time, results ...*Result) *xlmMachine {
 	return &xlmMachine{
 		sheets:      make(map[string]*xlmSheet),
 		names:       make(map[string]string),
@@ -79,6 +80,7 @@ func newMachine(out *[][]byte, totalOutput *int, deadline time.Time) *xlmMachine
 		deadline:    deadline,
 		out:         out,
 		totalOutput: totalOutput,
+		retained:    retainedResult(results),
 	}
 }
 
@@ -205,7 +207,8 @@ var xlmEmulTestHook func()
 // interpretXLMCells when the emulator produces no output (defense-in-depth).
 // A top-level recover ensures the emulator never panics into the extraction
 // pipeline; any partial *out accumulated before the panic is preserved.
-func emulateXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline time.Time) {
+func emulateXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	if len(cells) == 0 {
 		return
 	}
@@ -222,7 +225,7 @@ func emulateXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline 
 		}
 	}()
 
-	m := newMachine(out, totalOutput, deadline)
+	m := newMachine(out, totalOutput, deadline, res)
 	if xlmEmulTestHook != nil {
 		xlmEmulTestHook()
 	}
@@ -249,23 +252,24 @@ func emulateXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline 
 	// Emit depth class marker so YARA rules can correlate emulation depth with
 	// dangerous-func co-occurrence (e.g. CALL + branched = high signal).
 	depthMarker := "XLM-EMUL-DEPTH " + emulDepthClass(m)
-	emitFoldedFormula(depthMarker, m.out, m.totalOutput, false)
+	emitFoldedFormula(depthMarker, m.out, m.totalOutput, false, res)
 
 	// Zero-output fallback: if the emulator produced no real output (depth
 	// marker is not counted), fall back to the old interpreter for
 	// defense-in-depth coverage.
 	if emulatorLen <= priorLen {
-		interpretXLMCells(cells, out, totalOutput, deadline)
+		interpretXLMCells(cells, out, totalOutput, deadline, res)
 	} else {
-		emitEvaluatedXLMCells(cells, out, totalOutput, deadline)
+		emitEvaluatedXLMCells(cells, out, totalOutput, deadline, res)
 	}
 }
 
-func emitEvaluatedXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline time.Time) {
+func emitEvaluatedXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	if len(cells) == 0 || expired(deadline) {
 		return
 	}
-	m := newMachine(out, totalOutput, deadline)
+	m := newMachine(out, totalOutput, deadline, res)
 	const sheetName = "Sheet1"
 	for _, c := range cells {
 		m.setCell(sheetName, c.coord, c.formula, c.value)
@@ -289,7 +293,7 @@ func emitEvaluatedXLMCells(cells []xlmCell, out *[][]byte, totalOutput *int, dea
 			continue
 		}
 		before := len(*out)
-		if !emitFoldedFormula(s, out, totalOutput, true) {
+		if !emitFoldedFormula(s, out, totalOutput, true, res) {
 			return
 		}
 		if len(*out) > before {

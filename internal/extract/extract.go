@@ -37,7 +37,13 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16+mimeidentity+xxh3key"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16+mimeidentity+retainedlimit+xxh3key"
+
+// DefaultRetainedBytesLimit is the calibrated per-extraction logical-output
+// ceiling, enforced per whole entry: an entry that does not fit the remaining
+// capacity is refused (never truncated) and the scan is marked
+// MAILSTRIX_SCAN_INCOMPLETE, while later entries that still fit are admitted.
+const DefaultRetainedBytesLimit int64 = 2621440
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
 // budget. It is resolved once per scan from the effort level and threaded to the
@@ -53,6 +59,14 @@ const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmpl
 // behaviour rather than an unbounded or zero-depth walk.
 type Options struct {
 	Deadline time.Time // zero == no wall-clock limit (mirrors the old deadline arg)
+	// RetainedBytesLimit caps logical retained extraction output for one request.
+	// Zero and negative values select DefaultRetainedBytesLimit. ExtractWithOptions
+	// normalizes this on a request-local copy and never mutates the caller's value.
+	RetainedBytesLimit int64
+
+	// retained is request-owned accounting state. ExtractWithOptions always
+	// replaces it on a request-local Options copy; nested copies preserve it.
+	retained *retainedBudget
 
 	// DecodeDepth caps the MSD multi-layer static-decode recursion (decodeSourceTree).
 	// DecodeIterations caps worklist dequeues per source stream. Both are floored
@@ -91,12 +105,13 @@ type Options struct {
 // effort scaling. Values mirror the extract package's own ceilings.
 func FullOptions(deadline time.Time) *Options {
 	return &Options{
-		Deadline:         deadline,
-		DecodeDepth:      maxDecodeDepth,
-		DecodeIterations: maxDecodeIterations,
-		PDFDeepen:        true,
-		XLMFoldSheets:    maxXLMFoldSheets,
-		XLMFoldFormulas:  maxXLMFoldFormulas,
+		Deadline:           deadline,
+		RetainedBytesLimit: defaultRetainedLimit(),
+		DecodeDepth:        maxDecodeDepth,
+		DecodeIterations:   maxDecodeIterations,
+		PDFDeepen:          true,
+		XLMFoldSheets:      maxXLMFoldSheets,
+		XLMFoldFormulas:    maxXLMFoldFormulas,
 	}
 }
 
@@ -371,6 +386,15 @@ type Result struct {
 	// hit as an incomplete scan, so a capped walk is never cached as clean.
 	CapHits []string
 
+	// RetainedTruncated is true when the request's retained-output ceiling
+	// refused a real nonempty entry. It is authoritative on its own (set even if
+	// a parser or finalizer failed) and the scanner treats it as incomplete.
+	RetainedTruncated bool `json:",omitempty"`
+
+	// Retained is a read-only snapshot of this request's logical retained-output
+	// accounting. P16 records only; it never refuses or rewrites output.
+	Retained RetainedAccounting
+
 	// childOpts carries the request's effort Options down the nested-carrier walk
 	// (extractChild) so a nested PDF honors the same PDFDeepen / DecodeDepth /
 	// DecodeIterations caps as a top-level one. nil => FullOptions (top-level
@@ -387,6 +411,18 @@ type Result struct {
 // per-request effort caps (EFFORT-4).
 func Extract(buf []byte, deadline time.Time) Result {
 	return ExtractWithOptions(buf, FullOptions(deadline))
+}
+
+func normalizeRequestOptions(opts *Options) Options {
+	if opts == nil {
+		opts = FullOptions(time.Time{})
+	}
+	requestOpts := *opts
+	if requestOpts.RetainedBytesLimit <= 0 {
+		requestOpts.RetainedBytesLimit = defaultRetainedLimit()
+	}
+	requestOpts.retained = newRetainedBudget(requestOpts.RetainedBytesLimit)
+	return requestOpts
 }
 
 // Result.TopType values: the container type the top-level dispatch matched.
@@ -418,9 +454,8 @@ const (
 // pass. A nil opts degrades to FullOptions (no time limit, full depth). The
 // cumulative byte/count caps still apply regardless.
 func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
-	if opts == nil {
-		opts = FullOptions(time.Time{})
-	}
+	requestOpts := normalizeRequestOptions(opts)
+	opts = &requestOpts
 	deadline := opts.Deadline
 	res.childOpts = opts
 	// oleparse walks attacker-controlled binary offsets; a malformed document can
@@ -441,6 +476,8 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 				finalizeStreams(&res, preDecodeLen)
 			}()
 		}
+		res.noteRetainedTruncation()
+		res.Retained = opts.retained.snapshot()
 	}()
 
 	// One shared nested-carrier budget for the whole input: archive members,
@@ -609,7 +646,7 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// buffer is XLM-STACK-prefixed so splitPureMarkers routes it to the Markers
 	// channel; the individual entries stay in Streams for the self-contained rules.
 	if xb := joinXLMStackerMarkers(res.Streams); xb != nil {
-		res.Streams = append(res.Streams, xb)
+		res.appendStream(&xb)
 	}
 
 	// olevba-style "weight of evidence": when several independent LOW-confidence
@@ -618,11 +655,22 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// rule) still scores. Source markers stay in Streams — this only adds a
 	// stacking verdict. Built AFTER the XLM stacker so XLM presence can count.
 	if bs := joinBehaviorScore(res.Streams); bs != nil {
-		res.Streams = append(res.Streams, bs)
+		res.appendStream(&bs)
 	}
 
+	// Other cap markers need normal admission; the retained-bytes marker is
+	// emitted last, from the reserve, once every refusal (including this
+	// finalizer's own) is known.
 	for _, kind := range res.CapHits {
-		res.Streams = append(res.Streams, []byte(capHitMarkerPrefix+kind))
+		if kind == retainedBytesKind {
+			continue
+		}
+		marker := []byte(capHitMarkerPrefix + kind)
+		res.appendStream(&marker)
+	}
+	res.noteRetainedTruncation()
+	if res.RetainedTruncated && res.childOpts.retained.admitReserve() {
+		res.Streams = append(res.Streams, []byte(capHitMarkerPrefix+retainedBytesKind))
 	}
 
 	if preDecodeLen < 0 || preDecodeLen > len(res.Streams) {
@@ -823,12 +871,14 @@ func fromOLEExtraData(ole *oleparse.OLEFile, buf []byte, res *Result, deadline t
 	if len(tail) < extraDataMinBytes || allZero(tail) {
 		return // sub-sector padding or free-sector zeros — not an appended payload
 	}
-	res.Streams = append(res.Streams, []byte("OLE2-EXTRA-DATA"))
+	marker := []byte("OLE2-EXTRA-DATA")
+	res.appendStream(&marker)
 	if len(tail) > maxExtraDataCarve {
 		tail = tail[:maxExtraDataCarve]
 	}
 	if len(res.Streams) < maxStreams {
-		res.Streams = append(res.Streams, append([]byte(nil), tail...))
+		stream := append([]byte(nil), tail...)
+		res.appendStream(&stream)
 	}
 }
 
@@ -874,7 +924,7 @@ func fromMSI(ole *oleparse.OLEFile, res *Result, deadline time.Time) bool {
 		if len(b) > maxBytesPerMSIStream {
 			b = b[:maxBytesPerMSIStream]
 		}
-		res.Streams = append(res.Streams, b)
+		res.appendStreamOwned(&b)
 		total += len(b)
 	}
 	return true
@@ -971,9 +1021,15 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		if len(b) > maxBytesPerMSGAttach {
 			b = b[:maxBytesPerMSGAttach]
 		}
-		res.Streams = append(res.Streams, b)
+		admitted := res.appendStreamOwned(&b)
 		total += len(b)
 		emitted++
+		if !admitted {
+			// Refused by the retained ledger: the attachment is not published, so
+			// neither charge the nested-carrier budget for it nor crack its
+			// derived output (matches emitMember/fromOneNote/fromTNEF).
+			continue
+		}
 		// Charge the shared nested-carrier budget so a .msg → carrier fan-out is
 		// bounded together with archive members (see nested.go), then crack the
 		// attachment's own carrier layer if it is one (depth+1: one carrier deeper
@@ -1096,20 +1152,20 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// "OOXML-EXTERNAL-REL <Type> <Target>" stream so YARA rules can match it.
 	// Fail-open: malformed .rels parts are silently skipped.
 	lenBeforeRels := len(out)
-	fromOOXMLRels(zr, &out, deadline)
+	fromOOXMLRels(zr, &out, deadline, res)
 	hasExtRel := len(out) > lenBeforeRels
 	// Scan word/document.xml (and related parts) for DDE/DDEAUTO field
 	// instructions. Each hit appends a synthetic "OOXML-DDE-FIELD <instr>" stream.
 	// Fail-open: malformed XML is silently skipped.
 	lenBeforeDDE := len(out)
-	fromOOXMLDDE(zr, &out, deadline)
+	fromOOXMLDDE(zr, &out, deadline, res)
 	hasDDE := len(out) > lenBeforeDDE
 	// Detect hidden Excel-4.0 macrosheets in OOXML workbooks (xlsm/xlsb/xlam).
 	// Each hidden/veryHidden sheet coinciding with an xl/macrosheets/ part appends
 	// a synthetic "XLM-HIDDEN-MACROSHEET <state> <name>" stream.
 	// Fail-open: any parse error is silently ignored.
 	lenBeforeXLM := len(out)
-	fromOOXMLXLM(idx, hasMacrosheet, &out, deadline)
+	fromOOXMLXLM(idx, hasMacrosheet, &out, deadline, res)
 	// Capture the hidden-macrosheet result HERE, right after fromOOXMLXLM, before
 	// XLMFold/docProps append. The fold contribution is tracked separately by
 	// res.HasXLMFold below; measuring len(out) > lenBeforeXLM at the END would also
@@ -1119,15 +1175,15 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// obfuscated CHAR()&CHAR()&"..." concatenations into cleartext so
 	// keyword/URL/IOC YARA rules fire. Also emits XLM-DANGEROUS-FUNC markers.
 	prevLen := len(out)
-	fromOOXMLXLMFold(zr, &out, deadline, opts)
+	fromOOXMLXLMFold(zr, &out, deadline, opts, res)
 	// .xlsb stores macrosheets as BIFF12 binary parts (xl/macrosheets/sheet*.bin)
 	// rather than XML <f> elements, so fromOOXMLXLMFold (which only reads .xml)
 	// misses them. Fold the BIFF12 ptg token streams too (XLM-4).
-	fromXLSBXLMFold(zr, &out, deadline, opts)
+	fromXLSBXLMFold(zr, &out, deadline, opts, res)
 	// CSV-DDE-XLSB: a DDE supporting book (BrtBeginSupBook sbt=1) in
 	// xl/externalLinks/*.bin carries a command-exec server/topic as UTF-16LE in
 	// a binary record, invisible to the plain-text/XML passes.
-	fromXLSBExternalDDE(zr, &out, deadline)
+	fromXLSBExternalDDE(zr, &out, deadline, res)
 	if len(out) > prevLen {
 		res.HasXLMFold = true
 	}
@@ -1135,7 +1191,7 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// (docProps/core.xml, docProps/app.xml, docProps/custom.xml,
 	// customXml/item*.xml) and word/settings.xml docVars.
 	// Emits "DOCPROPS-STRINGS" marker + extracted strings.
-	fromOOXMLDocProps(zr, &out, deadline)
+	fromOOXMLDocProps(zr, &out, deadline, res)
 	if hasDocPropsMarker(out) {
 		res.HasDocProps = true
 	}
@@ -1144,10 +1200,10 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 	// is only appended when not already present (dedup guard) and never causes
 	// extraction failure (fail-open). The OLE path (oleid.go) emits OLEID-OBJECTPOOL
 	// and OLEID-FLASH only; these four markers are OOXML-exclusive, no overlap.
-	out = appendOLEIDMarker(out, "OLEID-VBA-PRESENT", vbaProduced)
-	out = appendOLEIDMarker(out, "OLEID-EXTREL", hasExtRel)
-	out = appendOLEIDMarker(out, "OLEID-DDE", hasDDE)
-	out = appendOLEIDMarker(out, "OLEID-XLM-PRESENT", xlmHidden || res.HasXLMFold)
+	out = appendOLEIDMarker(res, out, "OLEID-VBA-PRESENT", vbaProduced)
+	out = appendOLEIDMarker(res, out, "OLEID-EXTREL", hasExtRel)
+	out = appendOLEIDMarker(res, out, "OLEID-DDE", hasDDE)
+	out = appendOLEIDMarker(res, out, "OLEID-XLM-PRESENT", xlmHidden || res.HasXLMFold)
 	res.Streams = out
 	// Every .bin we tried failed to parse and nothing came out: a document that
 	// looks macro-bearing but yields no usable VBA (obfuscated/corrupt/hostile).
@@ -1161,7 +1217,7 @@ func fromOOXMLZip(zr *zip.Reader, res *Result, deadline time.Time, opts *Options
 
 // appendOLEIDMarker appends a []byte stream containing marker to out if cond is
 // true and the marker is not already present. Fail-open: always returns out.
-func appendOLEIDMarker(out [][]byte, marker string, cond bool) [][]byte {
+func appendOLEIDMarker(res *Result, out [][]byte, marker string, cond bool) [][]byte {
 	if !cond {
 		return out
 	}
@@ -1171,7 +1227,8 @@ func appendOLEIDMarker(out [][]byte, marker string, cond bool) [][]byte {
 			return out
 		}
 	}
-	return append(out, mb)
+	res.appendOut(&out, &mb, false)
+	return out
 }
 
 // externalRelSchemes lists the URI schemes that indicate an attacker-controlled
@@ -1195,7 +1252,8 @@ var externalRelSchemes = []string{"http://", "https://", "smb://", "file://\\\\"
 // Fail-open contract: a .rels file that cannot be read or parsed is silently
 // skipped — it must never cause the whole extract to fail. Bounded by
 // maxRelsFiles + maxExternalRels + maxBytesPerRels.
-func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	// xmlRel is the schema for a single <Relationship> element.
 	type xmlRel struct {
 		Type       string `xml:"Type,attr"`
@@ -1265,14 +1323,14 @@ func fromOOXMLRels(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			// (not instead of) the generic marker when the inner scheme is remote.
 			if hasMHTMLScheme(target) {
 				stream := []byte("OOXML-MHTML-REL " + typLabel + " " + target)
-				*out = append(*out, stream)
+				res.appendOut(out, &stream, false)
 				continue
 			}
 			if !hasSuspiciousScheme(target) {
 				continue
 			}
 			stream := []byte("OOXML-EXTERNAL-REL " + typLabel + " " + target)
-			*out = append(*out, stream)
+			res.appendOut(out, &stream, false)
 			extRels++
 		}
 	}
@@ -1370,7 +1428,7 @@ const maxBytesPerDocXML = 4 << 20
 //
 // Fail-open contract: a part that cannot be read or parsed is silently skipped.
 // Bounded by maxDDEFields + maxBytesPerDocXML; respects expired(deadline).
-func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
+func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time, results ...*Result) {
 	// Walk the directory once, scanning every word-processing part that may carry
 	// a DDE field (isDDEDocPart globs document*/header*/footer*/footnotes/endnotes/
 	// comments*) — not a fixed four-name list that missed header2+, footnotes, etc.
@@ -1402,7 +1460,7 @@ func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 			continue
 		}
 		priorLen := len(*out)
-		parseDDEFields(raw, out, deadline)
+		parseDDEFields(raw, out, deadline, retainedResult(results))
 		ddeCount += len(*out) - priorLen
 	}
 }
@@ -1412,7 +1470,8 @@ func fromOOXMLDDE(zr *zip.Reader, out *[][]byte, deadline time.Time) {
 // finds. It handles both w:fldSimple/@w:instr (single-attribute instructions)
 // and concatenated w:instrText run text (split-run instructions). Malformed
 // XML is silently ignored (fail-open).
-func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time) {
+func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time, results ...*Result) {
+	res := retainedResult(results)
 	// We stream-parse with encoding/xml to avoid loading the whole DOM.
 	// State machine: inside a w:fldChar complex field, we accumulate
 	// w:instrText content until w:fldChar w:fldCharType="end".
@@ -1467,7 +1526,8 @@ func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time) {
 		if tail := strings.TrimSpace(norm[cut:]); tail != "" {
 			emit += " " + tail
 		}
-		*out = append(*out, []byte("OOXML-DDE-FIELD "+emit))
+		stream := []byte("OOXML-DDE-FIELD " + emit)
+		res.appendOut(out, &stream, false)
 		ddeFields++
 	}
 
@@ -1611,7 +1671,10 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 			}
 			b = []byte(m.Code[:n])
 		}
-		out = append(out, b)
+		// Admit once; the accepted array backs both the output and the VBA alias.
+		if !res.appendOut(&out, &b, len(m.CodeBytes) > 0) {
+			break
+		}
 		// Record this as genuine VBA macro source so the scanner sets the VBA
 		// external ONLY for these streams. Without it the scanner set VBA=true on
 		// EVERY extracted stream (PDF text, archive members, decoded blobs, markers)
@@ -1627,6 +1690,20 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 // capHitMarkerPrefix tags the PURE marker emitted once per CapHits kind; the
 // kind is a yarad literal, never attacker bytes.
 const capHitMarkerPrefix = "EXTRACT-CAP-HIT kind="
+
+// retainedBytesKind is the CapHits kind for a retained-output refusal.
+const retainedBytesKind = "retained-bytes"
+
+// noteRetainedTruncation latches the observable truncation flag and cap hit
+// from the request ledger. It is idempotent, so normal and panic-recover exits
+// may both call it.
+func (r *Result) noteRetainedTruncation() {
+	if r == nil || r.childOpts == nil || r.childOpts.retained == nil || !r.childOpts.retained.refused {
+		return
+	}
+	r.RetainedTruncated = true
+	r.capHit(retainedBytesKind)
+}
 
 // capHit records that the cap named kind stopped extraction while input was
 // left. Repeats of a kind are ignored.

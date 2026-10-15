@@ -22,6 +22,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/myguard-labs/mailstrix/internal/extract"
 )
 
 // DefaultRulesURL is the published rolling rules release used by both daemon
@@ -43,9 +45,12 @@ type Config struct {
 	MaxConcurrent  int           // MAILSTRIX_MAX_CONCURRENT  (default "auto" = CPU count)
 	MaxInflight    int           // MAILSTRIX_MAX_INFLIGHT    (default 2×MaxConcurrent); admission gate
 	ICAPMaxConns   int           // MAILSTRIX_ICAP_MAX_CONNS  (default 8×MaxInflight); live ICAP conns, pre-admission
-	MaxBody        int64         // MAILSTRIX_MAX_BODY bytes  (default 8 MiB)
-	Token          string        // MAILSTRIX_TOKEN[_FILE]    (required for /scan; comma-separated for rotation)
-	TokenNext      string        // MAILSTRIX_TOKEN_NEXT[_FILE] (incoming rotation token; empty = no rotation)
+	MaxBody        int64         // MAILSTRIX_MAX_BODY bytes (default 8 MiB)
+
+	ExtractionRetainedBytes int64 // MAILSTRIX_EXTRACTION_RETAINED_BYTES (default 2621440)
+
+	Token     string // MAILSTRIX_TOKEN[_FILE]    (required for /scan; comma-separated for rotation)
+	TokenNext string // MAILSTRIX_TOKEN_NEXT[_FILE] (incoming rotation token; empty = no rotation)
 
 	// tokens is the expanded accepted-token set: comma-separated parts of Token
 	// plus TokenNext (if set and not a sentinel). Built by sanitize(); never set
@@ -244,15 +249,18 @@ type Config struct {
 // then sanitizes invalid numeric values.
 func LoadConfig() *Config {
 	c := &Config{
-		CAPEConfigFile:    strings.TrimSpace(os.Getenv("MAILSTRIX_CAPE_CONFIG_FILE")),
-		CAPEPolicy:        envStr("MAILSTRIX_CAPE_POLICY", "static-only"),
-		Host:              envStr("MAILSTRIX_HOST", "0.0.0.0"),
-		Port:              envInt("MAILSTRIX_PORT", 8079),
-		BackendTimeout:    envDur("MAILSTRIX_BACKEND_TIMEOUT", 1),
-		MaxConcurrent:     envIntAuto("MAILSTRIX_MAX_CONCURRENT", runtime.NumCPU()),
-		MaxInflight:       envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0),   // 0 -> sanitize sets 2×MaxConcurrent
-		ICAPMaxConns:      envIntAuto("MAILSTRIX_ICAP_MAX_CONNS", 0), // 0 -> sanitize sets 8×MaxInflight
-		MaxBody:           envInt64("MAILSTRIX_MAX_BODY", 8*1024*1024),
+		CAPEConfigFile: strings.TrimSpace(os.Getenv("MAILSTRIX_CAPE_CONFIG_FILE")),
+		CAPEPolicy:     envStr("MAILSTRIX_CAPE_POLICY", "static-only"),
+		Host:           envStr("MAILSTRIX_HOST", "0.0.0.0"),
+		Port:           envInt("MAILSTRIX_PORT", 8079),
+		BackendTimeout: envDur("MAILSTRIX_BACKEND_TIMEOUT", 1),
+		MaxConcurrent:  envIntAuto("MAILSTRIX_MAX_CONCURRENT", runtime.NumCPU()),
+		MaxInflight:    envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0),   // 0 -> sanitize sets 2×MaxConcurrent
+		ICAPMaxConns:   envIntAuto("MAILSTRIX_ICAP_MAX_CONNS", 0), // 0 -> sanitize sets 8×MaxInflight
+		MaxBody:        envInt64("MAILSTRIX_MAX_BODY", 8*1024*1024),
+
+		ExtractionRetainedBytes: envInt64Range("MAILSTRIX_EXTRACTION_RETAINED_BYTES", extract.DefaultRetainedBytesLimit, 1024, 128*1024*1024),
+
 		ClamdTCPAddr:      os.Getenv("MAILSTRIX_CLAMD_TCP_ADDR"),
 		ClamdUnixPath:     os.Getenv("MAILSTRIX_CLAMD_UNIX_PATH"),
 		ClamdMaxConns:     envInt("MAILSTRIX_CLAMD_MAX_CONNS", 64),
@@ -655,6 +663,14 @@ func warnInvalidEnv(name, raw string) {
 	log.Printf("[mailstrix] WARNING: invalid %s=%q (not a number); using the default", name, raw) // #nosec G706 -- name is a constant env var name; %q escapes the operator-set value, so no control bytes or newlines reach the log
 }
 
+func warnInvalidInt64Env(name, raw string, min, max int64) {
+	log.Printf("[mailstrix] WARNING: invalid %s=%q (invalid base-10 integer; allowed range %d..%d); using the default", name, raw, min, max) // #nosec G706 -- name is a constant env var name; %q escapes the operator-set value, so no control bytes or newlines reach the log
+}
+
+func warnInt64EnvRange(name, raw string, min, max int64) {
+	log.Printf("[mailstrix] WARNING: invalid %s=%q (outside allowed range %d..%d); using the default", name, raw, min, max) // #nosec G706 -- name is a constant env var name; %q escapes the operator-set value, so no control bytes or newlines reach the log
+}
+
 func envInt(name string, def int) int {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -693,6 +709,27 @@ func envInt64(name string, def int64) int64 {
 	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		warnInvalidEnv(name, raw)
+		return def
+	}
+	return n
+}
+
+func envInt64Range(name string, def, min, max int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			warnInt64EnvRange(name, raw, min, max)
+		} else {
+			warnInvalidInt64Env(name, raw, min, max)
+		}
+		return def
+	}
+	if n < min || n > max {
+		warnInt64EnvRange(name, raw, min, max)
 		return def
 	}
 	return n
