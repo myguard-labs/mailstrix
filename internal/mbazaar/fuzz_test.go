@@ -60,8 +60,8 @@ func FuzzParseFeed(f *testing.F) {
 		if hs == nil {
 			t.Fatal("parseFeed returned nil hashSet with nil error")
 		}
-		if len(hs.m) > maxHashes {
-			t.Fatalf("hashSet size %d > maxHashes %d", len(hs.m), maxHashes)
+		if len(hs.s) > maxHashes {
+			t.Fatalf("hashSet size %d > maxHashes %d", len(hs.s), maxHashes)
 		}
 	})
 }

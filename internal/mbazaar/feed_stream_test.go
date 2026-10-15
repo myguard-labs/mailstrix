@@ -39,7 +39,7 @@ func TestParseMultiEntryZipStreams(t *testing.T) {
 	defer func() { maxDecompressedBytes = orig }()
 
 	hs, err := parseFeed(zipOf(t, []byte(body)))
-	if err != nil || len(hs.m) != 1000 {
+	if err != nil || len(hs.s) != 1000 {
 		t.Fatalf("n=%v err=%v, want 1000", hs, err)
 	}
 }
@@ -90,7 +90,7 @@ func TestParseStreamsBoundedHeap(t *testing.T) {
 	hs, err := parseFeed(z)
 	close(stop)
 	wg.Wait()
-	if err != nil || len(hs.m) != 1 {
+	if err != nil || len(hs.s) != 1 {
 		t.Fatalf("n=%v err=%v", hs, err)
 	}
 	grew := int64(peak) - int64(base.HeapAlloc)
@@ -141,7 +141,7 @@ func TestRefreshOverCeilingKeepsPrevious(t *testing.T) {
 		t.Fatal("cache snapshot is not the downloaded zip")
 	}
 	d, _ := parseSHA256(strings.Split(rowFor(3), "\"")[3])
-	if _, ok := c.set.Load().m[d]; !ok {
+	if ok := c.set.Load().has(d); !ok {
 		t.Fatal("hash missing after first refresh")
 	}
 
@@ -152,10 +152,10 @@ func TestRefreshOverCeilingKeepsPrevious(t *testing.T) {
 	if err == nil || !errors.Is(err, errOverCeiling) || !strings.Contains(err.Error(), "exceeds ceiling") {
 		t.Fatalf("err=%v, want errOverCeiling", err)
 	}
-	if n := len(c.set.Load().m); n != 20 {
+	if n := len(c.set.Load().s); n != 20 {
 		t.Fatalf("set replaced: %d hashes, want 20", n)
 	}
-	if _, ok := c.set.Load().m[d]; !ok {
+	if ok := c.set.Load().has(d); !ok {
 		t.Fatal("a hash that hit before no longer hits")
 	}
 	if again, _ := os.ReadFile(c.cachePath); !bytes.Equal(again, cached) {
@@ -249,7 +249,7 @@ func TestRefreshUnwritableCacheDirStillLoads(t *testing.T) {
 	if err := c.refreshOnce(context.Background()); err != nil {
 		t.Fatalf("refresh with unusable cache dir: %v", err)
 	}
-	if n := len(c.set.Load().m); n != 2 {
+	if n := len(c.set.Load().s); n != 2 {
 		t.Fatalf("loaded %d hashes, want 2", n)
 	}
 	// Parent exists but is read-only: CreateTemp fails, same fallback.
@@ -260,7 +260,7 @@ func TestRefreshUnwritableCacheDirStillLoads(t *testing.T) {
 		}
 		c2 := &Checker{key: "k", feedURL: srv.URL, client: srv.Client(), cachePath: filepath.Join(ro, "mb.bin"),
 			logf: func(string, ...any) {}, stop: make(chan struct{})}
-		if err := c2.refreshOnce(context.Background()); err != nil || len(c2.set.Load().m) != 2 {
+		if err := c2.refreshOnce(context.Background()); err != nil || len(c2.set.Load().s) != 2 {
 			t.Fatalf("read-only cache dir: err=%v", err)
 		}
 	}

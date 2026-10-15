@@ -191,8 +191,9 @@ func feedSetCases() []feedSetCase {
 				fmt.Sprintf("\"2024-01-01\",\"%s\",\"md5\"\n", hash2),
 			},
 			empty: "# no rows\n",
-			// Two 32-byte digests: 2 * (32 + 24).
-			want:  2 * (32 + feedSetPerEntry),
+			// Two 32-byte digests in a sorted slice: 2*32 bytes + 24-byte slice
+			// header (mbazaar.hashSet.bytes; no per-entry overhead).
+			want:  2*32 + 24,
 			cache: "malwarebazaar.bin",
 			start: func(dir string, logf func(string, ...any)) *feedSetEngine {
 				return &feedSetEngine{mb: mbazaar.New("fixture-key", time.Hour, "https://feed.invalid/", dir, logf)}
