@@ -386,6 +386,12 @@ func TestSchedulerShutdownStorageFailureRetainsPacket(t *testing.T) {
 	if _, e := s.db.Exec("DROP TRIGGER reject_shutdown"); e != nil {
 		t.Fatal(e)
 	}
+	// The repaired retry's contract is success, not speed: a loaded runner can
+	// make one persistence pass outlast the short drain bound used above. Model
+	// that slowness deterministically (the pass outlasts the old bound) and give
+	// the retry a drain bound that cannot expire first.
+	q.beforePersist = func(context.Context) { time.Sleep(700 * time.Millisecond) }
+	q.drainTimeout = time.Minute
 	if e := q.Run(ctx); e != nil {
 		t.Fatal(e)
 	}
