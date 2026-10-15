@@ -1324,7 +1324,7 @@ before it can allocate:
 | header count | 128 | a flood of short header lines |
 | header block, total | 64 KiB | many medium lines, each under the line cap |
 | chunk-header line | 256 B | an oversized chunk-size line |
-| body | `MAILSTRIX_MAX_BODY` | an oversized payload (`413`) |
+| body | `MAILSTRIX_MAX_BODY` | oversized (ICAP `413`, HTTP `/scan` `400`) |
 | head read time | 30 s | a slow-loris holding a connection without completing a request |
 | live connections | `MAILSTRIX_ICAP_MAX_CONNS` | a connection pool exhausting goroutines/fds (`503` + close) |
 

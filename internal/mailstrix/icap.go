@@ -393,7 +393,7 @@ func (s *Server) handleICAPOptions(w io.Writer) error {
 	sb.WriteString("Preview: 0\r\n")
 	sb.WriteString("Encapsulated: null-body=0\r\n")
 	sb.WriteString("Options-TTL: 3600\r\n")
-	sb.WriteString(fmt.Sprintf("Max-Connections: %d\r\n", s.cfg.ICAPMaxConns))
+	fmt.Fprintf(&sb, "Max-Connections: %d\r\n", s.cfg.ICAPMaxConns)
 	sb.WriteString("Date: " + time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT") + "\r\n")
 	sb.WriteString("\r\n")
 	_, err := io.WriteString(w, sb.String())
@@ -1039,7 +1039,7 @@ func icapWriteInfected(w io.Writer, fp string, matches []Match) error {
 	}
 	fmt.Fprintf(&sb, "X-Violations-Found: %d\r\n", len(listed))
 	sb.WriteString(icapViolationLines(listed))
-	sb.WriteString(fmt.Sprintf("Encapsulated: res-hdr=0, res-body=%d\r\n", len(resHdr)))
+	fmt.Fprintf(&sb, "Encapsulated: res-hdr=0, res-body=%d\r\n", len(resHdr))
 	sb.WriteString("\r\n")
 	sb.WriteString(resHdr)
 	sb.WriteString(chunkHex + "\r\n")

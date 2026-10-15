@@ -1214,17 +1214,11 @@ func rulesetModUnix(srcFile, srcDir string) int64 {
 	return newest
 }
 
-// compileDir compiles every *.yar / *.yara file under dir into one rule set.
-// Files are added by namespace = their base name so identically named rules in
-// different files don't collide.
-//
-// Public rulesets (YARA-Forge, signature-base, ANY.RUN) inevitably contain a
-// few files this build can't compile: a rule importing a module we didn't build
-// in (cuckoo, magic), or a syntax the linked libyara version rejects. One such
-// file must NOT disarm the whole scanner, so each file is validated in a
-// throwaway compiler first and only added to the real set if it compiles
-// clean; bad files are logged and skipped. It is an error only if NOTHING
-// compiles (a misconfigured rules dir, not a single rotten rule).
+// ruleFiles lists the *.yar and *.yara entries directly under dir, sorted by
+// name. It reads the directory and matches each entry name with
+// filepath.Match; no glob pattern is built from dir. It returns an error if
+// dir cannot be read or holds no rule files. Unparsable files are dropped
+// later, in validatedRuleFiles.
 func ruleFiles(dir string) ([]string, error) {
 	// List the directory and match the names, rather than globbing a pattern
 	// built from dir: a rules dir containing glob metacharacters ("[", "*", "?")
@@ -1308,6 +1302,17 @@ var compileRuleFiles = func(dir string, files []string, logf func(string, ...any
 	return rules, nil
 }
 
+// compileDir compiles every *.yar / *.yara file under dir into one rule set.
+// Files are added by namespace = their base name so identically named rules in
+// different files don't collide.
+//
+// Public rulesets (YARA-Forge, signature-base, ANY.RUN) inevitably contain a
+// few files this build can't compile: a rule importing a module we didn't build
+// in (cuckoo, magic), or a syntax the linked libyara version rejects. One such
+// file must NOT disarm the whole scanner, so each file is validated in a
+// throwaway compiler first and only added to the real set if it compiles
+// clean; bad files are logged and skipped. It is an error only if NOTHING
+// compiles (a misconfigured rules dir, not a single rotten rule).
 func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 	files, err := validatedRuleFiles(dir, logf)
 	if err != nil {
