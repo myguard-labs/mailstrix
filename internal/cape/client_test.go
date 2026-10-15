@@ -456,7 +456,12 @@ func TestResponseBodyCancellation(t *testing.T) {
 				_, _ = io.Copy(io.Discard, r.Body)
 				w.WriteHeader(tc.status)
 				_, _ = io.WriteString(w, `{"data":{"task_ids":[41,42,`)
-				w.(http.Flusher).Flush()
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					t.Error("response writer cannot flush")
+					return
+				}
+				flusher.Flush()
 				<-r.Context().Done()
 			})
 			ctx, cancel := context.WithCancel(context.Background())
@@ -887,7 +892,11 @@ func TestReadErrors(t *testing.T) {
 			if strings.Contains(err.Error(), "secret-fixture") || calls.Load() != 1 {
 				t.Fatal("body leak or automatic retry")
 			}
-			if tc.code == Throttled && err.(*Error).RetryAfter != 5*time.Minute {
+			var apiErr *Error
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("status error is not *Error: %v", err)
+			}
+			if tc.code == Throttled && apiErr.RetryAfter != 5*time.Minute {
 				t.Fatal("Retry-After not bounded")
 			}
 		})

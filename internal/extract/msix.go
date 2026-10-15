@@ -3,6 +3,7 @@ package extract
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
 	"strings"
 	"time"
@@ -65,7 +66,7 @@ func msixManifestFields(data []byte, limit int, deadline time.Time) [][]byte {
 	rootSeen, identitySeen := false, false
 	for n := 0; !expired(deadline); n++ {
 		tok, err := d.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			if !expired(deadline) && rootSeen && identitySeen && len(path) == 0 {
 				return fields
 			}

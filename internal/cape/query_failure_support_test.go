@@ -42,8 +42,16 @@ func (p10QueryTx) Commit() error   { return nil }
 func (p10QueryTx) Rollback() error { return nil }
 func (c *p10QueryConn) QueryContext(_ context.Context, _ string, args []driver.NamedValue) (driver.Rows, error) {
 	c.calls++
-	c.cursors = append(c.cursors, args[0].Value.(string))
-	c.limits = append(c.limits, args[1].Value.(int64))
+	cursor, ok := args[0].Value.(string)
+	if !ok {
+		return nil, errors.New("p10 fixture: cursor argument is not a string")
+	}
+	limit, ok := args[1].Value.(int64)
+	if !ok {
+		return nil, errors.New("p10 fixture: limit argument is not int64")
+	}
+	c.cursors = append(c.cursors, cursor)
+	c.limits = append(c.limits, limit)
 	if c.calls == c.failAt {
 		return nil, errors.New("injected query failure")
 	}
@@ -69,12 +77,20 @@ func TestP10MaintenanceInitialQueryFailure(t *testing.T) {
 			t.Run(fmt.Sprintf("states=%s/cursor=%s", states, cursor), func(t *testing.T) {
 				c := &p10QueryConn{failAt: 1}
 				db := sql.OpenDB(p10QueryConnector{c})
-				defer db.Close()
+				defer func() {
+					if err := db.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
 				tx, err := db.Begin()
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer tx.Rollback()
+				defer func() {
+					if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+						t.Error(err)
+					}
+				}()
 				jobs, next, err := nextMaintenanceBatch(tx, states, cursor)
 				if jobs != nil || next != cursor || !errors.Is(err, ErrStoreUnavailable) {
 					t.Fatalf("initial query failure must preserve cursor: jobs=%v next=%q want=%q error=%v", jobs, next, cursor, err)
@@ -95,7 +111,11 @@ func TestP10SchedulerWrapQueryFailure(t *testing.T) {
 				c.failAt = 2
 			}
 			db := sql.OpenDB(p10QueryConnector{c})
-			defer db.Close()
+			defer func() {
+				if err := db.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			s := &Store{db: db, schedulerCursor: "z"}
 			jobs, err := s.schedulerJobs(context.Background())
 			if fail {
@@ -157,7 +177,11 @@ func TestP10MaintenanceQuerySuccess(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer tx.Rollback()
+				defer func() {
+					if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+						t.Error(err)
+					}
+				}()
 				jobs, next, err := nextMaintenanceBatch(tx, states, cursor)
 				if err != nil {
 					t.Fatal(err)

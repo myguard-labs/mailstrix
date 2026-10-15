@@ -1072,7 +1072,7 @@ func TestReadBoundedLineTable(t *testing.T) {
 	t.Run("non-EOF error unchanged", func(t *testing.T) {
 		br := bufio.NewReader(&errAfterReader{data: "abc", err: boom})
 		got, err := readBoundedLine(br, 10)
-		if err != boom || got != "" {
+		if !errors.Is(err, boom) || got != "" {
 			t.Errorf("got (%q, %v), want (\"\", boom)", got, err)
 		}
 	})

@@ -106,7 +106,10 @@ func TestPolyglotArchivedExeNotPolyglot(t *testing.T) {
 	// polyglot. (zip.Deflate is the default for buildZip's Create.)
 	var b bytes.Buffer
 	zw := zip.NewWriter(&b)
-	w, _ := zw.Create("real.exe")
+	w, err := zw.Create("real.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, _ = w.Write(minimalPE())
 	_ = zw.Close()
 	res := Extract(b.Bytes(), time.Time{})

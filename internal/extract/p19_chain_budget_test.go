@@ -76,13 +76,15 @@ func TestP19GlobalBudgetStopsReachableChain(t *testing.T) {
 	limit := int64(retainedReserveBytes) + int64(free.Retained.Bytes())/2
 	cut := ExtractWithOptions(chain, opts(limit))
 	if !cut.RetainedTruncated {
-		t.Fatal("global budget did not truncate the chain")
+		t.Fatalf("global budget did not truncate the chain: retained=%d limit=%d markers=%q",
+			cut.Retained.Bytes(), limit, cut.Markers)
 	}
 	if cut.Retained.Bytes() > uint64(limit) || !p17bWithinBound(&cut, uint64(limit)) {
 		t.Fatalf("retained %d exceeds E=%d", cut.Retained.Bytes(), limit)
 	}
 	if p19Unwrapped(&cut, leaf) || p19Has(&cut, "p19-pdf") {
-		t.Fatal("chain content below the first layers emitted past the global budget")
+		t.Fatalf("chain content below the first layers emitted past the global budget: retained=%d limit=%d leaf=%v pdf=%v markers=%q",
+			cut.Retained.Bytes(), limit, p19Unwrapped(&cut, leaf), p19Has(&cut, "p19-pdf"), cut.Markers)
 	}
 	if cut.Failed || cut.Panicked {
 		t.Fatalf("truncation mapped to failure: failed=%v panicked=%v", cut.Failed, cut.Panicked)

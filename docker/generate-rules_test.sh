@@ -184,6 +184,15 @@ STUB
 cat >"$test_root/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 cat >/dev/null
+printf 'curl %s\n' "$*" >> "$EVENTS"
+if [ "${CURL_TIMEOUT:-0}" -eq 1 ]; then
+    # Model a hung API socket: curl -s -w prints 000 and exits 28, but only a
+    # bounded call ever gets there; an unbounded one would hang forever.
+    case " $* " in
+        *' --max-time '*) printf '000'; exit 28 ;;
+        *) sleep 30 ;;
+    esac
+fi
 printf '%s' "${RELEASE_HTTP:-404}"
 STUB
 
@@ -449,6 +458,19 @@ assert_release_probe_failure_is_publish() {
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 0 ] || assert_event 'release probe started verifier'
 }
 
+assert_release_probe_is_time_bounded() {
+    local actual
+    run_script RELEASE_HTTP=404
+    grep -E '^curl .*--connect-timeout [0-9]+ ' "$EVENTS" >/dev/null || assert_event 'release probe has no --connect-timeout'
+    grep -E '^curl .*--max-time [0-9]+ ' "$EVENTS" >/dev/null || assert_event 'release probe has no --max-time'
+    run_script CURL_TIMEOUT=1
+    [ "$actual" -eq 1 ] || assert_event "release probe timeout exit: $actual"
+    assert_receipt publish failed
+    grep -F 'cannot determine whether release' "$test_root/log" >/dev/null || assert_event 'release probe timeout diagnostic'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 0 ] || assert_event 'release probe timeout uploaded assets'
+    [ "$(grep -c '^create$' "$EVENTS" || true)" -eq 0 ] || assert_event 'release probe timeout created a release'
+}
+
 assert_release_create_failure_is_publish_uncertain() {
     local actual
     run_script FAIL_CREATE=1
@@ -692,6 +714,7 @@ grep -Fx 'notify-body rules-current v1 was published, but native verification fa
 run_case notify-failure-is-best-effort 0 verify success 1 3 0 0 0 1
 assert_receipt_failure_preserves_stage_failure
 assert_release_probe_failure_is_publish
+assert_release_probe_is_time_bounded
 assert_release_create_failure_is_publish_uncertain
 assert_success_receipt_failure_is_receipt_stage
 assert_stdout_failure_is_receipt_stage

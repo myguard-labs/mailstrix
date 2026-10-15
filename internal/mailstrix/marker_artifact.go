@@ -370,7 +370,7 @@ func markerVerifyNativeGraph(path string, invocation markerInvocation) error {
 	if e != nil {
 		return e
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	reader := bufio.NewReader(f)
 	g := markerGraph{Schema: 1, Complete: invocation.Exit == 0, Inventory: []markerInventoryRule{}, References: [][2]int{}, Completions: []int{}}
 	started, sealed, complete := false, false, false

@@ -1214,22 +1214,27 @@ func rulesetModUnix(srcFile, srcDir string) int64 {
 	return newest
 }
 
-// compileDir compiles every *.yar / *.yara file under dir into one rule set.
-// Files are added by namespace = their base name so identically named rules in
-// different files don't collide.
-//
-// Public rulesets (YARA-Forge, signature-base, ANY.RUN) inevitably contain a
-// few files this build can't compile: a rule importing a module we didn't build
-// in (cuckoo, magic), or a syntax the linked libyara version rejects. One such
-// file must NOT disarm the whole scanner, so each file is validated in a
-// throwaway compiler first and only added to the real set if it compiles
-// clean; bad files are logged and skipped. It is an error only if NOTHING
-// compiles (a misconfigured rules dir, not a single rotten rule).
+// ruleFiles lists the *.yar and *.yara entries directly under dir, sorted by
+// name. It reads the directory and matches each entry name with
+// filepath.Match; no glob pattern is built from dir. It returns an error if
+// dir cannot be read or holds no rule files. Unparsable files are dropped
+// later, in validatedRuleFiles.
 func ruleFiles(dir string) ([]string, error) {
+	// List the directory and match the names, rather than globbing a pattern
+	// built from dir: a rules dir containing glob metacharacters ("[", "*", "?")
+	// would make filepath.Glob return ErrBadPattern or match nothing, which the
+	// old code swallowed and reported as "no rule files".
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read rules dir %s: %w", dir, err)
+	}
 	var files []string
 	for _, ext := range []string{"*.yar", "*.yara"} {
-		m, _ := filepath.Glob(filepath.Join(dir, ext))
-		files = append(files, m...)
+		for _, e := range entries {
+			if ok, _ := filepath.Match(ext, e.Name()); ok { // constant patterns: never ErrBadPattern
+				files = append(files, filepath.Join(dir, e.Name()))
+			}
+		}
 	}
 	sort.Strings(files) // deterministic namespace ordering
 	if len(files) == 0 {
@@ -1247,6 +1252,12 @@ func validatedRuleFiles(dir string, logf func(string, ...any)) ([]string, error)
 	skipped := 0
 	for _, f := range files {
 		if compileErr := validateRuleFile(f); compileErr != nil {
+			var setupErr *ruleSetupError
+			if errors.As(compileErr, &setupErr) {
+				// Compiler setup failure is not a property of this file: fail the
+				// whole set rather than returning a silently partial ruleset.
+				return nil, fmt.Errorf("validate rule file %s: %w", filepath.Base(f), compileErr)
+			}
 			skipped++
 			logf("skip unparsable rule file %s: %v", filepath.Base(f), compileErr)
 			continue
@@ -1268,7 +1279,10 @@ var compileRuleFiles = func(dir string, files []string, logf func(string, ...any
 	if err != nil {
 		return nil, fmt.Errorf("new compiler: %w", err)
 	}
-	defineExternals(c)
+	if err := defineExternals(c); err != nil {
+		c.Destroy()
+		return nil, err
+	}
 	added, skipped := 0, 0
 	for _, f := range files {
 		fh, err := os.Open(f) // #nosec G304 -- operator rules dir, not attacker input
@@ -1297,6 +1311,17 @@ var compileRuleFiles = func(dir string, files []string, logf func(string, ...any
 	return rules, nil
 }
 
+// compileDir compiles every *.yar / *.yara file under dir into one rule set.
+// Files are added by namespace = their base name so identically named rules in
+// different files don't collide.
+//
+// Public rulesets (YARA-Forge, signature-base, ANY.RUN) inevitably contain a
+// few files this build can't compile: a rule importing a module we didn't build
+// in (cuckoo, magic), or a syntax the linked libyara version rejects. One such
+// file must NOT disarm the whole scanner, so each file is validated in a
+// throwaway compiler first and only added to the real set if it compiles
+// clean; bad files are logged and skipped. It is an error only if NOTHING
+// compiles (a misconfigured rules dir, not a single rotten rule).
 func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 	files, err := validatedRuleFiles(dir, logf)
 	if err != nil {
@@ -1389,18 +1414,29 @@ func disableNonMarkerRules(bundle *yara.Rules, deny map[string]struct{}, logf fu
 		total, disabled, total-disabled, mbDisabled)
 }
 
+// ruleSetupError marks a compiler-setup failure (compiler creation or external
+// declaration) that is not specific to one rule file, so callers must not skip
+// that file as unparsable.
+type ruleSetupError struct{ err error }
+
+func (e *ruleSetupError) Error() string { return e.err.Error() }
+func (e *ruleSetupError) Unwrap() error { return e.err }
+
 var validateRuleFile = fileCompiles
 
 // fileCompiles validates one rule file in an isolated compiler so a single bad
 // file (unknown module, bad syntax) can be skipped without poisoning the shared
-// compiler the rest of the set is built in.
+// compiler the rest of the set is built in. Compiler-setup failures are returned
+// as *ruleSetupError so they are not mistaken for a bad file.
 func fileCompiles(path string) error {
 	c, err := yara.NewCompiler()
 	if err != nil {
-		return err
+		return &ruleSetupError{err: err}
 	}
 	defer c.Destroy()
-	defineExternals(c)
+	if err := defineExternals(c); err != nil {
+		return &ruleSetupError{err: err}
+	}
 	fh, err := os.Open(path) // #nosec G304 -- operator rules dir, not attacker input
 	if err != nil {
 		return err
@@ -1429,11 +1465,25 @@ func fileCompiles(path string) error {
 //     is inert on raw bytes, and Scan flips it true ONLY for decompressed macro
 //     streams (see scanOne). This must mirror compile-rules.sh's yarac `-d` flags
 //     so the precompiled .yac and this in-process path behave identically.
-func defineExternals(c *yara.Compiler) {
-	_ = c.DefineVariable("VBA", false)
-	for _, v := range []string{"filename", "filepath", "extension", "filetype", "file_type", "owner"} {
-		_ = c.DefineVariable(v, "")
+//
+// A failed declaration (libyara: out of memory, or a duplicate/invalid external)
+// is returned so compilation fails with the real cause instead of every rule
+// file later being skipped for an "undefined identifier".
+func defineExternals(c *yara.Compiler) error {
+	return declareExternals(c.DefineVariable)
+}
+
+// declareExternals is defineExternals over an injectable definer.
+func declareExternals(define func(string, interface{}) error) error {
+	if err := define("VBA", false); err != nil {
+		return fmt.Errorf("define external VBA: %w", err)
 	}
+	for _, v := range []string{"filename", "filepath", "extension", "filetype", "file_type", "owner"} {
+		if err := define(v, ""); err != nil {
+			return fmt.Errorf("define external %s: %w", v, err)
+		}
+	}
+	return nil
 }
 
 // ScanMeta carries the per-message context the rspamd plugin knows but the raw

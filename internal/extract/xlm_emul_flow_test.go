@@ -119,15 +119,19 @@ func TestCOWSheetsSnapshot(t *testing.T) {
 
 	// Snap should be independent at the map level.
 	m.setCell("Sheet1", "A3", "=EXEC(\"new\")", "new")
-	if _, ok := snap["Sheet1"].cells["A3"]; ok {
+	sheet := snap["Sheet1"]
+	if sheet == nil {
+		t.Fatal("snapshot lost Sheet1")
+	}
+	if _, ok := sheet.cells["A3"]; ok {
 		t.Error("snapshot was affected by post-snapshot setCell on original")
 	}
 
 	// Pre-existing cells should still be in the snapshot.
-	if _, ok := snap["Sheet1"].cells["A1"]; !ok {
+	if _, ok := sheet.cells["A1"]; !ok {
 		t.Error("A1 missing from snapshot")
 	}
-	if _, ok := snap["Sheet1"].cells["A2"]; !ok {
+	if _, ok := sheet.cells["A2"]; !ok {
 		t.Error("A2 missing from snapshot")
 	}
 

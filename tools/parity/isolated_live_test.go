@@ -56,7 +56,7 @@ func inertIsolationProbe() int {
 		return 2
 	}
 	if r.Operation == "identity" {
-		if json.NewEncoder(os.Stdout).Encode(isolatedResponse{1, "ok", isolatedTestIdentity(), []symbol{}}) != nil {
+		if err := json.NewEncoder(os.Stdout).Encode(isolatedResponse{1, "ok", isolatedTestIdentity(), []symbol{}}); err != nil {
 			return 2
 		}
 		return 0
@@ -139,7 +139,7 @@ func inertIsolationProbe() int {
 		}
 		result.PidsEvents = probeRead("/sys/fs/cgroup/pids.events")
 	}
-	if json.NewEncoder(os.Stdout).Encode(result) != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		return 2
 	}
 	return 0

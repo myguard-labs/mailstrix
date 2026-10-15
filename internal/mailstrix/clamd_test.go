@@ -910,7 +910,7 @@ func assertClamdSharedConnectionCap(t *testing.T, c *ClamdService, unixPath stri
 	defer func() { _ = refused.Close() }() // refusal already closed the socket
 	_ = refused.SetReadDeadline(time.Now().Add(time.Second))
 	var b [1]byte
-	if n, err := refused.Read(b[:]); n != 0 || err != io.EOF {
+	if n, err := refused.Read(b[:]); n != 0 || !errors.Is(err, io.EOF) {
 		t.Fatalf("cap refusal n=%d err=%v", n, err)
 	}
 	_ = held.Close()

@@ -93,10 +93,7 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time, result
 	extractXMLText := func(raw []byte) {
 		dec := xml.NewDecoder(bytes.NewReader(raw))
 		dec.Strict = false
-		for {
-			if expired(deadline) {
-				break
-			}
+		for !expired(deadline) {
 			if len(carved) >= maxDocPropsStreams || len(*out)+len(carved) >= maxStreams {
 				break
 			}
@@ -176,10 +173,7 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time, result
 			dec := xml.NewDecoder(bytes.NewReader(raw))
 			dec.Strict = false
 		docVarLoop:
-			for {
-				if expired(deadline) {
-					break
-				}
+			for !expired(deadline) {
 				if len(carved) >= maxDocPropsStreams || len(*out)+len(carved) >= maxStreams {
 					break
 				}

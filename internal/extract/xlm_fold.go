@@ -124,10 +124,9 @@ func processXLMFoldSheet(sf *zip.File, out *[][]byte, totalOutput *int, deadline
 	var currentCell xlmCell
 	inCell := false
 
-	for {
-		if expired(deadline) || len(*out) >= maxStreams {
-			break // stop collecting, but still interpret+emit what we have
-		}
+	// Stop collecting at the deadline or stream cap, but still interpret+emit
+	// what we have.
+	for !expired(deadline) && len(*out) < maxStreams {
 		if len(cells) >= formulaCap {
 			break
 		}

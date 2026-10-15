@@ -213,9 +213,21 @@ func TestReportCheckedIdentityAndMapper(t *testing.T) {
 			version := j.Version
 			switch mode {
 			case "task":
-				report.document["info"].(map[string]any)["id"] = json.Number("42")
+				info, ok := report.document["info"].(map[string]any)
+				if !ok {
+					t.Fatal("fixture info is not an object")
+				}
+				info["id"] = json.Number("42")
 			case "hash":
-				report.document["target"].(map[string]any)["file"].(map[string]any)["sha256"] = strings.Repeat("a", 64)
+				target, ok := report.document["target"].(map[string]any)
+				if !ok {
+					t.Fatal("fixture target is not an object")
+				}
+				file, ok := target["file"].(map[string]any)
+				if !ok {
+					t.Fatal("fixture target file is not an object")
+				}
+				file["sha256"] = strings.Repeat("a", 64)
 			case "generation":
 				report.task.Generation = "other"
 			case "category":
@@ -374,6 +386,12 @@ func TestSchedulerShutdownStorageFailureRetainsPacket(t *testing.T) {
 	if _, e := s.db.Exec("DROP TRIGGER reject_shutdown"); e != nil {
 		t.Fatal(e)
 	}
+	// The repaired retry's contract is success, not speed: a loaded runner can
+	// make one persistence pass outlast the short drain bound used above. Model
+	// that slowness deterministically (the pass outlasts the old bound) and give
+	// the retry a drain bound that cannot expire first.
+	q.beforePersist = func(context.Context) { time.Sleep(700 * time.Millisecond) }
+	q.drainTimeout = time.Minute
 	if e := q.Run(ctx); e != nil {
 		t.Fatal(e)
 	}

@@ -395,3 +395,40 @@ func TestCAPEDaemonRuntimeCredentialRoleSeparation(t *testing.T) {
 		t.Fatal("distinct credential roles did not reach store initialization", err)
 	}
 }
+
+// TestCAPEConfigNameAndEnvBoundaries pins the character allowlists behind
+// capeName and the environment-reference name check in validateReferences at
+// the ASCII boundaries on both sides of each accepted range.
+func TestCAPEConfigNameAndEnvBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"a", true}, {"z", true}, {"A", true}, {"Z", true}, {"0", true}, {"9", true},
+		{"_", true}, {"-", true}, {".", true}, {"a_b-c.d", true},
+		{"", false}, {"/", false}, {":", false}, {"@", false}, {"[", false}, {"`", false},
+		{"{", false}, {" ", false}, {"a/b", false}, {"a:b", false}, {"é", false},
+	} {
+		if got := capeName(tc.name); got != tc.want {
+			t.Errorf("capeName(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		env string
+		ok  bool
+	}{
+		{"A", true}, {"Z", true}, {"_", true}, {"A1", true}, {"_9", true}, {"ENV_NAME_2", true},
+		{"0", false}, {"1ABC", false}, {"a", false}, {"@", false}, {"[", false}, {"`", false},
+		{"A:", false}, {"A/", false}, {"A-B", false}, {"A.B", false}, {"A B", false}, {"é", false},
+	} {
+		c := capeFixtureConfig()
+		c.References["probe"] = capeReference{Env: tc.env}
+		err := c.validateReferences()
+		if tc.ok && err != nil {
+			t.Errorf("env %q rejected: %v", tc.env, err)
+		}
+		if !tc.ok && !errors.Is(err, ErrCAPEConfig) {
+			t.Errorf("env %q accepted, want ErrCAPEConfig (err=%v)", tc.env, err)
+		}
+	}
+}

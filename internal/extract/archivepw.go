@@ -488,7 +488,7 @@ func verifyRarPassword(buf []byte, pw string) (ok bool) {
 		if h.Solid {
 			return false
 		}
-		if !(h.Encrypted || h.HeaderEncrypted) {
+		if !h.Encrypted && !h.HeaderEncrypted {
 			continue // plaintext member — reading it proves nothing about the password
 		}
 		if h.UnPackedSize > maxBytesPerMember {
