@@ -110,10 +110,7 @@ func fromOOXMLXLM(idx map[string]*zip.File, hasMacrosheet bool, out *[][]byte, d
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	dec.Strict = false
 	markers := countXLMMarkers(*out)
-	for {
-		if expired(deadline) {
-			break
-		}
+	for !expired(deadline) {
 		if markers >= maxXLMMarkers || len(*out) >= maxStreams {
 			break
 		}
@@ -373,10 +370,7 @@ func scanBIFFXLMStream(workbookData []byte, res *Result, deadline time.Time) {
 		}
 	}
 
-	for {
-		if expired(deadline) {
-			break
-		}
+	for !expired(deadline) {
 		if scanned >= maxXLMSheets {
 			break
 		}
