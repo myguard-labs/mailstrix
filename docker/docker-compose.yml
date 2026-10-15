@@ -7,14 +7,24 @@ services:
     image: eilandert/mailstrix:latest
     container_name: strixd
     restart: unless-stopped
-    # ~74 MB image + rules RSS (~90-200 MiB under macro/zip load) + in-flight
-    # request buffers (max_inflight × max_body). 512m gives burst/GC headroom;
-    # 256m was tight (measured ~198 MiB peak). Lower max_inflight/max_body or set
-    # an explicit MAILSTRIX_MAX_CONCURRENT if you must run leaner.
-    # NOTE: enabling the MalwareBazaar full feed (below) adds ~40 MiB resident
-    # (the hash set) plus a ~100-150 MiB transient spike while the daily dump is
-    # downloaded + unzipped — raise mem_limit to ~768m if you turn it on.
+    # ~74 MB image + rules RSS (~90-200 MiB under macro/zip load, recorded
+    # 2026-06-17) + in-flight request buffers (max_inflight × max_body). 512m
+    # gives burst/GC headroom; 256m was tight (measured ~198 MiB peak, recorded
+    # 2026-06-17). Lower max_inflight/max_body or set an explicit
+    # MAILSTRIX_MAX_CONCURRENT if you must run leaner.
+    # NOTE: the MalwareBazaar full feed is commented out below because its
+    # refresh peak exceeds this limit. Measured 2026-10-15 (local 33-file rule
+    # set, single samples, not a monotone series): VmHWM 2002876 kB (~1.9 GiB)
+    # with all three feeds, 177860 kB with URLhaus+ThreatFox only, 341572 kB
+    # with all feeds disabled.
+    # The peak is the MalwareBazaar dump fetch/unzip (~225 MB dump; resident set
+    # 64.6 MB, 1.15M hashes). A refresh-spike fix (P32) is in progress and not
+    # merged. Re-measure before re-enabling MalwareBazaar at 512m.
     mem_limit: 512m
+    # Optional, not set by default: GOMEMLIMIT = mem_limit - measured libyara (C)
+    # RSS. Example value only (120 MiB, not measured, recorded 2026-10-15): 392MiB
+    # for 512m. To set it, add GOMEMLIMIT to the environment: map below. See the
+    # README "Go memory limit (GOMEMLIMIT)" section before setting it.
 
     # No `ports:` — not published to the host. Reachable only on the internal
     # docker network, by the static IPv4 the rspamd plugin uses.
@@ -52,7 +62,11 @@ services:
       MAILSTRIX_URLHAUS_KEY_FILE: /run/secrets/abuse_ch_key
       # MalwareBazaar — exact SHA256 of each attachment vs known malware samples.
       # Full dump (~1M hashes) refreshed daily; see the mem_limit note above.
-      MAILSTRIX_MBAZAAR_KEY_FILE: /run/secrets/abuse_ch_key
+      # Commented out: the feed is enabled by MAILSTRIX_MBAZAAR_KEY[_FILE]. At
+      # mem_limit 512m the measured 2026-10-15 refresh peak (~1.9 GiB VmHWM, one
+      # sample) exceeds the limit. P32 (refresh spike fix) is expected to lower
+      # it; re-measure and raise mem_limit only with a dated figure.
+      # MAILSTRIX_MBAZAAR_KEY_FILE: /run/secrets/abuse_ch_key
       # MAILSTRIX_MBAZAAR_REFRESH: "86400" # seconds; floor 300
       # MAILSTRIX_MBAZAAR_FEED: "..."      # override feed URL (default: full dump)
       # ThreatFox — recent IOC URL/domain feed (botnet C&C indicators). Same key.

@@ -901,6 +901,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 		b.WriteString("# TYPE mailstrix_cache_limit_evictions_total counter\n")
 		b.WriteString("mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"} " + strconv.FormatUint(lru.ByteEvictions(), 10) + "\n")
 		b.WriteString("mailstrix_cache_limit_evictions_total{cause=\"count_limit\"} " + strconv.FormatUint(lru.CountEvictions(), 10) + "\n")
+		fm("cache_rejected_oversize_total", "L1 puts refused because the entry alone exceeds MAILSTRIX_CACHE_MAX_BYTES (a refused replacement's removed old entry is still counted in cache_limit_evictions_total)", lru.RejectedOversize())
 		fg("cache_bytes", "estimated retained bytes in the L1 verdict cache", lru.Bytes())
 	}
 	b.WriteString("# HELP mailstrix_rules loaded YARA rule count\n")
