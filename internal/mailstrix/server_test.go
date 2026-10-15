@@ -278,7 +278,7 @@ func TestLogStartupFoldsRSS(t *testing.T) {
 	if !strings.Contains(out, "RSS=") || !strings.Contains(out, "lower bound for peak memory") {
 		t.Fatalf("startup line did not fold RSS into peak estimate:\n%s", out)
 	}
-	for _, text := range []string{"lower bound", "extraction streams", "ICAP pre-admission buffers"} {
+	for _, text := range []string{"lower bound", "extraction_retained=", "retained allowance", "feed refresh spikes", "verdict cache", "libyara C allocations", "ICAP pre-admission buffers"} {
 		if !strings.Contains(out, text) || !strings.Contains(warnings.String(), text) {
 			t.Fatalf("startup memory logs missing %q: info=%s warnings=%s", text, out, warnings.String())
 		}
@@ -1124,5 +1124,38 @@ func TestDegradedReason(t *testing.T) {
 		if got := degradedReason(tc.in); got != tc.want {
 			t.Errorf("degradedReason(%v) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestStartupPeakEstimateMessage: the report uses RSS + N*(B+E), names its
+// exclusions, and never prints a figure for unknown RSS or overflow.
+func TestStartupPeakEstimateMessage(t *testing.T) {
+	const mib = 1 << 20
+	r := startupPeakEstimate(344*mib, 8, 16*mib, 2*mib)
+	if !r.ok || r.bytes != uint64(344+8*18)*mib {
+		t.Fatalf("estimate = %+v; want %d MiB", r, 344+8*18)
+	}
+	for _, w := range []string{"~488 MiB", "RSS=344 MiB", "max_inflight=8 x (max_body=", "extraction_retained=2097152 B", "retained allowance=144 MiB", "feed refresh spikes", "verdict cache growth", "libyara C allocations"} {
+		if !strings.Contains(r.info, w) {
+			t.Errorf("info missing %q: %s", w, r.info)
+		}
+	}
+	if strings.Contains(r.info, "request buffers") || strings.Contains(r.info, "excludes extraction streams") {
+		t.Errorf("stale buffer-only wording: %s", r.info)
+	}
+	u := startupPeakEstimate(0, 8, 16*mib, 2*mib)
+	if !u.checkable || u.bytes != 144*mib {
+		t.Errorf("unknown-RSS floor = %+v; want checkable 144 MiB", u)
+	}
+	if u.ok || !strings.Contains(u.info, "RSS unknown") || strings.Contains(u.info, "~") || !strings.Contains(u.info, "144 MiB") {
+		t.Errorf("unknown RSS report wrong: %+v", u)
+	}
+	uo := startupPeakEstimate(0, 1<<30, 1<<62, 1<<20)
+	if !uo.overflow || uo.checkable || strings.Contains(uo.info, "~") {
+		t.Errorf("unknown-RSS overflow report wrong: %+v", uo)
+	}
+	o := startupPeakEstimate(mib, 1<<30, 1<<62, 1<<20)
+	if !o.overflow || o.ok || !strings.Contains(o.info, "overflow") || strings.Contains(o.info, "~") {
+		t.Errorf("overflow report wrong: %+v", o)
 	}
 }

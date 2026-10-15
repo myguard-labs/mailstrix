@@ -33,7 +33,8 @@ func emitZipMember(name string, data []byte, res *Result, b *archiveBudget, dept
 	before := b.members
 	emitMember(data, res, b, depth, deadline)
 	if name == msixManifestName && b.members > before {
-		res.Streams = append(res.Streams, msixManifestFields(data, maxStreams-len(res.Streams), deadline)...)
+		fields := msixManifestFields(data, maxStreams-len(res.Streams), deadline)
+		res.appendStreams(fields, false)
 	}
 }
 

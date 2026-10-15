@@ -89,10 +89,15 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 			data = data[:maxBytesPerPackage]
 		}
 		payload := append([]byte(nil), data...)
-		res.Streams = append(res.Streams, payload)
-		res.IsOLEPackage = true
+		admitted := res.appendStream(&payload)
 		total += len(data)
 		emitted++
+		if !admitted {
+			// Refused by the retained ledger: no published payload, so no
+			// package flag, nested-carrier charge or derived recursion.
+			continue
+		}
+		res.IsOLEPackage = true
 		// Charge the shared nested-carrier budget, then crack the dropped file's
 		// own carrier layer if it is one (depth+1). See nested.go.
 		bud.members++

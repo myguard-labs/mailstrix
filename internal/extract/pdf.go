@@ -197,7 +197,7 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 				// instead of up to maxBytesPerPDFStream that is then discarded.
 				if room := maxTotalPDF - total - 1; room > 0 && len(res.Streams) < maxStreams {
 					if x := rawInflatePDFLimit(decoded, room); len(x) > 0 && !bytes.Equal(x, dec) {
-						res.Streams = append(res.Streams, x)
+						res.appendStreamOwned(&x)
 						total += len(x)
 					}
 				}
@@ -225,7 +225,7 @@ func fromPDF(buf []byte, res *Result, opts *Options) {
 				continue // not deflate / not armoured-deflate — raw scan covers it
 			}
 		}
-		res.Streams = append(res.Streams, dec)
+		res.appendStreamOwned(&dec)
 		total += len(dec)
 		produced++
 	}
@@ -282,7 +282,8 @@ func fromPDFIndicators(scan []byte, lengths map[int]int, res *Result, deadline t
 
 	emit := func(marker string) {
 		if len(res.Streams) < maxStreams {
-			res.Streams = append(res.Streams, []byte(marker))
+			markerBytes := []byte(marker)
+			res.appendStream(&markerBytes)
 		}
 	}
 

@@ -284,7 +284,7 @@ func (m *xlmMachine) runPC(currentSheet, currentCoord *string) {
 			// Non-control-flow formula (or empty): eval and emit, then advance.
 			if formula != "" {
 				if s := evalExpr(m, *currentSheet, formula, nil); s != "" {
-					if !emitFoldedFormula(s, m.out, m.totalOutput, true) {
+					if !emitFoldedFormula(s, m.out, m.totalOutput, true, m.retained) {
 						return // output cap reached
 					}
 				}
