@@ -154,6 +154,15 @@ func TestICAPSlowButSteadyBodyIsNotCut(t *testing.T) {
 		}
 	}
 	_, _ = io.WriteString(c, "\r\n0\r\n\r\n")
+	// Half-close the write side so the client's read ends at the server's
+	// reply instead of waiting out the 10s read deadline.
+	tc, ok := c.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("expected a *net.TCPConn, got %T", c)
+	}
+	if err := tc.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
 	if time.Since(t0) <= 2*idle {
 		t.Fatalf("test did not exceed 2*idle")
 	}
