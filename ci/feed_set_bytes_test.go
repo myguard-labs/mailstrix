@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -100,9 +102,7 @@ func scrapeFeedSetBytes(t *testing.T, eng ms.ScanEngine) map[string]int64 {
 		t.Fatalf("scrape status=%d", w.Code)
 	}
 	body := w.Body.String()
-	if n := strings.Count(body, "# TYPE mailstrix_feed_set_bytes gauge\n"); n > 1 {
-		t.Fatalf("feed_set_bytes family declared %d times", n)
-	}
+	declared := strings.Count(body, "# TYPE mailstrix_feed_set_bytes gauge\n")
 	out := map[string]int64{}
 	const prefix = `mailstrix_feed_set_bytes{feed="`
 	for _, line := range strings.Split(body, "\n") {
@@ -119,6 +119,9 @@ func scrapeFeedSetBytes(t *testing.T, eng ms.ScanEngine) map[string]int64 {
 			t.Fatalf("series %q value: %v", line, err)
 		}
 		out[feed] = v
+	}
+	if declared > 1 || (len(out) > 0 && declared != 1) {
+		t.Fatalf("feed_set_bytes family declared %d times with %d series, want exactly 1 declaration", declared, len(out))
 	}
 	return out
 }
@@ -138,7 +141,9 @@ type feedSetCase struct {
 	rows  []string // two good feed rows, each adding one URL and one host/domain (or one hash)
 	empty string   // a 200 body that parses to zero entries
 	want  int64    // known estimate for the good rows
-	start func(logf func(string, ...any)) *feedSetEngine
+	// cache is the file name the constructor warm-starts from in its cache dir.
+	cache string
+	start func(cacheDir string, logf func(string, ...any)) *feedSetEngine
 }
 
 const (
@@ -160,9 +165,10 @@ func feedSetCases() []feedSetCase {
 			},
 			empty: "# no rows\n",
 			// urls: two full URLs; hosts: the two bare hosts.
-			want: feedSetEstimate(len(fsURL1), len(fsURL2), len(fsHost), len(fsHost2)),
-			start: func(logf func(string, ...any)) *feedSetEngine {
-				return &feedSetEngine{uh: urlhaus.New("fixture-key", time.Hour, "", logf)}
+			want:  feedSetEstimate(len(fsURL1), len(fsURL2), len(fsHost), len(fsHost2)),
+			cache: "urlhaus.csv",
+			start: func(dir string, logf func(string, ...any)) *feedSetEngine {
+				return &feedSetEngine{uh: urlhaus.New("fixture-key", time.Hour, dir, logf)}
 			},
 		},
 		{
@@ -173,8 +179,9 @@ func feedSetCases() []feedSetCase {
 			},
 			empty: "# no rows\n",
 			want:  feedSetEstimate(len(fsURL1), len(fsURL2), len(fsHost), len(fsHost2)),
-			start: func(logf func(string, ...any)) *feedSetEngine {
-				return &feedSetEngine{tf: threatfox.New("fixture-key", time.Hour, "", logf)}
+			cache: "threatfox.csv",
+			start: func(dir string, logf func(string, ...any)) *feedSetEngine {
+				return &feedSetEngine{tf: threatfox.New("fixture-key", time.Hour, dir, logf)}
 			},
 		},
 		{
@@ -185,9 +192,10 @@ func feedSetCases() []feedSetCase {
 			},
 			empty: "# no rows\n",
 			// Two 32-byte digests: 2 * (32 + 24).
-			want: 2 * (32 + feedSetPerEntry),
-			start: func(logf func(string, ...any)) *feedSetEngine {
-				return &feedSetEngine{mb: mbazaar.New("fixture-key", time.Hour, "https://feed.invalid/", "", logf)}
+			want:  2 * (32 + feedSetPerEntry),
+			cache: "malwarebazaar.bin",
+			start: func(dir string, logf func(string, ...any)) *feedSetEngine {
+				return &feedSetEngine{mb: mbazaar.New("fixture-key", time.Hour, "https://feed.invalid/", dir, logf)}
 			},
 		},
 	}
@@ -217,7 +225,7 @@ func TestFeedSetBytesKnownSize(t *testing.T) {
 					func(int) int { return http.StatusOK },
 					func(int) string { return body })
 				loaded := make(chan struct{})
-				eng := c.start(func(msg string, _ ...any) {
+				eng := c.start("", func(msg string, _ ...any) {
 					if strings.Contains(msg, "feed loaded") {
 						loaded <- struct{}{}
 					}
@@ -245,7 +253,7 @@ func TestFeedSetBytesEmptySetIsZero(t *testing.T) {
 					func(int) int { return http.StatusOK },
 					func(int) string { return c.empty })
 				rejected := make(chan struct{})
-				eng := c.start(func(msg string, _ ...any) {
+				eng := c.start("", func(msg string, _ ...any) {
 					if strings.Contains(msg, "initial feed fetch failed") {
 						rejected <- struct{}{}
 					}
@@ -255,8 +263,60 @@ func TestFeedSetBytesEmptySetIsZero(t *testing.T) {
 				if got := eng.setBytes(c.feed); got != 0 {
 					t.Fatalf("empty %s set reports %d bytes, want 0", c.feed, got)
 				}
-				if series := scrapeFeedSetBytes(t, eng); series[c.feed] != 0 {
+				series := scrapeFeedSetBytes(t, eng)
+				v, ok := series[c.feed]
+				if !ok {
+					t.Fatalf("empty %s has no series; absent is not zero: %v", c.feed, series)
+				}
+				if v != 0 {
 					t.Fatalf("empty %s scrape = %v, want 0", c.feed, series)
+				}
+			})
+		})
+	}
+}
+
+// A cached snapshot is loaded synchronously by the constructor, so the set and
+// the gauge reflect it before any network refresh. The served body is empty, so
+// the refresh is rejected and the warm value must survive it.
+func TestFeedSetBytesWarmStart(t *testing.T) {
+	for _, c := range feedSetCases() {
+		t.Run(c.feed, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, c.cache), []byte(strings.Join(c.rows, "")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				requests := 0
+				feedSetServe(t, &requests,
+					func(int) int { return http.StatusOK },
+					func(int) string { return c.empty })
+				warm := make(chan string, 16)
+				done := make(chan string, 16)
+				eng := c.start(dir, func(msg string, _ ...any) {
+					switch {
+					case strings.Contains(msg, "warm-start from cache"):
+						warm <- msg
+					case strings.Contains(msg, "initial feed fetch failed"), strings.Contains(msg, "keeping previous set"):
+						done <- msg
+					}
+				})
+				defer eng.closeAll()
+				select {
+				case msg := <-warm:
+					t.Logf("warm start: %s", msg)
+				default:
+					t.Fatalf("%s constructor did not warm-start from %s", c.feed, c.cache)
+				}
+				if got := eng.setBytes(c.feed); got != c.want {
+					t.Fatalf("warm %s set bytes = %d, want %d", c.feed, got, c.want)
+				}
+				<-done
+				if got := eng.setBytes(c.feed); got != c.want {
+					t.Fatalf("rejected refresh changed warm %s bytes to %d, want %d", c.feed, got, c.want)
+				}
+				if series := scrapeFeedSetBytes(t, eng); series[c.feed] != c.want {
+					t.Fatalf("warm %s scrape = %v, want %d", c.feed, series, c.want)
 				}
 			})
 		})
@@ -285,7 +345,7 @@ func TestFeedSetBytesFailedRefreshKeepsValue(t *testing.T) {
 							return body
 						})
 					done := make(chan struct{})
-					eng := c.start(func(msg string, _ ...any) {
+					eng := c.start("", func(msg string, _ ...any) {
 						if strings.Contains(msg, "feed loaded") || strings.Contains(msg, "keeping previous set") || strings.Contains(msg, "initial feed fetch failed") {
 							done <- struct{}{}
 						}
