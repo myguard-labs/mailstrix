@@ -518,7 +518,7 @@ func corpusCompareCLI(args []string, stdout, stderr io.Writer) (exitCode int) {
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	if encoder.Encode(r) != nil {
+	if err := encoder.Encode(r); err != nil {
 		printError(stderr, "report write failed")
 		return 2
 	}
