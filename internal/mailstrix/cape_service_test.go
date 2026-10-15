@@ -162,9 +162,10 @@ func TestCAPEDaemonPreTLSAcceptBound(t *testing.T) {
 		conn := dial()
 		defer func() { _ = conn.Close() }()
 		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		var netErr net.Error
 		if _, err := conn.Read(make([]byte, 1)); err == nil {
 			t.Fatal("over-cap pre-TLS connection remained open")
-		} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		} else if errors.As(err, &netErr) && netErr.Timeout() {
 			t.Fatal("over-cap pre-TLS connection was held instead of refused")
 		}
 		waitSlots(cfg.AcceptLimit)
@@ -226,9 +227,10 @@ func TestCAPEDaemonTLSConcreteConnAndAcceptLifecycle(t *testing.T) {
 	}
 	start := time.Now()
 	_ = held.SetReadDeadline(start.Add(capeReadHeaderTimeout + 10*time.Second))
+	var heldErr net.Error
 	if _, err := held.Read(make([]byte, 1)); err == nil {
 		t.Fatal("incomplete TLS handshake survived server timeout")
-	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+	} else if errors.As(err, &heldErr) && heldErr.Timeout() {
 		t.Fatal("client deadline fired before server TLS handshake timeout")
 	}
 	_ = held.Close()

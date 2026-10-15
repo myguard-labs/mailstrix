@@ -57,15 +57,16 @@ func TestP10MarkerCloneReleasesBackingBuffer(t *testing.T) {
 			if bundle != nil {
 				defer bundle.Destroy()
 			}
-			if mode == "valid" {
+			switch mode {
+			case "valid":
 				if cloneErr != nil || bundle == nil || bundle == rules {
 					t.Fatalf("valid clone ownership: bundle=%p main=%p error=%v", bundle, rules, cloneErr)
 				}
-			} else if mode == "panic" {
+			case "panic":
 				if panicked != "injected serialization panic" {
 					t.Fatalf("serialization panic changed: %v", panicked)
 				}
-			} else {
+			default:
 				stage := "marker bundle read:"
 				if strings.Contains(mode, "write-error") {
 					stage = "marker bundle serialize:"

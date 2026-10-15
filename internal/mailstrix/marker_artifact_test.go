@@ -25,11 +25,11 @@ func markerArtifactFixture(t testing.TB) string {
 	if e != nil {
 		t.Fatalf("native marker fixture unavailable; run python3 ci/prepare_marker_runtime.py before local Go tests: %v", e)
 	}
-	defer archive.Close()
+	defer func() { _ = archive.Close() }()
 	root := t.TempDir()
 	var total uint64
 	for _, entry := range archive.File {
-		if entry.Mode()&os.ModeSymlink != 0 || entry.FileInfo().IsDir() || filepath.IsAbs(entry.Name) || filepath.ToSlash(filepath.Clean(entry.Name)) != entry.Name || strings.HasPrefix(entry.Name, "../") {
+		if entry.Mode()&os.ModeSymlink != 0 || entry.FileInfo().IsDir() || filepath.IsAbs(entry.Name) || filepath.ToSlash(filepath.Clean(entry.Name)) != entry.Name || entry.Name == ".." || strings.HasPrefix(entry.Name, "../") {
 			t.Fatalf("invalid fixture entry: %q", entry.Name)
 		}
 		if entry.UncompressedSize64 > (16<<20)-total {
@@ -164,6 +164,9 @@ func TestP12ArtifactFallbacks(t *testing.T) {
 			_, e := markerReadJSON(bindingPath, &b)
 			if e != nil {
 				t.Fatal(e)
+			}
+			if len(b.MarkerInventory) == 0 || len(b.MarkerDescriptors.Rules) == 0 || len(b.MarkerDescriptors.Rules[0].Lines) == 0 {
+				t.Fatal("marker binding fixture lacks inventory or descriptor lines")
 			}
 			write := func(p string, data []byte) {
 				t.Helper()
@@ -597,6 +600,9 @@ func TestP12GraphAndExternalInvalid(t *testing.T) {
 		if e = markerJSON(data, &g); e != nil {
 			t.Fatal(e)
 		}
+		if len(g.Summary) == 0 || len(g.Inventory) < 2 || len(g.Completions) == 0 || len(g.References) == 0 {
+			t.Fatal("manifest graph fixture lacks summary, inventory, completions or references")
+		}
 		switch kind {
 		case "complete":
 			g.Complete = false
@@ -839,6 +845,9 @@ func TestP12BindingSemanticBoundaries(t *testing.T) {
 			clone(b, &binding)
 			clone(main, &m)
 			clone(narrow, &n)
+			if len(m.Validations) == 0 || len(m.Externals) == 0 || len(m.Final.Sources) == 0 || len(binding.Namespaces) == 0 || len(binding.Sources) == 0 || len(binding.MarkerInventory) == 0 || len(binding.MainDescriptors.Rules) == 0 || len(n.Final.Graph.Inventory) == 0 || len(n.Final.Sources) == 0 {
+				t.Fatal("binding fixture lacks indexed entries")
+			}
 			switch kind {
 			case "manifest-contract":
 				m.Validations[0].Argv[1] = "changed"
@@ -1044,6 +1053,9 @@ func TestP12ManifestContractFailures(t *testing.T) {
 		if e = markerJSON(data, &m); e != nil {
 			t.Fatal(e)
 		}
+		if len(m.Validations) == 0 || len(m.Final.Sources) == 0 {
+			t.Fatal("manifest fixture lacks validations or final sources")
+		}
 		switch kind {
 		case "validation-status":
 			m.Validations[0].Accepted = false
@@ -1183,6 +1195,9 @@ func TestP12GraphStateReferenceAndPublicationGuards(t *testing.T) {
 			if _, e := markerReadJSON(filepath.Join(root, "manifest.json"), &m); e != nil {
 				t.Fatal(e)
 			}
+			if len(m.Validations) == 0 || len(m.Validations[0].Sources) == 0 || len(m.Validations[0].Includes) == 0 {
+				t.Fatal("manifest fixture lacks validation sources or includes")
+			}
 			files := index.Artifacts["main"].Files
 			bad := markerFingerprint{SHA256: strings.Repeat("0", 64), Size: 1}
 			writeRecord := func() {
@@ -1301,6 +1316,9 @@ func TestP12ReferencedSnapshotFallback(t *testing.T) {
 	if _, e := markerReadJSON(filepath.Join(root, "marker-artifact/binding.json"), &b); e != nil {
 		t.Fatal(e)
 	}
+	if len(m.Validations) == 0 || len(b.Sources) == 0 {
+		t.Fatal("fixture lacks validations or binding sources")
+	}
 	fp := markerFingerprint{SHA256: strings.Repeat("0", 64), Size: 1}
 	m.Validations[0].Candidate.Snapshot = fp
 	b.Sources[0].Snapshot = fp
@@ -1369,6 +1387,9 @@ func TestP12LexicalDirectoryIdentity(t *testing.T) {
 	if e := markerValidateManifest(m); e != nil {
 		t.Fatal(e)
 	}
+	if len(m.Final.Sources) == 0 {
+		t.Fatal("manifest fixture lacks final sources")
+	}
 	source := markerObserved{Path: "/traversed//./leaf/../deep/file.inc", Observed: m.Final.Sources[0].Observed}
 	m.Final.Includes = append(m.Final.Includes, source)
 	m.Inputs[filepath.Clean(source.Path)] = source.Observed
@@ -1397,11 +1418,10 @@ func TestP12NativeFailedAndSuccessfulRootContracts(t *testing.T) {
 		t.Fatal(e)
 	}
 	frame := func(kind byte, name string, payload []byte) []byte {
-		data := make([]byte, 17)
-		data[0] = kind
-		binary.LittleEndian.PutUint64(data[1:9], uint64(len(name)))
-		binary.LittleEndian.PutUint64(data[9:17], uint64(len(payload)))
-		data = append(data, []byte(name)...)
+		data := []byte{kind}
+		data = binary.LittleEndian.AppendUint64(data, uint64(len(name)))
+		data = binary.LittleEndian.AppendUint64(data, uint64(len(payload)))
+		data = append(data, name...)
 		return append(data, payload...)
 	}
 	run := func(data []byte, inv markerInvocation, want string) {
@@ -1462,6 +1482,9 @@ func TestP12NativeFailedAndSuccessfulRootContracts(t *testing.T) {
 				data = append(data, trace[offset:offset+size]...)
 			}
 			offset += size
+		}
+		if len(failed.Sources) == 0 {
+			t.Fatal("failed validation lacks sources")
 		}
 		failed.Sources[0].Errors = nil
 		run(data, failed, "")
