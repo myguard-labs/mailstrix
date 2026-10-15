@@ -40,7 +40,7 @@ func TestStartupMemoryWording(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := string(output)
-	for _, text := range []string{"lower bound for peak memory", "extraction streams", "ICAP pre-admission buffers", "RSS="} {
+	for _, text := range []string{"lower bound for peak memory", "extraction_retained", "ICAP pre-admission buffers", "RSS="} {
 		if !strings.Contains(logs, text) {
 			t.Fatalf("startup memory log missing %q:\n%s", text, logs)
 		}
@@ -51,7 +51,7 @@ func TestStartupMemoryWording(t *testing.T) {
 			continue
 		}
 		foundWarning = true
-		for _, text := range []string{"lower bound", "extraction streams", "ICAP pre-admission buffers", "MAILSTRIX_MAX_INFLIGHT", "MAILSTRIX_MAX_BODY"} {
+		for _, text := range []string{"lower bound", "extraction_retained", "ICAP pre-admission buffers", "MAILSTRIX_MAX_INFLIGHT", "MAILSTRIX_MAX_BODY"} {
 			if !strings.Contains(line, text) {
 				t.Fatalf("memory warning missing %q: %s", text, line)
 			}
@@ -116,7 +116,7 @@ func TestP10StartupReclaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	match := regexp.MustCompile(`rules\+feed RSS=(\d+) MiB`).FindSubmatch(logs)
+	match := regexp.MustCompile(`lower bound for peak memory ~\d+ MiB: RSS=(\d+) MiB`).FindSubmatch(logs)
 	if len(match) != 2 {
 		t.Fatalf("startup RSS banner missing: %s", logs)
 	}
