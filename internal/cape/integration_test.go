@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,7 +41,7 @@ func TestIntegrationReportAvailability(t *testing.T) {
 					files := 0
 					for {
 						part, err := mr.NextPart()
-						if err == io.EOF {
+						if errors.Is(err, io.EOF) {
 							break
 						}
 						if err != nil {
