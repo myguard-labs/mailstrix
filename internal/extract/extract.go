@@ -105,7 +105,7 @@ type Options struct {
 func FullOptions(deadline time.Time) *Options {
 	return &Options{
 		Deadline:           deadline,
-		RetainedBytesLimit: DefaultRetainedBytesLimit,
+		RetainedBytesLimit: defaultRetainedLimit(),
 		DecodeDepth:        maxDecodeDepth,
 		DecodeIterations:   maxDecodeIterations,
 		PDFDeepen:          true,
@@ -418,7 +418,7 @@ func normalizeRequestOptions(opts *Options) Options {
 	}
 	requestOpts := *opts
 	if requestOpts.RetainedBytesLimit <= 0 {
-		requestOpts.RetainedBytesLimit = DefaultRetainedBytesLimit
+		requestOpts.RetainedBytesLimit = defaultRetainedLimit()
 	}
 	requestOpts.retained = newRetainedBudget(requestOpts.RetainedBytesLimit)
 	return requestOpts

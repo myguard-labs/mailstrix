@@ -1888,7 +1888,7 @@ func (s *Scanner) buildExtractOptions(meta ScanMeta, profile EffortProfile, extr
 
 func validatedExtractionRetainedBytes(n int64) int64 {
 	if n < 1024 || n > 128*1024*1024 {
-		return extract.DefaultRetainedBytesLimit
+		return extract.EffectiveDefaultRetainedBytesLimit()
 	}
 	return n
 }
