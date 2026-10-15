@@ -51,11 +51,6 @@ const (
 	defaultRefresh = 24 * time.Hour
 	// fetchTimeout is generous: the full dump is tens of MB to download + unzip.
 	fetchTimeout = 5 * time.Minute
-	// maxFeedBytes caps the DOWNLOADED (zipped) body, which is spooled to disk
-	// while it arrives, so a runaway feed is cut off at the ceiling. Measured
-	// 2026-10-15: the full dump is 225,432,017 bytes zipped (215 MiB); 320 MiB is
-	// ~1.5x headroom for growth.
-	maxFeedBytes = 320 << 20
 	// maxDecompressedBytes (var below) caps the DECOMPRESSED CSV stream, checked
 	// while reading (capReader) and against the zip header before inflating, so a
 	// zip bomb or a forged multi-GB record is rejected before it is buffered. The
@@ -64,6 +59,12 @@ const (
 	// maxHashes bounds the set size defensively (MalwareBazaar is ~1M samples).
 	maxHashes = 10_000_000
 )
+
+// maxFeedBytes caps the DOWNLOADED (zipped) body, which is spooled to disk
+// while it arrives, so a runaway feed is cut off at the ceiling. Measured
+// 2026-10-15: the full dump is 225,432,017 bytes zipped (215 MiB); 320 MiB is
+// ~1.5x headroom for growth. A var so tests can lower it.
+var maxFeedBytes int64 = 320 << 20
 
 // maxDecompressedBytes is a var (not const) so tests can lower it to exercise the
 // over-ceiling path without allocating hundreds of megabytes.
@@ -180,19 +181,6 @@ func (c *Checker) Close() {
 func (c *Checker) refreshOnce(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.feedURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Auth-Key", c.key)
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return &feedrefresh.StatusError{Feed: "malwarebazaar", Code: resp.StatusCode}
-	}
 	// Spool the compressed download to disk (bounded by maxFeedBytes) instead of
 	// holding it in memory: zip needs a seekable source, and the spool file is
 	// then installed as the cache snapshot without a second copy in RAM. An
@@ -206,19 +194,19 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 			spoolDir = ""
 		}
 	}
-	f, err := os.CreateTemp(spoolDir, spoolPattern)
-	if err != nil && spoolDir != "" {
-		c.logf("malwarebazaar feed cache dir not writable (non-fatal): %v", err)
-		spoolDir = ""
-		f, err = os.CreateTemp("", spoolPattern)
+	spool, size, usedDir, err := c.fetchSpool(ctx, spoolDir)
+	var we *localWriteError
+	if err != nil && usedDir != "" && errors.As(err, &we) {
+		// The cache volume failed on the local write side (full disk, I/O
+		// error). The response body is consumed, so issue one fresh bounded
+		// request and spool it to the OS temp dir without persisting.
+		c.logf("malwarebazaar feed cache spool write failed (non-fatal): %v", err)
+		spool, size, usedDir, err = c.fetchSpool(ctx, "")
 	}
 	if err != nil {
 		return err
 	}
-	spool, size, err := spoolTo("malwarebazaar", resp.Body, maxFeedBytes, f)
-	if err != nil {
-		return err
-	}
+	spoolDir = usedDir
 	defer func() { _ = os.Remove(spool) }() // no-op once installed as the cache
 	hint := 0
 	if old := c.set.Load(); old != nil {
@@ -244,6 +232,66 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	return nil
 }
 
+// fetchSpool issues the bounded feed request and spools a 200 body into a temp
+// file in dir ("" = the OS temp dir). A cache dir that cannot create the file
+// falls back to the OS temp dir. It returns the dir actually used ("" when the
+// snapshot must not be persisted). Local write failures are *localWriteError.
+func (c *Checker) fetchSpool(ctx context.Context, dir string) (path string, n int64, usedDir string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.feedURL, nil)
+	if err != nil {
+		return "", 0, "", err
+	}
+	req.Header.Set("Auth-Key", c.key)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", 0, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", 0, "", &feedrefresh.StatusError{Feed: "malwarebazaar", Code: resp.StatusCode}
+	}
+	f, err := os.CreateTemp(dir, spoolPattern)
+	if err != nil && dir != "" {
+		c.logf("malwarebazaar feed cache dir not writable (non-fatal): %v", err)
+		dir = ""
+		f, err = os.CreateTemp("", spoolPattern)
+	}
+	if err != nil {
+		return "", 0, "", err
+	}
+	path, n, err = spoolTo("malwarebazaar", resp.Body, maxFeedBytes, f)
+	if err != nil {
+		return "", 0, dir, err
+	}
+	return path, n, dir, nil
+}
+
+// localWriteError marks a failure writing, syncing or closing the spool file,
+// as opposed to reading the response body or exceeding the size ceiling.
+type localWriteError struct{ err error }
+
+func (e *localWriteError) Error() string { return "spool write: " + e.err.Error() }
+func (e *localWriteError) Unwrap() error { return e.err }
+
+// spoolWriter returns the writer the body is copied into; a test hook for
+// injecting write failures.
+var spoolWriter = func(f *os.File) io.Writer { return f }
+
+// errWriter tags write errors as *localWriteError. Wrapping also hides
+// *os.File's ReadFrom so every write goes through it.
+type errWriter struct{ w io.Writer }
+
+func (e errWriter) Write(p []byte) (int, error) {
+	n, err := e.w.Write(p)
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		err = &localWriteError{err}
+	}
+	return n, err
+}
+
 const spoolPattern = ".mbazaar-spool-*.tmp"
 
 // spoolBody is spoolTo into a new temp file in dir ("" = the OS temp dir).
@@ -266,15 +314,17 @@ func spoolTo(feed string, r io.Reader, limit int64, f *os.File) (path string, n 
 			_ = os.Remove(name)
 		}
 	}()
-	n, err = io.Copy(f, &io.LimitedReader{R: r, N: limit + 1})
+	n, err = io.Copy(errWriter{spoolWriter(f)}, &io.LimitedReader{R: r, N: limit + 1})
 	if err == nil && n > limit {
 		err = &feedrefresh.TooLargeError{Feed: feed}
 	}
 	if err == nil {
-		err = f.Sync()
+		if serr := f.Sync(); serr != nil {
+			err = &localWriteError{serr}
+		}
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if cerr := f.Close(); err == nil && cerr != nil {
+		err = &localWriteError{cerr}
 	}
 	if err != nil {
 		return "", 0, err
