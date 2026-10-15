@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -29,7 +30,7 @@ func jsonDocument(body []byte, visit func(any)) (map[string]any, error) {
 	if err != nil {
 		return nil, &Error{Code: Protocol}
 	}
-	if _, err = p.decoder.Token(); err != io.EOF || p.invalid || !utf8.Valid(body) {
+	if _, err = p.decoder.Token(); !errors.Is(err, io.EOF) || p.invalid || !utf8.Valid(body) {
 		return nil, &Error{Code: Protocol}
 	}
 	m, ok := v.(map[string]any)
