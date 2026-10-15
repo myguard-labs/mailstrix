@@ -39,12 +39,18 @@ func TestP17dEnforcedEmittersNeverExceedCeiling(t *testing.T) {
 			if fullBytes == 0 || full.RetainedTruncated {
 				t.Fatalf("below-budget fixture must be complete: bytes=%d truncated=%v", fullBytes, full.RetainedTruncated)
 			}
+			fullDigest := p16dResultDigest(t, full)
 			for _, e := range ceilings {
 				res := func() extract.Result {
 					defer extract.SetDefaultRetainedBytesLimitForTest(e)()
 					return run()
 				}()
 				got, _ := p16gIndependentBytes(res)
+				if !res.RetainedTruncated {
+					if resDigest := p16dResultDigest(t, res); resDigest != fullDigest {
+						t.Fatalf("%s E=%d: RetainedTruncated=false but result differs from the complete result: output bytes=%d complete bytes=%d (silent incomplete result)", name, e, got, fullBytes)
+					}
+				}
 				if uint64(got) > uint64(e) {
 					t.Fatalf("E=%d: final output %d bytes exceeds the ceiling (an emitter bypassed admission)", e, got)
 				}
