@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +62,9 @@ func TestParseStreamsBoundedHeap(t *testing.T) {
 	maxDecompressedBytes = decompressed + 1024
 	defer func() { maxDecompressedBytes = orig }()
 
+	// A low GC target keeps the peak tied to live data, not to the GC schedule.
+	gcPercent := debug.SetGCPercent(10)
+	defer debug.SetGCPercent(gcPercent)
 	runtime.GC()
 	var base runtime.MemStats
 	runtime.ReadMemStats(&base)

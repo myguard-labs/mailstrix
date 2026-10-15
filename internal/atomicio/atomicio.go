@@ -58,7 +58,18 @@ func WriteWithBackup(path string, data []byte, perm os.FileMode) (err error) {
 // memory.
 func InstallFile(src, path string, perm os.FileMode) error {
 	dir := filepath.Dir(path)
-	if filepath.Dir(src) != dir {
+	srcDir, err := filepath.Abs(filepath.Dir(src))
+	if err != nil {
+		_ = os.Remove(src)
+		return err
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		_ = os.Remove(src)
+		return err
+	}
+	if srcDir != dirAbs {
+		_ = os.Remove(src)
 		return errors.New("atomicio: InstallFile src must be in the destination directory")
 	}
 	return installTemp(dir, src, path, perm)
