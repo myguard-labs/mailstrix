@@ -65,6 +65,7 @@ type lruCache struct {
 	evictions      atomic.Uint64            // LRU evictions (capacity-driven, not TTL expiry)
 	byteEvictions  atomic.Uint64
 	countEvictions atomic.Uint64
+	oversized      atomic.Uint64 // new values refused because they exceed maxBytes alone
 }
 
 type entry struct {
@@ -248,6 +249,7 @@ func (c *lruCache) putLocal(key string, matches []Match) {
 	if size > c.maxBytes {
 		// An oversized replacement invalidates the old value for this key, but
 		// must not evict unrelated entries in a futile attempt to make room.
+		c.oversized.Add(1)
 		if el, ok := c.items[key]; ok {
 			c.removeElement(el)
 			c.recordEviction(true)
@@ -307,6 +309,12 @@ func (c *lruCache) Evictions() uint64 { return c.evictions.Load() }
 func (c *lruCache) ByteEvictions() uint64 { return c.byteEvictions.Load() }
 
 func (c *lruCache) CountEvictions() uint64 { return c.countEvictions.Load() }
+
+// RejectedOversize returns the number of puts refused because the entry alone
+// exceeds the byte budget. Each refusal is counted here, not as an eviction. A
+// refused replacement that also removes the key's previous entry still records
+// that removal as a limit eviction, as before.
+func (c *lruCache) RejectedOversize() uint64 { return c.oversized.Load() }
 
 func (c *lruCache) Bytes() uint64 {
 	c.mu.Lock()

@@ -244,6 +244,71 @@ func TestCacheOversizedEntryDoesNotEvictUnrelated(t *testing.T) {
 	}
 }
 
+func TestCacheRejectedOversizeCounter(t *testing.T) {
+	keep := []Match{{Rule: "keep"}}
+	limit := cacheEntryRetainedBytes("keep", keep)
+	c := newLRUBytes(t, time.Minute, 10, limit)
+
+	// Boundary: an entry exactly at the byte budget is retained, not rejected.
+	c.Put("keep", keep)
+	if got := c.RejectedOversize(); got != 0 {
+		t.Fatalf("entry at limit counted as oversize rejection: %d", got)
+	}
+	if _, ok := c.Get("keep"); !ok {
+		t.Fatal("entry at limit was not retained")
+	}
+
+	// Positive: an entry over the budget is refused and counted once.
+	c.Put("huge", []Match{{Rule: strings.Repeat("x", 4096)}})
+	if got := c.RejectedOversize(); got != 1 {
+		t.Fatalf("oversize put rejections=%d, want 1", got)
+	}
+
+	// Negative: refusals never touch the eviction counters.
+	if c.Evictions() != 0 || c.ByteEvictions() != 0 || c.CountEvictions() != 0 {
+		t.Fatalf("oversize refusal counted as eviction total=%d byte=%d count=%d", c.Evictions(), c.ByteEvictions(), c.CountEvictions())
+	}
+	if _, ok := c.Get("keep"); !ok {
+		t.Fatal("oversize refusal evicted unrelated entry")
+	}
+}
+
+func TestCacheRejectedOversizeReplacementAccounting(t *testing.T) {
+	keep := []Match{{Rule: "keep"}}
+	limit := cacheEntryRetainedBytes("keep", keep)
+	c := newLRUBytes(t, time.Minute, 10, limit)
+	c.Put("keep", keep)
+	c.Put("keep", []Match{{Rule: strings.Repeat("y", 4096)}})
+	if got := c.RejectedOversize(); got != 1 {
+		t.Fatalf("oversized replacement rejections=%d, want 1", got)
+	}
+	// The removed previous entry keeps its existing byte-limit eviction count.
+	if c.Evictions() != 1 || c.ByteEvictions() != 1 || c.CountEvictions() != 0 {
+		t.Fatalf("replacement eviction stats total=%d byte=%d count=%d", c.Evictions(), c.ByteEvictions(), c.CountEvictions())
+	}
+}
+
+func TestCacheRejectedOversizeMetric(t *testing.T) {
+	s := newCachingServer(&fakeEngine{count: 1}, "tok")
+	lru, ok := s.cache.(*lruCache)
+	if !ok {
+		t.Fatalf("cache type=%T, want *lruCache", s.cache)
+	}
+	lru.maxBytes = cacheEntryRetainedBytes("a", nil)
+	lru.Put("big", []Match{{Rule: strings.Repeat("x", 4096)}})
+	body := get(s, "/metrics").Body.String()
+	for _, want := range []string{
+		"# TYPE mailstrix_cache_rejected_oversize_total counter\n",
+		"mailstrix_cache_rejected_oversize_total 1\n",
+		"mailstrix_cache_limit_evictions_total{cause=\"byte_limit\"} 0\n",
+		"mailstrix_cache_limit_evictions_total{cause=\"count_limit\"} 0\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q in:\n%s", want, body)
+		}
+	}
+}
+
 func TestCacheEntryAccountingIncludesCapacityTails(t *testing.T) {
 	backing := []Match{
 		{Rule: "visible", Tags: []string{"visible"}},
