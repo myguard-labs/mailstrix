@@ -5,6 +5,7 @@
 package atomicio
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -46,6 +47,40 @@ func WriteWithBackup(path string, data []byte, perm os.FileMode) (err error) {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
+	return installTemp(dir, tmpName, path, perm)
+}
+
+// InstallFile atomically installs the already-written file src as path, keeping
+// the single .bak rollback copy exactly as WriteWithBackup does. src must live
+// in the same directory as path (so the final rename is atomic) and is consumed
+// (or removed on error). It lets a caller
+// that spooled a large download to disk install it without holding the bytes in
+// memory.
+func InstallFile(src, path string, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	srcDir, err := filepath.Abs(filepath.Dir(src))
+	if err != nil {
+		_ = os.Remove(src)
+		return err
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		_ = os.Remove(src)
+		return err
+	}
+	if srcDir != dirAbs {
+		_ = os.Remove(src)
+		return errors.New("atomicio: InstallFile src must be in the destination directory")
+	}
+	return installTemp(dir, src, path, perm)
+}
+
+func installTemp(dir, tmpName, path string, perm os.FileMode) (err error) {
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
 	if err = os.Chmod(tmpName, perm); err != nil {
 		return err
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 // fuzzMaxDecompressed is the cap used inside fuzz targets. It is much lower than
-// the production 1 GiB so the CSV-parse loop terminates in finite time and the
+// the production 768 MiB so the CSV-parse loop terminates in finite time and the
 // fuzz worker does not OOM on a crafted zip entry that claims a plausible but
 // large UncompressedSize64.
 const fuzzMaxDecompressed = 1 << 20 // 1 MiB
@@ -83,7 +83,7 @@ func FuzzOpenCSV(f *testing.F) {
 	f.Add(buildOversizedZip(fuzzMaxDecompressed))
 
 	f.Fuzz(func(t *testing.T, body []byte) {
-		rc, err := openCSV(body)
+		rc, err := openCSV(bytes.NewReader(body), int64(len(body)))
 		if err != nil {
 			return
 		}

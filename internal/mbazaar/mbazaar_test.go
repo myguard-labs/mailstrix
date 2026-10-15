@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -165,26 +166,22 @@ func TestCloseNilSafeAndIdempotent(t *testing.T) {
 }
 
 // TestParseFeedDecompressedCap verifies the DECOMPRESSED CSV stream is bounded
-// (zip-bomb guard) — lowering maxDecompressedBytes truncates the read mid-CSV so
-// rows past the cap are not loaded, and the parser does not OOM/hang.
+// (zip-bomb guard): a body over maxDecompressedBytes is rejected with
+// errOverCeiling (never silently truncated into a partial set), a body under it
+// loads fully.
 func TestParseFeedDecompressedCap(t *testing.T) {
 	orig := maxDecompressedBytes
 	defer func() { maxDecompressedBytes = orig }()
 
-	// Build a large plaintext CSV: header + many rows. We will cap so only the
-	// first chunk is read.
 	var b bytes.Buffer
 	b.WriteString("# first_seen_utc,sha256_hash,md5_hash\n")
 	const rows = 5000
 	for i := 0; i < rows; i++ {
-		// 64-hex sha256 derived from i, unique per row.
 		sum := sha256.Sum256([]byte{byte(i), byte(i >> 8)})
 		b.WriteString("\"2024-01-01 00:00:00\",\"" + hex.EncodeToString(sum[:]) + "\",\"x\"\n")
 	}
 	full := b.Bytes()
 
-	// Uncapped: all rows load.
-	maxDecompressedBytes = orig
 	hsFull, err := parseFeed(full)
 	if err != nil {
 		t.Fatalf("uncapped parseFeed: %v", err)
@@ -193,60 +190,87 @@ func TestParseFeedDecompressedCap(t *testing.T) {
 		t.Fatalf("uncapped: got %d hashes, want %d", len(hsFull.m), rows)
 	}
 
-	// Capped to the first ~512 bytes: only a handful of rows survive the
-	// io.LimitReader, proving the decompressed stream is bounded.
 	maxDecompressedBytes = 512
-	hsCapped, err := parseFeed(full)
-	if err != nil {
-		t.Fatalf("capped parseFeed: %v", err)
+	if hs, err := parseFeed(full); !errors.Is(err, errOverCeiling) || hs != nil {
+		t.Fatalf("capped plain CSV: hs=%v err=%v, want errOverCeiling", hs, err)
 	}
-	if len(hsCapped.m) >= rows {
-		t.Fatalf("cap not enforced: got %d hashes, expected far fewer than %d", len(hsCapped.m), rows)
-	}
-	if len(hsCapped.m) == 0 {
-		t.Fatalf("cap too aggressive: expected at least one row within 512B")
+	if hs, err := parseFeed(zipOf(t, full)); !errors.Is(err, errOverCeiling) || hs != nil {
+		t.Fatalf("capped zip: hs=%v err=%v, want errOverCeiling", hs, err)
 	}
 }
 
-// TestParseFeedDecompressedCapTruncates verifies the decompressed-stream cap
-// (maxDecompressedBytes) bounds CSV reading, so a zip bomb / oversized plain feed
-// cannot OOM the container. urlhaus/threatfox apply the same io.LimitReader cap;
-// mbazaar was missing it (audit 2026-06-30). Lower the var so we don't allocate
-// a real gigabyte.
-func TestParseFeedDecompressedCapTruncates(t *testing.T) {
+// TestParseFeedExactlyAtCeiling is the boundary: a CSV of exactly
+// maxDecompressedBytes loads, one byte more is rejected (plain and zip).
+func TestParseFeedExactlyAtCeiling(t *testing.T) {
 	orig := maxDecompressedBytes
-	maxDecompressedBytes = 256 // bytes — well below the multi-row CSV below
 	defer func() { maxDecompressedBytes = orig }()
+	csv := []byte(sampleCSV)
 
-	var b bytes.Buffer
-	b.WriteString("# header\n")
-	// Each row ~140 bytes; 50 rows >> 256-byte cap, so reading must stop early.
-	for i := 0; i < 50; i++ {
-		b.WriteString("\"2024-01-01\",\"")
-		b.WriteString(hashOf(string(rune('a'+i%26)) + string(rune(i))))
-		b.WriteString("\",\"md5\",\"sha1\",\"anon\",\"x\"\n")
+	maxDecompressedBytes = int64(len(csv))
+	for name, body := range map[string][]byte{"plain": csv, "zip": zipOf(t, csv)} {
+		hs, err := parseFeed(body)
+		if err != nil || len(hs.m) != 2 {
+			t.Fatalf("%s at bound: n=%v err=%v, want 2 hashes", name, hs, err)
+		}
 	}
-	hs, err := parseFeed(b.Bytes())
-	if err != nil {
-		t.Fatalf("parseFeed: %v", err)
-	}
-	// With a 256-byte cap only the first row or two survive; never all 50.
-	if len(hs.m) >= 50 {
-		t.Fatalf("decompressed cap not enforced: got %d hashes, want truncated", len(hs.m))
+	maxDecompressedBytes = int64(len(csv)) - 1
+	for name, body := range map[string][]byte{"plain": csv, "zip": zipOf(t, csv)} {
+		if _, err := parseFeed(body); !errors.Is(err, errOverCeiling) {
+			t.Fatalf("%s one over bound: err=%v, want errOverCeiling", name, err)
+		}
 	}
 }
 
-// TestOpenCSVSkipsOversizedZipEntry verifies a zip entry declaring a
-// decompressed size over the cap is skipped (zip-bomb guard).
-func TestOpenCSVSkipsOversizedZipEntry(t *testing.T) {
+// TestParseFeedLyingZipHeader: a zip whose header declares a small size but
+// inflates past the ceiling is stopped by the streaming bound, not the header.
+func TestParseFeedLyingZipHeader(t *testing.T) {
 	orig := maxDecompressedBytes
-	maxDecompressedBytes = 16 // tiny: the real CSV's UncompressedSize64 exceeds it
+	maxDecompressedBytes = 1024
 	defer func() { maxDecompressedBytes = orig }()
 
-	z := zipOf(t, []byte(sampleCSV))
-	_, err := openCSV(z)
-	if err == nil {
-		t.Fatal("openCSV should reject a zip whose only entry exceeds the cap")
+	big := bytes.Repeat([]byte("# padding padding padding padding\n"), 200) // ~7 KB
+	z := zipOf(t, big)
+	// Forge the central-directory uncompressed size (offset 24 in the PK\x01\x02
+	// record) to a small value so only the streaming bound can catch the bomb.
+	i := bytes.LastIndex(z, []byte("PK\x01\x02"))
+	if i < 0 {
+		t.Fatal("no central directory")
+	}
+	copy(z[i+24:i+28], []byte{16, 0, 0, 0})
+	zr, err := zip.NewReader(bytes.NewReader(z), int64(len(z)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zr.File[0].UncompressedSize64 > uint64(maxDecompressedBytes) {
+		t.Fatal("forged header must claim a size under the ceiling")
+	}
+	if _, err := parseFeed(z); err == nil {
+		t.Fatal("lying header inflating past the ceiling was accepted")
+	}
+}
+
+// TestParseFeedMalformedRejected: a truncated zip, a corrupt deflate stream and
+// a zip with no file entry are rejected (not an empty or partial set).
+func TestParseFeedMalformedRejected(t *testing.T) {
+	good := zipOf(t, []byte(sampleCSV))
+	corrupt := append([]byte(nil), good...)
+	for i := 40; i < 60 && i < len(corrupt); i++ { // inside the deflate payload
+		corrupt[i] ^= 0xFF
+	}
+	cases := map[string][]byte{
+		"truncated":  good[:len(good)/2],
+		"corrupt":    corrupt,
+		"magic-only": []byte("PK\x03\x04junk"),
+	}
+	for name, body := range cases {
+		if hs, err := parseFeed(body); err == nil {
+			t.Errorf("%s: accepted (hs=%v), want error", name, hs)
+		}
+	}
+	// Malformed CSV rows alone are skipped, not fatal.
+	hs, err := parseFeed([]byte("\"unterminated,\x00\n" + string(csvFor("ok"))))
+	if err != nil || hs == nil {
+		t.Fatalf("bad row must be skipped: %v", err)
 	}
 }
 
