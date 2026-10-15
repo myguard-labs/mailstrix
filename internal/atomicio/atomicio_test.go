@@ -130,3 +130,46 @@ func BenchmarkWriteWithBackupLarge(b *testing.B) {
 		}
 	}
 }
+
+func TestInstallFile(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "feed.bin")
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "spool.tmp")
+	if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallFile(src, dst, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "new" {
+		t.Fatalf("dst=%q want new", b)
+	}
+	if b, _ := os.ReadFile(dst + BackupSuffix); string(b) != "old" {
+		t.Fatalf("bak=%q want old", b)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatal("src not consumed")
+	}
+	if fi, err := os.Stat(dst); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode check: fi=%v err=%v", fi, err)
+	}
+}
+
+func TestInstallFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	other := t.TempDir()
+	src := filepath.Join(other, "s.tmp")
+	if err := os.WriteFile(src, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallFile(src, filepath.Join(dir, "f"), 0o600); err == nil {
+		t.Fatal("cross-directory src accepted")
+	}
+	missing := filepath.Join(dir, "gone.tmp")
+	if err := InstallFile(missing, filepath.Join(dir, "f"), 0o600); err == nil {
+		t.Fatal("missing src accepted")
+	}
+}

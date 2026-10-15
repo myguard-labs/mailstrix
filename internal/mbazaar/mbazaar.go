@@ -6,7 +6,8 @@
 //
 // Design mirrors the URLhaus checker (the same fail-open feed-cache infra):
 //   - The full MalwareBazaar CSV dump is downloaded ONCE per refresh interval
-//     (daily by default) into an in-memory set of raw 32-byte digests; lookups
+//     (daily by default) into an in-memory set of raw 32-byte digests (the
+//     download is spooled to disk and stream-parsed, never buffered); lookups
 //     are pure local map hits, never a per-message remote API call.
 //   - A failed refresh keeps the previous set (fail-static) and is counted.
 //   - The dump is a ZIP (one CSV inside); a plain-CSV feed (the "recent" export
@@ -28,6 +29,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -49,21 +51,23 @@ const (
 	defaultRefresh = 24 * time.Hour
 	// fetchTimeout is generous: the full dump is tens of MB to download + unzip.
 	fetchTimeout = 5 * time.Minute
-	// maxFeedBytes caps the DOWNLOADED (zipped) body so a runaway feed can't
-	// exhaust memory.
-	maxFeedBytes = 512 << 20
-	// maxDecompressedBytes (var below) caps the DECOMPRESSED CSV stream. maxFeedBytes
-	// only bounds the zipped body, so without this a zip bomb (or a single forged
-	// multi-GB record csv.Reader must buffer whole) decompresses unbounded and OOMs
-	// the mem-limited container before the maxHashes break can fire — mirrors the
-	// io.LimitReader cap urlhaus/threatfox already apply.
+	// maxFeedBytes caps the DOWNLOADED (zipped) body, which is spooled to disk
+	// while it arrives, so a runaway feed is cut off at the ceiling. Measured
+	// 2026-10-15: the full dump is 225,432,017 bytes zipped (215 MiB); 320 MiB is
+	// ~1.5x headroom for growth.
+	maxFeedBytes = 320 << 20
+	// maxDecompressedBytes (var below) caps the DECOMPRESSED CSV stream, checked
+	// while reading (capReader) and against the zip header before inflating, so a
+	// zip bomb or a forged multi-GB record is rejected before it is buffered. The
+	// refresh then fails and the previous set is kept. Measured 2026-10-15: the
+	// dump decompresses to 529,161,878 bytes (505 MiB); 768 MiB is ~1.5x headroom.
 	// maxHashes bounds the set size defensively (MalwareBazaar is ~1M samples).
 	maxHashes = 10_000_000
 )
 
 // maxDecompressedBytes is a var (not const) so tests can lower it to exercise the
-// truncation path without allocating a real gigabyte.
-var maxDecompressedBytes int64 = 1 << 30
+// over-ceiling path without allocating hundreds of megabytes.
+var maxDecompressedBytes int64 = 768 << 20
 
 // Hit is one scanned buffer whose SHA256 matched a known malware sample.
 type Hit struct {
@@ -189,31 +193,103 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		return &feedrefresh.StatusError{Feed: "malwarebazaar", Code: resp.StatusCode}
 	}
-	body, err := feedrefresh.ReadBody("malwarebazaar", resp.Body, maxFeedBytes)
+	// Spool the compressed download to disk (bounded by maxFeedBytes) instead of
+	// holding it in memory: zip needs a seekable source, and the spool file is
+	// then installed as the cache snapshot without a second copy in RAM. An
+	// unusable cache directory is non-fatal, as before: spool to the OS temp dir
+	// and skip persisting the snapshot.
+	spoolDir := ""
+	if c.cachePath != "" {
+		spoolDir = filepath.Dir(c.cachePath)
+		if err := os.MkdirAll(spoolDir, 0o750); err != nil {
+			c.logf("malwarebazaar feed cache dir unusable (non-fatal): %v", err)
+			spoolDir = ""
+		}
+	}
+	f, err := os.CreateTemp(spoolDir, spoolPattern)
+	if err != nil && spoolDir != "" {
+		c.logf("malwarebazaar feed cache dir not writable (non-fatal): %v", err)
+		spoolDir = ""
+		f, err = os.CreateTemp("", spoolPattern)
+	}
 	if err != nil {
 		return err
 	}
-	hs, err := parseFeed(body)
+	spool, size, err := spoolTo("malwarebazaar", resp.Body, maxFeedBytes, f)
 	if err != nil {
 		return err
 	}
-	prev := 0
+	defer func() { _ = os.Remove(spool) }() // no-op once installed as the cache
+	hint := 0
 	if old := c.set.Load(); old != nil {
-		prev = len(old.m)
+		hint = len(old.m)
 	}
+	hs, err := parseFile(spool, size, hint)
+	if err != nil {
+		return err
+	}
+	prev := hint
 	if err := feedrefresh.CheckSize(prev, len(hs.m)); err != nil {
 		return err
 	}
 	c.set.Store(hs)
 	c.setBytes.Store(feedrefresh.DigestSetBytes(len(hs.m), sha256.Size))
 	c.lastRefresh.Store(time.Now().Unix())
-	if c.cachePath != "" {
-		if err := atomicio.WriteWithBackup(c.cachePath, body, 0o600); err != nil {
+	if spoolDir != "" {
+		if err := atomicio.InstallFile(spool, c.cachePath, 0o600); err != nil {
 			c.logf("malwarebazaar feed cache write failed (non-fatal): %v", err)
 		}
 	}
 	c.logf("malwarebazaar feed loaded: %d hashes", len(hs.m))
 	return nil
+}
+
+const spoolPattern = ".mbazaar-spool-*.tmp"
+
+// spoolBody is spoolTo into a new temp file in dir ("" = the OS temp dir).
+func spoolBody(feed string, r io.Reader, limit int64, dir string) (path string, n int64, err error) {
+	f, err := os.CreateTemp(dir, spoolPattern)
+	if err != nil {
+		return "", 0, err
+	}
+	return spoolTo(feed, r, limit, f)
+}
+
+// spoolTo copies r into the open temp file f and closes it, failing with
+// feedrefresh.TooLargeError as soon as more than limit bytes arrive, so nothing
+// past the ceiling is ever written. On error the file is removed. It returns
+// the path and byte count.
+func spoolTo(feed string, r io.Reader, limit int64, f *os.File) (path string, n int64, err error) {
+	name := f.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(name)
+		}
+	}()
+	n, err = io.Copy(f, &io.LimitedReader{R: r, N: limit + 1})
+	if err == nil && n > limit {
+		err = &feedrefresh.TooLargeError{Feed: feed}
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	return name, n, nil
+}
+
+// sweepSpools removes spool files a killed process left behind (a refresh
+// removes its own spool on every normal path). Called once at startup, before
+// any refresh can create a live spool.
+func sweepSpools(dir string) {
+	ms, _ := filepath.Glob(filepath.Join(dir, ".mbazaar-spool-*.tmp"))
+	for _, m := range ms {
+		_ = os.Remove(m)
+	}
 }
 
 // warmStart loads the persisted feed snapshot (if any) so lookups work from the
@@ -222,11 +298,12 @@ func (c *Checker) warmStart() {
 	if c.cachePath == "" {
 		return
 	}
-	b, ok := atomicio.ReadCached(c.cachePath)
-	if !ok {
+	sweepSpools(filepath.Dir(c.cachePath))
+	fi, err := os.Stat(c.cachePath)
+	if err != nil || fi.Size() == 0 {
 		return
 	}
-	hs, err := parseFeed(b)
+	hs, err := parseFile(c.cachePath, fi.Size(), 0)
 	if err != nil {
 		c.logf("malwarebazaar warm-start parse failed (ignoring cached feed): %v", err)
 		return
@@ -236,18 +313,67 @@ func (c *Checker) warmStart() {
 	c.logf("malwarebazaar warm-start from cache: %d hashes", len(hs.m))
 }
 
-// parseFeed builds the digest set from the downloaded body — either the ZIP dump
-// (one CSV inside) or a plain CSV (the "recent" export / a custom feed). The
-// format is magic-sniffed. A malformed row is skipped, not fatal.
+// errOverCeiling reports a feed whose decompressed CSV exceeds
+// maxDecompressedBytes. The refresh is rejected and the previous set kept.
+var errOverCeiling = errors.New("malwarebazaar: decompressed feed exceeds ceiling")
+
+// capReader bounds a stream: it returns errOverCeiling the moment more than cap
+// bytes have been produced, before the excess is handed to the parser, so the
+// bound is enforced while reading and never after allocation.
+type capReader struct {
+	r    io.Reader
+	left int64 // bytes still allowed
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.left < 0 {
+		return 0, errOverCeiling
+	}
+	// Allow one probe byte past the cap so exactly-at-cap succeeds and cap+1 fails.
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	if c.left < 0 {
+		return n - 1, errOverCeiling // drop the probe byte
+	}
+	return n, err
+}
+
+// parseFile opens path (size bytes) and stream-parses it; see parseReaderAt.
+func parseFile(path string, size int64, hint int) (*hashSet, error) {
+	f, err := os.Open(path) // #nosec G304 -- spool or operator-configured cache path
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }() // read-only
+	return parseReaderAt(f, size, hint)
+}
+
+// parseFeed parses an in-memory body (tests and fuzzing).
 func parseFeed(body []byte) (*hashSet, error) {
-	rc, err := openCSV(body)
+	return parseReaderAt(bytes.NewReader(body), int64(len(body)), 0)
+}
+
+// parseReaderAt builds the digest set from the feed — either the ZIP dump (one
+// CSV inside) or a plain CSV (the "recent" export / a custom feed); the format
+// is magic-sniffed. The CSV is streamed straight from the zip entry reader into
+// csv.Reader: the decompressed body is never held in memory. A malformed row is
+// skipped; a corrupt zip/deflate stream or a decompressed size over
+// maxDecompressedBytes fails the whole parse. hint presizes the map.
+func parseReaderAt(ra io.ReaderAt, size int64, hint int) (*hashSet, error) {
+	rc, err := openCSV(ra, size)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rc.Close() }() // read-only reader
 
-	hs := &hashSet{m: make(map[[32]byte]struct{})}
-	cr := csv.NewReader(io.LimitReader(rc, maxDecompressedBytes))
+	if hint > maxHashes {
+		hint = maxHashes
+	}
+	hs := &hashSet{m: make(map[[32]byte]struct{}, hint)}
+	cr := csv.NewReader(&capReader{r: rc, left: maxDecompressedBytes})
 	cr.Comment = '#'
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
@@ -261,7 +387,11 @@ func parseFeed(body []byte) (*hashSet, error) {
 			break
 		}
 		if err != nil {
-			continue // skip a bad row, keep loading the rest
+			var pe *csv.ParseError
+			if errors.As(err, &pe) {
+				continue // skip a bad row, keep loading the rest
+			}
+			return nil, err // read failure: ceiling, corrupt deflate, bad CRC
 		}
 		d, ok := pickSHA256(rec)
 		if !ok {
@@ -276,10 +406,11 @@ func parseFeed(body []byte) (*hashSet, error) {
 }
 
 // openCSV returns a reader over the CSV: it unwraps the ZIP dump (first regular
-// file entry) when the body is a zip, else reads the body as plain CSV.
-func openCSV(body []byte) (io.ReadCloser, error) {
-	if len(body) >= 4 && string(body[:4]) == "PK\x03\x04" {
-		zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+// file entry) when the source is a zip, else reads it as plain CSV.
+func openCSV(ra io.ReaderAt, size int64) (io.ReadCloser, error) {
+	var magic [4]byte
+	if n, _ := ra.ReadAt(magic[:], 0); n == 4 && string(magic[:]) == "PK\x03\x04" {
+		zr, err := zip.NewReader(ra, size)
 		if err != nil {
 			return nil, err
 		}
@@ -287,31 +418,17 @@ func openCSV(body []byte) (io.ReadCloser, error) {
 			if f.FileInfo().IsDir() {
 				continue
 			}
-			// Skip an entry whose declared decompressed size already exceeds the
-			// cap — defends against a zip bomb before a single byte is inflated.
-			// maxDecompressedBytes is always positive (1<<30); the uint64 cast is
-			// safe. #nosec G115 -- int64 constant is positive, no overflow.
+			// A declared decompressed size over the ceiling is rejected before a
+			// single byte is inflated (the capReader still bounds a lying header).
+			// maxDecompressedBytes is positive; the uint64 cast is safe.
 			if f.UncompressedSize64 > uint64(maxDecompressedBytes) { //#nosec G115
-				continue
+				return nil, errOverCeiling
 			}
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			// Read the decompressed bytes into memory, bounded by the cap. A
-			// corrupt or adversarial deflate stream can cause the flate decompressor
-			// to spin reading 0 bytes per iteration — io.LimitReader on the output
-			// side cannot terminate that loop; only bounding the read here does.
-			raw, err := io.ReadAll(io.LimitReader(rc, maxDecompressedBytes))
-			_ = rc.Close() // zip entry fully read; a close error cannot change raw
-			if err != nil {
-				return nil, err
-			}
-			return io.NopCloser(bytes.NewReader(raw)), nil
+			return f.Open()
 		}
 		return nil, errors.New("malwarebazaar: empty zip dump")
 	}
-	return io.NopCloser(bytes.NewReader(body)), nil
+	return io.NopCloser(io.NewSectionReader(ra, 0, size)), nil
 }
 
 // pickSHA256 extracts the sample's SHA256 from a CSV row. It prefers the
