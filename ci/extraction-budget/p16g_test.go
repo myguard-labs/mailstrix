@@ -63,11 +63,10 @@ func TestP16gCompleteAccountingClosure(t *testing.T) {
 		},
 	}
 	for _, tc := range p16dCases() {
-		tc := tc
 		cases["text_"+tc.name] = func() extract.Result { return extract.Extract(tc.input, time.Time{}) }
 	}
 	for name, input := range p16eInputs(t) {
-		name, input := name, bytes.Clone(input)
+		input := bytes.Clone(input)
 		cases["structural_"+name] = func() extract.Result { return p16eExtract(name, input) }
 	}
 
