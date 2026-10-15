@@ -1027,6 +1027,30 @@ func (s *Server) serveMetrics(w http.ResponseWriter) {
 		gauge("threatfox_last_refresh_timestamp_seconds", "unix time of the last successful feed refresh", tf.LastRefreshUnix)
 	}
 
+	// Estimated resident bytes per enabled feed set. One family, so HELP and TYPE
+	// are written once above the labelled series.
+	type feedSet struct {
+		feed  string
+		bytes int64
+	}
+	var feedSets []feedSet
+	if uh.Enabled {
+		feedSets = append(feedSets, feedSet{"urlhaus", uh.SetBytes})
+	}
+	if mb.Enabled {
+		feedSets = append(feedSets, feedSet{"malwarebazaar", mb.SetBytes})
+	}
+	if tf.Enabled {
+		feedSets = append(feedSets, feedSet{"threatfox", tf.SetBytes})
+	}
+	if len(feedSets) > 0 {
+		b.WriteString("# HELP mailstrix_feed_set_bytes estimated resident bytes of each loaded abuse.ch feed set, updated on each successful refresh\n")
+		b.WriteString("# TYPE mailstrix_feed_set_bytes gauge\n")
+		for _, f := range feedSets {
+			b.WriteString("mailstrix_feed_set_bytes{feed=\"" + f.feed + "\"} " + strconv.FormatInt(f.bytes, 10) + "\n")
+		}
+	}
+
 	if s.cfg.ICAPAddr != "" {
 		fm("icap_requests_total", "total ICAP REQMOD/RESPMOD requests served", s.metrics.icapRequests.Load())
 		fm("icap_infected_total", "ICAP requests with >=1 rule match (403 replacement sent)", s.metrics.icapInfected.Load())

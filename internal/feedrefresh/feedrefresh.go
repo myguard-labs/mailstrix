@@ -77,6 +77,26 @@ func CheckSize(prev, next int) error {
 	return nil
 }
 
+// perEntryOverhead approximates the map slot and key header cost of one set
+// entry for the SetBytes estimates. It is a planning figure, not a measurement.
+const perEntryOverhead = 24
+
+// StringSetBytes estimates the resident bytes of a string-keyed set: each key's
+// length plus perEntryOverhead. An empty set is 0.
+func StringSetBytes(m map[string]struct{}) int64 {
+	var n int64
+	for k := range m {
+		n += int64(len(k)) + perEntryOverhead
+	}
+	return n
+}
+
+// DigestSetBytes estimates the resident bytes of n fixed-size digest keys of
+// digestLen bytes each, including perEntryOverhead per entry.
+func DigestSetBytes(n, digestLen int) int64 {
+	return int64(n) * (int64(digestLen) + perEntryOverhead)
+}
+
 // Loop runs refresh immediately, then every interval, until stop closes or a
 // refresh fails because ctx was cancelled (shutdown, not counted). Any other
 // failure increments failures and is logged; the caller keeps its previous set.

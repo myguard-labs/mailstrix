@@ -249,3 +249,24 @@ func TestOpenCSVSkipsOversizedZipEntry(t *testing.T) {
 		t.Fatal("openCSV should reject a zip whose only entry exceeds the cap")
 	}
 }
+
+func TestParseFeedSpaceSeparatedRows(t *testing.T) {
+	a, b := hashOf("a"), hashOf("b")
+	feed := "# comment\n# \"first_seen_utc\", \"sha256_hash\", \"md5_hash\"\n" +
+		"\"2026-10-14 10:00:00\", \"" + a + "\", \"md5\", \"x\"\n" +
+		"\"2026-10-14 10:00:01\",\"" + b + "\",\"md5\"\n" + // no-space boundary
+		"\"2026-10-14 10:00:02\", \"not-a-hash\", \"md5\"\n" // malformed
+	hs, err := parseFeed([]byte(feed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hs.m) != 2 {
+		t.Fatalf("entries=%d want 2", len(hs.m))
+	}
+	for _, h := range []string{a, b} {
+		d, ok := parseSHA256(h)
+		if _, hit := hs.m[d]; !ok || !hit {
+			t.Fatalf("missing %s", h)
+		}
+	}
+}
