@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,9 +57,11 @@ const (
 	// zip bomb or a forged multi-GB record is rejected before it is buffered. The
 	// refresh then fails and the previous set is kept. Measured 2026-10-15: the
 	// dump decompresses to 529,161,878 bytes (505 MiB); 768 MiB is ~1.5x headroom.
-	// maxHashes bounds the set size defensively (MalwareBazaar is ~1M samples).
-	maxHashes = 10_000_000
 )
+
+// maxHashes bounds the distinct set size defensively (MalwareBazaar is ~1M
+// samples). A var so tests can lower it.
+var maxHashes = 10_000_000
 
 // maxFeedBytes caps the DOWNLOADED (zipped) body, which is spooled to disk
 // while it arrives, so a runaway feed is cut off at the ceiling. Measured
@@ -90,9 +93,35 @@ type Metrics struct {
 	Hits            uint64 // buffers whose hash matched
 }
 
-// hashSet wraps the digest set so the whole set can be swapped atomically on a
-// refresh (a map is not directly storable in an atomic.Pointer).
-type hashSet struct{ m map[[32]byte]struct{} }
+// hashSet holds the digest set as a sorted, deduplicated slice (32 B per entry,
+// about half the memory of a map) so the whole set can be swapped atomically on
+// a refresh through an atomic.Pointer.
+type hashSet struct{ s [][32]byte }
+
+// sliceHeaderBytes is the size of a slice header on 64-bit targets.
+const sliceHeaderBytes = 24
+
+func cmpDigest(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) }
+
+// compactMin is the smallest full slice worth sorting/deduping before growth.
+const compactMin = 1 << 16
+
+// dedupe sorts the slice and drops duplicate digests in place.
+func (h *hashSet) dedupe() {
+	slices.SortFunc(h.s, cmpDigest)
+	h.s = slices.CompactFunc(h.s, func(a, b [32]byte) bool { return a == b })
+}
+
+// has reports whether d is in the set (binary search over the sorted slice).
+func (h *hashSet) has(d [32]byte) bool {
+	_, ok := slices.BinarySearchFunc(h.s, d, cmpDigest)
+	return ok
+}
+
+// bytes is the resident size: backing array capacity plus the slice header.
+func (h *hashSet) bytes() int64 {
+	return int64(cap(h.s))*sha256.Size + sliceHeaderBytes
+}
 
 // Checker holds the cached hash set and serves lookups. The zero value is not
 // usable; use New.
@@ -153,7 +182,7 @@ func New(key string, refresh time.Duration, feedURL, cacheDir string, logf func(
 	if cacheDir != "" {
 		c.cachePath = filepath.Join(cacheDir, "malwarebazaar.bin")
 	}
-	c.set.Store(&hashSet{m: map[[32]byte]struct{}{}})
+	c.set.Store(&hashSet{})
 	c.warmStart()
 	go func() {
 		defer close(c.done)
@@ -210,25 +239,25 @@ func (c *Checker) refreshOnce(ctx context.Context) error {
 	defer func() { _ = os.Remove(spool) }() // no-op once installed as the cache
 	hint := 0
 	if old := c.set.Load(); old != nil {
-		hint = len(old.m)
+		hint = len(old.s)
 	}
 	hs, err := parseFile(spool, size, hint)
 	if err != nil {
 		return err
 	}
 	prev := hint
-	if err := feedrefresh.CheckSize(prev, len(hs.m)); err != nil {
+	if err := feedrefresh.CheckSize(prev, len(hs.s)); err != nil {
 		return err
 	}
 	c.set.Store(hs)
-	c.setBytes.Store(feedrefresh.DigestSetBytes(len(hs.m), sha256.Size))
+	c.setBytes.Store(hs.bytes())
 	c.lastRefresh.Store(time.Now().Unix())
 	if spoolDir != "" {
 		if err := atomicio.InstallFile(spool, c.cachePath, 0o600); err != nil {
 			c.logf("malwarebazaar feed cache write failed (non-fatal): %v", err)
 		}
 	}
-	c.logf("malwarebazaar feed loaded: %d hashes", len(hs.m))
+	c.logf("malwarebazaar feed loaded: %d hashes", len(hs.s))
 	return nil
 }
 
@@ -359,8 +388,8 @@ func (c *Checker) warmStart() {
 		return
 	}
 	c.set.Store(hs)
-	c.setBytes.Store(feedrefresh.DigestSetBytes(len(hs.m), sha256.Size))
-	c.logf("malwarebazaar warm-start from cache: %d hashes", len(hs.m))
+	c.setBytes.Store(hs.bytes())
+	c.logf("malwarebazaar warm-start from cache: %d hashes", len(hs.s))
 }
 
 // errOverCeiling reports a feed whose decompressed CSV exceeds
@@ -411,7 +440,7 @@ func parseFeed(body []byte) (*hashSet, error) {
 // is magic-sniffed. The CSV is streamed straight from the zip entry reader into
 // csv.Reader: the decompressed body is never held in memory. A malformed row is
 // skipped; a corrupt zip/deflate stream or a decompressed size over
-// maxDecompressedBytes fails the whole parse. hint presizes the map.
+// maxDecompressedBytes fails the whole parse. hint presizes the slice; the result is sorted and deduplicated.
 func parseReaderAt(ra io.ReaderAt, size int64, hint int) (*hashSet, error) {
 	rc, err := openCSV(ra, size)
 	if err != nil {
@@ -422,7 +451,7 @@ func parseReaderAt(ra io.ReaderAt, size int64, hint int) (*hashSet, error) {
 	if hint > maxHashes {
 		hint = maxHashes
 	}
-	hs := &hashSet{m: make(map[[32]byte]struct{}, hint)}
+	hs := &hashSet{s: make([][32]byte, 0, hint)}
 	cr := csv.NewReader(&capReader{r: rc, left: maxDecompressedBytes})
 	cr.Comment = '#'
 	cr.FieldsPerRecord = -1
@@ -431,6 +460,7 @@ func parseReaderAt(ra io.ReaderAt, size int64, hint int) (*hashSet, error) {
 	// keeps its quotes and every row is dropped.
 	cr.TrimLeadingSpace = true
 	cr.ReuseRecord = true
+	checkAt := maxHashes
 	for {
 		rec, err := cr.Read()
 		if err == io.EOF {
@@ -447,10 +477,28 @@ func parseReaderAt(ra io.ReaderAt, size int64, hint int) (*hashSet, error) {
 		if !ok {
 			continue
 		}
-		hs.m[d] = struct{}{}
-		if len(hs.m) >= maxHashes {
-			break
+		if len(hs.s) == cap(hs.s) && len(hs.s) >= compactMin {
+			// Full: dedupe before growing so a duplicate-heavy feed stays small.
+			hs.dedupe()
+			if cap(hs.s)-len(hs.s) < cap(hs.s)/8 {
+				// Little was reclaimed: grow so we do not re-sort per row.
+				hs.s = slices.Grow(hs.s, cap(hs.s)/4)
+			}
 		}
+		hs.s = append(hs.s, d)
+		if len(hs.s) >= checkAt {
+			hs.dedupe() // the cap bounds distinct hashes
+			if len(hs.s) >= maxHashes {
+				break
+			}
+			// Re-check only after a further batch so duplicate rows near the
+			// cap do not trigger a full re-sort each.
+			checkAt = len(hs.s) + maxHashes/8
+		}
+	}
+	hs.dedupe()
+	if len(hs.s) > maxHashes {
+		hs.s = hs.s[:maxHashes]
 	}
 	return hs, nil
 }
@@ -523,10 +571,10 @@ func (c *Checker) Check(data []byte) []Hit {
 func (c *Checker) CheckDigest(sum [32]byte) []Hit {
 	c.lookups.Add(1)
 	hs := c.set.Load()
-	if hs == nil || len(hs.m) == 0 {
+	if hs == nil || len(hs.s) == 0 {
 		return nil
 	}
-	if _, ok := hs.m[sum]; !ok {
+	if !hs.has(sum) {
 		return nil
 	}
 	c.hits.Add(1)
@@ -537,7 +585,7 @@ func (c *Checker) CheckDigest(sum [32]byte) []Hit {
 func (c *Checker) Metrics() Metrics {
 	var n int
 	if hs := c.set.Load(); hs != nil {
-		n = len(hs.m)
+		n = len(hs.s)
 	}
 	return Metrics{
 		Enabled:         true,

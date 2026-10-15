@@ -25,14 +25,14 @@ func TestRefreshEmptyKeepsLastGood(t *testing.T) {
 	if err := c.refreshOnce(context.Background()); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
-	if n := len(c.set.Load().m); n != 2 {
+	if n := len(c.set.Load().s); n != 2 {
 		t.Fatalf("loaded %d hashes, want 2", n)
 	}
 	body.Store("# sha256_hash\n")
 	if err := c.refreshOnce(context.Background()); !errors.Is(err, feedrefresh.ErrShrank) {
 		t.Fatalf("empty refresh: err=%v, want feedrefresh.ErrShrank", err)
 	}
-	if n := len(c.set.Load().m); n != 2 {
+	if n := len(c.set.Load().s); n != 2 {
 		t.Fatalf("empty refresh replaced the set: %d hashes", n)
 	}
 }

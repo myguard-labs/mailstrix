@@ -62,14 +62,14 @@ func TestParseFeedPlainCSV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hs.m) != 2 {
-		t.Fatalf("hashes=%d want 2", len(hs.m))
+	if len(hs.s) != 2 {
+		t.Fatalf("hashes=%d want 2", len(hs.s))
 	}
 	var want [32]byte
 	if _, err := hex.Decode(want[:], bytes.Repeat([]byte("a"), 64)); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := hs.m[want]; !ok {
+	if ok := hs.has(want); !ok {
 		t.Error("expected sha256 not in set")
 	}
 }
@@ -80,8 +80,8 @@ func TestParseFeedZip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hs.m) != 2 {
-		t.Fatalf("zip hashes=%d want 2", len(hs.m))
+	if len(hs.s) != 2 {
+		t.Fatalf("zip hashes=%d want 2", len(hs.s))
 	}
 }
 
@@ -112,7 +112,7 @@ func TestCheckMiss(t *testing.T) {
 
 func TestCheckEmptySet(t *testing.T) {
 	c := &Checker{logf: func(string, ...any) {}}
-	c.set.Store(&hashSet{m: map[[32]byte]struct{}{}})
+	c.set.Store(&hashSet{})
 	if hits := c.Check([]byte("anything")); hits != nil {
 		t.Errorf("empty set must never hit: %+v", hits)
 	}
@@ -186,8 +186,8 @@ func TestParseFeedDecompressedCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("uncapped parseFeed: %v", err)
 	}
-	if len(hsFull.m) != rows {
-		t.Fatalf("uncapped: got %d hashes, want %d", len(hsFull.m), rows)
+	if len(hsFull.s) != rows {
+		t.Fatalf("uncapped: got %d hashes, want %d", len(hsFull.s), rows)
 	}
 
 	maxDecompressedBytes = 512
@@ -209,7 +209,7 @@ func TestParseFeedExactlyAtCeiling(t *testing.T) {
 	maxDecompressedBytes = int64(len(csv))
 	for name, body := range map[string][]byte{"plain": csv, "zip": zipOf(t, csv)} {
 		hs, err := parseFeed(body)
-		if err != nil || len(hs.m) != 2 {
+		if err != nil || len(hs.s) != 2 {
 			t.Fatalf("%s at bound: n=%v err=%v, want 2 hashes", name, hs, err)
 		}
 	}
@@ -284,12 +284,12 @@ func TestParseFeedSpaceSeparatedRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hs.m) != 2 {
-		t.Fatalf("entries=%d want 2", len(hs.m))
+	if len(hs.s) != 2 {
+		t.Fatalf("entries=%d want 2", len(hs.s))
 	}
 	for _, h := range []string{a, b} {
 		d, ok := parseSHA256(h)
-		if _, hit := hs.m[d]; !ok || !hit {
+		if hit := hs.has(d); !ok || !hit {
 			t.Fatalf("missing %s", h)
 		}
 	}

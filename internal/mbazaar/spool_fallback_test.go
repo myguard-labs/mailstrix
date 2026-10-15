@@ -87,7 +87,7 @@ func TestSpoolWriteFailureFallsBackToTempDir(t *testing.T) {
 	if got := n.Load(); got != 2 {
 		t.Fatalf("requests=%d, want 2", got)
 	}
-	if _, ok := c.set.Load().m[mustDigest(t, "payload")]; !ok {
+	if ok := c.set.Load().has(mustDigest(t, "payload")); !ok {
 		t.Fatal("set not stored after fallback")
 	}
 	if _, err := os.Stat(c.cachePath); !os.IsNotExist(err) {
