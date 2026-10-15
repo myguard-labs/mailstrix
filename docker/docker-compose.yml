@@ -15,6 +15,10 @@ services:
     # (the hash set) plus a ~100-150 MiB transient spike while the daily dump is
     # downloaded + unzipped — raise mem_limit to ~768m if you turn it on.
     mem_limit: 512m
+    # Optional, not set by default: GOMEMLIMIT = mem_limit - measured libyara (C)
+    # RSS. Example value only (120 MiB, not measured): 392MiB for 512m. To set it,
+    # add GOMEMLIMIT to the environment: map below. See the README "Go memory
+    # limit (GOMEMLIMIT)" section before setting it.
 
     # No `ports:` — not published to the host. Reachable only on the internal
     # docker network, by the static IPv4 the rspamd plugin uses.

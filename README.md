@@ -783,6 +783,50 @@ Notes:
   admission slot. Under sustained overload this is the 503 fuse — keep it short
   so callers (rspamd) fail fast rather than stacking connections.
 
+### Go memory limit (GOMEMLIMIT)
+
+The image sets no `GOMEMLIMIT` default; leaving it unset keeps the Go runtime's
+default behaviour. The Go soft limit only governs memory the Go runtime
+allocates and manages (heap, goroutine stacks). libyara is a C library called
+through cgo, so its allocations come from `malloc` and sit outside that
+accounting. Setting `GOMEMLIMIT` equal to `mem_limit` therefore lets the Go heap
+grow into the whole container budget, and the libyara resident set then has no
+room under the cgroup limit.
+
+Derivation:
+
+```text
+GOMEMLIMIT = mem_limit - L
+```
+
+`L` is the measured resident set of libyara (C) allocations for the rule set in
+use. No measured libyara-only RSS figure exists in this repository. The existing
+figures (about 90-200 MiB under macro and zip load, about 198 MiB peak) are whole
+process numbers, not libyara-only. To estimate `L`, compare `mailstrix_rss_bytes`
+with `mailstrix_heap_inuse_bytes` on `/metrics` after the rules have loaded. The
+difference is a rough indicator of `L`, not a bound. It can overstate `L`,
+because it also contains Go runtime overhead that is not heap in use (idle spans,
+goroutine stacks and runtime metadata). It can also understate `L`, because
+malloc'd libyara pages that are not yet touched are absent from RSS and a single
+sample after rule load misses scan-time peaks. Measure under representative scan
+load as well as after rule load, and re-measure per rule set.
+
+Worked examples, using a placeholder **example value** of `L = 120 MiB` that
+was not measured. Substitute the figure measured for your rule set:
+
+| `mem_limit` | `L` (example value) | `GOMEMLIMIT` |
+|-------------|---------------------|--------------|
+| `512m`      | 120 MiB             | `392MiB`     |
+| `768m`      | 120 MiB             | `648MiB`     |
+
+The formula does not reserve headroom for other non-Go memory that also counts
+against the cgroup, such as thread stacks, TLS and other cgo allocations. Any
+extra margin on top of it is an operator choice.
+
+`GOMEMLIMIT` is a soft limit: approaching it makes the garbage collector work
+harder, but it does not stop allocations. Set it only after measuring `L`, and set
+it in the operator's compose or environment, not in the image.
+
 ## Rules
 
 The image bakes eight public rulesets at build time; a daily rebuild
