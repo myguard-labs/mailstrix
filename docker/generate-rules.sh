@@ -397,9 +397,11 @@ fi
 #    reset the version to 1 while live was 34 (2026-07-30). Probe the REST API and
 #    branch on the HTTP STATUS instead: 200 => exists, 404 => genuinely absent,
 #    anything else (401/403/5xx) => credential/network fault, so abort rather than
-#    guess. This is what actually enforces the monotonicity rule described above.
+#    guess. The probe is bounded (--connect-timeout/--max-time): a hung API
+#    socket ends in curl exit 28 with no 200/404, which dies below instead of
+#    stalling the publisher forever. This is what actually enforces the monotonicity rule described above.
 NIGHTLY_STAGE=publish
-RELEASE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' \
+RELEASE_HTTP="$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
     -H @- \
     -H 'Accept: application/vnd.github+json' \
     "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" \
