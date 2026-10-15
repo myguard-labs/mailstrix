@@ -871,13 +871,14 @@ What each knob affects:
 | `MAILSTRIX_MAX_INFLIGHT` (`N`) | `2 × MAX_CONCURRENT` | Multiplies `B + E`. Each admitted request holds its body and extracted streams until its handler returns. | A request beyond `N` waits up to `MAILSTRIX_BACKEND_TIMEOUT` for a slot, then gets `503`. |
 | `MAILSTRIX_MAX_BODY` (`B`) | 8 MiB | Per-request body ceiling. Multiplied by `N`. | Requests over it are refused. |
 | `MAILSTRIX_EXTRACTION_RETAINED_BYTES` (`E`) | 2.5 MiB | Per-request ceiling on retained extracted output, enforced per whole entry. Multiplied by `N`. | Entries that do not fit are refused and the scan is marked incomplete. |
-| `MAILSTRIX_MAX_CONCURRENT` | CPU count | **Does not bound memory.** It is the CPU gate: the number of libyara scans that run at once. It is not a term in the formula. | Limits scan parallelism. Raising it does not change the buffer ceiling. |
+| `MAILSTRIX_MAX_CONCURRENT` | CPU count | Not a term in the formula, but it sets the default `N`: with `MAX_INFLIGHT` on `auto`, `N = 2 × MAX_CONCURRENT`, and an explicit `MAX_INFLIGHT` below `MAX_CONCURRENT` is raised to `2 × MAX_CONCURRENT`. Set `MAX_INFLIGHT` explicitly, at or above `MAX_CONCURRENT`, to size memory independently of CPU. | The CPU gate: the number of libyara scans that run at once. |
 | `MAILSTRIX_CACHE_MAX_BYTES` | 256 MiB | Not in the formula. It is the separate estimate for the verdict cache. | Cache hit rate. |
 | `MAILSTRIX_ICAP_MAX_CONNS` | `8 × N` | Not in the formula. It caps connections before admission. | Connection count. |
 
 To reduce the bound, lower `MAX_INFLIGHT`, `MAX_BODY` or the retained budget.
-Lowering `MAX_CONCURRENT` reduces CPU contention and does not reduce the buffer
-ceiling.
+Lowering `MAX_CONCURRENT` reduces CPU contention; it lowers the buffer ceiling only
+when `N` follows it: `MAX_INFLIGHT` is left on `auto`, or it is set below
+`MAX_CONCURRENT` and raised to `2 × MAX_CONCURRENT`.
 
 Feed refresh (MalwareBazaar, `MAILSTRIX_MBAZAAR_KEY` set): the zipped dump is
 streamed to a spool file, not held in RAM. The spool is bounded at 320 MiB zipped
@@ -894,7 +895,7 @@ Worked example with the defaults, on a 4-CPU host with no overrides:
 
 | Term | Value | Derivation |
 |------|-------|------------|
-| `N` | 8 | `2 × 4` |
+| `N` | 8 | `2 × MAX_CONCURRENT` (4 CPUs), with `MAX_INFLIGHT` left on `auto` |
 | `B + E` | 11,010,048 bytes (10.5 MiB) | `8,388,608 + 2,621,440` |
 | `N × (B + E)` | 88,080,384 bytes (84 MiB) | `8 × 11,010,048` |
 
