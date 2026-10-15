@@ -36,7 +36,8 @@ func p16gIndependentBytes(res extract.Result) (total uint64, attachmentOnly int)
 	return total, attachmentOnly
 }
 
-func TestP16gCompleteAccountingClosure(t *testing.T) {
+func p16gCases(t *testing.T) map[string]func() extract.Result {
+	t.Helper()
 	rtf := []byte("{\\rtf1{\\field{\\*\\fldinst DDEAUTO cmd /c calc}}}")
 	innerArchive := p16bZip(t, p16bZipEntry{name: "payload.rtf", data: rtf})
 	mimePayload := []byte("P16G complete attachment payload")
@@ -69,7 +70,11 @@ func TestP16gCompleteAccountingClosure(t *testing.T) {
 		input := bytes.Clone(input)
 		cases["structural_"+name] = func() extract.Result { return p16eExtract(name, input) }
 	}
+	return cases
+}
 
+func TestP16gCompleteAccountingClosure(t *testing.T) {
+	cases := p16gCases(t)
 	var streams, markers, attachmentOnly int
 	names := make([]string, 0, len(cases))
 	for name := range cases {
