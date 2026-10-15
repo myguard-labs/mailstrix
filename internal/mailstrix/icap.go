@@ -231,6 +231,10 @@ func (s *Server) serveICAPConn(conn net.Conn) {
 		// live-connection slot for the whole body budget.
 		_ = conn.SetDeadline(time.Now().Add(icapHeadTimeout))
 		if err := s.handleICAPRequest(conn, br); err != nil {
+			// Nothing to protect after a deadline expiry or a peer close.
+			if !isTimeout(err) && !errors.Is(err, io.EOF) {
+				icapDrainClose(conn)
+			}
 			return
 		}
 		// Body: handleICAPRequest re-arms to the (legitimately slower) body
@@ -251,6 +255,11 @@ const (
 	// may take to deliver a complete request line + header block. Bodies get the
 	// longer BackendTimeout-derived deadline, re-armed once the head has parsed.
 	icapHeadTimeout = 30 * time.Second
+	// icapRefuseDrainMax / icapRefuseDrainTime bound how much unread input is
+	// discarded, and for how long, after a final error reply so the close does
+	// not turn into a kernel RST that discards the reply.
+	icapRefuseDrainMax  = 256 << 10
+	icapRefuseDrainTime = 500 * time.Millisecond
 	// icapRefuseWriteTimeout bounds the 503 write on a refused connection.
 	icapRefuseWriteTimeout = 5 * time.Second
 	// icapRefuseLogInterval throttles the cap-reached log line.
@@ -269,6 +278,18 @@ const (
 // BackendTimeout (no new knob); the slack covers a legitimately large body on a
 // slower link. A variable only so tests can shorten it.
 var icapBodySlack = 10 * time.Second
+
+// icapDrainClose half-closes the write side and discards a bounded amount of
+// unread input before the caller closes conn. Closing a socket with unread
+// receive data makes the kernel send RST, which can discard a final reply the
+// peer has not yet read (e.g. a saturation 503 sent before the preview).
+func icapDrainClose(conn net.Conn) {
+	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = tc.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(icapRefuseDrainTime))
+	_, _ = io.Copy(io.Discard, io.LimitReader(conn, icapRefuseDrainMax))
+}
 
 // deadlineSetter is satisfied by net.Conn. handleICAPRequest re-arms the read
 // deadline after the head parses; a plain io.Writer (as in unit tests) simply

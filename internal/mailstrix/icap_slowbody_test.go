@@ -110,3 +110,24 @@ func TestICAPMaxSizeBodyStillScans(t *testing.T) {
 		t.Fatalf("max-size body at normal speed: %q", resp[:min(len(resp), 80)])
 	}
 }
+
+// A saturation 503 sent before the preview is read must reach the client even
+// when preview bytes are still unread (no RST discarding the reply).
+func TestICAP503SurvivesUnreadPreview(t *testing.T) {
+	s, addr, _ := slowBodyServer(t, 1<<20)
+	s.admit <- struct{}{} // saturate
+	defer func() { <-s.admit }()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	big := strings.Repeat("x", 200<<10)
+	body := fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(big), big)
+	go func() { _, _ = io.WriteString(c, slowHead(addr, false)+body) }()
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	b, err := io.ReadAll(c)
+	if err != nil || !strings.HasPrefix(string(b), "ICAP/1.0 503") {
+		t.Fatalf("503 lost: err=%v got=%q", err, b)
+	}
+}
