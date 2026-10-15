@@ -749,13 +749,16 @@ edit can't disarm a running scanner. On SIGTERM/SIGINT strixd drains (`/ready` �
 `MAILSTRIX_MAX_CONCURRENT` defaults to the CPU count (`auto`). On a many-core host
 (32+ CPUs) that reserves significant memory. The request-buffer ceiling is set by
 the admission gate, not the scan gate: up to `MAX_INFLIGHT` requests can each hold
-a full body plus its extracted streams, so the startup log estimates peak resident
-as roughly `MAX_INFLIGHT × MAX_BODY + RSS` (the loaded-rules resident set). Size
-`mem_limit` accordingly and pin `MAX_CONCURRENT`/`MAX_INFLIGHT` explicitly when the
-defaults are too aggressive.
+a body plus its extracted streams, so the startup log reports a lower bound of
+`RSS + MAX_INFLIGHT × (MAX_BODY + EXTRACTION_RETAINED_BYTES)`. The terms, what
+the bound excludes and a worked `mem_limit` derivation are in
+[Memory sizing](#memory-sizing). Size `mem_limit` accordingly and pin
+`MAX_INFLIGHT` (the memory knob) and `MAX_CONCURRENT` (the CPU knob)
+explicitly when the defaults are too aggressive.
 
 `MAILSTRIX_MAX_INFLIGHT` (default `2×MAX_CONCURRENT`) is the admission gate — excess
-requests receive a `503` immediately rather than queuing. Keep it above
+requests wait up to `MAILSTRIX_BACKEND_TIMEOUT` for a slot and then receive a
+`503`. Keep it above
 `MAX_CONCURRENT` so a slow body read or Redis round-trip can't starve scan slots.
 
 Redis/Valkey L2 (`MAILSTRIX_REDIS_URL`) dramatically improves throughput for repeated
@@ -774,8 +777,10 @@ cache misses. The MAC is not a freshness check.
 
 Notes:
 - MalwareBazaar full-dump mode (`MAILSTRIX_MBAZAAR_KEY` set) adds ~40 MiB resident
-  plus a ~100–150 MiB transient spike on refresh — raise `mem_limit` to ~768m in
-  that case.
+  plus a refresh spike. The refresh now streams the dump to a disk spool, so the
+  older ~100–150 MiB spike figure and the ~768m recommendation no longer apply
+  without a measurement. See [Memory sizing](#memory-sizing) and measure the
+  refresh peak with container stats before raising `mem_limit`.
 - For the Large profile, run multiple replicas behind a load balancer rather than
   one container with a very high `MAX_CONCURRENT`: smaller per-container concurrency
   improves tail latency under burst load and avoids one libyara panic taking all
@@ -827,6 +832,82 @@ extra margin on top of it is an operator choice.
 `GOMEMLIMIT` is a soft limit: approaching it makes the garbage collector work
 harder, but it does not stop allocations. Set it only after measuring `L`, and set
 it in the operator's compose or environment, not in the image.
+
+### Memory sizing
+
+The startup log line `lower bound for peak memory ...` reports:
+
+```text
+peak lower bound = RSS + N × (B + E)
+```
+
+- `RSS`: the process resident set, sampled at startup after a forced collection.
+  It includes the loaded rules and any MalwareBazaar snapshot warm-started from
+  the cache. The first MalwareBazaar fetch runs in the background and may finish
+  after the sample. When `MAILSTRIX_MBAZAAR_KEY` is set and no cached snapshot
+  file existed at startup, add the resident feed set (about 40 MiB, per the feed
+  notes) to the term, since it was not in the sample. Read `RSS` from the startup
+  log (`RSS=<n> MiB`) or from container stats. Do not use a figure from another
+  deployment.
+- `N` = `MAILSTRIX_MAX_INFLIGHT`. Default `2 × MAILSTRIX_MAX_CONCURRENT`, where
+  the default `MAX_CONCURRENT` is the CPU count. An explicit value below
+  `MAX_CONCURRENT` is raised to `2 × MAX_CONCURRENT`.
+- `B` = `MAILSTRIX_MAX_BODY`, default `8388608` bytes (8 MiB). A request whose
+  `Content-Length` exceeds it is refused before the body is read.
+- `E` = `MAILSTRIX_EXTRACTION_RETAINED_BYTES`, default `2621440` bytes (2.5 MiB).
+  A value outside 1024–134217728 falls back to the default.
+
+The bound is a lower bound, not a cap. The startup log names its exclusions:
+ICAP pre-admission buffers, extraction decoder transients, MalwareBazaar feed
+refresh spikes, verdict cache growth, libyara C allocations made after startup,
+and allocator slack. Add margin for these when choosing `mem_limit`. If the
+estimate exceeds 3/4 of the container limit, strixd logs a `WARNING` at startup.
+With no cgroup limit visible, it warns above 512 MiB.
+
+What each knob affects:
+
+| Setting | Default | Effect on memory | Effect on CPU or other |
+|---------|---------|------------------|------------------------|
+| `MAILSTRIX_MAX_INFLIGHT` (`N`) | `2 × MAX_CONCURRENT` | Multiplies `B + E`. Each admitted request holds its body and extracted streams until its handler returns. | A request beyond `N` waits up to `MAILSTRIX_BACKEND_TIMEOUT` for a slot, then gets `503`. |
+| `MAILSTRIX_MAX_BODY` (`B`) | 8 MiB | Per-request body ceiling. Multiplied by `N`. | Requests over it are refused. |
+| `MAILSTRIX_EXTRACTION_RETAINED_BYTES` (`E`) | 2.5 MiB | Per-request ceiling on retained extracted output, enforced per whole entry. Multiplied by `N`. | Entries that do not fit are refused and the scan is marked incomplete. |
+| `MAILSTRIX_MAX_CONCURRENT` | CPU count | **Does not bound memory.** It is the CPU gate: the number of libyara scans that run at once. It is not a term in the formula. | Limits scan parallelism. Raising it does not change the buffer ceiling. |
+| `MAILSTRIX_CACHE_MAX_BYTES` | 256 MiB | Not in the formula. It is the separate estimate for the verdict cache. | Cache hit rate. |
+| `MAILSTRIX_ICAP_MAX_CONNS` | `8 × N` | Not in the formula. It caps connections before admission. | Connection count. |
+
+To reduce the bound, lower `MAX_INFLIGHT`, `MAX_BODY` or the retained budget.
+Lowering `MAX_CONCURRENT` reduces CPU contention and does not reduce the buffer
+ceiling.
+
+Feed refresh (MalwareBazaar, `MAILSTRIX_MBAZAAR_KEY` set): the zipped dump is
+streamed to a spool file, not held in RAM. The spool is bounded at 320 MiB zipped
+(`maxFeedBytes`); the full dump was measured at about 215 MiB zipped in the code
+comment. The spool is created inside `MAILSTRIX_CACHE_DIR` itself, next to the installed
+snapshot `malwarebazaar.bin`. Installing a snapshot keeps a
+`malwarebazaar.bin.bak` rollback copy. During a refresh, the cache volume
+therefore has to hold the new spool, the current snapshot and the rollback copy
+at the same time. Without `MAILSTRIX_CACHE_DIR` the spool goes to the OS temp
+directory and no snapshot is persisted. No measured refresh-peak figure is
+recorded in this README, so measure the refresh peak with container stats.
+
+Worked example with the defaults, on a 4-CPU host with no overrides:
+
+| Term | Value | Derivation |
+|------|-------|------------|
+| `N` | 8 | `2 × 4` |
+| `B + E` | 11,010,048 bytes (10.5 MiB) | `8,388,608 + 2,621,440` |
+| `N × (B + E)` | 88,080,384 bytes (84 MiB) | `8 × 11,010,048` |
+
+The startup check passes when `RSS + 84 MiB ≤ 3/4 × mem_limit`, so:
+
+```text
+mem_limit ≥ (RSS + 84 MiB) ÷ 0.75
+```
+
+Substitute the `RSS` from your startup log. For example, `mem_limit=256m` avoids
+the warning only when `RSS ≤ 192 − 84 = 108 MiB`. Add the excluded items above
+for the real margin, then set `GOMEMLIMIT = mem_limit − L` as described in the
+section above.
 
 ## Rules
 
@@ -1200,8 +1281,9 @@ on top of the YARA rules:
 These use the same fail-open cached-feed design: the feed is downloaded once per
 refresh interval into an in-memory set (lookups are local map hits, never a
 per-message API call); a failed refresh keeps the previous set. MalwareBazaar's
-full dump adds ~40 MiB resident + a ~100–150 MiB transient spike on refresh —
-raise the container `mem_limit` (~768m) when enabling it.
+full dump adds ~40 MiB resident plus a refresh spike; the refresh streams to a
+disk spool, so size the cache volume and `mem_limit` per
+[Memory sizing](#memory-sizing) and measure the peak before relying on any figure.
 
 ## ICAP mode (optional)
 
