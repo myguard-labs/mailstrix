@@ -213,7 +213,8 @@ func (s *Server) logBadEncapsulatedICAP(method string, encErr error) {
 
 func (s *Server) serveICAPConn(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	br := bufio.NewReader(conn)
+	ic := &icapIdleConn{Conn: conn}
+	br := bufio.NewReader(ic)
 	for {
 		// Three deadlines, because "idle", "sending a head" and "sending a body"
 		// have very different legitimate durations.
@@ -230,7 +231,7 @@ func (s *Server) serveICAPConn(conn net.Conn) {
 		// not finish the request line + headers is a slow-loris and must not hold a
 		// live-connection slot for the whole body budget.
 		_ = conn.SetDeadline(time.Now().Add(icapHeadTimeout))
-		if err := s.handleICAPRequest(conn, br); err != nil {
+		if err := s.handleICAPRequest(ic, br); err != nil {
 			// Nothing to protect after a deadline expiry or a peer close.
 			if !isTimeout(err) && !errors.Is(err, io.EOF) {
 				icapDrainClose(conn)
@@ -271,13 +272,42 @@ const (
 	icapMaxRefuseInflight = 64
 )
 
-// icapBodySlack is added to BackendTimeout to form the wall-clock budget for
-// reading the preview and body once an admission slot is held. It is far below
-// the BackendTimeout+60s connection deadline, so a client trickling bytes
-// cannot pin one of the MaxInflight slots for that whole time. Derived from
-// BackendTimeout (no new knob); the slack covers a legitimately large body on a
-// slower link. A variable only so tests can shorten it.
-var icapBodySlack = 10 * time.Second
+// icapBodyIdle is the no-progress window for reading the preview and body
+// once an admission slot is held. Every read that returns bytes pushes the read
+// deadline out by this much, so a slow-but-steady origin (Squid streams a
+// RESPMOD body as it arrives) is never cut, while a client that stalls for this
+// long releases the slot and is closed without a verdict. Total hold is still
+// bounded by the connection ceiling (BackendTimeout + icapConnGrace). Derived
+// constant, no env knob; a variable only so tests can shorten it.
+var icapBodyIdle = 10 * time.Second
+
+// icapConnGrace is added to BackendTimeout for the connection ceiling armed
+// once the head is parsed. A variable only so tests can shorten it.
+var icapConnGrace = 60 * time.Second
+
+// icapIdleConn wraps the connection so that, while ceiling is non-zero, every
+// read that makes progress pushes the deadline out by icapBodyIdle, never past
+// ceiling. It is owned by the single connection goroutine (no locking).
+type icapIdleConn struct {
+	net.Conn
+	ceiling time.Time
+}
+
+func (c *icapIdleConn) arm() {
+	dl := time.Now().Add(icapBodyIdle)
+	if dl.After(c.ceiling) {
+		dl = c.ceiling
+	}
+	_ = c.SetDeadline(dl)
+}
+
+func (c *icapIdleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && !c.ceiling.IsZero() {
+		c.arm()
+	}
+	return n, err
+}
 
 // icapDrainClose half-closes the write side and discards a bounded amount of
 // unread input before the caller closes conn. Closing a socket with unread
@@ -325,7 +355,7 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 	// Head is in. Re-arm with the body deadline: encapsulated headers and a
 	// chunked body may legitimately take longer than icapHeadTimeout.
 	if d, ok := w.(deadlineSetter); ok {
-		_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + 60*time.Second))
+		_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + icapConnGrace))
 	}
 
 	switch method {
@@ -405,6 +435,7 @@ func readHTTPHeaders(br *bufio.Reader) ([]byte, error) {
 }
 
 func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr textproto.MIMEHeader, sections []icapSection) error {
+	ceiling := time.Now().Add(s.cfg.BackendTimeout + icapConnGrace)
 	s.metrics.icapRequests.Add(1)
 
 	allow204 := strings.Contains(hdr.Get("Allow"), "204")
@@ -454,10 +485,13 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 			return errors.New("icap busy")
 		}
 		defer func() { <-s.admit }()
-		// Slot held: bound preview + 100-Continue + body reads by a deadline
-		// shorter than the connection deadline. Re-armed after the read below.
-		if d, ok := w.(deadlineSetter); ok {
-			_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + icapBodySlack))
+		// Slot held: bound preview + 100-Continue + body reads by an idle
+		// (no-progress) deadline that each successful read extends, capped at
+		// the connection ceiling. Re-armed after the read below.
+		if ic, ok := w.(*icapIdleConn); ok {
+			ic.ceiling = ceiling
+			ic.arm()
+			defer func() { ic.ceiling = time.Time{} }()
 		}
 	}
 
@@ -508,6 +542,9 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		}
 		// Body is in: lift the body-read deadline so the scan and the reply
 		// write are not cut by it. Same budget the head re-arm grants.
+		if ic, ok := w.(*icapIdleConn); ok {
+			ic.ceiling = time.Time{}
+		}
 		if d, ok := w.(deadlineSetter); ok {
 			_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + s.cfg.ScanTimeout + clamdScanSlack + 60*time.Second))
 		}

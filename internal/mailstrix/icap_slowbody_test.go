@@ -11,17 +11,20 @@ import (
 )
 
 // slowBodyServer returns a server with one admission slot and a short body
-// budget (BackendTimeout + icapBodySlack), restoring the slack on cleanup.
+// idle window (icapBodyIdle) and a short connection ceiling (BackendTimeout +
+// icapConnGrace), restoring both on cleanup. The returned duration is the idle
+// window.
 func slowBodyServer(t *testing.T, maxBody int64) (*Server, string, time.Duration) {
 	t.Helper()
 	cfg := &Config{MaxConcurrent: 1, MaxInflight: 1, MaxBody: maxBody, BackendTimeout: 300 * time.Millisecond}
 	cfg.sanitize()
 	cfg.BackendTimeout = 300 * time.Millisecond
 	s := NewServer(cfg, &fakeEngine{count: 1, fp: "fp"})
-	old := icapBodySlack
-	icapBodySlack = 200 * time.Millisecond
-	t.Cleanup(func() { icapBodySlack = old })
-	return s, startTestICAPServer(t, s), cfg.BackendTimeout + icapBodySlack
+	oldIdle, oldGrace := icapBodyIdle, icapConnGrace
+	icapBodyIdle = 200 * time.Millisecond
+	icapConnGrace = 2 * time.Second
+	t.Cleanup(func() { icapBodyIdle, icapConnGrace = oldIdle, oldGrace })
+	return s, startTestICAPServer(t, s), icapBodyIdle
 }
 
 func slowHead(host string, preview bool) string {
@@ -129,5 +132,66 @@ func TestICAP503SurvivesUnreadPreview(t *testing.T) {
 	b, err := io.ReadAll(c)
 	if err != nil || !strings.HasPrefix(string(b), "ICAP/1.0 503") {
 		t.Fatalf("503 lost: err=%v got=%q", err, b)
+	}
+}
+
+// A slow-but-steady client (bytes every idle/2, total > 2*idle, below the
+// ceiling) is the RESPMOD case: never cut, gets a real verdict.
+func TestICAPSlowButSteadyBodyIsNotCut(t *testing.T) {
+	_, addr, idle := slowBodyServer(t, 1<<20)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	body := "hello world!" // 12 bytes
+	_, _ = io.WriteString(c, slowHead(addr, false)+fmt.Sprintf("%x\r\n", len(body)))
+	t0 := time.Now()
+	for i := 0; i < len(body); i++ {
+		time.Sleep(idle / 2)
+		if _, err := io.WriteString(c, body[i:i+1]); err != nil {
+			t.Fatalf("server cut a steady client after %v: %v", time.Since(t0), err)
+		}
+	}
+	_, _ = io.WriteString(c, "\r\n0\r\n\r\n")
+	if time.Since(t0) <= 2*idle {
+		t.Fatalf("test did not exceed 2*idle")
+	}
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	b, _ := io.ReadAll(c)
+	if !strings.HasPrefix(string(b), "ICAP/1.0 204") {
+		t.Fatalf("steady client got no verdict: %q", b)
+	}
+}
+
+// A client that keeps making progress forever is still cut by the connection
+// ceiling, with no verdict.
+func TestICAPEndlessTrickleHitsCeiling(t *testing.T) {
+	s, addr, idle := slowBodyServer(t, 1<<30)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_, _ = io.WriteString(c, slowHead(addr, false)+"3fffffff\r\n")
+	t0 := time.Now()
+	ceiling := s.cfg.BackendTimeout + icapConnGrace
+	for time.Since(t0) < ceiling+3*time.Second {
+		if _, err := io.WriteString(c, "x"); err != nil {
+			break
+		}
+		time.Sleep(idle / 4)
+	}
+	if d := time.Since(t0); d < ceiling-500*time.Millisecond || d > ceiling+2*time.Second {
+		t.Fatalf("cut after %v; want near ceiling %v", d, ceiling)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	b, _ := io.ReadAll(c)
+	if strings.Contains(string(b), " 204 ") || strings.Contains(string(b), " 200 ") {
+		t.Fatalf("endless trickler got a verdict: %q", b)
+	}
+	resp := doICAP(t, addr, icapRESPMODRequest(addr, "hello", true))
+	if !strings.HasPrefix(resp, "ICAP/1.0 204") {
+		t.Fatalf("slot not released: %q", resp)
 	}
 }
