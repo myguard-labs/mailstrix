@@ -1226,10 +1226,21 @@ func rulesetModUnix(srcFile, srcDir string) int64 {
 // clean; bad files are logged and skipped. It is an error only if NOTHING
 // compiles (a misconfigured rules dir, not a single rotten rule).
 func ruleFiles(dir string) ([]string, error) {
+	// List the directory and match the names, rather than globbing a pattern
+	// built from dir: a rules dir containing glob metacharacters ("[", "*", "?")
+	// would make filepath.Glob return ErrBadPattern or match nothing, which the
+	// old code swallowed and reported as "no rule files".
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read rules dir %s: %w", dir, err)
+	}
 	var files []string
 	for _, ext := range []string{"*.yar", "*.yara"} {
-		m, _ := filepath.Glob(filepath.Join(dir, ext))
-		files = append(files, m...)
+		for _, e := range entries {
+			if ok, _ := filepath.Match(ext, e.Name()); ok { // constant patterns: never ErrBadPattern
+				files = append(files, filepath.Join(dir, e.Name()))
+			}
+		}
 	}
 	sort.Strings(files) // deterministic namespace ordering
 	if len(files) == 0 {
