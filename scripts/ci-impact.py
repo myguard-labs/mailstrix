@@ -211,6 +211,10 @@ RULES = {
     ],
 }
 GO_INPUTS = [
+    "ci/icap_admission_ordering_test.go",
+    "ci/testdata/icap_admission_ordering_test.go",
+    "ci/clamd_admission_ordering_test.go",
+    "ci/testdata/clamd_admission_ordering_test.go",
     "ci/cache_distribution/*.go",
     "ci/cache_byte_bound_test.go",
     "ci/feed_set_bytes_test.go",

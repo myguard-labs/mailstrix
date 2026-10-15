@@ -387,7 +387,11 @@ func (c *Config) sanitize() {
 	// Only 0 ("auto") is derived — an explicit operator value is honoured, even a
 	// small one, since a deliberately tight cap is a legitimate choice. Anything
 	// below 1 is nonsense and warns like every other clamp. Auto allows generous
-	// headroom over MaxInflight: most live conns are idle keep-alives.
+	// headroom over MaxInflight: most live conns are idle keep-alives. The 8x
+	// factor bounds live connections (goroutine, bufio.Reader, fd), not buffered
+	// bodies: handleICAPMod takes s.admit before reading any preview or body
+	// chunk, so a connection waiting for admission holds no body bytes and body
+	// memory stays bounded by MaxInflight*MaxBody regardless of this cap.
 	switch {
 	case c.icapConnsAuto || c.ICAPMaxConns == 0:
 		c.ICAPMaxConns = c.MaxInflight * 8
