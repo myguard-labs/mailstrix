@@ -70,7 +70,7 @@ func TestP17cExactFitNotTruncatedAndFinalizeIdempotent(t *testing.T) {
 	r, ledger := p17bLedger(10)
 	r.appendStream(ptr(p17bEntry(10, 'a')))
 	r.noteRetainedTruncation()
-	if r.RetainedTruncated || ledger.exhausted {
+	if r.RetainedTruncated || ledger.refused {
 		t.Fatal("exact fit flagged")
 	}
 	r.appendStream(ptr(p17bEntry(1, 'b'))) // real refusal

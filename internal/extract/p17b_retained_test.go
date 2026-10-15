@@ -32,19 +32,21 @@ func TestP17bExactFitAndOneByteExcess(t *testing.T) {
 	if !r.appendStream(ptr(p17bEntry(10, 'a'))) {
 		t.Fatal("exact fit refused")
 	}
-	if got := ledger.snapshot().Bytes(); got != 10 || ledger.exhausted {
-		t.Fatalf("exact fit bytes=%d exhausted=%v", got, ledger.exhausted)
+	if got := ledger.snapshot().Bytes(); got != 10 || ledger.refused {
+		t.Fatalf("exact fit bytes=%d exhausted=%v", got, ledger.refused)
 	}
 	r2, ledger2 := p17bLedger(10)
 	if r2.appendStream(ptr(p17bEntry(11, 'b'))) {
 		t.Fatal("one-byte excess admitted")
 	}
-	if len(r2.Streams) != 0 || ledger2.snapshot().Bytes() != 0 || !ledger2.exhausted {
-		t.Fatalf("excess left state streams=%d bytes=%d exhausted=%v", len(r2.Streams), ledger2.snapshot().Bytes(), ledger2.exhausted)
+	if len(r2.Streams) != 0 || ledger2.snapshot().Bytes() != 0 || !ledger2.refused {
+		t.Fatalf("excess left state streams=%d bytes=%d exhausted=%v", len(r2.Streams), ledger2.snapshot().Bytes(), ledger2.refused)
 	}
-	// Exhaustion latches: even a tiny entry that would fit is refused.
-	if r2.appendStream(ptr(p17bEntry(1, 'c'))) || len(r2.Streams) != 0 {
-		t.Fatal("derived admission continued after a real refusal")
+	// No refuse-everything latch (CR534): an oversized refusal must not hide a
+	// later entry that still fits, so a tiny entry is admitted while the
+	// refusal stays recorded for the truncation outcome.
+	if !r2.appendStream(ptr(p17bEntry(1, 'c'))) || len(r2.Streams) != 1 || !ledger2.refused {
+		t.Fatalf("fitting entry after a refusal streams=%d refused=%v", len(r2.Streams), ledger2.refused)
 	}
 }
 
@@ -55,18 +57,18 @@ func TestP17bZeroAndNoOpNeverExhaust(t *testing.T) {
 	if !r.appendStream(ptr(nil)) || !r.appendStream(ptr([]byte{})) {
 		t.Fatal("empty entry refused")
 	}
-	if ledger.exhausted || ledger.snapshot().Bytes() != 0 {
-		t.Fatalf("empty entries exhausted=%v bytes=%d", ledger.exhausted, ledger.snapshot().Bytes())
+	if ledger.refused || ledger.snapshot().Bytes() != 0 {
+		t.Fatalf("empty entries exhausted=%v bytes=%d", ledger.refused, ledger.snapshot().Bytes())
 	}
 	if !r.appendStream(ptr(p17bEntry(4, 'x'))) {
 		t.Fatal("full-size entry refused after empties")
 	}
 	// A zero-capacity ordinary budget still tolerates empties, refuses data.
 	r0, l0 := p17bLedger(0)
-	if !r0.appendStream(ptr(nil)) || l0.exhausted {
+	if !r0.appendStream(ptr(nil)) || l0.refused {
 		t.Fatal("empty entry on zero-capacity budget exhausted it")
 	}
-	if r0.appendStream(ptr([]byte("y"))) || !l0.exhausted {
+	if r0.appendStream(ptr([]byte("y"))) || !l0.refused {
 		t.Fatal("data entry on zero-capacity budget admitted")
 	}
 	// Limits below the reserve still saturate to zero capacity, never wrap.
@@ -204,11 +206,13 @@ func TestP17bBatchHasPerEntryOutcomes(t *testing.T) {
 	r, ledger := p17bLedger(10)
 	entries := [][]byte{[]byte("abc"), p17bEntry(100, 'x'), nil, []byte("de")}
 	r.appendStreams(entries, false)
-	if len(r.Streams) != 2 || string(r.Streams[0]) != "abc" || len(r.Streams[1]) != 0 {
+	// The oversized entry is refused on its own; "de" still fits after it
+	// (CR534 removed the latch that used to refuse every later entry).
+	if len(r.Streams) != 3 || string(r.Streams[0]) != "abc" || len(r.Streams[1]) != 0 || string(r.Streams[2]) != "de" {
 		t.Fatalf("batch outcomes %q", r.Streams)
 	}
-	if ledger.snapshot().Bytes() != 3 || !ledger.exhausted {
-		t.Fatalf("batch bytes=%d exhausted=%v", ledger.snapshot().Bytes(), ledger.exhausted)
+	if ledger.snapshot().Bytes() != 5 || !ledger.refused {
+		t.Fatalf("batch bytes=%d exhausted=%v", ledger.snapshot().Bytes(), ledger.refused)
 	}
 }
 
@@ -313,7 +317,7 @@ func TestP17bMIMEAttachmentSharesOneOwnedArray(t *testing.T) {
 	// One byte over E-D: the file is never published as a complete identity.
 	r2, l2 := p17bLedger(39)
 	walkMIMEEntity(h, bytes.NewReader(payload), r2, &archiveBudget{}, 0, time.Time{}, new(int), true)
-	if len(r2.Streams) != 0 || len(r2.MIMEAttachments) != 0 || l2.snapshot().Bytes() != 0 || !l2.exhausted {
+	if len(r2.Streams) != 0 || len(r2.MIMEAttachments) != 0 || l2.snapshot().Bytes() != 0 || !l2.refused {
 		t.Fatalf("refused attachment leaked streams=%d attachments=%d bytes=%d", len(r2.Streams), len(r2.MIMEAttachments), l2.snapshot().Bytes())
 	}
 

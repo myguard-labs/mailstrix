@@ -22,9 +22,11 @@ type retainedBudget struct {
 	admissions uint64
 	// limit is the request ceiling E; 0 means non-enforcing.
 	limit uint64
-	// exhausted latches after a real refusal of a nonempty entry: later nonempty
-	// ordinary admissions are refused so no derived output is admitted.
-	exhausted bool
+	// refused latches after a real refusal of a nonempty entry. It only drives
+	// the once-only truncation outcome (RetainedTruncated and the reserved
+	// retained-bytes diagnostic); it never gates later admissions, so one
+	// oversized decoy entry cannot hide smaller later siblings that still fit.
+	refused bool
 	// reserved latches once the diagnostic reserve has been materialized.
 	reserved bool
 }
@@ -49,17 +51,17 @@ func (b *retainedBudget) ordinaryCap() uint64 {
 }
 
 // admit is the single enforcing debit. It admits whole entries only: an empty
-// entry is a no-op that never exhausts anything, an exact fit succeeds, and a
-// real nonempty refusal latches exhaustion without debiting.
+// entry is a no-op that never refuses anything, an exact fit succeeds, and a
+// real nonempty refusal records the truncation outcome without debiting. Each
+// entry is judged on its own size against the remaining ordinary capacity
+// E-D-used, so a later entry that fits is admitted after an earlier refusal.
 func (b *retainedBudget) admit(size uint64) (retainedToken, bool) {
 	if b == nil {
 		return retainedToken{}, false
 	}
-	if b.limit != 0 && size > 0 {
-		if b.exhausted || size > b.ordinaryCap()-b.ordinaryUsed() {
-			b.exhausted = true
-			return retainedToken{}, false
-		}
+	if b.limit != 0 && size > 0 && size > b.ordinaryCap()-b.ordinaryUsed() {
+		b.refused = true
+		return retainedToken{}, false
 	}
 	return b.record(size)
 }
@@ -76,8 +78,8 @@ func (b *retainedBudget) ordinaryUsed() uint64 {
 	return used
 }
 
-// admitReserve materializes the diagnostic reserve once, even after ordinary
-// exhaustion. The final total stays within E because D was held back.
+// admitReserve materializes the diagnostic reserve once, even after an
+// ordinary refusal. The final total stays within E because D was held back.
 func (b *retainedBudget) admitReserve() bool {
 	if b == nil || b.reserved || (b.limit != 0 && b.limit < retainedReserveBytes) {
 		return false
@@ -135,7 +137,7 @@ func (r *Result) admitStream(p *[]byte, own bool) (retainedToken, bool) {
 }
 
 // release returns an admitted but never-published entry's bytes to the ledger,
-// saturating at zero. It does not clear a latched exhaustion.
+// saturating at zero. It does not clear a recorded refusal.
 func (b *retainedBudget) release(size uint64) {
 	if b == nil {
 		return

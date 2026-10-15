@@ -40,8 +40,9 @@ import (
 const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16+mimeidentity+retainedlimit+xxh3key"
 
 // DefaultRetainedBytesLimit is the calibrated per-extraction logical-output
-// ceiling. P17a propagates and identities the policy; enforcement is added by
-// the later budget packet.
+// ceiling, enforced per whole entry: an entry that does not fit the remaining
+// capacity is refused (never truncated) and the scan is marked
+// MAILSTRIX_SCAN_INCOMPLETE, while later entries that still fit are admitted.
 const DefaultRetainedBytesLimit int64 = 2621440
 
 // Options carries the per-request extraction caps (EFFORT-4) plus the time
@@ -1020,9 +1021,15 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		if len(b) > maxBytesPerMSGAttach {
 			b = b[:maxBytesPerMSGAttach]
 		}
-		res.appendStreamOwned(&b)
+		admitted := res.appendStreamOwned(&b)
 		total += len(b)
 		emitted++
+		if !admitted {
+			// Refused by the retained ledger: the attachment is not published, so
+			// neither charge the nested-carrier budget for it nor crack its
+			// derived output (matches emitMember/fromOneNote/fromTNEF).
+			continue
+		}
 		// Charge the shared nested-carrier budget so a .msg → carrier fan-out is
 		// bounded together with archive members (see nested.go), then crack the
 		// attachment's own carrier layer if it is one (depth+1: one carrier deeper
@@ -1684,14 +1691,14 @@ func codes(res *Result, mods []*oleparse.VBAModule, out [][]byte) [][]byte {
 // kind is a yarad literal, never attacker bytes.
 const capHitMarkerPrefix = "EXTRACT-CAP-HIT kind="
 
-// retainedBytesKind is the CapHits kind for retained-output exhaustion.
+// retainedBytesKind is the CapHits kind for a retained-output refusal.
 const retainedBytesKind = "retained-bytes"
 
 // noteRetainedTruncation latches the observable truncation flag and cap hit
 // from the request ledger. It is idempotent, so normal and panic-recover exits
 // may both call it.
 func (r *Result) noteRetainedTruncation() {
-	if r == nil || r.childOpts == nil || r.childOpts.retained == nil || !r.childOpts.retained.exhausted {
+	if r == nil || r.childOpts == nil || r.childOpts.retained == nil || !r.childOpts.retained.refused {
 		return
 	}
 	r.RetainedTruncated = true
