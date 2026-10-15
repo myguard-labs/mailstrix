@@ -87,13 +87,13 @@ func TestFetchRules_DenylistPrunes(t *testing.T) {
 	// one single-rule file per denied rule (mirrors yaraify's one-rule-per-file)
 	for _, name := range deniedRules {
 		f := filepath.Join(dir, "yaraify-"+name+".yar")
-		if err := os.WriteFile(f, []byte("rule "+name+" {\n condition:\n  true\n}\n"), 0o644); err != nil {
+		if err := os.WriteFile(f, []byte("rule "+name+" {\n condition:\n  true\n}\n"), 0o600); err != nil {
 			t.Fatalf("write %s: %v", f, err)
 		}
 	}
 	// a keeper that must NOT be pruned (different rule name, substring-adjacent)
 	keeper := filepath.Join(dir, "yaraify-Keep_Luckyware_Sibling.yar")
-	if err := os.WriteFile(keeper, []byte("rule Keep_Luckyware_Sibling {\n condition:\n  true\n}\n"), 0o644); err != nil {
+	if err := os.WriteFile(keeper, []byte("rule Keep_Luckyware_Sibling {\n condition:\n  true\n}\n"), 0o600); err != nil {
 		t.Fatalf("write keeper: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestFetchRules_DenylistBundleGuard(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		body += "rule Innocent_Sibling_" + string(rune('A'+i)) + " {\n condition:\n  true\n}\n"
 	}
-	if err := os.WriteFile(bundle, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(bundle, []byte(body), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
 	src, err := os.ReadFile(abs)

@@ -327,8 +327,12 @@ func TestBinAnalyzeFastPathPEInStream(t *testing.T) {
 
 	var gzBuf bytes.Buffer
 	gz := gzip.NewWriter(&gzBuf)
-	gz.Write(pe) //nolint:errcheck
-	gz.Close()   //nolint:errcheck
+	if _, err := gz.Write(pe); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	res := extract.Extract(gzBuf.Bytes(), time.Time{})
 	if !hasMarker(res, "PE-SECTION-PACKED") && !hasMarker(res, "PE-SECTION-HIGH-ENTROPY") {

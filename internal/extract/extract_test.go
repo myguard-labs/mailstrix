@@ -205,6 +205,9 @@ func TestCodesByteBackedModules(t *testing.T) {
 
 	both := oleparse.VBAModule{Code: "legacy", CodeBytes: []byte("bytes")}
 	out = codes(nil, []*oleparse.VBAModule{&both}, nil)
+	if len(out) != 1 {
+		t.Fatalf("want 1 stream, got %d", len(out))
+	}
 	if got := string(out[0]); got != "bytes" {
 		t.Fatalf("CodeBytes should win over Code: got %q", got)
 	}
@@ -250,11 +253,19 @@ func makeMultiPartZip(t *testing.T, entries [][2]any) []byte {
 	var b bytes.Buffer
 	zw := zip.NewWriter(&b)
 	for _, e := range entries {
-		w, err := zw.Create(e[0].(string))
+		name, ok := e[0].(string)
+		if !ok {
+			t.Fatalf("entry name %v is not a string", e[0])
+		}
+		data, ok := e[1].([]byte)
+		if !ok {
+			t.Fatalf("entry %q body is not []byte", name)
+		}
+		w, err := zw.Create(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := w.Write(e[1].([]byte)); err != nil {
+		if _, err := w.Write(data); err != nil {
 			t.Fatal(err)
 		}
 	}

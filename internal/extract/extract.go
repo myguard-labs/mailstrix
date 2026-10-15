@@ -1531,10 +1531,7 @@ func parseDDEFields(raw []byte, out *[][]byte, deadline time.Time, results ...*R
 		ddeFields++
 	}
 
-	for {
-		if expired(deadline) {
-			break
-		}
+	for !expired(deadline) {
 		tok, err := dec.Token()
 		if err != nil {
 			break // EOF or malformed — fail-open

@@ -225,6 +225,9 @@ func TestBIFF12FormulaRgce_TooShort(t *testing.T) {
 
 func TestBIFF12FormulaRgce_DeclaredLengthOverrun(t *testing.T) {
 	p := fmlaNumRecord(strPtg("payload"))
+	if len(p) < 22 {
+		t.Fatalf("FMLA_NUM record too short: %d bytes", len(p))
+	}
 	binary.LittleEndian.PutUint32(p[18:22], uint32(len(p)))
 	if got := biff12FormulaRgce(biff12FmlaNum, p); got != nil {
 		t.Fatalf("overrunning cce must return nil, got %v", got)

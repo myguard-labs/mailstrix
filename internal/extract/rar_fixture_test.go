@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"errors"
 	"io"
 	"os"
 	"testing"
@@ -251,7 +252,7 @@ func TestRarFixtureMembersMatchDocumentedContract(t *testing.T) {
 	seen := make(map[string]bool, len(rarFixtureMembers))
 	for {
 		h, err := rr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

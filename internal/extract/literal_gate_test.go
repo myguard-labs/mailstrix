@@ -97,7 +97,7 @@ func TestFoldVBAStringsGatedStillFolds(t *testing.T) {
 // work; hxxp, fxp and bracket defangs still fold; an empty input is a no-op.
 func TestUndefangGates(t *testing.T) {
 	prose := []byte("the fish had a fine home here")
-	if out, ok := undefang(prose); ok || &out[0] != &prose[0] {
+	if out, ok := undefang(prose); ok || len(out) == 0 || &out[0] != &prose[0] {
 		t.Fatalf("prose changed: %q", out)
 	}
 	for in, want := range map[string]string{
