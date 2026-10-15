@@ -1011,3 +1011,80 @@ func TestDefineExternalsRealDuplicateFails(t *testing.T) {
 		t.Fatal("redefining externals on the same compiler must fail loudly")
 	}
 }
+
+// writeRuleFilesForValidation writes trivially valid rule files into a fresh dir.
+func writeRuleFilesForValidation(t *testing.T, names ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("rule ok_"+strings.TrimSuffix(n, ".yar")+" { condition: true }\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// stubValidateRuleFile replaces validateRuleFile for one test and restores it on cleanup.
+func stubValidateRuleFile(t *testing.T, fn func(path string) error) {
+	t.Helper()
+	old := validateRuleFile
+	validateRuleFile = fn
+	t.Cleanup(func() { validateRuleFile = old })
+}
+
+func TestValidatedRuleFilesSetupErrorFailsSet(t *testing.T) {
+	dir := writeRuleFilesForValidation(t, "a.yar", "b.yar")
+	cause := errors.New("libyara: compiler creation failed")
+	stubValidateRuleFile(t, func(path string) error {
+		if filepath.Base(path) == "b.yar" {
+			return &ruleSetupError{err: cause}
+		}
+		return nil
+	})
+	files, err := validatedRuleFiles(dir, func(string, ...any) {})
+	if err == nil {
+		t.Fatal("setup failure must fail the set, not yield a partial ruleset")
+	}
+	if files != nil {
+		t.Fatalf("files = %v, want nil on setup failure", files)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("errors.Is(err, cause) = false; err = %v", err)
+	}
+	var setupErr *ruleSetupError
+	if !errors.As(err, &setupErr) {
+		t.Fatalf("errors.As(err, *ruleSetupError) = false; err = %v", err)
+	}
+}
+
+func TestValidatedRuleFilesPlainErrorSkipsFile(t *testing.T) {
+	dir := writeRuleFilesForValidation(t, "a.yar", "b.yar")
+	stubValidateRuleFile(t, func(path string) error {
+		if filepath.Base(path) == "b.yar" {
+			return errors.New("syntax error in b.yar")
+		}
+		return nil
+	})
+	files, err := validatedRuleFiles(dir, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("per-file error must not fail the set: %v", err)
+	}
+	if len(files) != 1 || filepath.Base(files[0]) != "a.yar" {
+		t.Fatalf("files = %v, want only a.yar", files)
+	}
+}
+
+func TestValidatedRuleFilesSetupErrorStopsEarly(t *testing.T) {
+	dir := writeRuleFilesForValidation(t, "a.yar", "b.yar", "c.yar")
+	var calls int
+	stubValidateRuleFile(t, func(string) error {
+		calls++
+		return &ruleSetupError{err: errors.New("externals declaration failed")}
+	})
+	if _, err := validatedRuleFiles(dir, func(string, ...any) {}); err == nil {
+		t.Fatal("setup failure on the first file must fail the set")
+	}
+	if calls != 1 {
+		t.Fatalf("validateRuleFile calls = %d, want 1 (stop at first setup failure)", calls)
+	}
+}

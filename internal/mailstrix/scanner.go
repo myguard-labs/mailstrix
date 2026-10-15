@@ -1252,6 +1252,12 @@ func validatedRuleFiles(dir string, logf func(string, ...any)) ([]string, error)
 	skipped := 0
 	for _, f := range files {
 		if compileErr := validateRuleFile(f); compileErr != nil {
+			var setupErr *ruleSetupError
+			if errors.As(compileErr, &setupErr) {
+				// Compiler setup failure is not a property of this file: fail the
+				// whole set rather than returning a silently partial ruleset.
+				return nil, fmt.Errorf("validate rule file %s: %w", filepath.Base(f), compileErr)
+			}
 			skipped++
 			logf("skip unparsable rule file %s: %v", filepath.Base(f), compileErr)
 			continue
@@ -1408,19 +1414,28 @@ func disableNonMarkerRules(bundle *yara.Rules, deny map[string]struct{}, logf fu
 		total, disabled, total-disabled, mbDisabled)
 }
 
+// ruleSetupError marks a compiler-setup failure (compiler creation or external
+// declaration) that is not specific to one rule file, so callers must not skip
+// that file as unparsable.
+type ruleSetupError struct{ err error }
+
+func (e *ruleSetupError) Error() string { return e.err.Error() }
+func (e *ruleSetupError) Unwrap() error { return e.err }
+
 var validateRuleFile = fileCompiles
 
 // fileCompiles validates one rule file in an isolated compiler so a single bad
 // file (unknown module, bad syntax) can be skipped without poisoning the shared
-// compiler the rest of the set is built in.
+// compiler the rest of the set is built in. Compiler-setup failures are returned
+// as *ruleSetupError so they are not mistaken for a bad file.
 func fileCompiles(path string) error {
 	c, err := yara.NewCompiler()
 	if err != nil {
-		return err
+		return &ruleSetupError{err: err}
 	}
 	defer c.Destroy()
 	if err := defineExternals(c); err != nil {
-		return err
+		return &ruleSetupError{err: err}
 	}
 	fh, err := os.Open(path) // #nosec G304 -- operator rules dir, not attacker input
 	if err != nil {
