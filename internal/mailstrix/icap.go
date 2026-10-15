@@ -262,6 +262,14 @@ const (
 	icapMaxRefuseInflight = 64
 )
 
+// icapBodySlack is added to BackendTimeout to form the wall-clock budget for
+// reading the preview and body once an admission slot is held. It is far below
+// the BackendTimeout+60s connection deadline, so a client trickling bytes
+// cannot pin one of the MaxInflight slots for that whole time. Derived from
+// BackendTimeout (no new knob); the slack covers a legitimately large body on a
+// slower link. A variable only so tests can shorten it.
+var icapBodySlack = 10 * time.Second
+
 // deadlineSetter is satisfied by net.Conn. handleICAPRequest re-arms the read
 // deadline after the head parses; a plain io.Writer (as in unit tests) simply
 // skips that step.
@@ -425,12 +433,20 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 			return errors.New("icap busy")
 		}
 		defer func() { <-s.admit }()
+		// Slot held: bound preview + 100-Continue + body reads by a deadline
+		// shorter than the connection deadline. Re-armed after the read below.
+		if d, ok := w.(deadlineSetter); ok {
+			_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + icapBodySlack))
+		}
 	}
 
 	// Read body (chunked per RFC 3507 §4.5).
 	var buf []byte
 	if hasBody {
 		preview, ieof, readErr := readICAPChunkedBody(br, s.cfg.MaxBody)
+		if isTimeout(readErr) {
+			return s.icapBodyTimeout(method, readErr)
+		}
 		if errors.Is(readErr, errICAPBodyTooLarge) {
 			_ = s.icapWriteStatus(w, 413, "Request Entity Too Large", "")
 			return readErr
@@ -460,11 +476,19 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 				_ = s.icapWriteStatus(w, 413, "Request Entity Too Large", "")
 				return contErr
 			}
+			if isTimeout(contErr) {
+				return s.icapBodyTimeout(method, contErr)
+			}
 			if contErr != nil {
 				_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 				return contErr
 			}
 			buf = full
+		}
+		// Body is in: lift the body-read deadline so the scan and the reply
+		// write are not cut by it. Same budget the head re-arm grants.
+		if d, ok := w.(deadlineSetter); ok {
+			_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + s.cfg.ScanTimeout + clamdScanSlack + 60*time.Second))
 		}
 	}
 
@@ -523,6 +547,20 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		return s.icapWriteStatusFP(w, fp, 204, "No Modification", "")
 	}
 	return icapWriteEcho(w, fp, echo, buf)
+}
+
+// isTimeout reports whether err is a network deadline expiry.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// icapBodyTimeout handles a body read that hit the slot-hold deadline: no
+// verdict is produced (never a clean one); the slot is released by the caller's
+// defer and the connection is closed without a reply.
+func (s *Server) icapBodyTimeout(method string, err error) error {
+	s.errf("ICAP %s body read timed out holding an admission slot; closing", method)
+	return err
 }
 
 // icapFingerprint returns the active rule-set fingerprint, or "" when the
