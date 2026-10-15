@@ -213,7 +213,8 @@ func (s *Server) logBadEncapsulatedICAP(method string, encErr error) {
 
 func (s *Server) serveICAPConn(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	br := bufio.NewReader(conn)
+	ic := &icapIdleConn{Conn: conn}
+	br := bufio.NewReader(ic)
 	for {
 		// Three deadlines, because "idle", "sending a head" and "sending a body"
 		// have very different legitimate durations.
@@ -230,7 +231,11 @@ func (s *Server) serveICAPConn(conn net.Conn) {
 		// not finish the request line + headers is a slow-loris and must not hold a
 		// live-connection slot for the whole body budget.
 		_ = conn.SetDeadline(time.Now().Add(icapHeadTimeout))
-		if err := s.handleICAPRequest(conn, br); err != nil {
+		if err := s.handleICAPRequest(ic, br); err != nil {
+			// Nothing to protect after a deadline expiry or a peer close.
+			if !isTimeout(err) && !errors.Is(err, io.EOF) {
+				icapDrainClose(conn)
+			}
 			return
 		}
 		// Body: handleICAPRequest re-arms to the (legitimately slower) body
@@ -251,6 +256,11 @@ const (
 	// may take to deliver a complete request line + header block. Bodies get the
 	// longer BackendTimeout-derived deadline, re-armed once the head has parsed.
 	icapHeadTimeout = 30 * time.Second
+	// icapRefuseDrainMax / icapRefuseDrainTime bound how much unread input is
+	// discarded, and for how long, after a final error reply so the close does
+	// not turn into a kernel RST that discards the reply.
+	icapRefuseDrainMax  = 256 << 10
+	icapRefuseDrainTime = 500 * time.Millisecond
 	// icapRefuseWriteTimeout bounds the 503 write on a refused connection.
 	icapRefuseWriteTimeout = 5 * time.Second
 	// icapRefuseLogInterval throttles the cap-reached log line.
@@ -261,6 +271,55 @@ const (
 	// refused connection is closed without a reply.
 	icapMaxRefuseInflight = 64
 )
+
+// icapBodyIdle is the no-progress window for reading the preview and body
+// once an admission slot is held. Every read that returns bytes pushes the read
+// deadline out by this much, so a slow-but-steady origin (Squid streams a
+// RESPMOD body as it arrives) is never cut, while a client that stalls for this
+// long releases the slot and is closed without a verdict. Total hold is still
+// bounded by the connection ceiling (BackendTimeout + icapConnGrace). Derived
+// constant, no env knob; a variable only so tests can shorten it.
+var icapBodyIdle = 10 * time.Second
+
+// icapConnGrace is added to BackendTimeout for the connection ceiling armed
+// once the head is parsed. A variable only so tests can shorten it.
+var icapConnGrace = 60 * time.Second
+
+// icapIdleConn wraps the connection so that, while ceiling is non-zero, every
+// read that makes progress pushes the deadline out by icapBodyIdle, never past
+// ceiling. It is owned by the single connection goroutine (no locking).
+type icapIdleConn struct {
+	net.Conn
+	ceiling time.Time
+}
+
+func (c *icapIdleConn) arm() {
+	dl := time.Now().Add(icapBodyIdle)
+	if dl.After(c.ceiling) {
+		dl = c.ceiling
+	}
+	_ = c.SetDeadline(dl)
+}
+
+func (c *icapIdleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && !c.ceiling.IsZero() {
+		c.arm()
+	}
+	return n, err
+}
+
+// icapDrainClose half-closes the write side and discards a bounded amount of
+// unread input before the caller closes conn. Closing a socket with unread
+// receive data makes the kernel send RST, which can discard a final reply the
+// peer has not yet read (e.g. a saturation 503 sent before the preview).
+func icapDrainClose(conn net.Conn) {
+	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = tc.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(icapRefuseDrainTime))
+	_, _ = io.Copy(io.Discard, io.LimitReader(conn, icapRefuseDrainMax))
+}
 
 // deadlineSetter is satisfied by net.Conn. handleICAPRequest re-arms the read
 // deadline after the head parses; a plain io.Writer (as in unit tests) simply
@@ -296,7 +355,7 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 	// Head is in. Re-arm with the body deadline: encapsulated headers and a
 	// chunked body may legitimately take longer than icapHeadTimeout.
 	if d, ok := w.(deadlineSetter); ok {
-		_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + 60*time.Second))
+		_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + icapConnGrace))
 	}
 
 	switch method {
@@ -376,6 +435,7 @@ func readHTTPHeaders(br *bufio.Reader) ([]byte, error) {
 }
 
 func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr textproto.MIMEHeader, sections []icapSection) error {
+	ceiling := time.Now().Add(s.cfg.BackendTimeout + icapConnGrace)
 	s.metrics.icapRequests.Add(1)
 
 	allow204 := strings.Contains(hdr.Get("Allow"), "204")
@@ -425,12 +485,23 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 			return errors.New("icap busy")
 		}
 		defer func() { <-s.admit }()
+		// Slot held: bound preview + 100-Continue + body reads by an idle
+		// (no-progress) deadline that each successful read extends, capped at
+		// the connection ceiling. Re-armed after the read below.
+		if ic, ok := w.(*icapIdleConn); ok {
+			ic.ceiling = ceiling
+			ic.arm()
+			defer func() { ic.ceiling = time.Time{} }()
+		}
 	}
 
 	// Read body (chunked per RFC 3507 §4.5).
 	var buf []byte
 	if hasBody {
 		preview, ieof, readErr := readICAPChunkedBody(br, s.cfg.MaxBody)
+		if isTimeout(readErr) {
+			return s.icapBodyTimeout(method, readErr)
+		}
 		if errors.Is(readErr, errICAPBodyTooLarge) {
 			_ = s.icapWriteStatus(w, 413, "Request Entity Too Large", "")
 			return readErr
@@ -460,11 +531,22 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 				_ = s.icapWriteStatus(w, 413, "Request Entity Too Large", "")
 				return contErr
 			}
+			if isTimeout(contErr) {
+				return s.icapBodyTimeout(method, contErr)
+			}
 			if contErr != nil {
 				_ = s.icapWriteStatus(w, 400, "Bad Request", "")
 				return contErr
 			}
 			buf = full
+		}
+		// Body is in: lift the body-read deadline so the scan and the reply
+		// write are not cut by it. Same budget the head re-arm grants.
+		if ic, ok := w.(*icapIdleConn); ok {
+			ic.ceiling = time.Time{}
+		}
+		if d, ok := w.(deadlineSetter); ok {
+			_ = d.SetDeadline(time.Now().Add(s.cfg.BackendTimeout + s.cfg.ScanTimeout + clamdScanSlack + 60*time.Second))
 		}
 	}
 
@@ -523,6 +605,20 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		return s.icapWriteStatusFP(w, fp, 204, "No Modification", "")
 	}
 	return icapWriteEcho(w, fp, echo, buf)
+}
+
+// isTimeout reports whether err is a network deadline expiry.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// icapBodyTimeout handles a body read that hit the slot-hold deadline: no
+// verdict is produced (never a clean one); the slot is released by the caller's
+// defer and the connection is closed without a reply.
+func (s *Server) icapBodyTimeout(method string, err error) error {
+	s.errf("ICAP %s body read timed out holding an admission slot; closing", method)
+	return err
 }
 
 // icapFingerprint returns the active rule-set fingerprint, or "" when the
