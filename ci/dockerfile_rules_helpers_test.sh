@@ -9,8 +9,11 @@ set -eu
 
 # helpers ROOT -> sorted helper names referenced by the stage scripts.
 helpers() {
+	# Existence guard runs outside the pipeline: a pipeline's status is sort's.
 	for s in "$1/docker/compile-rules.sh" "$1/docker/fetch-rules.sh"; do
 		[ -f "$s" ] || { echo "FAIL: missing $s" >&2; return 2; }
+	done
+	for s in "$1/docker/compile-rules.sh" "$1/docker/fetch-rules.sh"; do
 		# shellcheck disable=SC2016 # literal $(dirname "$0") is the pattern
 		sed -n 's/.*\$(dirname "\$0")\/\([A-Za-z0-9_.-]*\).*/\1/p' "$s"
 	done | sort -u
@@ -87,8 +90,10 @@ echo "PASS: COPY outside the rules stage rejected"
 
 # Boundary: helpers split over several COPY lines still pass.
 mk "$tmp/split"
-sed -i 's#^COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py /usr/local/bin/#COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/\nCOPY docker/capture-compiler-inputs.py /usr/local/bin/\nCOPY docker/filter-rules.py /usr/local/bin/#' "$tmp/split/docker/Dockerfile"
-[ "$(grep -c '^COPY docker/.*/usr/local/bin/$' "$tmp/split/docker/Dockerfile")" -ge 3 ]
+sed -i 's#^COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py /usr/local/bin/#COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/\nCOPY docker/capture-compiler-inputs.py docker/build-marker-artifact.py /usr/local/bin/\nCOPY docker/filter-rules.py /usr/local/bin/#' "$tmp/split/docker/Dockerfile"
+if [ "$(grep -c '^COPY docker/.*/usr/local/bin/$' "$tmp/split/docker/Dockerfile")" -lt 3 ]; then
+	echo "FAIL: split fixture was not mutated" >&2; exit 1
+fi
 check "$tmp/split"
 echo "PASS: split COPY lines accepted"
 
@@ -100,6 +105,15 @@ if check "$tmp/miss" 2>"$tmp/miss.err"; then
 fi
 grep -q 'FAIL: missing .*Dockerfile.release' "$tmp/miss.err"
 echo "PASS: missing Dockerfile reported"
+
+# Malformed: missing stage script -> helper resolution fails, not masked by sort.
+mk "$tmp/nostage"
+rm "$tmp/nostage/docker/fetch-rules.sh"
+if check "$tmp/nostage" 2>"$tmp/nostage.err"; then
+	echo "FAIL: missing fetch-rules.sh passed" >&2; exit 1
+fi
+grep -q 'FAIL: missing' "$tmp/nostage.err"
+echo "PASS: missing stage script reported"
 
 # Malformed: script with no helper references -> parser-drift failure, not a pass.
 mk "$tmp/nohelp"

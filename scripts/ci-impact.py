@@ -182,6 +182,8 @@ RULES = {
         "docker/Dockerfile",
         "docker/Dockerfile.release",
         "docker/docker-compose.yml",
+        "docker/compile-rules.sh",
+        "docker/fetch-rules.sh",
         "cmd/*",
         "internal/*",
         "packaging/deb/*.env",
