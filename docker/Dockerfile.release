@@ -75,7 +75,7 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 ARG YARA_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential automake libtool make pkg-config \
-        libssl-dev curl ca-certificates \
+        libssl-dev curl ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
         -o /tmp/yara.tar.gz \
@@ -86,6 +86,12 @@ WORKDIR /tmp/yara-${YARA_VERSION}
 RUN ./bootstrap.sh \
     && CFLAGS="-O2 -flto -DNDEBUG" LDFLAGS="-flto" \
        ./configure --disable-shared --enable-static --with-crypto \
+    && make -j"$(nproc)" && make install && ldconfig
+# compile-rules.sh retains compiler inputs through capture-compiler-inputs.py, which
+# needs the instrumented yarac. Same patch as docker/Dockerfile (runtime logging
+# stays off unless the helper sets MAILSTRIX_COMPILER_INPUT_LOG).
+COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py /tmp/capture/
+RUN python3 /tmp/capture/patch-compiler-input-capture.py . \
     && make -j"$(nproc)" && make install && ldconfig
 
 # ---- rules ------------------------------------------------------------------
@@ -98,8 +104,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip python3 \
     && rm -rf /var/lib/apt/lists/*
 # filter-rules.py beside fetch-rules.sh (resolved via $(dirname "$0")) for the
-# `mail` profile per-rule mail-relevance/license filter.
-COPY docker/fetch-rules.sh docker/compile-rules.sh docker/filter-rules.py /usr/local/bin/
+# `mail` profile per-rule mail-relevance/license filter; capture-compiler-inputs.py
+# beside compile-rules.sh (same $(dirname "$0") lookup).
+COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/filter-rules.py /usr/local/bin/
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
 RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-rules.py
 ARG CACHEBUST=unset

@@ -178,6 +178,7 @@ RULES = {
     "filter": ["docker/filter-rules.py", "packaging/deb/filter_rules_test.sh"],
     "envkeys": [
         "ci/rules_polling_defaults_test.sh",
+        "ci/dockerfile_rules_helpers_test.sh",
         "docker/Dockerfile",
         "docker/Dockerfile.release",
         "docker/docker-compose.yml",
