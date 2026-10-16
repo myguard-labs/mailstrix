@@ -54,7 +54,21 @@ func writeRules(t *testing.T, content string) string {
 
 func newScanner(t *testing.T, dir string) *Scanner {
 	t.Helper()
-	cfg := &Config{RulesDir: dir, ScanTimeout: 0}
+	return newScannerBudget(t, dir, 0)
+}
+
+// loadInsensitiveScanTimeout is the per-request scan budget for tests whose
+// subject is a scan RESULT, not the budget itself. Effort scaling cuts it to at
+// most 50-100% of this, so a loaded CI host (race detector + parallel packages)
+// cannot exhaust the wall-clock deadline and turn the verdict into
+// ErrScanIncomplete. Production defaults (8s) are unchanged.
+const loadInsensitiveScanTimeout = 10 * time.Minute
+
+// newScannerBudget is newScanner with an explicit base ScanTimeout; 0 keeps the
+// sanitized production default.
+func newScannerBudget(t *testing.T, dir string, scanTimeout time.Duration) *Scanner {
+	t.Helper()
+	cfg := &Config{RulesDir: dir, ScanTimeout: scanTimeout}
 	cfg.sanitize()
 	s, err := NewScanner(cfg, func(string, ...any) {})
 	if err != nil {
@@ -934,7 +948,7 @@ rule FastMode_Repeat
 `
 
 func TestFastModeMatchSetIdentical(t *testing.T) {
-	s := newScanner(t, writeRules(t, fastModeRule))
+	s := newScannerBudget(t, writeRules(t, fastModeRule), loadInsensitiveScanTimeout)
 
 	single := []byte("prefix ZZTOKENZZ suffix")
 	// Many repeats: pre-FAST_MODE libyara would record every offset; FAST_MODE
@@ -962,7 +976,7 @@ func TestFastModeMatchSetIdentical(t *testing.T) {
 // FAST_MODE is set on that path too, so a repeat-heavy buffer must still yield
 // the same single rule match.
 func TestFastModeScannerPath(t *testing.T) {
-	s := newScanner(t, writeRules(t, fastModeRule))
+	s := newScannerBudget(t, writeRules(t, fastModeRule), loadInsensitiveScanTimeout)
 	many := bytes.Repeat([]byte("ZZTOKENZZ "), 50000)
 	// NewScanMeta sets a filename/extension → scanVars.needsScanner() true →
 	// scanner path with SetFlags(FAST_MODE).
