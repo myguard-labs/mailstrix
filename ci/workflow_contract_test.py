@@ -19,6 +19,35 @@ OPTIONAL = ("PARITY", "LINT", "RSPAMD", "SPAMASSASSIN")
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class DockerGateTimeoutContract(unittest.TestCase):
+    """The authoritative docker job must keep headroom over measured runtimes."""
+
+    SLOWEST_MEASURED_SUCCESS_MINUTES = 42.04  # ci + nightly runs, 2026-10
+    MIN_HEADROOM = 1.4
+
+    def assert_headroom(self, source):
+        job = yaml.safe_load(source)["jobs"]["docker"]
+        self.assertGreaterEqual(
+            job["timeout-minutes"],
+            self.SLOWEST_MEASURED_SUCCESS_MINUTES * self.MIN_HEADROOM,
+        )
+
+    def test_shipped_docker_timeout_has_headroom(self):
+        self.assert_headroom(WORKFLOW.read_text())
+
+    def test_old_cap_and_malformed_values_fail(self):
+        for value in (45, 30, 0):
+            with self.subTest(value=value):
+                workflow = yaml.safe_load(WORKFLOW.read_text())
+                workflow["jobs"]["docker"]["timeout-minutes"] = value
+                with self.assertRaises(AssertionError):
+                    self.assert_headroom(yaml.safe_dump(workflow))
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        del workflow["jobs"]["docker"]["timeout-minutes"]
+        with self.assertRaises(KeyError):
+            self.assert_headroom(yaml.safe_dump(workflow))
+
+
 class CheckoutCredentialContract(unittest.TestCase):
     """Reject persisted checkout credentials before repository container mounts."""
 

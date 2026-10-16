@@ -117,7 +117,11 @@ jobs:
     # A failed/cancelled planner must never turn into successful skipped checks.
     if: ${{ always() }}
     runs-on: [self-hosted, builder02, docker]
-    timeout-minutes: 45
+    # Measured docker job wall time (60 ci + 12 nightly runs, 2026-10): successes
+    # median 25.5m, p95 38.8m, max 42.0m; the 2026-10-09 run was cancelled at the
+    # old 45m cap while still healthy. 60m keeps >=40% headroom over the slowest
+    # success without hiding a hang for long.
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: write   # buildx GHA layer cache (--cache-to/from type=gha)
