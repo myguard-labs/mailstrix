@@ -216,6 +216,11 @@ class ImpactTests(unittest.TestCase):
                 ["go", "image", "ruleargs"],
                 ["rspamd", "postfix"],
             ),
+            (
+                "docker/compile-rules.sh",
+                ["envkeys", "image", "native"],
+                ["go", "rspamd", "postfix"],
+            ),
             ("docker/local-rules/mail.yar", ["go", "image", "parity"], ["rspamd"]),
             ("docker/bake.ci.hcl", ["image", "docker"], ["go", "postfix"]),
             ("contrib/clamd/test_clients.py", ["go"], ["rspamd", "image"]),
