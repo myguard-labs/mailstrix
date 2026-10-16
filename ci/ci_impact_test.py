@@ -277,6 +277,21 @@ class ImpactTests(unittest.TestCase):
             "the lint job containing the generate step must be selected",
         )
 
+    def test_apt_install_test_and_subject_select_the_planner_job(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("-m unittest discover -s ci -p 'ci_*_test.py'", workflow)
+        test = impact.plan(["ci/ci_apt_install_test.py"])
+        self.assertEqual(
+            {key for key, value in test.items() if value is True}, {"scope"}
+        )
+        self.assertEqual(test["changed_files"], "--changed -- ")
+        subject = impact.plan([".github/actions/go-setup/apt-install.sh"])
+        self.assertTrue(subject["scope"])
+        self.assertTrue(subject["go"])
+        for unrelated in ["ci/apt_install_test.py", "ci/ci_apt_install_test.txt"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_decode_scalar_native_go_consumer(self):
         path = "ci/decode_scalar_test.go"
         result = impact.plan([path])
