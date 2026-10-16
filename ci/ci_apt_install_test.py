@@ -34,9 +34,11 @@ class Fixture:
             "sleep",
             f'echo "sleep $1" >> {self.log}',
         )
+        self.dpkg_log = Path(self.tmp.name) / "dpkg.log"
         self._stub(
             "dpkg-query",
-            "pkg=${@: -1}\n"
+            f'echo "$@" >> {self.dpkg_log}\n'
+            + "pkg=${@: -1}\n"
             + "".join(
                 f'[ "$pkg" = "{p}" ] && {{ printf "install ok installed"; exit 0; }}\n'
                 for p in installed
@@ -152,12 +154,42 @@ class AptInstall(unittest.TestCase):
         self.assertEqual(p.returncode, 7)
 
     def test_malformed_package_names_rejected_without_apt(self):
-        for bad in ("Bad Name", "-oFoo=bar", "a;rm", "$(x)", "", "UPPER", "pkg/evil"):
+        for bad in (
+            "Bad Name",
+            "-oFoo=bar",
+            "a;rm",
+            "$(x)",
+            "",
+            "UPPER",
+            "pkg/evil",
+            "clang-",
+            "clang-:amd64",
+        ):
             with self.subTest(pkg=bad):
                 f = self.fixture()
                 p, calls = f.run("libyara-dev", bad)
                 self.assertEqual(p.returncode, 2)
+                self.assertIn(f"apt-install: invalid package name: {bad}", p.stderr)
                 self.assertEqual(calls, [])
+                self.assertFalse(f.dpkg_log.exists())
+
+    def test_trailing_hyphen_never_reaches_apt_remove_syntax(self):
+        f = self.fixture(installed=("clang",))
+        p, calls = f.run("clang-")
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(calls, [])
+        self.assertFalse(f.dpkg_log.exists())
+
+    def test_valid_names_with_plus_dot_digit_and_arch_accepted(self):
+        f = self.fixture()
+        names = ("g++", "libstdc++6", "python3.12", "foo:amd64", "libyara-dev", "g")
+        p, calls = f.run(*names)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        installs = [c for c in calls if " install " in c]
+        self.assertEqual(len(installs), 1)
+        self.assertTrue(
+            installs[0].endswith("--no-install-recommends " + " ".join(names))
+        )
 
     def test_no_packages_and_bad_tunables_rejected(self):
         f = self.fixture()

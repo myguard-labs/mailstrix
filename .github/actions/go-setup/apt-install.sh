@@ -22,13 +22,18 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-missing=()
+# Validate every name before any dpkg-query or apt call. Debian package names:
+# lowercase alnum start and end, alnum + . - between (optional :arch). A trailing
+# '-' is rejected: `apt-get install clang-` would REMOVE clang.
 for pkg in "$@"; do
-  # Debian package names: lowercase alnum start, then alnum + . - (optional :arch).
-  if ! [[ "$pkg" =~ ^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?$ ]]; then
+  if ! [[ "$pkg" =~ ^[a-z0-9]([a-z0-9+.-]*[a-z0-9+.])?(:[a-z0-9]+)?$ ]]; then
     echo "apt-install: invalid package name: $pkg" >&2
     exit 2
   fi
+done
+
+missing=()
+for pkg in "$@"; do
   status="$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)"
   if [ "$status" != "install ok installed" ]; then
     missing+=("$pkg")
