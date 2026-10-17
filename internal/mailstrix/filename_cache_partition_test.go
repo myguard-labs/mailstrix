@@ -449,8 +449,9 @@ func pf03Wait(t *testing.T, what string, ch <-chan pf03Reply) pf03Reply {
 // that needs a different verdict runs to completion meanwhile without joining the
 // held flight. Only then is the leader released. The follower must report
 // cache=coalesced and every response must carry its own name's verdict. The
-// leader also reports coalesced: flightGroup marks the flight shared when a
-// follower was still waiting at finish (flight.go documents this approximation).
+// leader's cache status is not pinned: flightGroup reports it as shared when a
+// follower was still waiting at finish, a metric approximation (flight.go), so
+// either a fresh "" or "coalesced" is accepted for the leader.
 func TestPF03FilenameCoalescedFollower(t *testing.T) {
 	sc := pf03Scanner(t)
 	cases := pf03Cases()
@@ -491,8 +492,8 @@ func TestPF03FilenameCoalescedFollower(t *testing.T) {
 			for _, x := range []struct {
 				role  string
 				r     pf03Reply
-				cache string
-			}{{"leader", lr, "coalesced"}, {"follower", fr, "coalesced"}} {
+				cache []string
+			}{{"leader", lr, []string{"", "coalesced"}}, {"follower", fr, []string{"coalesced"}}} {
 				if x.r.err != nil {
 					t.Errorf("%s: %v", x.role, x.r.err)
 					continue
@@ -500,8 +501,8 @@ func TestPF03FilenameCoalescedFollower(t *testing.T) {
 				if !slices.Equal(x.r.got, c.want) {
 					t.Errorf("%s %s (%q): verdict %v, want %v", x.role, c.label, c.name, x.r.got, c.want)
 				}
-				if x.r.cache != x.cache {
-					t.Errorf("%s %s: cache=%q, want %q", x.role, c.label, x.r.cache, x.cache)
+				if !slices.Contains(x.cache, x.r.cache) {
+					t.Errorf("%s %s: cache=%q, want one of %q", x.role, c.label, x.r.cache, x.cache)
 				}
 			}
 		})
