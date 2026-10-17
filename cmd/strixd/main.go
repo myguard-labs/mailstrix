@@ -379,6 +379,17 @@ func cmdServe(args []string) (exitCode int) {
 	go func() { defer close(updateDone); updater.Run(updateCtx) }()
 	defer func() { updateCancel(); <-updateDone }()
 
+	// Optional periodic status line (MAILSTRIX_STATUS_LOG); stops with updateCtx.
+	if statusDone := srv.StartStatusLog(updateCtx, os.Stdout); statusDone != nil {
+		defer func() {
+			updateCancel()
+			if !mailstrix.WaitStatusLog(statusDone, 2*time.Second) {
+				logf("status log writer blocked; not waiting")
+			}
+		}()
+		logf("status log enabled (interval=%s)", cfg.StatusInterval)
+	}
+
 	// Optional ICAP listener — disabled when ICAPAddr is empty.
 	icapShutdown := func(_ context.Context) {}
 	if cfg.ICAPAddr != "" {

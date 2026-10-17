@@ -81,6 +81,7 @@ type scanResponse struct {
 type Server struct {
 	rulesUpdater *RulesUpdater // set once before listeners start
 	cfg          *Config
+	started      time.Time // process-side start of this Server, for the status-line uptime
 	engine       ScanEngine
 	cache        Cache
 	flights      flightGroup
@@ -135,6 +136,7 @@ func NewServer(cfg *Config, engine ScanEngine) *Server {
 	info, errl := newLoggers(cfg)
 	s := &Server{
 		cfg:        cfg,
+		started:    time.Now(),
 		engine:     engine,
 		admit:      make(chan struct{}, cfg.MaxInflight),
 		sem:        make(chan struct{}, cfg.MaxConcurrent),
@@ -368,7 +370,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// rules is broken and should fail the container HEALTHCHECK. Deliberately
 		// stays 200 while draining so an in-progress graceful shutdown doesn't get
 		// the container killed before in-flight scans finish.
-		if s.engine.RuleCount() < 1 {
+		if !s.healthy() {
 			writeText(w, http.StatusServiceUnavailable, "no rules")
 			return
 		}
@@ -426,6 +428,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeText(w, http.StatusNotFound, "not found")
 	}
 }
+
+// healthy is the /health predicate (also read by the periodic status line): a
+// rule set is loaded.
+func (s *Server) healthy() bool { return s.engine.RuleCount() >= 1 }
 
 // rulesStale reports whether the loaded ruleset is older than the configured
 // MAILSTRIX_RULES_MAX_AGE. False when the check is disabled (max age 0) or the

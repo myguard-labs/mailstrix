@@ -722,6 +722,8 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_THREATFOX_KEY[_FILE]` | — | abuse.ch Auth-Key (same key); enables the ThreatFox URL/domain IOC lookup |
 | `MAILSTRIX_THREATFOX_REFRESH` | `21600` (6 h) | ThreatFox feed refresh (floor 5 min) |
 | `MAILSTRIX_THREATFOX_MAX_URLS` | `64` | max URLs/domains examined per message |
+| `MAILSTRIX_STATUS_LOG` | off | log one `strixd status:` line to stdout every `MAILSTRIX_STATUS_INTERVAL`: version, uptime, RSS and Go heap, rules identity and poll result/age, feed refresh age/failures, admission and scan-slot use, scan/cache counters, and `blocking=` (comma-separated degradations such as `rules_poll_failing`, `rules_stale`, `urlhaus_failing`, `urlhaus_stale`, `admission_saturated`, `unhealthy`, or `none`) |
+| `MAILSTRIX_STATUS_INTERVAL` | `900` (15 min) | seconds between status lines (floor 60; a smaller value is raised to 60, an invalid, zero or negative value uses the default) |
 | `MAILSTRIX_BIGFILE_THRESHOLD` | `6291456` (6 MiB) | buffers larger than this scan against the smaller `BIGFILE_RULES` set, not the full bundle (cost gate); markers always use the full set; `0` disables the gate |
 | `MAILSTRIX_BIGFILE_RULES` | baked seed | optional `.yac` bundle scanned for oversized buffers; unset ⇒ the baked `local.yac` seed set |
 | `MAILSTRIX_RULE_DENYLIST` | `http` | comma-sep rule names to suppress (case-insensitive); set empty to disable |

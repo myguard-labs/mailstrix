@@ -73,6 +73,10 @@ services:
       MAILSTRIX_THREATFOX_KEY_FILE: /run/secrets/abuse_ch_key
       # MAILSTRIX_THREATFOX_REFRESH: "21600"  # 6h; floor 300
 
+      # One "strixd status:" line on stdout per interval (health summary).
+      # MAILSTRIX_STATUS_LOG: "1"           # off by default
+      # MAILSTRIX_STATUS_INTERVAL: "900"    # seconds; floor 60
+
       # --- Auth (required) --------------------------------------------------
       # strixd refuses every /scan (503) until a token is set. The rspamd plugin
       # must present the same value. Prefer the _FILE form (Docker secret).

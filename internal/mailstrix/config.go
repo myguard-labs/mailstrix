@@ -147,6 +147,10 @@ type Config struct {
 	Pprof       bool // MAILSTRIX_PPROF — enable /debug/pprof (off by default, ops-only)
 	Canary      bool // MAILSTRIX_CANARY — shadow/observe-only: tag ALL matches mailstrix_canary=1
 
+	// Periodic one-line status to stdout (off by default).
+	StatusLog      bool          // MAILSTRIX_STATUS_LOG — emit a "strixd status:" line every StatusInterval
+	StatusInterval time.Duration // MAILSTRIX_STATUS_INTERVAL (seconds, default 900, floor 60)
+
 	// Password-protected archive decryption (opt-in, default OFF). When OFF the
 	// service behaves exactly as before — an encrypted zip/7z/rar member emits the
 	// ARCHIVE-ENCRYPTED marker and is never decrypted. When ON, the extractor tries
@@ -288,6 +292,8 @@ func LoadConfig() *Config {
 		RedisMACKey:           envOrFile("MAILSTRIX_REDIS_MAC_KEY"),
 		Verbose:               envBool("MAILSTRIX_VERBOSE"),
 		LogStdout:             envBool("MAILSTRIX_LOG_STDOUT"),
+		StatusLog:             envBool("MAILSTRIX_STATUS_LOG"),
+		StatusInterval:        envDur("MAILSTRIX_STATUS_INTERVAL", defaultStatusInterval.Seconds()),
 		MetricsAuth:           envBool("MAILSTRIX_METRICS_AUTH"),
 		Pprof:                 envBool("MAILSTRIX_PPROF"),
 		Canary:                envBool("MAILSTRIX_CANARY"),
@@ -419,6 +425,18 @@ func (c *Config) sanitize() {
 	if c.ScanTimeout <= 0 {
 		log.Printf("[mailstrix] WARNING: invalid MAILSTRIX_SCAN_TIMEOUT=%s; using 8s", c.ScanTimeout)
 		c.ScanTimeout = 8 * time.Second
+	}
+	// Status interval: non-positive falls back to the default; a positive value
+	// below the floor is raised to it (same floor-clamp idiom as the feed refreshers).
+	// Zero is the unset value (struct literals, "0") and takes the default silently.
+	if c.StatusInterval < 0 {
+		log.Printf("[mailstrix] WARNING: invalid MAILSTRIX_STATUS_INTERVAL=%s; using %s", c.StatusInterval, defaultStatusInterval)
+		c.StatusInterval = defaultStatusInterval
+	} else if c.StatusInterval == 0 {
+		c.StatusInterval = defaultStatusInterval
+	} else if c.StatusInterval < minStatusInterval {
+		log.Printf("[mailstrix] WARNING: MAILSTRIX_STATUS_INTERVAL=%s below floor; using %s", c.StatusInterval, minStatusInterval)
+		c.StatusInterval = minStatusInterval
 	}
 	if c.MaxBody <= 0 {
 		c.MaxBody = 8 * 1024 * 1024
