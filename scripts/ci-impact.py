@@ -257,6 +257,7 @@ GO_INPUTS = [
     "ci/clamd_cache_test.go",
     "ci/scanner_budget_test.go",
     "ci/streamdedupkey_test.go",
+    "ci/status_log_test.go",
     "ci/reload_generation_test.go",
     "ci/marker_reload_test.go",
     "ci/rules_polling_config_test.go",
