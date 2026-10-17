@@ -333,3 +333,21 @@ func (s *Server) StartStatusLog(ctx context.Context, w io.Writer) <-chan struct{
 	}()
 	return stopped
 }
+
+// WaitStatusLog joins the status emitter for at most timeout. It returns true
+// once done is closed (or immediately for a nil channel, i.e. disabled) and
+// false on timeout. A stdout write blocked on a stalled consumer cannot be
+// interrupted by ctx cancellation, so shutdown must not wait unboundedly.
+func WaitStatusLog(done <-chan struct{}, timeout time.Duration) bool {
+	if done == nil {
+		return true
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}

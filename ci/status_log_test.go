@@ -277,3 +277,44 @@ func TestStatusIntervalConfig(t *testing.T) {
 		t.Fatal("status log must be off by default")
 	}
 }
+
+func TestStatusWaitBoundedOnBlockedWriter(t *testing.T) {
+	s := statusServer(ms.Config{StatusLog: true}, &statusEngine{rules: 1})
+	pr, pw := io.Pipe() // nobody reads pr, so the emitter's write blocks
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ticks := make(chan time.Time, 1)
+	done := s.StartStatusLogTicks(ctx, pw, ticks)
+	ticks <- time.Now()
+	// Wait until the emitter has consumed the tick and is inside the write.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(ticks) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if ms.WaitStatusLog(done, 50*time.Millisecond) {
+		t.Fatal("WaitStatusLog returned true while the writer is blocked")
+	}
+	_ = pr.Close() // unblock the write; the emitter then sees ctx.Done
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("emitter did not exit after the writer was unblocked")
+	}
+}
+
+func TestStatusWaitReturnsOnExit(t *testing.T) {
+	s := statusServer(ms.Config{StatusLog: true}, &statusEngine{rules: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := s.StartStatusLogTicks(ctx, newLockedBuf(), make(chan time.Time))
+	cancel()
+	if !ms.WaitStatusLog(done, 5*time.Second) {
+		t.Fatal("WaitStatusLog timed out although the emitter exited")
+	}
+}
+
+func TestStatusWaitNilDone(t *testing.T) {
+	if !ms.WaitStatusLog(nil, time.Millisecond) {
+		t.Fatal("nil done (disabled) must return true immediately")
+	}
+}
