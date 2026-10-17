@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -105,7 +106,7 @@ func pf03Scanner(t *testing.T) *Scanner {
 	return sc
 }
 
-func pf03Server(sc *Scanner, maxConcurrent int) *Server {
+func pf03Server(sc ScanEngine, maxConcurrent int) *Server {
 	return NewServer(&Config{
 		Token: pf03Token, MaxConcurrent: maxConcurrent, MaxInflight: 256, MaxBody: 4096,
 		CacheTTL: time.Hour, CacheSize: 256, Effort: 5, EffortMax: 10,
@@ -331,5 +332,178 @@ func TestPF03FilenamePartitionConcurrent(t *testing.T) {
 		if t.Failed() {
 			return
 		}
+	}
+}
+
+// pf03Gate wraps a real scanner and holds the FIRST Scan call open until
+// released. Embedding the ScanEngine interface (not *Scanner) hides
+// acquireScanLease, so leaseScanEngine routes the scan through this Scan.
+type pf03Gate struct {
+	ScanEngine
+	calls   atomic.Int32
+	entered chan struct{} // closed when the gated (leader) Scan is running
+	release chan struct{} // closed by the test to let the leader finish
+}
+
+func newPF03Gate(sc *Scanner) *pf03Gate {
+	return &pf03Gate{ScanEngine: sc, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *pf03Gate) Scan(buf []byte, meta ScanMeta) ([]Match, error) {
+	if g.calls.Add(1) == 1 {
+		close(g.entered)
+		select {
+		case <-g.release:
+		case <-time.After(time.Minute):
+			return nil, fmt.Errorf("pf03 gate never released")
+		}
+	}
+	return g.ScanEngine.Scan(buf, meta)
+}
+
+// pf03Joiners reports how many followers are registered on in-flight scans.
+func pf03Joiners(s *Server) int {
+	s.flights.mu.Lock()
+	defer s.flights.mu.Unlock()
+	n := 0
+	for _, fl := range s.flights.m {
+		n += fl.joiners
+	}
+	return n
+}
+
+func pf03Ext(c pf03Case) string {
+	if c.header != "" || c.name == "-" {
+		return ""
+	}
+	return NewScanMeta(c.name).Extension
+}
+
+// pf03Neighbour picks a case whose verdict differs from cases[i], preferring one
+// that shares the extension so only the filename component of the key separates
+// it from the held flight. nil when no differently-verdicted case exists.
+func pf03Neighbour(cases []pf03Case, i int) *pf03Case {
+	c := cases[i]
+	var other *pf03Case
+	for j := range cases {
+		if j == i || slices.Equal(cases[j].want, c.want) {
+			continue
+		}
+		if other == nil || (pf03Ext(cases[j]) == pf03Ext(c) && pf03Ext(*other) != pf03Ext(c)) {
+			other = &cases[j]
+		}
+	}
+	return other
+}
+
+// pf03AwaitNeighbour posts the neighbour while the leader is held and returns its
+// reply, failing at once if it registers as a second joiner on the held flight.
+func pf03AwaitNeighbour(t *testing.T, s *Server, held, other pf03Case, deadline time.Time) pf03Reply {
+	t.Helper()
+	neighbour := pf03Async(t, s, other)
+	for {
+		select {
+		case nr := <-neighbour:
+			return nr
+		default:
+		}
+		if pf03Joiners(s) > 1 {
+			t.Fatalf("%s (%q) coalesced onto the held scan of %s (%q)", other.label, other.name, held.label, held.name)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("neighbour %s never completed while the leader was held", other.label)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+type pf03Reply struct {
+	got   []string
+	cache string
+	err   error
+}
+
+func pf03Async(t *testing.T, s *Server, c pf03Case) <-chan pf03Reply {
+	out := make(chan pf03Reply, 1)
+	go func() {
+		got, cache, err := pf03Post(t, s, c)
+		out <- pf03Reply{got, cache, err}
+	}()
+	return out
+}
+
+func pf03Wait(t *testing.T, what string, ch <-chan pf03Reply) pf03Reply {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(30 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		return pf03Reply{}
+	}
+}
+
+// Coalesced follower: for every name, the leader's scan is held open inside the
+// engine, a follower with the SAME name provably registers on that flight
+// (observed via flightGroup.joiners, no sleeps), and a differently named request
+// that needs a different verdict runs to completion meanwhile without joining the
+// held flight. Only then is the leader released. The follower must report
+// cache=coalesced and every response must carry its own name's verdict. The
+// leader also reports coalesced: flightGroup marks the flight shared when a
+// follower was still waiting at finish (flight.go documents this approximation).
+func TestPF03FilenameCoalescedFollower(t *testing.T) {
+	sc := pf03Scanner(t)
+	cases := pf03Cases()
+	for i, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			other := pf03Neighbour(cases, i)
+			if other == nil {
+				t.Fatal("no differently-verdicted neighbour name for " + c.label)
+			}
+			gate := newPF03Gate(sc)
+			s := pf03Server(gate, 2)
+			var once sync.Once
+			free := func() { once.Do(func() { close(gate.release) }) }
+			t.Cleanup(free)
+
+			leader := pf03Async(t, s, c)
+			select {
+			case <-gate.entered:
+			case <-time.After(30 * time.Second):
+				t.Fatal("leader never reached the engine")
+			}
+			follower := pf03Async(t, s, c)
+			deadline := time.Now().Add(30 * time.Second)
+			for pf03Joiners(s) < 1 {
+				if time.Now().After(deadline) {
+					t.Fatal("follower never joined the in-flight scan")
+				}
+				time.Sleep(time.Millisecond) // polls the observable joiner count; not a synchronizer
+			}
+			nr := pf03AwaitNeighbour(t, s, c, *other, deadline)
+			if nr.err != nil || !slices.Equal(nr.got, other.want) || nr.cache != "" {
+				t.Errorf("neighbour %s (%q): verdict %v cache=%q err=%v, want %v fresh", other.label, other.name, nr.got, nr.cache, nr.err, other.want)
+			}
+
+			free()
+			lr := pf03Wait(t, "leader", leader)
+			fr := pf03Wait(t, "follower", follower)
+			for _, x := range []struct {
+				role  string
+				r     pf03Reply
+				cache string
+			}{{"leader", lr, "coalesced"}, {"follower", fr, "coalesced"}} {
+				if x.r.err != nil {
+					t.Errorf("%s: %v", x.role, x.r.err)
+					continue
+				}
+				if !slices.Equal(x.r.got, c.want) {
+					t.Errorf("%s %s (%q): verdict %v, want %v", x.role, c.label, c.name, x.r.got, c.want)
+				}
+				if x.r.cache != x.cache {
+					t.Errorf("%s %s: cache=%q, want %q", x.role, c.label, x.r.cache, x.cache)
+				}
+			}
+		})
 	}
 }
