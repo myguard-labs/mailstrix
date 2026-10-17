@@ -423,6 +423,8 @@ type pf03Reply struct {
 	err   error
 }
 
+// pf03Async runs pf03Post off the test goroutine, so pf03Post must never call
+// t.Fatal/t.Error: it reports failures only through the returned pf03Reply.
 func pf03Async(t *testing.T, s *Server, c pf03Case) <-chan pf03Reply {
 	out := make(chan pf03Reply, 1)
 	go func() {
@@ -481,7 +483,7 @@ func TestPF03FilenameCoalescedFollower(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond) // polls the observable joiner count; not a synchronizer
 			}
-			nr := pf03AwaitNeighbour(t, s, c, *other, deadline)
+			nr := pf03AwaitNeighbour(t, s, c, *other, time.Now().Add(30*time.Second))
 			if nr.err != nil || !slices.Equal(nr.got, other.want) || nr.cache != "" {
 				t.Errorf("neighbour %s (%q): verdict %v cache=%q err=%v, want %v fresh", other.label, other.name, nr.got, nr.cache, nr.err, other.want)
 			}
