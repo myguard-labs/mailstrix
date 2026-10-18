@@ -162,9 +162,16 @@ class DockerfileTest(unittest.TestCase):
         self.assertIn("COPY --from=fetch /out/bin/ /usr/local/bin/", stage("final"))
 
 
-@unittest.skipUnless(docker_ready(), "docker buildx daemon unavailable")
 class SelectionTest(unittest.TestCase):
     def setUp(self):
+        if not docker_ready():
+            # CI must exercise the controls; a local run may opt out explicitly.
+            required = os.environ.get(
+                "RELEASE_LOCALBIN_REQUIRE_DOCKER", "1" if os.environ.get("CI") else "0"
+            )
+            if required != "0":
+                self.fail("docker buildx and its daemon are required for the selection controls")
+            self.skipTest("docker buildx daemon unavailable (RELEASE_LOCALBIN_REQUIRE_DOCKER=0)")
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
@@ -208,6 +215,11 @@ class SelectionTest(unittest.TestCase):
     def test_local_source_without_context_fails_closed(self):
         res, _ = self.build_fetch("--build-arg", "RELEASE_SOURCE=local")
         self.assertNotEqual(res.returncode, 0)
+        # Not the helper's message: an omitted context is never bound, so the
+        # build dies resolving it. Assert it names the context and never
+        # falls back to a published release.
+        self.assertIn("local-artifacts", res.stderr)
+        self.assertNotIn("releases/download", res.stderr)
 
     def test_default_source_still_requires_a_published_release(self):
         # The download stage's first guard fires; a supplied local context is ignored.
