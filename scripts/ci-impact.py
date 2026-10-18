@@ -261,6 +261,7 @@ GO_INPUTS = [
     "ci/reload_generation_test.go",
     "ci/marker_reload_test.go",
     "ci/rules_polling_config_test.go",
+    "ci/rules_update_run_test.go",
     "ci/config_auto_derive_test.go",
     "ci/mime_attachment_hash_test.go",
     "ci/feed_lifecycle_helpers_test.go",

@@ -21,3 +21,4 @@ testdata/live-samples/
 # transient smoke-suite rule dirs (scripts/smoke.sh creates rules*/ in the tree)
 /rules/
 /rules-*/
+__pycache__/
