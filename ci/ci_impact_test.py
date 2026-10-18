@@ -312,6 +312,11 @@ class ImpactTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             impact.plan(["ci/gh_install_test.py"])
 
+    def test_preflight_script_and_test_select_the_planner_job(self):
+        for path in ("ci/ci_preflight_test.py", "scripts/ci-preflight.sh"):
+            with self.subTest(path=path):
+                self.assertTrue(impact.plan([path])["scope"])
+
     def test_decode_scalar_native_go_consumer(self):
         path = "ci/decode_scalar_test.go"
         result = impact.plan([path])
