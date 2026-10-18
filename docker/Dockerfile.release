@@ -11,9 +11,12 @@
 # Dockerfile stays the source of truth for CI (release.yml builds the binaries
 # this file then consumes).
 #
-# Requires VERSION or RELEASE_TAG to name a published release whose assets include
+# By default (RELEASE_SOURCE=download) it requires VERSION or RELEASE_TAG to name
+# a published release whose assets include
 # strixd-linux-${TARGETARCH} and strix-scan-linux-${TARGETARCH}; strix-milter-linux-
-# ${TARGETARCH} is shipped too when the release has it.
+# ${TARGETARCH} is shipped too when the release has it. RELEASE_SOURCE=local builds
+# from candidate assets in the `local-artifacts` build context instead (see the
+# ARG below).
 # Releases with marker support also publish yarac-linux-${TARGETARCH} and
 # libyara-linux-${TARGETARCH}.a: the exact compiler and static library linked
 # into strixd. The rules stage compiles with them and bakes the marker artifact;
@@ -24,11 +27,22 @@
 ARG YARA_VERSION=4.5.2
 ARG VERSION
 ARG RELEASE_TAG
+# Where the release binaries and marker toolchain come from:
+#   download (default) the published release named by VERSION/RELEASE_TAG,
+#                      checksum-verified (stage fetch-download);
+#   local              candidate assets from the named build context
+#                      `local-artifacts` (docker buildx build --build-context
+#                      local-artifacts=DIR), laid out as build-binaries.yml
+#                      names them (stage fetch-local). A dry run therefore
+#                      builds the candidate, not the last release. An incomplete
+#                      set fails the build; it never falls back to downloading.
+# Any other value names no stage and fails the build.
+ARG RELEASE_SOURCE=download
 
 # ---- fetch release binaries (per target architecture) -----------------------
 # This unqualified FROM runs for the target platform. It downloads assets
 # selected by TARGETARCH without executing the downloaded binaries.
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS fetch
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS fetch-download
 ARG VERSION
 ARG RELEASE_TAG
 ARG TARGETARCH
@@ -85,6 +99,23 @@ RUN VER="${VERSION#v}" \
     && chmod +x bin/*
 # Ship the NOTICE alongside the binary (final image parity with docker/Dockerfile).
 COPY NOTICE /out/NOTICE
+
+# ---- local candidate assets (RELEASE_SOURCE=local) --------------------------
+# Only built when selected; the default download path never resolves the
+# `local-artifacts` context. Same /out layout as fetch-download.
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS fetch-local
+ARG TARGETARCH
+COPY docker/release-local-artifacts.sh /usr/local/bin/release-local-artifacts.sh
+# hadolint ignore=DL3022
+COPY --from=local-artifacts / /in/
+RUN sh /usr/local/bin/release-local-artifacts.sh "${TARGETARCH}" /in /out \
+    && rm -rf /in
+COPY NOTICE /out/NOTICE
+
+# ---- selected release assets ------------------------------------------------
+# Everything below consumes `fetch`, whichever source produced it.
+# hadolint ignore=DL3006
+FROM fetch-${RELEASE_SOURCE} AS fetch
 
 # ---- libyara (static) — only needed to get a matching `yarac` for the rules
 #      stage; the final image carries no libyara (binaries are prelinked). ------
