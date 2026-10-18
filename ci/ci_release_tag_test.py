@@ -69,7 +69,7 @@ files = [name + '-linux-' + arch for name in names]
 toolchain = os.environ.get('TOOLCHAIN', '')
 if toolchain in ('pair', 'corrupt', 'no_library'):
     files.append('yarac-linux-' + arch)
-if toolchain in ('pair', 'corrupt'):
+if toolchain in ('pair', 'corrupt', 'no_compiler'):
     files.append('libyara-linux-' + arch + '.a')
 if target.name == 'SHA256SUMS':
     checksums = ''.join(
@@ -385,7 +385,7 @@ class ReleaseTagContract(unittest.TestCase):
         self.assertEqual(marker, [])
 
     def test_incomplete_or_corrupt_toolchain_installs_nothing(self):
-        for mode in ("no_library", "corrupt"):
+        for mode in ("no_library", "no_compiler", "corrupt"):
             with self.subTest(mode=mode):
                 marker = []
                 result, _, binaries = run_commands(
@@ -394,6 +394,18 @@ class ReleaseTagContract(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(binaries, [])
                 self.assertEqual(marker, [])
+
+    def test_pre_marker_release_with_lone_library_asset_fails_closed(self):
+        marker = []
+        result, _, binaries = run_commands(
+            "1.2.0", toolchain="no_compiler", marker=marker
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SHA256SUMS must list yarac-linux-arm64 exactly once", result.stderr
+        )
+        self.assertEqual(binaries, [])
+        self.assertEqual(marker, [])
 
     def test_build_version_oci_label(self):
         source = DOCKERFILE.read_text(encoding="utf-8")

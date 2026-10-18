@@ -45,7 +45,7 @@ WORKDIR /out
 ARG RELEASE_CACHEBUST
 # strix-milter is optional: releases before it shipped (<= 1.2.0) lack the
 # asset, so it is fetched (and checksum-verified) only when SHA256SUMS lists it.
-# The marker toolchain (yarac + libyara.a) is fetched as a pair when listed.
+# The marker toolchain (yarac + libyara.a) is a required pair when either is listed.
 # Every fetched asset must have exactly one SHA256SUMS line and pass it.
 # bins and tools are space-separated lists: word splitting is intended.
 # hadolint ignore=SC2086
@@ -64,7 +64,7 @@ RUN VER="${VERSION#v}" \
          && bins="${bins} strix-milter"; \
        fi \
     && tools="" \
-    && if grep -qE "  yarac-linux-${TARGETARCH}\$" SHA256SUMS; then \
+    && if grep -qE "  (yarac-linux-${TARGETARCH}|libyara-linux-${TARGETARCH}\.a)\$" SHA256SUMS; then \
          curl -fsSL "${base}/yarac-linux-${TARGETARCH}"     -o "yarac-linux-${TARGETARCH}" \
          && curl -fsSL "${base}/libyara-linux-${TARGETARCH}.a" -o "libyara-linux-${TARGETARCH}.a" \
          && tools="yarac-linux-${TARGETARCH} libyara-linux-${TARGETARCH}.a"; \
