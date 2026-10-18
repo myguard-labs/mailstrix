@@ -23,8 +23,8 @@ if [ "$#" -eq 0 ]; then
 fi
 
 # Validate every name before any dpkg-query or apt call. Debian package names:
-# lowercase alnum start and end, alnum + . - between (optional :arch). A trailing
-# '-' is rejected: `apt-get install clang-` would REMOVE clang.
+# lowercase alnum start; ends in alnum, '+' or '.'; alnum + . - between
+# (optional :arch). A trailing '-' is rejected: `apt-get install clang-` would REMOVE clang.
 for pkg in "$@"; do
   if ! [[ "$pkg" =~ ^[a-z0-9]([a-z0-9+.-]*[a-z0-9+.])?(:[a-z0-9]+)?$ ]]; then
     echo "apt-install: invalid package name: $pkg" >&2
@@ -48,15 +48,17 @@ fi
 rc=0
 delay="$backoff"
 for ((i = 1; i <= attempts; i++)); do
+  step=update
   sudo apt-get -o Acquire::Retries=3 update \
+    && step=install \
     && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends "${missing[@]}"
   rc=$?
   [ "$rc" -eq 0 ] && exit 0
   if [ "$i" -lt "$attempts" ]; then
-    echo "apt-install: attempt $i/$attempts failed (rc=$rc); retrying in ${delay}s" >&2
+    echo "apt-install: attempt $i/$attempts failed at apt $step (rc=$rc); retrying in ${delay}s" >&2
     sleep "$delay"
     delay=$((delay * 2))
   fi
 done
-echo "apt-install: giving up after $attempts attempts (rc=$rc)" >&2
+echo "apt-install: giving up after $attempts attempts (last failed at apt $step, rc=$rc)" >&2
 exit "$rc"

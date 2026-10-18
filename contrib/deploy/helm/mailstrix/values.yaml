@@ -58,6 +58,8 @@ config:
   MAILSTRIX_CANARY: ""           # "1" = log-only shadow mode; integrations observe but do not score/block
   MAILSTRIX_MBAZAAR_REFRESH: ""  # seconds; floor 300
   MAILSTRIX_THREATFOX_REFRESH: "" # 6h default; floor 300
+  MAILSTRIX_STATUS_LOG: ""       # "1" = log one "strixd status:" line to stdout per interval (default off)
+  MAILSTRIX_STATUS_INTERVAL: ""  # seconds between status lines (default 900; floor 60)
   TZ: ""                     # e.g. "Europe/Amsterdam"
 
 # --- Shared verdict cache (Redis/Valkey) ------------------------------------

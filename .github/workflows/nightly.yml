@@ -22,9 +22,18 @@ jobs:
     steps:
       - name: ensure gh CLI
         run: |
+          # Bounded retry: a brief mirror/proxy outage must not fail the job.
           command -v gh >/dev/null || {
-            sudo apt-get update
-            sudo apt-get install -y gh
+            for attempt in 1 2 3 4; do
+              sudo apt-get -o Acquire::Retries=3 update \
+                && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gh \
+                && break
+              if [ "$attempt" -eq 4 ]; then
+                echo "ensure gh CLI: giving up after $attempt attempts" >&2
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
           }
       - name: compare nightly target with main
         id: release
@@ -100,9 +109,18 @@ jobs:
       # The self-hosted lxc runner image does not ship the gh CLI.
       - name: ensure gh CLI
         run: |
+          # Bounded retry: a brief mirror/proxy outage must not fail the job.
           command -v gh >/dev/null || {
-            sudo apt-get update
-            sudo apt-get install -y gh
+            for attempt in 1 2 3 4; do
+              sudo apt-get -o Acquire::Retries=3 update \
+                && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gh \
+                && break
+              if [ "$attempt" -eq 4 ]; then
+                echo "ensure gh CLI: giving up after $attempt attempts" >&2
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
           }
 
       - name: publish rolling nightly

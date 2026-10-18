@@ -304,6 +304,35 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_gh_install_contract_test_selects_the_planner_job(self):
+        result = impact.plan(["ci/ci_gh_install_test.py"])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True}, {"scope"}
+        )
+        with self.assertRaises(ValueError):
+            impact.plan(["ci/gh_install_test.py"])
+
+    def test_preflight_script_and_test_select_the_planner_job(self):
+        for path in ("ci/ci_preflight_test.py", "scripts/ci-preflight.sh"):
+            with self.subTest(path=path):
+                self.assertTrue(impact.plan([path])["scope"])
+
+    def test_helm_chart_files_are_passive_and_select_no_go(self):
+        paths = [
+            "contrib/deploy/helm/mailstrix/values.yaml",
+            "contrib/deploy/helm/mailstrix/templates/deployment.yaml",
+        ]
+        result = impact.plan(paths)
+        self.assertFalse(result["go"])
+        self.assertEqual(result["changed_files"], "--changed -- ")
+        # A removal is the same path set; the planner never reads file contents.
+        self.assertFalse(impact.plan(paths[:1])["go"])
+        for bad in ("/contrib/deploy/helm/x.yaml", "contrib/../x.yaml"):
+            with self.subTest(path=bad), self.assertRaises(ValueError):
+                impact.plan([bad])
+        with self.assertRaises(ValueError):
+            impact.plan(["contrib/deploy/helm/mailstrix/values.yaml", "unmapped.txt"])
+
     def test_decode_scalar_native_go_consumer(self):
         path = "ci/decode_scalar_test.go"
         result = impact.plan([path])

@@ -32,12 +32,12 @@ class Fixture:
         )
         self._stub(
             "sleep",
-            f'echo "sleep $1" >> {self.log}',
+            f'echo "sleep $1" >> "{self.log}"',
         )
         self.dpkg_log = Path(self.tmp.name) / "dpkg.log"
         self._stub(
             "dpkg-query",
-            f'echo "$@" >> {self.dpkg_log}\n'
+            f'echo "$@" >> "{self.dpkg_log}"\n'
             + "pkg=${@: -1}\n"
             + "".join(
                 f'[ "$pkg" = "{p}" ] && {{ printf "install ok installed"; exit 0; }}\n'
@@ -52,7 +52,7 @@ class Fixture:
             cases = "\n".join(f"      {i}) rc={c} ;;" for i, c in enumerate(codes[:-1]))
             return textwrap.dedent(
                 f"""\
-                cnt={self.tmp.name}/{name}.count
+                cnt="{self.tmp.name}/{name}.count"
                 n=$(cat "$cnt" 2>/dev/null || echo 0)
                 echo $((n+1)) > "$cnt"
                 case $n in
@@ -63,7 +63,7 @@ class Fixture:
             )
 
         return (
-            f'echo "apt-get $*" >> {self.log}\n'
+            f'echo "apt-get $*" >> "{self.log}"\n'
             'for a in "$@"; do case "$a" in\n'
             f"  update) {seq('update', self.update)} ;;\n"
             f"  install) {seq('install', self.install)} ;;\n"
@@ -147,11 +147,13 @@ class AptInstall(unittest.TestCase):
         self.assertEqual(len([c for c in calls if c.startswith("sleep")]), 2)
         self.assertFalse([c for c in calls if " install " in c])
         self.assertIn("giving up after 3 attempts", p.stderr)
+        self.assertIn("failed at apt update", p.stderr)
 
     def test_persistent_install_failure_propagates_exit_code(self):
         f = self.fixture(install=(7,))
         p, _ = f.run("libyara-dev", APT_ATTEMPTS="2")
         self.assertEqual(p.returncode, 7)
+        self.assertIn("failed at apt install", p.stderr)
 
     def test_malformed_package_names_rejected_without_apt(self):
         for bad in (
