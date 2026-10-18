@@ -51,6 +51,10 @@ jobs:
           install -D "dist/${arch}/strix-scan" "out/strix-scan-linux-${arch}"
           # strix-milter: the lean, CGO-free Postfix/Sendmail milter.
           install -D "dist/${arch}/strix-milter" "out/strix-milter-linux-${arch}"
+          # The exact marker toolchain linked into strixd; Dockerfile.release
+          # needs these bytes to bake a marker artifact strixd will load.
+          install -D "dist/${arch}/yarac" "out/yarac-linux-${arch}"
+          install -D -m 0644 "dist/${arch}/libyara.a" "out/libyara-linux-${arch}.a"
           ls -l out
 
       - name: upload arch binaries

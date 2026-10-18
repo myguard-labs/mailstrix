@@ -65,10 +65,16 @@ arch = os.environ['TARGETARCH']
 names = ['strixd', 'strix-scan']
 if os.environ.get('HAS_MILTER') == '1':
     names.append('strix-milter')
+files = [name + '-linux-' + arch for name in names]
+toolchain = os.environ.get('TOOLCHAIN', '')
+if toolchain in ('pair', 'corrupt', 'no_library'):
+    files.append('yarac-linux-' + arch)
+if toolchain in ('pair', 'corrupt', 'no_compiler'):
+    files.append('libyara-linux-' + arch + '.a')
 if target.name == 'SHA256SUMS':
     checksums = ''.join(
-        hashlib.sha256(name.encode()).hexdigest() + '  ' + name + '-linux-' + arch + '\\n'
-        for name in names
+        hashlib.sha256(name.split('-linux-', 1)[0].encode()).hexdigest() + '  ' + name + '\\n'
+        for name in files
     )
     mode = os.environ.get('CHECKSUM_MODE', '')
     if mode == 'corrupt':
@@ -77,11 +83,23 @@ if target.name == 'SHA256SUMS':
         checksums = ''.join(checksums.splitlines(keepends=True)[1:])
     elif mode == 'duplicate':
         checksums += checksums.splitlines(keepends=True)[0]
+    elif mode.startswith('swap:'):
+        # A duplicate of one listed asset stands in for another asset's line,
+        # so the line count still matches the fetched set.
+        keep, drop = mode[5:].split('/')
+        lines = checksums.splitlines(keepends=True)
+        line = next(x for x in lines if x.endswith('  ' + keep + '-linux-' + arch + '\\n'))
+        checksums = ''.join(
+            line if (x.split('  ', 1)[1].split('-linux-', 1)[0] == drop) else x
+            for x in lines
+        )
     target.write_text(checksums)
 else:
     asset = target.name.split('-linux-', 1)[0]
     payload = asset.encode()
     if os.environ.get('CHECKSUM_MODE') == 'asset_corrupt' and asset == 'strixd':
+        payload += b'-corrupt'
+    if toolchain == 'corrupt' and asset == 'libyara':
         payload += b'-corrupt'
     target.write_bytes(payload)
 """,
@@ -101,6 +119,8 @@ def run_commands(
     rules_cachebust=None,
     trace=False,
     checksum_mode="",
+    toolchain="",
+    marker=None,
 ):
     command = docker_commands()
     with tempfile.TemporaryDirectory() as directory:
@@ -115,6 +135,7 @@ def run_commands(
             HAS_MILTER="1" if milter else "0",
             FAIL_DOWNLOAD="1" if fail_download else "0",
             CHECKSUM_MODE=checksum_mode,
+            TOOLCHAIN=toolchain,
             URL_LOG=str(root / "urls"),
             EXPECTED_RELEASE_URL=RELEASE_URL,
             PATH=f"{bin_dir}:{env['PATH']}",
@@ -146,6 +167,13 @@ def run_commands(
         binaries = sorted(
             path.name for path in bin_dir.iterdir() if path.name != "curl"
         )
+        if marker is not None and (root / "marker").is_dir():
+            marker.extend(
+                sorted(
+                    (path.name, path.read_bytes())
+                    for path in (root / "marker").iterdir()
+                )
+            )
         # The Docker command moves verified assets into /out/bin, represented by
         # this temporary directory's bin/ after the fake curl has finished.
         return result, urls, binaries
@@ -301,6 +329,26 @@ class ReleaseTagContract(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(binaries, [])
 
+    def test_duplicate_line_cannot_stand_in_for_a_missing_one(self):
+        for toolchain, mode, assets in (
+            ("", "swap:strixd/strix-scan", "strixd|strix-scan"),
+            ("pair", "swap:yarac/libyara", "yarac|libyara"),
+        ):
+            with self.subTest(mode=mode):
+                marker = []
+                result, _, binaries = run_commands(
+                    "1.3.0", checksum_mode=mode, toolchain=toolchain, marker=marker
+                )
+                self.assertNotEqual(result.returncode, 0)
+                # Either the duplicated or the dropped asset is reported,
+                # depending on fetch order.
+                self.assertRegex(
+                    result.stderr,
+                    rf"SHA256SUMS must list ({assets})-linux-arm64(\.a)? exactly once",
+                )
+                self.assertEqual(binaries, [])
+                self.assertEqual(marker, [])
+
     def test_corrupted_download_is_rejected_before_installation(self):
         result, urls, binaries = run_commands("1.3.0", checksum_mode="asset_corrupt")
         self.assertNotEqual(result.returncode, 0)
@@ -308,6 +356,56 @@ class ReleaseTagContract(unittest.TestCase):
         self.assertIn("computed checksum did NOT match", result.stderr)
         self.assertEqual(len(urls), 4)
         self.assertEqual(binaries, [])
+
+    def test_marker_toolchain_pair_is_fetched_verified_and_staged(self):
+        for arch in ("amd64", "arm64"):
+            with self.subTest(arch=arch):
+                marker = []
+                result, urls, binaries = run_commands(
+                    "1.3.0", arch=arch, toolchain="pair", marker=marker
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    urls[-2:],
+                    [
+                        f"{RELEASE_URL}/v1.3.0/yarac-linux-{arch}",
+                        f"{RELEASE_URL}/v1.3.0/libyara-linux-{arch}.a",
+                    ],
+                )
+                self.assertEqual(binaries, list(ASSETS))
+                self.assertEqual(
+                    marker, [("libyara.a", b"libyara"), ("yarac", b"yarac")]
+                )
+
+    def test_release_without_toolchain_stages_empty_marker_dir(self):
+        marker = []
+        result, urls, _ = run_commands("1.2.0", milter=False, marker=marker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(urls), 3)
+        self.assertEqual(marker, [])
+
+    def test_incomplete_or_corrupt_toolchain_installs_nothing(self):
+        for mode in ("no_library", "no_compiler", "corrupt"):
+            with self.subTest(mode=mode):
+                marker = []
+                result, _, binaries = run_commands(
+                    "1.3.0", toolchain=mode, marker=marker
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(binaries, [])
+                self.assertEqual(marker, [])
+
+    def test_pre_marker_release_with_lone_library_asset_fails_closed(self):
+        marker = []
+        result, _, binaries = run_commands(
+            "1.2.0", toolchain="no_compiler", marker=marker
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SHA256SUMS must list yarac-linux-arm64 exactly once", result.stderr
+        )
+        self.assertEqual(binaries, [])
+        self.assertEqual(marker, [])
 
     def test_build_version_oci_label(self):
         source = DOCKERFILE.read_text(encoding="utf-8")

@@ -195,6 +195,11 @@ FROM scratch AS bin
 COPY --from=build /out/strixd /strixd
 COPY --from=build /out/strix-scan /strix-scan
 COPY --from=build /out/strix-milter /strix-milter
+# The exact compiler and static library whose SHA-256 values are linked into
+# strixd. docker/Dockerfile.release compiles with them so its marker artifact
+# binds to the released binary (libyara.a is not byte-reproducible).
+COPY --from=build /opt/marker-compiler/yarac /yarac
+COPY --from=build /usr/local/lib/libyara.a /libyara.a
 
 # Post-publication verifier: no baked rules and no production cache mount.
 # Keep this before final so an untargeted build still produces the service image.

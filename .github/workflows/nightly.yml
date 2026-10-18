@@ -93,7 +93,8 @@ jobs:
           set -euo pipefail
           cd out
           sha256sum strixd-linux-amd64 strix-scan-linux-amd64 \
-            strix-milter-linux-amd64 > SHA256SUMS
+            strix-milter-linux-amd64 yarac-linux-amd64 \
+            libyara-linux-amd64.a > SHA256SUMS
           sha256sum -c SHA256SUMS
 
       # The self-hosted lxc runner image does not ship the gh CLI.
@@ -113,6 +114,8 @@ jobs:
             out/strixd-linux-amd64
             out/strix-scan-linux-amd64
             out/strix-milter-linux-amd64
+            out/yarac-linux-amd64
+            out/libyara-linux-amd64.a
             out/SHA256SUMS
           )
           # target_commitish is ignored for an existing tag. Remove the old

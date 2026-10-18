@@ -28,6 +28,41 @@ jobs:
     with:
       version: ${{ github.ref_name }}
 
+  # Prove Dockerfile.release turns these exact binaries and marker toolchain
+  # into an image whose strixd loads the marker artifact (not the full-ruleset
+  # fallback), and that a toolchain not linked into strixd fails the build.
+  marker-image:
+    needs: binaries
+    runs-on: [self-hosted, builder02, docker]
+    # arm64 rebuilds libyara and compiles rules under QEMU emulation.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3 arm64 emulation
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: download arch binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: bin-${{ matrix.arch }}
+          path: out/
+
+      - name: release image loads markers (${{ matrix.arch }})
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          MAILSTRIX_RELEASE_MARKER_RUN="release-${RUN_ID}-${ARCH}" \
+            bash ci/release_marker_image_test.sh "${ARCH}" out
+
   # Build .deb packages (strixd daemon + strix-scan client + strix-milter, amd64
   # and arm64) from
   # the just-built binaries with nfpm — no debian/ tree, pure-Go packager.
@@ -82,7 +117,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [binaries, debs]
+    needs: [binaries, debs, marker-image]
     runs-on: [self-hosted, builder02, lxc]
     permissions:
       contents: write   # create GitHub release + upload assets
@@ -105,7 +140,7 @@ jobs:
       - name: checksums
         run: |
           set -euo pipefail
-          ( cd out && sha256sum strixd-linux-* strix-scan-linux-* strix-milter-linux-* ./*.deb > SHA256SUMS )
+          ( cd out && sha256sum strixd-linux-* strix-scan-linux-* strix-milter-linux-* yarac-linux-* libyara-linux-* ./*.deb > SHA256SUMS )
           ls -l out
 
       # The self-hosted lxc runner image does not ship the gh CLI.
@@ -123,9 +158,10 @@ jobs:
           set -euo pipefail
           # Idempotent: if a release for this tag already exists (e.g. created
           # manually before the tag push), upload/overwrite assets onto it
-          # instead of failing the whole run on a duplicate. Assets = the four
-          # binaries, the four .debs, and the SHA256SUMS that covers them all.
-          assets=( out/strixd-linux-* out/strix-scan-linux-* out/strix-milter-linux-* out/*.deb out/SHA256SUMS )
+          # instead of failing the whole run on a duplicate. Assets = the six
+          # binaries, the per-arch marker toolchain (yarac + libyara.a), the six
+          # .debs, and the SHA256SUMS that covers them all.
+          assets=( out/strixd-linux-* out/strix-scan-linux-* out/strix-milter-linux-* out/yarac-linux-* out/libyara-linux-* out/*.deb out/SHA256SUMS )
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" --clobber "${assets[@]}"
           else
