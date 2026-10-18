@@ -234,6 +234,8 @@ GO_INPUTS = [
     "ci/ci_marker_runtime_fixture_test.py",
     "ci/ci_marker_closure_test.py",
     "ci/marker_runtime_test.go",
+    "ci/release_marker_loader_text_test.go",
+    "docker/release-marker-toolchain.sh",
     "ci/testdata/marker-runtime.zip",
     "ci/extraction_memory_test.go",
     "ci/retained_limit_main_test.go",

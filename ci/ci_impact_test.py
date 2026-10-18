@@ -185,6 +185,16 @@ class ImpactTests(unittest.TestCase):
             ("ci/streamdedupkey_test.go", ["go"], ["image", "parity", "postfix"]),
             ("ci/status_log_test.go", ["go"], ["image", "parity", "postfix"]),
             (
+                "ci/release_marker_loader_text_test.go",
+                ["go"],
+                ["image", "parity", "postfix"],
+            ),
+            (
+                "docker/release-marker-toolchain.sh",
+                ["dockerfiles", "go", "shell"],
+                ["parity", "postfix"],
+            ),
+            (
                 "ci/icap_admission_ordering_test.go",
                 ["go"],
                 ["image", "parity", "postfix"],
