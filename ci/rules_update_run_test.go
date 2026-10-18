@@ -284,6 +284,10 @@ func TestRulesUpdaterRunKeepsRulesOnBadRelease(t *testing.T) {
 		f.pub.sig = []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(runUpdateSigner, f.pub.manifest)) + "\n")
 		f.pub.mu.Unlock()
 
+		seed, err := os.ReadFile(f.cfg.RulesPath)
+		if err != nil {
+			t.Fatal(err)
+		}
 		stop := f.startRun(t)
 		defer stop()
 		synctest.Wait()
@@ -303,8 +307,8 @@ func TestRulesUpdaterRunKeepsRulesOnBadRelease(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Equal(got, f.pub.bundle) {
-			t.Fatal("rejected bundle replaced the cached rules")
+		if !bytes.Equal(got, seed) {
+			t.Fatal("rejected release changed the cached release 1 rules")
 		}
 	})
 }
