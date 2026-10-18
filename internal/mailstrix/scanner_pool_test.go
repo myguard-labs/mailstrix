@@ -71,7 +71,7 @@ func TestScannerPoolAlternatingMainBigReuses(t *testing.T) {
 
 // Boundary: with no big-file ruleset only the main set is pooled.
 func TestScannerPoolNoBigRules(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	if s.bigRules.Load() != nil {
 		t.Fatal("expected nil bigRules")
 	}

@@ -23,7 +23,7 @@ func TestScanStreamMergeDedupsByNamespace(t *testing.T) {
 	}
 	write("fileA.yar", "RAWTOKEN7731")
 	write("fileB.yar", "STREAMTOKEN4419")
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)

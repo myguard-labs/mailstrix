@@ -147,7 +147,7 @@ func TestReloadMarkerUntaggedGlobalAndEmpty(t *testing.T) {
 		if marker {
 			source += ` rule Marker : marker { strings: $a="EXT-MISMATCH" condition: $a }`
 		}
-		s := newScanner(t, writeRules(t, source))
+		s := newScannerBudget(t, writeRules(t, source), loadInsensitiveScanTimeout)
 		defer s.Close()
 		if s.markerRules.Load() != nil {
 			t.Fatal("unbound global source did not use fallback")

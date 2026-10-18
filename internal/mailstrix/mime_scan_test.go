@@ -10,7 +10,7 @@ const mimeDropperRule = `rule MIME_DROPPER { strings: $a = "COR01-SCAN-NEEDLE" c
 // TestScanEMLZipAttachment (COR-01): a script inside a base64 zip attachment
 // of a whole .eml now matches, as it does for the raw zip.
 func TestScanEMLZipAttachment(t *testing.T) {
-	s := newScanner(t, writeRules(t, mimeDropperRule))
+	s := newScannerBudget(t, writeRules(t, mimeDropperRule), loadInsensitiveScanTimeout)
 	defer s.Close()
 	zip := makePlainZIP(t, [][]byte{[]byte(`WScript.Echo "COR01-SCAN-NEEDLE"`)})
 	eml := "From: a@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n" +
@@ -24,7 +24,7 @@ func TestScanEMLZipAttachment(t *testing.T) {
 
 // TestScanEMLClean (negative control): a clean message does not match.
 func TestScanEMLClean(t *testing.T) {
-	s := newScanner(t, writeRules(t, mimeDropperRule))
+	s := newScannerBudget(t, writeRules(t, mimeDropperRule), loadInsensitiveScanTimeout)
 	defer s.Close()
 	eml := "From: a@example.com\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\nhello\r\n"
 	if m, err := s.Scan([]byte(eml), ScanMeta{}); err != nil || hasRule(m, "MIME_DROPPER") {

@@ -18,7 +18,7 @@ func denyMap(names ...string) map[string]struct{} {
 // nil/empty deny sets and nil rules.
 func TestDisableDeniedRules_NilAndEmpty(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	defer s.Close()
 
 	rules := s.rules.Load()
@@ -44,7 +44,7 @@ func TestDisableDeniedRules_NilAndEmpty(t *testing.T) {
 // ordinary rules (which ARE disabled) and the global/private guard compiles.
 func TestDisableDeniedRules_OrdinaryRuleDisabled(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	defer s.Close()
 
 	rules := s.rules.Load()
@@ -62,7 +62,7 @@ func TestDisableDeniedRules_OrdinaryRuleDisabled(t *testing.T) {
 // case-insensitive (denylist keys are lowercased, identifier folded via ToLower).
 func TestDisableDeniedRules_CaseInsensitive(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	defer s.Close()
 
 	rules := s.rules.Load()
@@ -113,7 +113,7 @@ func TestDenylistHashEmpty(t *testing.T) {
 // deny set changes — the #251-class cache-invalidation correctness requirement.
 func TestFingerprintFoldsDenylist(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	defer s.Close()
 
 	fp0 := s.Fingerprint()
@@ -145,9 +145,9 @@ func TestFingerprintFoldsDenylist(t *testing.T) {
 // identical deny sets produce the same Fingerprint denylist component.
 func TestFingerprintDenylistConsistent(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s1 := newScanner(t, dir)
+	s1 := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	defer s1.Close()
-	s2 := newScanner(t, dir)
+	s2 := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	defer s2.Close()
 
 	deny := denyMap("rule_x", "rule_y")

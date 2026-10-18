@@ -51,7 +51,7 @@ func TestGenerationCacheKeyScanInterval(t *testing.T) {
 	for _, protocol := range []string{"http", "clamd", "icap"} {
 		t.Run(protocol, func(t *testing.T) {
 			dir := writeRules(t, "rule Stable { condition: false }")
-			s := newScanner(t, dir)
+			s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 			t.Cleanup(s.Close)
 			srv := newCachingServer(s, "generation-test")
 			cache := &generationBarrierCache{Cache: srv.cache, key: make(chan string, 1), resume: make(chan struct{})}

@@ -23,7 +23,7 @@ rule Marker_Literal : marker
 
 func newExtractScan(t *testing.T, src string, res *extract.Result) (*Scanner, *extractScan) {
 	t.Helper()
-	s := newScanner(t, writeRules(t, src))
+	s := newScannerBudget(t, writeRules(t, src), loadInsensitiveScanTimeout)
 	x := &extractScan{
 		s:          s,
 		seen:       map[[16]byte]struct{}{},
