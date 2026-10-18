@@ -14,6 +14,10 @@
 # Requires VERSION or RELEASE_TAG to name a published release whose assets include
 # strixd-linux-${TARGETARCH} and strix-scan-linux-${TARGETARCH}; strix-milter-linux-
 # ${TARGETARCH} is shipped too when the release has it.
+# Releases with marker support also publish yarac-linux-${TARGETARCH} and
+# libyara-linux-${TARGETARCH}.a: the exact compiler and static library linked
+# into strixd. The rules stage compiles with them and bakes the marker artifact;
+# a rebuilt toolchain cannot match (libyara.a is not byte-reproducible).
 # Mutable nightly releases also require RELEASE_CACHEBUST (the nightly build SHA);
 # changing that token invalidates the fetch layer when their assets are replaced.
 
@@ -41,8 +45,9 @@ WORKDIR /out
 ARG RELEASE_CACHEBUST
 # strix-milter is optional: releases before it shipped (<= 1.2.0) lack the
 # asset, so it is fetched (and checksum-verified) only when SHA256SUMS lists it.
-# Every fetched binary must have exactly one SHA256SUMS line and pass it.
-# bins is a space-separated list: word splitting is intended.
+# The marker toolchain (yarac + libyara.a) is fetched as a pair when listed.
+# Every fetched asset must have exactly one SHA256SUMS line and pass it.
+# bins and tools are space-separated lists: word splitting is intended.
 # hadolint ignore=SC2086
 RUN VER="${VERSION#v}" \
     && tag="${RELEASE_TAG:-v${VER}}" \
@@ -58,13 +63,24 @@ RUN VER="${VERSION#v}" \
          curl -fsSL "${base}/strix-milter-linux-${TARGETARCH}" -o "strix-milter-linux-${TARGETARCH}" \
          && bins="${bins} strix-milter"; \
        fi \
-    && grep -E "  (strixd|strix-scan|strix-milter)-linux-${TARGETARCH}\$" SHA256SUMS > SHA256SUMS.all \
-    && for b in ${bins}; do grep -E "  ${b}-linux-${TARGETARCH}\$" SHA256SUMS.all; done > SHA256SUMS.arch \
-    && test "$(wc -l < SHA256SUMS.arch)" -eq "$(echo ${bins} | wc -w)" \
+    && tools="" \
+    && if grep -qE "  yarac-linux-${TARGETARCH}\$" SHA256SUMS; then \
+         curl -fsSL "${base}/yarac-linux-${TARGETARCH}"     -o "yarac-linux-${TARGETARCH}" \
+         && curl -fsSL "${base}/libyara-linux-${TARGETARCH}.a" -o "libyara-linux-${TARGETARCH}.a" \
+         && tools="yarac-linux-${TARGETARCH} libyara-linux-${TARGETARCH}.a"; \
+       fi \
+    && for f in $(for b in ${bins}; do echo "${b}-linux-${TARGETARCH}"; done) ${tools}; do \
+         awk -v f="${f}" '$2 == f' SHA256SUMS; \
+       done > SHA256SUMS.arch \
+    && test "$(wc -l < SHA256SUMS.arch)" -eq "$(echo ${bins} ${tools} | wc -w)" \
     && sha256sum -c SHA256SUMS.arch \
     && for b in ${bins}; do mv "${b}-linux-${TARGETARCH}" "${b}"; done \
-    && mkdir -p bin && mv ${bins} bin/ \
-    && rm -f SHA256SUMS SHA256SUMS.all SHA256SUMS.arch \
+    && mkdir -p bin marker && mv ${bins} bin/ \
+    && if [ -n "${tools}" ]; then \
+         mv "yarac-linux-${TARGETARCH}" marker/yarac \
+         && mv "libyara-linux-${TARGETARCH}.a" marker/libyara.a; \
+       fi \
+    && rm -f SHA256SUMS SHA256SUMS.arch \
     && chmod +x bin/*
 # Ship the NOTICE alongside the binary (final image parity with docker/Dockerfile).
 COPY NOTICE /out/NOTICE
@@ -107,8 +123,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `mail` profile per-rule mail-relevance/license filter; capture-compiler-inputs.py
 # beside compile-rules.sh (same $(dirname "$0") lookup).
 COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/filter-rules.py /usr/local/bin/
+COPY docker/build-marker-artifact.py docker/release-marker-toolchain.sh /usr/local/bin/
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
 RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-rules.py
+# Install the release's exact marker toolchain before any rule is compiled, so
+# the compiled bundles and the marker artifact come from the linked compiler.
+COPY --from=fetch /out/bin/strixd /tmp/release/strixd
+COPY --from=fetch /out/marker/ /tmp/release/marker/
+RUN mode="$(sh /usr/local/bin/release-marker-toolchain.sh /tmp/release/strixd /tmp/release/marker \
+        /usr/local/bin/yarac "$(pkg-config --variable=libdir yara)/libyara.a")" \
+    && echo "${mode}" > /tmp/release/mode \
+    && rm -rf /tmp/release/strixd /tmp/release/marker
 ARG CACHEBUST=unset
 ARG LOCAL_ONLY=0
 # PERF-25 rule profile: mail (default, conservative prune) | full (every rule).
@@ -144,9 +169,19 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
     && mkdir -p /rules/local-src \
     && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/local-src/ \
     && /usr/local/bin/compile-rules.sh /rules/local-src /rules/local.yac \
+    && if [ "$(cat /tmp/release/mode)" = marker ]; then \
+         python3 /usr/local/bin/build-marker-artifact.py /rules; \
+       fi \
     && rm -rf /rules/src /rules/local-src \
     && install -d -o 65532 -g 65532 /var/cache/mailstrix \
     && yarac --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 > /rules/libyara.version
+
+# Same verified export as docker/Dockerfile; export-marker additionally requires
+# and verifies the bound marker artifact for marker-capable releases.
+FROM rules AS rules-export-inputs
+COPY docker/export-compiler-inputs.py /usr/local/bin/
+RUN if [ "$(cat /tmp/release/mode)" = marker ]; then cmd="export-marker"; else cmd="export"; fi \
+    && python3 /usr/local/bin/export-compiler-inputs.py "${cmd}" /rules /rules-export
 
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
@@ -159,9 +194,9 @@ LABEL org.opencontainers.image.version="${BUILD_VERSION}"
 # Same three binaries as docker/Dockerfile's final image (strix-milter only
 # when the release carries it), so :latest and :testing behave alike.
 COPY --from=fetch /out/bin/ /usr/local/bin/
-COPY --from=rules /rules/compiled.yac /usr/share/mailstrix/compiled.yac
-COPY --from=rules /rules/local.yac /usr/share/mailstrix/local.yac
-COPY --from=rules /rules/sources.json /usr/share/mailstrix/sources.json
+# compiled.yac, local.yac, sources.json, their retained compiler inputs and,
+# for marker-capable releases, the bound native marker artifact.
+COPY --from=rules-export-inputs /rules-export/ /usr/share/mailstrix/
 COPY --from=fetch /out/NOTICE /usr/share/mailstrix/NOTICE
 COPY --from=rules --chown=nonroot:nonroot /var/cache/mailstrix /var/cache/mailstrix
 ENV MAILSTRIX_SEED_RULES=/usr/share/mailstrix/compiled.yac \

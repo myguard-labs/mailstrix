@@ -980,7 +980,26 @@ class BinaryWorkflowContract(unittest.TestCase):
         self.assertEqual(caller["with"]["version"], "${{ github.ref_name }}")
         self.assertEqual(caller["permissions"]["contents"], "read")
         self.assertEqual(jobs["debs"]["needs"], "binaries")
-        self.assertEqual(jobs["release"]["needs"], ["binaries", "debs"])
+        self.assertEqual(jobs["release"]["needs"], ["binaries", "debs", "marker-image"])
+        marker = jobs["marker-image"]
+        self.assertEqual(marker["needs"], "binaries")
+        self.assertEqual(marker["permissions"], {"contents": "read"})
+        self.assertEqual(marker["strategy"]["matrix"]["arch"], ["amd64", "arm64"])
+        self.assertIs(marker["strategy"]["fail-fast"], False)
+        marker_download = next(
+            step
+            for step in marker["steps"]
+            if step.get("name") == "download arch binaries"
+        )
+        self.assertEqual(
+            marker_download["with"],
+            {"name": "bin-${{ matrix.arch }}", "path": "out/"},
+        )
+        marker_check = marker["steps"][-1]
+        self.assertEqual(marker_check["env"]["ARCH"], "${{ matrix.arch }}")
+        self.assertIn(
+            'bash ci/release_marker_image_test.sh "${ARCH}" out', marker_check["run"]
+        )
 
         inputs = binaries[True]["workflow_call"]["inputs"]
         self.assertEqual(inputs["version"]["type"], "string")
@@ -997,8 +1016,10 @@ class BinaryWorkflowContract(unittest.TestCase):
         script = steps[3]["run"]
         self.assertIn('arch="${ARCH}"', script)
         self.assertIn('--build-arg "VERSION=${VERSION}"', script)
-        for asset in ("strixd", "strix-scan", "strix-milter"):
+        for asset in ("strixd", "strix-scan", "strix-milter", "yarac"):
             self.assertIn(f'"out/{asset}-linux-${{arch}}"', script)
+        self.assertIn('"dist/${arch}/yarac" "out/yarac-linux-${arch}"', script)
+        self.assertIn('"dist/${arch}/libyara.a" "out/libyara-linux-${arch}.a"', script)
         self.assertEqual(steps[4]["with"]["name"], "bin-${{ matrix.arch }}")
         self.assertEqual(steps[4]["with"]["if-no-files-found"], "error")
         for job in ("debs", "release"):
@@ -1023,9 +1044,16 @@ class BinaryWorkflowContract(unittest.TestCase):
         )
         self.assertIn(
             "out/strixd-linux-* out/strix-scan-linux-* "
-            "out/strix-milter-linux-* out/*.deb out/SHA256SUMS",
+            "out/strix-milter-linux-* out/yarac-linux-* out/libyara-linux-* "
+            "out/*.deb out/SHA256SUMS",
             publish_script,
         )
+        checksum_script = next(
+            step["run"]
+            for step in jobs["release"]["steps"]
+            if step.get("name") == "checksums"
+        )
+        self.assertIn("yarac-linux-* libyara-linux-* ./*.deb", checksum_script)
         self.assertIn('gh release create "${GITHUB_REF_NAME}"', publish_script)
 
         expected_pins = (
@@ -1210,6 +1238,8 @@ class NightlyWorkflowContract(unittest.TestCase):
                 "strixd-linux-amd64",
                 "strix-scan-linux-amd64",
                 "strix-milter-linux-amd64",
+                "yarac-linux-amd64",
+                "libyara-linux-amd64.a",
             )
             for name in names:
                 (output / name).write_bytes(name.encode())
@@ -1281,7 +1311,7 @@ class NightlyWorkflowContract(unittest.TestCase):
             return result, calls.read_text().splitlines() if calls.exists() else []
 
     def test_first_publication_is_prerelease_and_never_latest(self):
-        """A missing nightly must be created with SHA target and four assets."""
+        """A missing nightly must be created with SHA target and six assets."""
         result, calls = self.publication("missing")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 2, calls)
@@ -1295,6 +1325,8 @@ class NightlyWorkflowContract(unittest.TestCase):
             "strixd-linux-amd64",
             "strix-scan-linux-amd64",
             "strix-milter-linux-amd64",
+            "yarac-linux-amd64",
+            "libyara-linux-amd64.a",
             "SHA256SUMS",
         ):
             self.assertIn("out/" + asset, create)

@@ -106,7 +106,14 @@ RULES = {
         "ci/ci_rules_signing_secret_test.py",
     ],
     "shell": ["*.sh", "contrib/sieve/strix-scan-wrapper"],
-    "dockerfiles": ["*Dockerfile*", ".hadolint.yaml", "ci/ci_release_tag_test.py"],
+    "dockerfiles": [
+        "*Dockerfile*",
+        ".hadolint.yaml",
+        "ci/ci_release_tag_test.py",
+        "ci/ci_release_marker_toolchain_test.py",
+        "ci/release_marker_image_test.sh",
+        "docker/release-marker-toolchain.sh",
+    ],
     "scope": [
         "tools/testscope/*",
         "ci/testscope_test.sh",
