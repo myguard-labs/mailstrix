@@ -70,9 +70,10 @@ RUN VER="${VERSION#v}" \
          && tools="yarac-linux-${TARGETARCH} libyara-linux-${TARGETARCH}.a"; \
        fi \
     && for f in $(for b in ${bins}; do echo "${b}-linux-${TARGETARCH}"; done) ${tools}; do \
+         test "$(awk -v f="${f}" '$2 == f' SHA256SUMS | wc -l)" -eq 1 \
+           || { echo "SHA256SUMS must list ${f} exactly once" >&2; exit 1; }; \
          awk -v f="${f}" '$2 == f' SHA256SUMS; \
        done > SHA256SUMS.arch \
-    && test "$(wc -l < SHA256SUMS.arch)" -eq "$(echo ${bins} ${tools} | wc -w)" \
     && sha256sum -c SHA256SUMS.arch \
     && for b in ${bins}; do mv "${b}-linux-${TARGETARCH}" "${b}"; done \
     && mkdir -p bin marker && mv ${bins} bin/ \

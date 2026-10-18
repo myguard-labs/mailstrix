@@ -83,6 +83,16 @@ if target.name == 'SHA256SUMS':
         checksums = ''.join(checksums.splitlines(keepends=True)[1:])
     elif mode == 'duplicate':
         checksums += checksums.splitlines(keepends=True)[0]
+    elif mode.startswith('swap:'):
+        # A duplicate of one listed asset stands in for another asset's line,
+        # so the line count still matches the fetched set.
+        keep, drop = mode[5:].split('/')
+        lines = checksums.splitlines(keepends=True)
+        line = next(x for x in lines if x.endswith('  ' + keep + '-linux-' + arch + '\\n'))
+        checksums = ''.join(
+            line if (x.split('  ', 1)[1].split('-linux-', 1)[0] == drop) else x
+            for x in lines
+        )
     target.write_text(checksums)
 else:
     asset = target.name.split('-linux-', 1)[0]
@@ -318,6 +328,26 @@ class ReleaseTagContract(unittest.TestCase):
                 result, _, binaries = run_commands("1.3.0", checksum_mode=mode)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(binaries, [])
+
+    def test_duplicate_line_cannot_stand_in_for_a_missing_one(self):
+        for toolchain, mode, assets in (
+            ("", "swap:strixd/strix-scan", "strixd|strix-scan"),
+            ("pair", "swap:yarac/libyara", "yarac|libyara"),
+        ):
+            with self.subTest(mode=mode):
+                marker = []
+                result, _, binaries = run_commands(
+                    "1.3.0", checksum_mode=mode, toolchain=toolchain, marker=marker
+                )
+                self.assertNotEqual(result.returncode, 0)
+                # Either the duplicated or the dropped asset is reported,
+                # depending on fetch order.
+                self.assertRegex(
+                    result.stderr,
+                    rf"SHA256SUMS must list ({assets})-linux-arm64(\.a)? exactly once",
+                )
+                self.assertEqual(binaries, [])
+                self.assertEqual(marker, [])
 
     def test_corrupted_download_is_rejected_before_installation(self):
         result, urls, binaries = run_commands("1.3.0", checksum_mode="asset_corrupt")
