@@ -132,6 +132,7 @@ RULES = {
         "ci/compiler-input/seek.c",
         "ci/ci_go_checks_test.py",
         "ci/ci_apt_install_test.py",
+        "ci/ci_gh_install_test.py",
         "ci/vet_wiring_test.py",
         "ci/ci_integration_test.py",
         "ci/parity_cache_test.py",

@@ -304,6 +304,14 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_gh_install_contract_test_selects_the_planner_job(self):
+        result = impact.plan(["ci/ci_gh_install_test.py"])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True}, {"scope"}
+        )
+        with self.assertRaises(ValueError):
+            impact.plan(["ci/gh_install_test.py"])
+
     def test_decode_scalar_native_go_consumer(self):
         path = "ci/decode_scalar_test.go"
         result = impact.plan([path])
