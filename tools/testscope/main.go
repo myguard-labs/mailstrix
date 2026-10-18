@@ -143,8 +143,17 @@ var contractExtensions = map[string]map[string]bool{
 	"packaging": {".sh": true, ".py": true, ".yaml": true, ".env": true, ".service": true, ".sysusers": true},
 }
 
+const helmChartDir = "contrib/deploy/helm/"
+
+var helmChartExtensions = map[string]bool{".yaml": true, ".yml": true, ".tpl": true, ".txt": true}
+
 func separateContract(f string) bool {
 	if contractFiles[f] {
+		return true
+	}
+	// Helm chart files are static manifests/values with no Go consumer; other
+	// file types under the chart stay unmapped.
+	if strings.HasPrefix(f, helmChartDir) && helmChartExtensions[path.Ext(f)] {
 		return true
 	}
 	// Only the namespace matters; no separator means an unmapped root input.
