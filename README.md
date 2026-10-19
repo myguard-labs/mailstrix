@@ -372,9 +372,15 @@ verification. A crash in the middle of an update can leave `.marker-stage-*` or
 is running.
 
 `MAILSTRIX_RULES_MARKERS` takes `auto` (the default) or `off`. With `off`,
-`fetch-rules` installs `compiled.yac` only and retires any marker tree already
-in the cache, so no tree is loaded and scans use the full ruleset. Any other
-value is refused.
+`fetch-rules` downloads no tree. The next newer bundle it installs contains
+`compiled.yac` only and removes any tree already in the cache; until that
+install happens, a matching tree already in the cache is still loaded, because
+the scanner load path does not read this setting. Any other value is refused.
+
+The tree download runs under a shorter deadline than the whole fetch. The
+update keeps max(15 s, 25% of the remaining time) for installing `compiled.yac`;
+when less than that is left the tree is skipped, and a slow or failed tree
+never blocks the `compiled.yac` update.
 
 `strixd fetch-rules -verify-only -require-marker` fetches and loads the
 published bundle into a temporary cache that is deleted afterwards, never
