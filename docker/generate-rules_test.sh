@@ -18,7 +18,7 @@ export REAL_JQ REAL_MKTEMP REAL_AWK REAL_DIRNAME REAL_DATE
 test_root="$(mktemp -d)"
 trap 'rm -rf "$test_root"' EXIT
 mkdir -p "$test_root/sandbox/project/docker" "$test_root/bin" "$test_root/tools"
-cp "$here/generate-rules.sh" "$test_root/sandbox/project/docker/"
+cp "$here/generate-rules.sh" "$here/pack-marker-tree.py" "$test_root/sandbox/project/docker/"
 export EVENTS="$test_root/events"
 export PATH="$test_root/bin:$PATH"
 export GH_TOKEN=fixture-not-a-credential
@@ -44,6 +44,30 @@ if [ "$1" = run ]; then
         printf '%s\n' "${COUNT_REPORT-check-rules: OK — 1 rules loaded (fingerprint fixture)}"
         exit 0
     fi
+    if [[ " $* " == *' -allow-http '* ]]; then
+        # Pre-upload verification of the staged candidate: really fetch what the
+        # publisher serves, so the staged files and the loopback server are proven.
+        url="$(sed -n 's/.* -url \([^ ]*\) .*/\1/p' <<<" $* ")"
+        printf 'stage-verify %s\n' "$*" >> "$EVENTS"
+        python3 - "$url" "$EVENTS" <<'PYV'
+import hashlib
+import json
+import sys
+import urllib.request
+
+url, events = sys.argv[1:]
+get = lambda name: urllib.request.urlopen(f"{url}/{name}", timeout=10).read()
+manifest = json.loads(get("compiled.yac.manifest.json"))
+get("compiled.yac.manifest.json.sig")
+get("compiled.yac")
+tree = get(manifest["marker"]["asset"])
+ok = hashlib.sha256(tree).hexdigest() == manifest["marker"]["sha256"] and len(tree) == manifest["marker"]["size"]
+open(events, "a").write(f"stage-fetch {'ok' if ok else 'MISMATCH'}\n")
+sys.exit(0 if ok else 1)
+PYV
+        [ "${FAIL_MARKER_VERIFY:-0}" -eq 0 ] || exit 52
+        exit 0
+    fi
     printf 'verify %s\n' "$*" >> "$EVENTS"
     if [ "${SIGNAL_VERIFY:-0}" -eq 1 ]; then
         kill -TERM "$(cat "${EVENTS}.signal-target")"
@@ -55,6 +79,52 @@ if [ "$1" = run ]; then
     printf '%s\n' "$attempts" > "$attempts_file"
     [ "$attempts" -gt "${FAIL_VERIFY_UNTIL:-0}" ]
     exit
+fi
+dockerfile=""; target=""; prev=""
+for arg in "$@"; do
+    case "$prev" in
+        -f) dockerfile="$(basename "$arg")" ;;
+        --target) target="$arg" ;;
+    esac
+    prev="$arg"
+done
+printf 'dockerfile %s %s\n' "$dockerfile" "$target" >> "$EVENTS"
+if [ "$dockerfile" = Dockerfile.release ]; then
+    # Marker toolchain build. MARKER_BUILD=fail models a release whose yarac /
+    # libyara.a are not linked into its strixd (release-marker-toolchain.sh exits
+    # non-zero); legacy models a release without marker support (no tree).
+    [ "${MARKER_BUILD:-ok}" != fail ] || exit 61
+    [ "${FAIL_BUILD:-0}" -eq 0 ] || exit 41
+    case "$target" in
+        rules-verifier)
+            while [ "$#" -gt 0 ]; do
+                [ "$1" != --iidfile ] || printf 'sha256:markerverifier\n' > "$2"
+                shift
+            done
+            exit 0 ;;
+        rules-export)
+            while [ "$#" -gt 0 ]; do
+                if [ "$1" = --output ]; then
+                    dir="${2#type=local,dest=}"
+                    dd if=/dev/zero of="$dir/compiled.yac" bs=1024 count=1536 2>/dev/null
+                    printf '4.5.2\n' > "$dir/libyara.version"
+                    printf 'local' > "$dir/local.yac"
+                    printf '{"fixture":"sources"}\n' > "$dir/sources.json"
+                    if [ "${MARKER_BUILD:-ok}" != legacy ]; then
+                        mkdir -p "$dir/compiler-inputs/main/objects" "$dir/marker-artifact/abi"
+                        printf 'index' > "$dir/compiler-inputs/index.json"
+                        printf 'graph' > "$dir/compiler-inputs/main/objects/aa"
+                        printf 'marker' > "$dir/marker-artifact/binding.json"
+                        printf 'fixture-yarac' > "$dir/marker-artifact/abi/yarac"
+                        printf 'fixture-libyara' > "$dir/marker-artifact/abi/libyara.a"
+                        [ -z "${MARKER_SYMLINK:-}" ] || ln -s /etc/passwd "$dir/compiler-inputs/escape"
+                    fi
+                    shift
+                fi
+                shift
+            done
+            exit 0 ;;
+    esac
 fi
 [ "${FAIL_BUILD:-0}" -eq 0 ] || exit 41
 while [ "$#" -gt 0 ]; do
@@ -80,6 +150,9 @@ cat >"$test_root/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${2:-}" in
+    repos/*/releases/latest)
+        printf '%s\n' "${LATEST_TAG-}"
+        ;;
     create)
         printf 'create\n' >> "$EVENTS"
         [ "${FAIL_CREATE:-0}" -eq 0 ] || exit 49
@@ -88,6 +161,9 @@ case "${2:-}" in
         printf 'upload %s\n' "$(basename "${!#}")" >> "$EVENTS"
         if [[ "${!#}" == */compiled.yac.manifest.json ]]; then
             cp "${!#}" "${EVENTS}.manifest"
+        fi
+        if [[ "${!#}" == */marker-tree.tar.gz ]]; then
+            cp "${!#}" "${EVENTS}.tree"
         fi
         if [ "${SIGNAL_PUBLISH:-0}" -eq 1 ]; then
             kill -TERM "$(cat "${EVENTS}.signal-target")"
@@ -154,6 +230,9 @@ while [ "$#" -gt 0 ]; do
 done
 [ "${FAIL_FINAL_SIGN:-0}" -eq 0 ] || [[ "$manifest" != */compiled.yac.manifest.json ]] || exit 3
 [ -n "$out" ] || { printf 'rulessign: -out missing\n' >&2; exit 2; }
+if [[ "$manifest" == */compiled.yac.manifest.json ]]; then
+    printf 'signed-sha %s\n' "$(sha256sum "$manifest" | cut -d ' ' -f1)" >> "$EVENTS"
+fi
 printf 'ZmFrZS1zaWduYXR1cmUtZml4dHVyZQ==\n' > "$out"
 SIGNER
 chmod +x "$out"
@@ -412,7 +491,7 @@ run_script_with_output() {  # run_script_with_output <stdout> <stderr> <env-assi
     local stdout="$1" stderr="$2" runner_pid
     shift 2
     : >"$EVENTS"
-    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target" "${EVENTS}.manifest" "${EVENTS}.upload-n"
+    rm -f "${EVENTS}.attempts" "${EVENTS}.receipt-attempts" "${EVENTS}.signal-target" "${EVENTS}.manifest" "${EVENTS}.upload-n" "${EVENTS}.tree"
     (
         if [ "$stdout" = "$stderr" ]; then
             exec >"$stdout" 2>&1
@@ -1046,3 +1125,150 @@ assert_unreadable_build_env_is_a_missing_value
 echo 'PASS: the signing key resolves from the environment or the build-env base64 fallback without leaking'
 echo 'PASS: unsigned or failed-signing publication is refused before any asset upload'
 echo 'PASS: terminal JSON receipts distinguish build/publish/verify; publish order and verifier contract hold'
+
+# ---------------------------------------------------------------------------
+# Marker tree publication (M3). The fake docker serves a release-toolchain
+# export; everything else (pack, manifest field, ordering, staged verification)
+# is the real publisher code.
+# ---------------------------------------------------------------------------
+manifest_has_marker() { "$REAL_JQ" -e 'has("marker")' "${EVENTS}.manifest" >/dev/null; }
+
+tree_members() {  # tree_members <tar.gz>: type<TAB>name per member, sorted as stored
+    python3 - "$1" <<'PY'
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as tar:
+    for m in tar.getmembers():
+        print(("d" if m.isdir() else "f" if m.isreg() else "?") + "\t" + m.name)
+PY
+}
+
+assert_marker_published() {
+    local actual name=marker-published
+    run_script LATEST_TAG=v1.2.3
+    [ "$actual" -eq 0 ] || { cat "$test_root/log" >&2; assert_event "${name}: exit ${actual}, want 0"; }
+    assert_receipt verify success
+    manifest_has_marker || assert_event "${name}: manifest has no marker field"
+    local tree_sha manifest_sha
+    tree_sha="$(sha256sum "${EVENTS}.tree" | cut -d ' ' -f1)"
+    # shellcheck disable=SC2016  # jq program, not shell expansion
+    "$REAL_JQ" -e --arg sha "$tree_sha" --argjson size "$(stat -c %s "${EVENTS}.tree")" \
+        --arg lib "$(printf 'fixture-libyara' | sha256sum | cut -d ' ' -f1)" \
+        --arg comp "$(printf 'fixture-yarac' | sha256sum | cut -d ' ' -f1)" \
+        --arg main "$(sha256sum <(dd if=/dev/zero bs=1024 count=1536 2>/dev/null) | cut -d ' ' -f1)" \
+        '.marker == {asset:"marker-tree.tar.gz", sha256:$sha, size:$size, libyara_sha256:$lib, compiler_sha256:$comp, main_sha256:$main} and (.checksum == "sha256:" + $main)' \
+        "${EVENTS}.manifest" >/dev/null || assert_event "${name}: marker field does not describe the uploaded tree and toolchain"
+    # The signature covers the manifest that carries the marker field.
+    manifest_sha="$(sha256sum "${EVENTS}.manifest" | cut -d ' ' -f1)"
+    grep -Fx "signed-sha ${manifest_sha}" "$EVENTS" >/dev/null || assert_event "${name}: the signed manifest bytes differ from the uploaded manifest"
+    # Exact archive contract: only the allowed top-level names, dirs and regular files.
+    [ -z "$(tree_members "${EVENTS}.tree" | grep -vE '^(d|f)	(compiler-inputs|marker-artifact|libyara\.version|sources\.json)(/|$)' || true)" ] \
+        || assert_event "${name}: archive holds entries outside the contract set"
+    [ "$(tree_members "${EVENTS}.tree" | grep -c '^?' || true)" -eq 0 ] || assert_event "${name}: archive holds non-regular members"
+    [ "$(tree_members "${EVENTS}.tree" | tr '\t' ' ' | tr '\n' ',')" = 'd compiler-inputs,f compiler-inputs/index.json,d compiler-inputs/main,d compiler-inputs/main/objects,f compiler-inputs/main/objects/aa,f libyara.version,d marker-artifact,d marker-artifact/abi,f marker-artifact/abi/libyara.a,f marker-artifact/abi/yarac,f marker-artifact/binding.json,f sources.json,' ] \
+        || { tree_members "${EVENTS}.tree" >&2; assert_event "${name}: archive member list differs from the contract tree"; }
+    # Upload order: tree strictly before the signature and the manifest; the
+    # staged-candidate verification precedes every upload.
+    local -a order=()
+    local event
+    while IFS= read -r event; do
+        case "$event" in
+            stage-verify\ *|upload\ *|verify\ *) order+=("${event%% *} ${event#* }") ;;
+        esac
+    done <"$EVENTS"
+    [ "${order[0]%% *}" = stage-verify ] || assert_event "${name}: staged verification did not run first"
+    [ "${order[1]}" = 'upload compiled.yac' ] || assert_event "${name}: compiled.yac not uploaded right after verification"
+    [ "${order[2]}" = 'upload marker-tree.tar.gz' ] || assert_event "${name}: marker tree not uploaded before sig/manifest"
+    [ "${order[3]}" = 'upload compiled.yac.manifest.json.sig' ] || assert_event "${name}: signature not uploaded after the tree"
+    [ "${order[4]}" = 'upload compiled.yac.manifest.json' ] || assert_event "${name}: manifest not uploaded last"
+    [ "${order[5]%% *}" = verify ] || assert_event "${name}: post-publish verification missing"
+    grep -Fx 'stage-fetch ok' "$EVENTS" >/dev/null || assert_event "${name}: the staged candidate was not served intact"
+    grep -E '^stage-verify .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: staged verification lacks -require-marker"
+    grep -E '^stage-verify .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: staged verification did not use the release strixd image"
+    grep -E '^verify .*sha256:markerverifier .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: post-publish verification is not marker-gated"
+    grep -Fx 'dockerfile Dockerfile.release rules-export' "$EVENTS" >/dev/null || assert_event "${name}: bundle not built with the release toolchain"
+    ! grep -Fx 'dockerfile Dockerfile rules-export' "$EVENTS" >/dev/null || assert_event "${name}: the unmarked build ran despite a marker export"
+    # Same fixture twice -> byte-identical tree asset.
+    cp "${EVENTS}.tree" "$test_root/tree-first"
+    run_script LATEST_TAG=v1.2.3
+    cmp -s "$test_root/tree-first" "${EVENTS}.tree" || assert_event "${name}: two publishes of one tree differ"
+}
+assert_marker_published
+
+# Without a marker field every pre-existing guarantee is unchanged.
+assert_marker_skipped() {  # assert_marker_skipped <case> <env-assignment>...
+    local name="$1" actual
+    shift
+    run_script "$@"
+    [ "$actual" -eq 0 ] || { cat "$test_root/log" >&2; assert_event "${name}: exit ${actual}, want 0"; }
+    assert_receipt verify success
+    ! manifest_has_marker || assert_event "${name}: manifest carries a marker field"
+    [ ! -e "${EVENTS}.tree" ] || assert_event "${name}: a marker tree was uploaded"
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event "${name}: upload count"
+    [ "$(grep -c '^stage-verify ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: staged verification ran without a marker"
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event "${name}: verifier count"
+    ! grep -E '^verify .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: unmarked publish gated on a marker"
+    grep -Fx "dockerfile ${EXPECT_BUILD:-Dockerfile rules-export}" "$EVENTS" >/dev/null || assert_event "${name}: expected bundle build did not run"
+    assert_verifier_contract "$name" 1
+    assert_success_event_order "$name" 1
+    local signed manifest_sha
+    manifest_sha="$(sha256sum "${EVENTS}.manifest" | cut -d ' ' -f1)"
+    signed="$(grep '^signed-sha ' "$EVENTS" | tail -n1)"
+    [ "$signed" = "signed-sha ${manifest_sha}" ] || assert_event "${name}: signature does not cover the uploaded manifest"
+}
+# Toolchain / libyara hashes do not match the release strixd (the toolchain
+# build exits non-zero), a legacy release without marker support, a tree the
+# packer refuses (symlink), an unusable tag, and the operator opt-out.
+assert_marker_skipped toolchain-mismatch LATEST_TAG=v1.2.3 MARKER_BUILD=fail
+assert_marker_skipped legacy-release LATEST_TAG=v1.2.3 MARKER_BUILD=legacy
+# The bundle itself is still the release-toolchain build; only the field is dropped.
+EXPECT_BUILD='Dockerfile.release rules-export' assert_marker_skipped unpackable-tree LATEST_TAG=v1.2.3 MARKER_SYMLINK=1
+assert_marker_skipped no-latest-release LATEST_TAG=
+assert_marker_skipped malformed-tag 'LATEST_TAG=v1;rm -rf'
+assert_marker_skipped operator-off LATEST_TAG=v1.2.3 MARKER_RELEASE_TAG=off
+
+# -require-marker verification failure: nothing new is published.
+assert_marker_verify_failure_publishes_nothing() {
+    local actual name=marker-verify-failure
+    run_script LATEST_TAG=v1.2.3 FAIL_MARKER_VERIFY=1
+    [ "$actual" -eq 1 ] || assert_event "${name}: exit ${actual}, want 1"
+    assert_receipt verify failed
+    assert_notification "$name" verify failed
+    grep -F 'nothing was published' "$EVENTS" >/dev/null || assert_event "${name}: failure does not say nothing was updated"
+    grep -E '^stage-verify .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: staged verification did not run"
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: assets were uploaded after a failed verification"
+    [ "$(grep -c '^create$' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: a release was created after a failed verification"
+    [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: post-publish verifier ran"
+}
+assert_marker_verify_failure_publishes_nothing
+
+# The pack is deterministic regardless of file mtimes and creation order, and a
+# tree the client would refuse (symlink) or that lacks a required entry is
+# refused by the packer.
+assert_pack_deterministic_and_strict() {
+    local tree="$test_root/packtree" a="$test_root/pack-a.tar.gz" b="$test_root/pack-b.tar.gz" pack
+    pack="$test_root/sandbox/project/docker/pack-marker-tree.py"
+    mkdir -p "$tree/compiler-inputs/main" "$tree/marker-artifact/abi"
+    printf 'x' >"$tree/compiler-inputs/main/z"; printf 'y' >"$tree/compiler-inputs/a"
+    printf 'z' >"$tree/marker-artifact/abi/yarac"; printf '4.5.2\n' >"$tree/libyara.version"
+    printf 'ignored' >"$tree/compiled.yac"
+    python3 "$pack" "$tree" "$a" || assert_event 'pack: valid tree refused'
+    touch -d '2001-01-01' "$tree/compiler-inputs/a" "$tree/libyara.version"
+    chmod 600 "$tree/marker-artifact/abi/yarac"
+    python3 "$pack" "$tree" "$b" || assert_event 'pack: second pack refused'
+    cmp -s "$a" "$b" || assert_event 'pack: archives differ across mtime/mode changes'
+    ! tree_members "$a" | grep -q compiled.yac || assert_event 'pack: archived a file outside the contract set'
+    # gzip header carries no name and a zero mtime.
+    [ "$(head -c 8 "$a" | od -An -tx1 | tr -d ' \n' | cut -c7-16)" = '0000000000' ] \
+        || assert_event 'pack: gzip header carries a name flag or timestamp'
+    ln -s /etc/passwd "$tree/compiler-inputs/link"
+    ! python3 "$pack" "$tree" "$test_root/pack-c.tar.gz" 2>"$test_root/pack.err" || assert_event 'pack: symlink accepted'
+    grep -F 'not a regular file' "$test_root/pack.err" >/dev/null || assert_event 'pack: symlink diagnostic'
+    rm "$tree/compiler-inputs/link"; rm -rf "$tree/marker-artifact"
+    ! python3 "$pack" "$tree" "$test_root/pack-d.tar.gz" 2>"$test_root/pack.err" || assert_event 'pack: missing marker-artifact accepted'
+    grep -F 'missing required entry' "$test_root/pack.err" >/dev/null || assert_event 'pack: missing-entry diagnostic'
+}
+assert_pack_deterministic_and_strict
+
+echo 'PASS: marker tree is published tree-first with a signed marker field, only after staged -require-marker verification; every skip leaves publication unchanged'

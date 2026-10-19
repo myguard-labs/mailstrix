@@ -31,7 +31,12 @@ func cmdFetchRules(args []string) int {
 	allowDrop := fs.Bool("allow-count-drop", cfg.AllowRulesCountDrop, "install a bundle with zero rules or under half the current rule count (MAILSTRIX_RULES_ALLOW_COUNT_DROP)")
 	verifyOnly := fs.Bool("verify-only", false, "verify into a fresh temporary cache and remove it; never touch the configured cache")
 	expectedVersion := fs.Int("expected-version", 0, "with -verify-only, require this published version")
+	requireMarker := fs.Bool("require-marker", false, "with -verify-only, fail unless the published marker tree verifies and loads against this binary")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *requireMarker && !*verifyOnly {
+		fmt.Fprintln(os.Stderr, "require-marker requires verify-only")
 		return 2
 	}
 	if *expectedVersion < 0 || (*expectedVersion > 0 && !*verifyOnly) {
@@ -113,6 +118,12 @@ func cmdFetchRules(args []string) int {
 		}
 		fmt.Printf("verify-rules: version=%d libyara=%s size=%d checksum=%s loadable=true\n", m.Version, m.Libyara, m.Size, m.Checksum)
 		fmt.Printf("verify-rules: marker=%s\n", res.Marker)
+		if *requireMarker {
+			if err := requireMarkerInstalled(res.Marker); err != nil {
+				fmt.Fprintln(os.Stderr, "verify-rules:", err)
+				return 2
+			}
+		}
 		return 0
 	}
 	if res.Updated {
@@ -122,6 +133,18 @@ func cmdFetchRules(args []string) int {
 		fmt.Printf("fetch-rules: %s\n", res.Reason)
 	}
 	return 0
+}
+
+// requireMarkerInstalled is the -require-marker gate: only a marker tree that
+// was downloaded, hash-checked, extracted and loaded by this binary's loader
+// counts. Every other outcome (no field, disabled, wrong toolchain, invalid
+// field or tree) is a failure, so a publisher can refuse a candidate whose tree
+// would silently fall back to the full ruleset on clients.
+func requireMarkerInstalled(status string) error {
+	if status != mailstrix.MarkerStatusInstalled {
+		return fmt.Errorf("marker tree required but status is %q", status)
+	}
+	return nil
 }
 
 func firstNonEmpty(vals ...string) string {
