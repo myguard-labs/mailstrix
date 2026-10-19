@@ -56,6 +56,8 @@ type RulesUpdater struct {
 	// rules-manifest signing keys, resolved once at construction so a
 	// malformed key fails startup instead of every poll.
 	extraSigningKeys []ed25519.PublicKey
+	// markersOff is MAILSTRIX_RULES_MARKERS=off, resolved at construction.
+	markersOff bool
 }
 
 // SetRulesUpdater connects update telemetry before the server starts listening.
@@ -80,7 +82,11 @@ func NewRulesUpdater(cfg *Config, scanner *Scanner, libyara string, flush func()
 	if err != nil {
 		return nil, err
 	}
-	u := &RulesUpdater{cfg: cfg, extraSigningKeys: extra, scanner: scanner, enabled: cfg.RulesPollInterval > 0, libyara: libyara, flush: flush, client: &http.Client{}}
+	markersOff, err := parseRulesMarkersMode(cfg.RulesMarkers)
+	if err != nil {
+		return nil, err
+	}
+	u := &RulesUpdater{cfg: cfg, extraSigningKeys: extra, markersOff: markersOff, scanner: scanner, enabled: cfg.RulesPollInterval > 0, libyara: libyara, flush: flush, client: &http.Client{}}
 	u.state.Enabled = u.enabled
 	if loaded := scanner.loadedManifest.Load(); loaded != nil {
 		u.state.CachedVersion, u.state.LoadedVersion = loaded.Version, loaded.Version
@@ -153,7 +159,7 @@ func (u *RulesUpdater) Poll(ctx context.Context) error {
 	if u.cfg.AllowRulesCountDrop {
 		fetchCtx = WithAllowRuleCountDrop(ctx)
 	}
-	res, err := fetchRules(fetchCtx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, fetchOptions{allowHTTP: u.cfg.RulesAllowHTTP, minimumVersion: minimumVersion, liveCount: int(u.scanner.RuleCount()), reload: reload, extraSigningKeys: u.extraSigningKeys})
+	res, err := fetchRules(fetchCtx, u.cfg.RulesURL, u.scanner.cacheDir, u.libyara, u.client, fetchOptions{allowHTTP: u.cfg.RulesAllowHTTP, minimumVersion: minimumVersion, liveCount: int(u.scanner.RuleCount()), reload: reload, extraSigningKeys: u.extraSigningKeys, markersOff: u.markersOff, logf: u.scanner.logf})
 	observedCached, observedLoaded := res.NewVersion, 0
 	if res.Updated {
 		// fetchRules returns only after the same locked transaction installed and

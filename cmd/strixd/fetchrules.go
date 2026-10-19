@@ -83,7 +83,12 @@ func cmdFetchRules(args []string) int {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
 		return 2
 	}
-	res, err := mailstrix.FetchRulesWithExtraKeys(ctx, *url, *cacheDir, libyaraVersion, hc, *allowHTTP, extraKeys)
+	// MAILSTRIX_RULES_MARKERS=auto|off; an invalid value aborts before any request.
+	if err := cfg.ValidateRulesMarkers(); err != nil {
+		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
+		return 2
+	}
+	res, err := mailstrix.FetchRulesWithOptions(ctx, *url, *cacheDir, libyaraVersion, hc, mailstrix.FetchRulesOptions{AllowHTTP: *allowHTTP, ExtraSigningKeys: extraKeys, Markers: cfg.RulesMarkers})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
 		return 2
@@ -107,10 +112,12 @@ func cmdFetchRules(args []string) int {
 			return 2
 		}
 		fmt.Printf("verify-rules: version=%d libyara=%s size=%d checksum=%s loadable=true\n", m.Version, m.Libyara, m.Size, m.Checksum)
+		fmt.Printf("verify-rules: marker=%s\n", res.Marker)
 		return 0
 	}
 	if res.Updated {
 		fmt.Printf("fetch-rules: %s — restart or SIGHUP strixd to load the new bundle\n", res.Reason)
+		fmt.Printf("fetch-rules: marker tree %s\n", res.Marker)
 	} else {
 		fmt.Printf("fetch-rules: %s\n", res.Reason)
 	}
