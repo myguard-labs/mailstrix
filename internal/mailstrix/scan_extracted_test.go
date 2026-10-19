@@ -175,6 +175,9 @@ func TestExtractScanScanOneError(t *testing.T) {
 	var logged []string
 	s.logf = func(f string, a ...any) { logged = append(logged, f) }
 	x.deadline = time.Time{}
+	// Override the load-insensitive budget newExtractScan sets (10 min): this test
+	// needs its own 1s per-stream budget, so changing newExtractScan's budget does
+	// not alter this test's timeout.
 	s.scanTimeout = time.Second
 	b := []byte("0123456789abcdef")
 	if x.scan(b, streamDedupKey(b), false) {

@@ -79,8 +79,9 @@ func newScannerBudget(t *testing.T, dir string, scanTimeout time.Duration) *Scan
 
 // TestScanNoMBazaarDigestPath (PERF-34) pins the refactor where the cryptographic
 // SHA256 of the body is computed LAZILY inside the MalwareBazaar branch instead of
-// by every caller. newScanner wires no MBazaarKey, so s.mbazaar is nil and the
-// digest branch is never entered: Scan must still run the local rules to a verdict
+// by every caller. Neither newScannerBudget nor newScanner (which delegates to it)
+// wires an MBazaarKey, so s.mbazaar is nil and the digest branch is never entered:
+// Scan must still run the local rules to a verdict
 // (EICAR fires) and must not panic or error on the now-internal-digest path. The
 // whole suite already exercises this nil-mbazaar path; this test names the contract
 // so a future change that reintroduces an eager per-scan hash is caught here.
@@ -457,7 +458,7 @@ func TestScanMatchesMacroViaDecompressedStream(t *testing.T) {
 // the fix every extracted stream scanned with VBA=true, so the archive member
 // falsely satisfied the gate (a false positive).
 func TestScanVBAGatedOnlyOnMacroStream(t *testing.T) {
-	// strip the console import line — newScanner compiles a single rule file and
+	// strip the console import line — newScannerBudget compiles a single rule file and
 	// console may be unavailable; keep the rule self-contained.
 	rule := `rule VBA_Gated { strings: $kw = "Attribute VB_Name" condition: VBA and $kw }`
 	s := newScannerBudget(t, writeRules(t, rule), loadInsensitiveScanTimeout)
@@ -836,7 +837,7 @@ func TestStreamDeduplication(t *testing.T) {
 // set must be identical to the plain dedup test — the per-stream keys are computed
 // once and reused for both the scan-dedup and feed-dedup sets, so a stale or
 // mis-indexed key would either drop a real stream or skip a unique one and change
-// the output. (Feeds are disabled here — newScanner sets no feed keys — so the
+// the output. (Feeds are disabled here — newScannerBudget sets no feed keys — so the
 // feed loop runs its dedup walk over the precomputed keys without external I/O.)
 func TestPerStreamKeyReuse(t *testing.T) {
 	buf, err := os.ReadFile(filepath.Join("testdata", "dup_vba_streams.xlsm"))

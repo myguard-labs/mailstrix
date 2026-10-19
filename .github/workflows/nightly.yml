@@ -83,9 +83,38 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
       arches: '["amd64"]'
 
-  publish:
-    needs: [plan, gate, binaries]
+  # Prove Dockerfile.release turns these exact nightly binaries and marker
+  # toolchain into an image whose strixd loads the marker artifact, before the
+  # assets are published. Same proof as release.yml's marker-image job.
+  marker-image:
+    needs: [plan, binaries]
     if: needs.binaries.result == 'success'
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: download amd64 binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: bin-amd64
+          path: out/
+
+      - name: nightly image loads markers (amd64)
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          MAILSTRIX_RELEASE_MARKER_RUN="nightly-${RUN_ID}-amd64" \
+            bash ci/release_marker_image_test.sh amd64 out
+
+  publish:
+    needs: [plan, gate, binaries, marker-image]
+    if: needs.binaries.result == 'success' && needs.marker-image.result == 'success'
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 30
     permissions:
