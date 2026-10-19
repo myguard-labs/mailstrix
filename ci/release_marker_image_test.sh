@@ -5,7 +5,8 @@
 # architecture's release assets as build-binaries.yml names them
 # (strixd-linux-ARCH, strix-scan-linux-ARCH, strix-milter-linux-ARCH,
 # yarac-linux-ARCH, libyara-linux-ARCH.a). The real Dockerfile.release is built
-# with only its network fetch stage replaced by those local files, then:
+# through its RELEASE_SOURCE=local path (the fetch stage reads those files from
+# the `local-artifacts` build context instead of downloading), then:
 #   positive: before strixd logs "listening on" (the initial rule load,
 #             including the marker step, is complete), it has logged
 #             "PERF-18: marker artifact loaded". A per-root "marker artifact
@@ -39,48 +40,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Stage the fetch stage's /out layout from local release assets.
+# Stage the local-artifacts build context from the release assets.
 stage() { # stage DEST
-	mkdir -p "$1/bin" "$1/marker"
-	for b in strixd strix-scan strix-milter; do
-		if [ -f "$assets/${b}-linux-${arch}" ]; then
-			install -m 0755 "$assets/${b}-linux-${arch}" "$1/bin/${b}"
-		fi
-	done
-	[ -x "$1/bin/strixd" ] || {
-		echo "FAIL: $assets/strixd-linux-${arch} missing" >&2
-		exit 1
-	}
-	install -m 0755 "$assets/yarac-linux-${arch}" "$1/marker/yarac"
-	install -m 0644 "$assets/libyara-linux-${arch}.a" "$1/marker/libyara.a"
-	cp "$here/NOTICE" "$1/NOTICE"
+	mkdir -p "$1"
+	cp -p "$assets"/*-linux-"${arch}"* "$1/"
 }
-
-# The real Dockerfile.release with only the fetch stage swapped for a local
-# named build context; every later stage is byte-for-byte the shipped text.
-awk '
-	/^FROM .* AS fetch$/ { print "FROM scratch AS fetch"; print "COPY --from=release / /out/"; skip = 1; next }
-	skip && /^FROM / { skip = 0 }
-	!skip { print }
-' "$here/docker/Dockerfile.release" >"$tmp/Dockerfile.release"
-grep -q '^COPY --from=release / /out/$' "$tmp/Dockerfile.release" ||
-	{
-		echo "FAIL: fetch stage not found in Dockerfile.release" >&2
-		exit 1
-	}
 
 build() { # build CONTEXT_DIR LOG
 	docker buildx build --load --platform "linux/${arch}" \
 		--label "$label" -t "$image" \
 		--build-arg VERSION=release-marker-ci --build-arg LOCAL_ONLY=1 \
-		--build-context "release=$1" \
-		-f "$tmp/Dockerfile.release" "$here" >"$2" 2>&1
+		--build-arg RELEASE_SOURCE=local \
+		--build-context "local-artifacts=$1" \
+		-f "$here/docker/Dockerfile.release" "$here" >"$2" 2>&1
 }
 
 # ---- negative: a toolchain not linked into strixd must fail the build -------
 for f in yarac libyara.a; do
 	stage "$tmp/bad-$f"
-	printf 'x' >>"$tmp/bad-$f/marker/$f"
+	case "$f" in
+	yarac) asset="yarac-linux-${arch}" ;;
+	*) asset="libyara-linux-${arch}.a" ;;
+	esac
+	printf 'x' >>"$tmp/bad-$f/$asset"
 	if build "$tmp/bad-$f" "$tmp/bad-$f.log"; then
 		echo "FAIL: mismatched $f built a release image" >&2
 		exit 1

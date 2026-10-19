@@ -112,7 +112,9 @@ RULES = {
         "ci/ci_release_tag_test.py",
         "ci/ci_release_marker_toolchain_test.py",
         "ci/release_marker_image_test.sh",
+        "ci/ci_release_local_artifacts_test.py",
         "docker/release-marker-toolchain.sh",
+        "docker/release-local-artifacts.sh",
     ],
     "scope": [
         "tools/testscope/*",

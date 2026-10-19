@@ -182,7 +182,7 @@ def run_commands(
 class ReleaseTagContract(unittest.TestCase):
     def test_release_tag_is_a_fetch_stage_build_arg(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
-        fetch = source.split(" AS fetch\n", 1)[1].split("\nFROM ", 1)[0]
+        fetch = source.split(" AS fetch-download\n", 1)[1].split("\nFROM ", 1)[0]
         self.assertRegex(fetch, r"(?m)^ARG RELEASE_TAG$")
         self.assertLess(fetch.index("ARG RELEASE_TAG"), fetch.index("RUN test -n"))
 
@@ -288,7 +288,7 @@ class ReleaseTagContract(unittest.TestCase):
 
     def test_fetch_and_rules_cache_tokens_are_separate(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
-        fetch = source.split(" AS fetch\n", 1)[1].split("\nFROM ", 1)[0]
+        fetch = source.split(" AS fetch-download\n", 1)[1].split("\nFROM ", 1)[0]
         rules = source.split(" AS rules\n", 1)[1].split("\nFROM ", 1)[0]
         self.assertRegex(fetch, r"(?m)^ARG RELEASE_CACHEBUST$")
         self.assertNotRegex(fetch, r"(?im)^[ \t]*ARG[ \t]+CACHEBUST(?=[ \t=]|$)")

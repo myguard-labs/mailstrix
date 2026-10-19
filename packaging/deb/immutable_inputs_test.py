@@ -885,6 +885,7 @@ def _nfpm_block_result(block: str) -> tuple[int, int, list[str]]:
         for line in block.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
+
     downloads += sum("goreleaser/nfpm/" in line.casefold() for line in lines)
     for index, line in enumerate(lines):
         if "goreleaser/nfpm/" not in line.casefold():
@@ -1095,9 +1096,114 @@ class PinFixtures(unittest.TestCase):
         self.assertIn("nfpm download", release_errors("\n".join(lines))[0])
 
 
+_SCRIPT_SUFFIXES = frozenset(
+    {".sh", ".bash", ".yml", ".yaml", ".hcl", ".json", ".mk", ".env"}
+)
+_SCRIPT_NAMES = frozenset({"Makefile", "justfile", "Justfile"})
+
+
+def _strip_trailing_comment(line: str) -> str:
+    """Drop a shell trailing comment (conservative: any whitespace-hash)."""
+    return re.sub(r"\s#.*$", "", line)
+
+
+def _active_script_lines(path: Path, strip_comments: bool = True) -> list[str]:
+    """Return non-comment commands with shell continuations joined.
+
+    Chained commands (&&, ||, ;, |) are separate entries. Comments are blanked
+    before continuations are joined: a comment ending in a backslash does not
+    continue in shell, and a continuation absorbs only the next physical line.
+    """
+    physical = [
+        "" if line.lstrip().startswith("#") else line
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+    ]
+    if strip_comments:
+        physical = [_strip_trailing_comment(line) for line in physical]
+    text = re.sub(r"[ \t]*\\\n[ \t]*", " ", "\n".join(physical))
+    commands = re.split(r"&&|\|\||;|\||\n", text)
+    return [command.strip() for command in commands if command.strip()]
+
+
+def _release_source_values_literal(root: Path) -> bool:
+    """Require every in-repo RELEASE_SOURCE mention to be a reviewed literal.
+
+    Comments are not skipped and the key may be quoted: any occurrence that is
+    not a plain `RELEASE_SOURCE=download|local` style assignment (including a
+    bare `--build-arg RELEASE_SOURCE`) rejects the selector exemption.
+    """
+    for path in _candidate_files(root):
+        if path.suffix not in _SCRIPT_SUFFIXES and path.name not in _SCRIPT_NAMES:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in re.finditer(r"RELEASE_SOURCE", text):
+            tail = text[match.end() :]
+            if not re.match(
+                r"[\"']?\s*[=:]\s*[\"']?(?:download|local)(?=[\"'\s,;)}\]\\]|$)", tail
+            ):
+                return False
+    return True
+
+
+def _release_context_producer(root: Path) -> bool:
+    """Require every active Dockerfile.release build to supply local-artifacts.
+
+    The raw mention count (comments kept inside lines, so a quoted # cannot
+    hide a build) must equal the count of mentions in builds verified to carry
+    the named context.
+    """
+    producer = root / "ci/release_marker_image_test.sh"
+    if not producer.is_file():
+        return False
+    raw = sum(
+        line.count("Dockerfile.release")
+        for line in _active_script_lines(producer, strip_comments=False)
+    )
+    verified = sum(
+        line.count("Dockerfile.release")
+        for line in _active_script_lines(producer)
+        if re.search(r"\bbuild(?:x build)?\b", line)
+        and re.search(r"--build-context[ =]\"?local-artifacts=\S+", line)
+    )
+    return raw > 0 and raw == verified
+
+
+def _release_local_tokens(root: Path, text: str) -> frozenset[str]:
+    """Return the repository-internal FROM/COPY tokens of Dockerfile.release.
+
+    Two exact tokens are allowed, each only with its proof. The source selector
+    `fetch-${RELEASE_SOURCE}` needs both literal fetch stages declared, a
+    RELEASE_SOURCE default naming one of them, and every in-repo
+    RELEASE_SOURCE assignment limited to those two literals (a build-arg
+    override is otherwise an unpinned external base). The `local-artifacts`
+    named build context needs every active Dockerfile.release build in the
+    repository producer script to supply it. Every other external base,
+    including an unpinned FROM or COPY --from image, still fails.
+    """
+    tokens: set[str] = set()
+    declarations = [
+        line.strip()
+        for line in re.findall(r"(?mi)^\s*ARG\b.*\bRELEASE_SOURCE\b.*$", text)
+    ]
+    if (
+        declarations in (["ARG RELEASE_SOURCE=download"], ["ARG RELEASE_SOURCE=local"])
+        and re.search(r"(?mi)^FROM\s+\S+\s+AS\s+fetch-download$", text)
+        and re.search(r"(?mi)^FROM\s+\S+\s+AS\s+fetch-local$", text)
+        and re.search(r"(?m)^FROM fetch-\$\{RELEASE_SOURCE\} AS fetch$", text)
+        and _release_source_values_literal(root)
+    ):
+        tokens.add("fetch-${RELEASE_SOURCE}")
+    if _release_context_producer(root):
+        tokens.add("local-artifacts")
+    return frozenset(tokens)
+
+
 def _local_images_for(root: Path, path: Path, text: str) -> frozenset[str]:
     """Return the one repository-produced image allowed by the integration test."""
-    if path.relative_to(root).as_posix() != "contrib/postfix/Dockerfile.integration":
+    relative = path.relative_to(root).as_posix()
+    if relative == "docker/Dockerfile.release":
+        return _release_local_tokens(root, text)
+    if relative != "contrib/postfix/Dockerfile.integration":
         return frozenset()
     ci_workflow = root / ".github/workflows/ci.yml"
     if not ci_workflow.is_file():

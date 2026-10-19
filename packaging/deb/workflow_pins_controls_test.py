@@ -725,6 +725,269 @@ class TestWorkflowControls(unittest.TestCase):
             result = self.gate()
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def release_fixture(self, extra: str = "", producer: bool = True) -> None:
+        digest = "@sha256:" + "1" * 64
+        self.write(
+            "docker/Dockerfile.release",
+            f"ARG YARA_VERSION={immutable_inputs.PinFixtures.yara_version}\n"
+            + immutable_inputs.PinFixtures.yara
+            + "\nARG RELEASE_SOURCE=download\n"
+            + f"FROM example.test/base:1{digest} AS fetch-download\n"
+            + f"FROM example.test/base:1{digest} AS fetch-local\n"
+            + "COPY --from=local-artifacts / /in/\n"
+            + "FROM fetch-${RELEASE_SOURCE} AS fetch\n"
+            + extra,
+        )
+        if producer:
+            self.write(
+                "ci/release_marker_image_test.sh",
+                "docker buildx build --build-arg RELEASE_SOURCE=local \\\n"
+                '  --build-context "local-artifacts=$1" \\\n'
+                '  -f "$here/docker/Dockerfile.release" "$here"\n',
+            )
+
+    def test_release_internal_stage_and_context(self) -> None:
+        self.release_fixture()
+        result = self.gate()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_release_selector_requires_producer_for_context(self) -> None:
+        self.release_fixture(producer=False)
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_unpinned_external_base_still_fails(self) -> None:
+        self.release_fixture("FROM alpine AS extra\n")
+        self.reject("Docker external base must have a sha256 digest")
+
+    def test_release_other_arg_base_still_fails(self) -> None:
+        self.release_fixture("ARG X=alpine\nFROM ${X} AS extra\n")
+        self.reject("use a literal token")
+
+    def test_release_unpinned_copy_from_image_still_fails(self) -> None:
+        self.release_fixture("COPY --from=some/image:tag /a /b\n")
+        self.reject("use a literal token: some/image:tag")
+
+    def test_release_selector_needs_both_literal_stages(self) -> None:
+        self.release_fixture()
+        path = self.root / "docker/Dockerfile.release"
+        self.write(
+            "docker/Dockerfile.release",
+            path.read_text(encoding="utf-8").replace("AS fetch-local", "AS other"),
+        )
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_selector_default_must_name_a_stage(self) -> None:
+        self.release_fixture()
+        path = self.root / "docker/Dockerfile.release"
+        self.write(
+            "docker/Dockerfile.release",
+            path.read_text(encoding="utf-8").replace(
+                "RELEASE_SOURCE=download", "RELEASE_SOURCE=alpine"
+            ),
+        )
+        self.reject("use a literal token: fetch-alpine")
+
+    def test_release_bogus_source_override_rejected(self) -> None:
+        self.release_fixture()
+        self.write(
+            "ci/other.sh",
+            "docker buildx build --build-arg RELEASE_SOURCE=alpine "
+            "-f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_variable_source_override_rejected(self) -> None:
+        self.release_fixture()
+        self.write(
+            ".github/workflows/x.yml",
+            "      run: docker build --build-arg RELEASE_SOURCE=$SRC .\n",
+        )
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_commented_override_still_rejected(self) -> None:
+        self.release_fixture()
+        self.write("ci/other.sh", "# --build-arg RELEASE_SOURCE=alpine\n")
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_commented_context_is_not_a_producer(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            '# --build-context "local-artifacts=$1" -f docker/Dockerfile.release\n'
+            "docker buildx build -f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_build_without_context_rejected(self) -> None:
+        self.release_fixture()
+        self.write(
+            "ci/release_marker_image_test.sh",
+            'docker buildx build --build-context "local-artifacts=$1" '
+            "-f docker/Dockerfile.release .\n"
+            "docker buildx build -f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_context_flag_order_free(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            "docker buildx build -f docker/Dockerfile.release "
+            '--build-context=local-artifacts=ctx --load .\n',
+        )
+        result = self.gate()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_release_hcl_spaced_override_rejected(self) -> None:
+        self.release_fixture()
+        self.write(
+            "docker-bake.hcl",
+            'target "x" {\n  args = { RELEASE_SOURCE = "alpine" }\n}\n',
+        )
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_quoted_bare_build_arg_rejected(self) -> None:
+        self.release_fixture()
+        self.write("ci/other.sh", "docker build --build-arg 'RELEASE_SOURCE' .\n")
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_duplicate_arg_declaration_rejected(self) -> None:
+        self.release_fixture()
+        path = self.root / "docker/Dockerfile.release"
+        self.write(
+            "docker/Dockerfile.release",
+            path.read_text(encoding="utf-8").replace(
+                "ARG RELEASE_SOURCE=download\n",
+                "ARG RELEASE_SOURCE=download\nARG RELEASE_SOURCE=alpine\n",
+            ),
+        )
+        self.reject("use a literal token: fetch-alpine")
+
+    def test_release_trailing_comment_context_is_not_a_producer(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            "docker buildx build -f docker/Dockerfile.release . "
+            "# --build-context local-artifacts=x\n",
+        )
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_comment_continuation_cannot_hide_build(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            'docker buildx build --build-context "local-artifacts=$1" '
+            "-f docker/Dockerfile.release .\n"
+            "# hide \\\n"
+            "docker buildx build -f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_quoted_key_override_rejected(self) -> None:
+        self.release_fixture()
+        self.write(
+            "docker-bake.hcl",
+            'target "x" {\n  args = { "RELEASE_SOURCE" = "alpine" }\n}\n',
+        )
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_commented_mention_without_literal_rejected(self) -> None:
+        self.release_fixture()
+        self.write("ci/other.sh", "# RELEASE_SOURCE may be anything\n")
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_commented_literal_mention_accepted(self) -> None:
+        self.release_fixture()
+        self.write(
+            "ci/other.sh",
+            "# RELEASE_SOURCE=local selects candidates\n"
+            "# the local path (RELEASE_SOURCE=local).\n"
+            "docker build --build-arg RELEASE_SOURCE=local \\\n  .\n",
+        )
+        result = self.gate()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_release_build_via_relative_dockerfile_name_checked(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            "cd docker && docker build -f Dockerfile.release ..\n",
+        )
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_literal_prefix_override_rejected(self) -> None:
+        self.release_fixture()
+        self.write(
+            "ci/other.sh",
+            "docker build --build-arg RELEASE_SOURCE=local-evil "
+            "-f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_chained_contextless_build_rejected(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            'docker buildx build --build-context "local-artifacts=$1" '
+            "-f docker/Dockerfile.release . && "
+            "docker build -f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_comment_backslash_join_rejected(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            'docker buildx build --build-context "local-artifacts=$1" '
+            "-f docker/Dockerfile.release . # note \\\n"
+            "docker build -f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: local-artifacts")
+
+    def test_release_expansion_suffix_override_rejected(self) -> None:
+        for value in ("local${SUFFIX}", "download$X", "local+x"):
+            with self.subTest(value=value):
+                self.release_fixture()
+                self.write(
+                    "ci/other.sh",
+                    f"docker build --build-arg RELEASE_SOURCE={value} .\n",
+                )
+                self.reject("use a literal token: fetch-download")
+
+    def test_release_case_and_multipair_arg_redeclaration_rejected(self) -> None:
+        for extra in ("arg RELEASE_SOURCE=alpine", "  ARG FOO=1 RELEASE_SOURCE=alpine"):
+            with self.subTest(extra=extra):
+                self.release_fixture()
+                path = self.root / "docker/Dockerfile.release"
+                self.write(
+                    "docker/Dockerfile.release",
+                    path.read_text(encoding="utf-8").replace(
+                        "ARG RELEASE_SOURCE=download\n",
+                        "ARG RELEASE_SOURCE=download\n" + extra + "\n",
+                    ),
+                )
+                self.reject("use a literal token: fetch-download")
+
+    def test_release_continuation_does_not_cross_comment_or_blank(self) -> None:
+        for gap in ("# note\n", "\n"):
+            with self.subTest(gap=gap):
+                self.release_fixture(producer=False)
+                self.write(
+                    "ci/release_marker_image_test.sh",
+                    'docker buildx build --build-context "local-artifacts=$1" \\\n'
+                    + gap
+                    + "docker build -f docker/Dockerfile.release .\n",
+                )
+                self.reject("use a literal token: local-artifacts")
+
+    def test_release_quoted_hash_cannot_hide_build(self) -> None:
+        self.release_fixture(producer=False)
+        self.write(
+            "ci/release_marker_image_test.sh",
+            'docker build --label "a #b" -f docker/Dockerfile.release .\n',
+        )
+        self.reject("use a literal token: local-artifacts")
+
     def test_contrib_docker_base_tag(self) -> None:
         self.write(
             "contrib/postfix/Dockerfile.integration", "FROM example.test/base:1\n"
