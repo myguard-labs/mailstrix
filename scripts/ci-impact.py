@@ -87,6 +87,7 @@ RULES = {
         "tools/parity/*.py",
         "tools/parity/comparator-pins.json",
         "docker/export-compiler-inputs.py",
+        "docker/pack-marker-tree.py",
         "docker/build-marker-artifact.py",
         "ci/compiler_input_export_test.py",
         "ci/marker_artifact_test.py",
@@ -150,6 +151,7 @@ RULES = {
     ],
     "generate": [
         "docker/export-compiler-inputs.py",
+        "docker/pack-marker-tree.py",
         "docker/build-marker-artifact.py",
         "ci/generate_rules_count_test.sh",
         "ci/generate_rules_cron_signer_test.sh",
