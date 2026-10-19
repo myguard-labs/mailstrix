@@ -571,6 +571,36 @@ func fetchManifest(ctx context.Context, hc *http.Client, base string, keys []ed2
 	return m, nil
 }
 
+// Marker-tree budget. The tree (archive up to 1 GiB) must not consume the whole
+// fetch deadline: compiled.yac has to keep time to lock, count, swap and reload
+// (a tree failure only drops the marker part). The reserve left to the core
+// install is max(markerCoreReserveMin, markerCoreReserveFraction of the
+// remaining budget). Variables so tests can shorten them.
+var (
+	markerCoreReserveMin      = 15 * time.Second
+	markerCoreReserveFraction = 4 // reserve at least 1/N of the remaining budget
+)
+
+// markerTreeContext derives the context for tree preparation. Without a parent
+// deadline there is no extra limit. Otherwise the child deadline is
+// now + remaining - reserve; when remaining <= reserve ok is false and the
+// caller must skip the tree without any download. The cancel func is always
+// non-nil.
+func markerTreeContext(parent context.Context) (context.Context, context.CancelFunc, bool) {
+	deadline, has := parent.Deadline()
+	if !has {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, true
+	}
+	remaining := time.Until(deadline)
+	reserve := max(markerCoreReserveMin, remaining/time.Duration(markerCoreReserveFraction))
+	if remaining <= reserve {
+		return parent, func() {}, false
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline.Add(-reserve))
+	return ctx, cancel, true
+}
+
 // prepareRemoteMarkerTree decides and, when warranted, stages the marker tree
 // for remote. It never fails the update: every problem is logged, reported in
 // the returned status, and leaves the full-ruleset fallback in place.
@@ -591,7 +621,13 @@ func prepareRemoteMarkerTree(ctx context.Context, hc *http.Client, base, cacheDi
 		logf("PERF-18: rules manifest v%d marker tree targets another libyara/compiler build; full ruleset fallback", remote.Version)
 		return "", MarkerStatusSkipped + ": linked libyara/compiler identity differs"
 	}
-	stage, err := stageMarkerTree(ctx, hc, base, cacheDir, bundle, remote.marker)
+	mctx, cancel, ok := markerTreeContext(ctx)
+	defer cancel()
+	if !ok {
+		logf("ERROR: rules manifest v%d marker tree skipped: remaining fetch budget is below the reserve kept for installing compiled.yac (full ruleset fallback)", remote.Version)
+		return "", MarkerStatusSkipped + ": fetch budget below the reserve kept for the compiled.yac install"
+	}
+	stage, err := stageMarkerTree(mctx, hc, base, cacheDir, bundle, remote.marker)
 	if err != nil {
 		logf("ERROR: rules manifest v%d marker tree refused (compiled.yac installs; full ruleset fallback): %v", remote.Version, err)
 		return "", MarkerStatusRejected + ": " + err.Error()
