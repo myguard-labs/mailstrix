@@ -229,6 +229,15 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("VERSION or RELEASE_TAG build-arg is required", res.stderr)
         self.assertFalse((out / "out/bin/strixd").exists())
 
+    def test_default_source_needs_no_local_context(self):
+        # The daily bake never supplies `local-artifacts`; the default path must
+        # reach its first guard without resolving that context.
+        res, out = self.build_fetch()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("VERSION or RELEASE_TAG build-arg is required", res.stderr)
+        self.assertNotIn("local-artifacts", res.stderr)
+        self.assertFalse((out / "out/bin/strixd").exists())
+
     def test_unknown_source_fails_closed(self):
         res, _ = self.build_fetch("--build-arg", "RELEASE_SOURCE=bogus")
         self.assertNotEqual(res.returncode, 0)
