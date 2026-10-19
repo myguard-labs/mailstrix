@@ -385,6 +385,28 @@ build_marker_export() {  # build_marker_export <tag>; 0 only for a complete mark
         -f "${HERE}/docker/Dockerfile.release" "${HERE}" || return 1
     [ -s "${out}/compiled.yac" ] && [ -f "${out}/libyara.version" ] \
         && [ -d "${out}/compiler-inputs" ] && [ -d "${out}/marker-artifact" ] || return 1
+    # Skew guard: the pre-publish check-rules load and the later verification
+    # use the HEAD-built verifier, while this export carries the release's
+    # libyara. A .yac only loads on a matching libyara, so when HEAD moved
+    # YARA_VERSION past the release, publish the unmarked HEAD build instead of
+    # dying at check-rules. An empty or invalid release version file still dies.
+    local rel_ver head_ver
+    # Trim only surrounding whitespace: an embedded space must fail validation,
+    # not collapse into a different, valid-looking version.
+    rel_ver="$(<"${out}/libyara.version")"
+    rel_ver="${rel_ver#"${rel_ver%%[![:space:]]*}"}"
+    rel_ver="${rel_ver%"${rel_ver##*[![:space:]]}"}"
+    [[ "$rel_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || die "invalid libyara version in the ${tag} marker export: '${rel_ver}'"
+    head_ver="$(sed -n 's/^ARG YARA_VERSION=\([0-9][0-9.]*\)[[:space:]]*$/\1/p' "${HERE}/docker/Dockerfile" 2>/dev/null | head -n1)"
+    if [ -z "$head_ver" ]; then
+        note "WARNING: cannot read ARG YARA_VERSION from HEAD docker/Dockerfile; publishing the unmarked HEAD build"
+        return 1
+    fi
+    if [ "$head_ver" != "$rel_ver" ]; then
+        note "the ${tag} toolchain libyara ${rel_ver} differs from HEAD libyara ${head_ver}; publishing the unmarked HEAD build"
+        return 1
+    fi
     # The released strixd is the binary that must load the tree.
     docker buildx build --target rules-verifier --load \
         --build-arg "RELEASE_TAG=${tag}" \

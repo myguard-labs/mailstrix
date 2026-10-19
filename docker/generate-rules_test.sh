@@ -19,6 +19,8 @@ test_root="$(mktemp -d)"
 trap 'rm -rf "$test_root"' EXIT
 mkdir -p "$test_root/sandbox/project/docker" "$test_root/bin" "$test_root/tools"
 cp "$here/generate-rules.sh" "$here/pack-marker-tree.py" "$test_root/sandbox/project/docker/"
+# HEAD's libyara pin, read by the marker skew guard; cases rewrite it.
+printf 'ARG YARA_VERSION=4.5.2\n' > "$test_root/sandbox/project/docker/Dockerfile"
 export EVENTS="$test_root/events"
 export PATH="$test_root/bin:$PATH"
 export GH_TOKEN=fixture-not-a-credential
@@ -115,7 +117,7 @@ if [ "$dockerfile" = Dockerfile.release ]; then
                 if [ "$1" = --output ]; then
                     dir="${2#type=local,dest=}"
                     dd if=/dev/zero of="$dir/compiled.yac" bs=1024 count=1536 2>/dev/null
-                    printf '4.5.2\n' > "$dir/libyara.version"
+                    printf '%s\n' "${RELEASE_LIBYARA-4.5.2}" > "$dir/libyara.version"
                     printf 'local' > "$dir/local.yac"
                     printf '{"fixture":"sources"}\n' > "$dir/sources.json"
                     if [ "${MARKER_BUILD:-ok}" != legacy ]; then
@@ -1240,6 +1242,44 @@ EXPECT_BUILD='Dockerfile.release rules-export' assert_marker_skipped unpackable-
 assert_marker_skipped no-latest-release LATEST_TAG=
 assert_marker_skipped malformed-tag 'LATEST_TAG=v1;rm -rf'
 assert_marker_skipped operator-off LATEST_TAG=v1.2.3 MARKER_RELEASE_TAG=off
+
+# Toolchain skew: HEAD bumped YARA_VERSION past the latest release, so the release
+# export's libyara cannot load in the HEAD verifier. Fall back, still publish.
+head_dockerfile="$test_root/sandbox/project/docker/Dockerfile"
+printf 'ARG YARA_VERSION=4.6.0\n' > "$head_dockerfile"
+assert_marker_skipped libyara-skew LATEST_TAG=v1.2.3
+grep -F 'differs from HEAD libyara' "$test_root/log" >/dev/null || assert_event 'libyara-skew: no fallback note'
+# HEAD pin unreadable or unparsable: cannot prove a match, so no marker.
+printf 'FROM scratch\n' > "$head_dockerfile"
+assert_marker_skipped libyara-head-unknown LATEST_TAG=v1.2.3
+grep -F 'cannot read ARG YARA_VERSION' "$test_root/log" >/dev/null || assert_event 'libyara-head-unknown: no unreadable-pin warning'
+# The real HEAD Dockerfile must stay parseable: with a release export on the same
+# libyara, the marker path is kept. A format change to the pin fails here instead
+# of silently dropping the marker on every nightly.
+cp "$here/Dockerfile" "$head_dockerfile"
+real_pin="$(awk -F= '/^ARG YARA_VERSION=/{print $2; exit}' "$head_dockerfile")"
+[ -n "$real_pin" ] || assert_event 'real-dockerfile: no ARG YARA_VERSION pin found'
+RELEASE_LIBYARA="$real_pin" assert_marker_published
+# Bounds: a lower HEAD pin and a longer-but-different version are still skew.
+printf 'ARG YARA_VERSION=4.5.1\n' > "$head_dockerfile"
+assert_marker_skipped libyara-skew-lower LATEST_TAG=v1.2.3
+printf 'ARG YARA_VERSION=4.5.20\n' > "$head_dockerfile"
+assert_marker_skipped libyara-skew-longer LATEST_TAG=v1.2.3
+printf 'ARG YARA_VERSION=4.5.2\n' > "$head_dockerfile"
+# Negative control: matching versions keep the marker path.
+assert_marker_published
+# Malformed release version file: fail closed, nothing published.
+assert_libyara_file_dies() {  # assert_libyara_file_dies <case> <value>
+    local actual name="$1"
+    run_script LATEST_TAG=v1.2.3 "RELEASE_LIBYARA=$2"
+    [ "$actual" -eq 1 ] || assert_event "${name}: exit ${actual}, want 1"
+    grep -F 'invalid libyara version' "$test_root/log" >/dev/null || assert_event "${name}: no invalid-version diagnosis"
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: assets uploaded"
+}
+assert_libyara_file_dies libyara-empty ''
+assert_libyara_file_dies libyara-garbage 'not-a-version'
+assert_libyara_file_dies libyara-injection '4.5.2;rm'
+assert_libyara_file_dies libyara-embedded-space '4.6. 0'
 
 # -require-marker verification failure: nothing new is published.
 assert_marker_verify_failure_publishes_nothing() {
