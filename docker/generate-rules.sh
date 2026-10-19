@@ -391,7 +391,11 @@ build_marker_export() {  # build_marker_export <tag>; 0 only for a complete mark
     # YARA_VERSION past the release, publish the unmarked HEAD build instead of
     # dying at check-rules. An empty or invalid release version file still dies.
     local rel_ver head_ver
-    rel_ver="$(tr -d '[:space:]' < "${out}/libyara.version")"
+    # Trim only surrounding whitespace: an embedded space must fail validation,
+    # not collapse into a different, valid-looking version.
+    rel_ver="$(<"${out}/libyara.version")"
+    rel_ver="${rel_ver#"${rel_ver%%[![:space:]]*}"}"
+    rel_ver="${rel_ver%"${rel_ver##*[![:space:]]}"}"
     [[ "$rel_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || die "invalid libyara version in the ${tag} marker export: '${rel_ver}'"
     head_ver="$(sed -n 's/^ARG YARA_VERSION=\([0-9][0-9.]*\)[[:space:]]*$/\1/p' "${HERE}/docker/Dockerfile" 2>/dev/null | head -n1)"

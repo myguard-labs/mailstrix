@@ -1279,6 +1279,7 @@ assert_libyara_file_dies() {  # assert_libyara_file_dies <case> <value>
 assert_libyara_file_dies libyara-empty ''
 assert_libyara_file_dies libyara-garbage 'not-a-version'
 assert_libyara_file_dies libyara-injection '4.5.2;rm'
+assert_libyara_file_dies libyara-embedded-space '4.6. 0'
 
 # -require-marker verification failure: nothing new is published.
 assert_marker_verify_failure_publishes_nothing() {
