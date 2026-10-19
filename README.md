@@ -350,6 +350,38 @@ refused even with the opt-in. The base URL must not contain userinfo
 (credentials), query parameters, or fragments; these are refused to prevent
 credential leaks and broken asset URL construction.
 
+#### Marker tree (speed gain after a refresh)
+
+A refreshed `compiled.yac` would otherwise lose the faster marker scan path.
+The publisher can ship a signed marker tree beside it, named by the manifest's
+optional `marker` field. `fetch-rules` installs the tree only when the running
+binary links the same libyara and yarac that built it, which is the latest
+release toolchain. Other binaries, and source builds without that identity,
+report `skipped` and keep the full main ruleset. Detection is the same either
+way; only the speed differs. On the c88 measurement (15425 rules), marker-bearing
+attachments had a median scan of 3.13 ms against 5.04 ms on the fallback, with
+identical matches.
+
+The tree is extracted into the cache directory next to `compiled.yac`; the
+download is a temporary file removed after verification. The code caps the
+signed archive at 1 GiB and the extracted tree at 2 GiB and 131072 entries, so
+the real size is whatever the release publishes. The bound costs about 184 MiB
+of peak RSS, about 3 s of extra startup and about 1.85 s per reload for artifact
+verification. A crash in the middle of an update can leave `.marker-stage-*` or
+`.rules-rollback-*` directories in the cache; remove them by hand when no update
+is running.
+
+`MAILSTRIX_RULES_MARKERS` takes `auto` (the default) or `off`. With `off`,
+`fetch-rules` installs `compiled.yac` only and retires any marker tree already
+in the cache, so no tree is loaded and scans use the full ruleset. Any other
+value is refused.
+
+`strixd fetch-rules -verify-only -require-marker` fetches and loads the
+published bundle into a temporary cache that is deleted afterwards, never
+touching the configured cache. It exits 2 unless the marker tree reports
+`installed`. `-require-marker` needs `-verify-only`; the publisher uses it as a
+release gate.
+
 #### Rules-manifest signature
 
 A remote manifest must carry a valid `ed25519` signature or the update is
