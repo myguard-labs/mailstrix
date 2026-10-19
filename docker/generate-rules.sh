@@ -393,6 +393,16 @@ build_marker_export() {  # build_marker_export <tag>; 0 only for a complete mark
     [ -s "${WORK}/marker-verifier.iid" ] || return 1
     MARKER_VERIFIER_IMAGE="$(<"${WORK}/marker-verifier.iid")"
     [ -n "$MARKER_VERIFIER_IMAGE" ] || return 1
+    # A marker-capable release built before -require-marker existed cannot run
+    # the staged gate; without this probe every publication would die there
+    # instead of falling back. `-h` prints the flag list and exits 2.
+    local usage
+    usage="$(docker run --rm --network none "$MARKER_VERIFIER_IMAGE" -h 2>&1 || true)"
+    grep -qF -- '-require-marker' <<<"$usage" || {
+        note "the ${tag} strixd has no -require-marker gate; publishing without a marker tree"
+        MARKER_VERIFIER_IMAGE=""
+        return 1
+    }
 }
 if [ -n "$MARKER_TAG" ]; then
     note "building rules with the ${MARKER_TAG} marker toolchain…"

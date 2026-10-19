@@ -38,6 +38,14 @@ cat >"$test_root/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "$1" = run ]; then
+    if [[ " $* " == *' sha256:markerverifier -h '* ]]; then
+        # Flag probe of the release strixd. VERIFIER_NO_REQUIRE_MARKER=1 models a
+        # marker-capable release that predates the -require-marker gate.
+        printf 'probe %s\n' "$*" >> "$EVENTS"
+        printf 'Usage of fetch-rules:\n  -verify-only\n'
+        [ "${VERIFIER_NO_REQUIRE_MARKER:-0}" -eq 1 ] || printf '  -require-marker\n'
+        exit 2
+    fi
     if [[ " $* " == *' check-rules '* ]]; then
         printf 'count %s\n' "$*" >> "$EVENTS"
         [ "${FAIL_COUNT:-0}" -eq 0 ] || exit 51
@@ -1186,6 +1194,7 @@ assert_marker_published() {
     grep -Fx 'stage-fetch ok' "$EVENTS" >/dev/null || assert_event "${name}: the staged candidate was not served intact"
     grep -E '^stage-verify .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: staged verification lacks -require-marker"
     grep -E '^stage-verify .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: staged verification did not use the release strixd image"
+    grep -E '^probe .*--network none sha256:markerverifier -h' "$EVENTS" >/dev/null || assert_event "${name}: release strixd was not probed for -require-marker"
     grep -E '^verify .*sha256:markerverifier .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: post-publish verification is not marker-gated"
     grep -Fx 'dockerfile Dockerfile.release rules-export' "$EVENTS" >/dev/null || assert_event "${name}: bundle not built with the release toolchain"
     ! grep -Fx 'dockerfile Dockerfile rules-export' "$EVENTS" >/dev/null || assert_event "${name}: the unmarked build ran despite a marker export"
@@ -1222,6 +1231,8 @@ assert_marker_skipped() {  # assert_marker_skipped <case> <env-assignment>...
 # packer refuses (symlink), an unusable tag, and the operator opt-out.
 assert_marker_skipped toolchain-mismatch LATEST_TAG=v1.2.3 MARKER_BUILD=fail
 assert_marker_skipped legacy-release LATEST_TAG=v1.2.3 MARKER_BUILD=legacy
+# A marker-capable release whose strixd predates -require-marker: fall back, never die.
+assert_marker_skipped verifier-without-require-marker LATEST_TAG=v1.2.3 VERIFIER_NO_REQUIRE_MARKER=1
 # The bundle itself is still the release-toolchain build; only the field is dropped.
 EXPECT_BUILD='Dockerfile.release rules-export' assert_marker_skipped unpackable-tree LATEST_TAG=v1.2.3 MARKER_SYMLINK=1
 assert_marker_skipped no-latest-release LATEST_TAG=
