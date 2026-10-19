@@ -1014,9 +1014,11 @@ class NightlyMarkerImageContract(unittest.TestCase):
                     s["with"]["name"] = "bin-arm64"
 
         for fn in (drop_job, drop_need, downloaded, wrong_artifact):
-            with self.subTest(case=fn.__name__):
-                with self.assertRaises((AssertionError, KeyError)):
-                    self.check(mutate(fn))
+            with (
+                self.subTest(case=fn.__name__),
+                self.assertRaises((AssertionError, KeyError)),
+            ):
+                self.check(mutate(fn))
 
 
 class BinaryWorkflowContract(unittest.TestCase):
