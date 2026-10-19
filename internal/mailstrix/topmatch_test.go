@@ -102,7 +102,7 @@ func TestMatchCounterAddAtDropsStaleEpoch(t *testing.T) {
 // A scan that leased the old generation and finishes after a Reload must not
 // count its hits in the new generation's top-matches (AUD-N6).
 func TestTopMatchesIgnoresOldGenerationScanAfterReload(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	defer s.Close()
 	stale := s.acquireScanLease()
 	if err := s.Reload(); err != nil {

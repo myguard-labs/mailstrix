@@ -85,9 +85,9 @@ func newScannerBudget(t *testing.T, dir string, scanTimeout time.Duration) *Scan
 // whole suite already exercises this nil-mbazaar path; this test names the contract
 // so a future change that reintroduces an eager per-scan hash is caught here.
 func TestScanNoMBazaarDigestPath(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	if s.mbazaar != nil {
-		t.Fatal("test precondition: newScanner must leave mbazaar disabled")
+		t.Fatal("test precondition: newScannerBudget must leave mbazaar disabled")
 	}
 	m, err := s.Scan(eicar(), ScanMeta{})
 	if err != nil {
@@ -106,14 +106,14 @@ func TestScanNoMBazaarDigestPath(t *testing.T) {
 }
 
 func TestScannerCompileAndCount(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	if s.RuleCount() != 1 {
 		t.Errorf("rule count = %d, want 1", s.RuleCount())
 	}
 }
 
 func TestScannerMatch(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	m, err := scanT(s, eicar(), ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +209,7 @@ func TestExtractStreamMatchesMetric(t *testing.T) {
 	// "Attribute VB_Name" exists in every decompressed VBA module but not in the
 	// raw (zip-compressed) container bytes.
 	rule := `rule MacroAttr { strings: $a = "Attribute VB_Name" condition: $a }`
-	s := newScanner(t, writeRules(t, rule))
+	s := newScannerBudget(t, writeRules(t, rule), loadInsensitiveScanTimeout)
 	if s.ExtractMetrics().StreamMatches != 0 {
 		t.Fatalf("precondition: StreamMatches should start at 0")
 	}
@@ -228,7 +228,7 @@ func TestExtractStreamMatchesMetric(t *testing.T) {
 // TestPerChannelScanCounts (PERF-17) verifies the raw / real-stream / marker
 // per-channel scan counters increment on the right channel.
 func TestPerChannelScanCounts(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 
 	// A plain (non-document) buffer is scanned on the raw channel only.
 	if _, err := scanT(s, eicar(), ScanMeta{}); err != nil {
@@ -259,7 +259,7 @@ func TestPerChannelScanCounts(t *testing.T) {
 }
 
 func TestScannerNoMatch(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	m, err := scanT(s, []byte("a perfectly innocent email body"), ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +288,7 @@ func TestScannerSkipsBadFileKeepsGood(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "bad.yar"), []byte("rule oops { this is not yara }"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	if s.RuleCount() != 1 {
 		t.Fatalf("rule count = %d, want 1 (good kept, bad skipped)", s.RuleCount())
 	}
@@ -300,7 +300,7 @@ func TestScannerSkipsBadFileKeepsGood(t *testing.T) {
 
 func TestScannerBrokenRuleKeepsOld(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	// Overwrite with a syntactically broken rule, then reload: must fail and
 	// keep the previous (working) set active.
 	if err := os.WriteFile(filepath.Join(dir, "eicar.yar"), []byte("rule broken {"), 0o600); err != nil {
@@ -356,7 +356,7 @@ func TestFingerprintFoldsRuleBody(t *testing.T) {
 	}
 
 	dir := writeRules(t, base)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	want := s.Fingerprint()
 
 	// Identity is unchanged across every variant (same namespace+identifier), so any
@@ -441,7 +441,7 @@ func TestScanMatchesMacroViaDecompressedStream(t *testing.T) {
 	if bytes.Contains(doc, []byte("Attribute VB_Name")) {
 		t.Fatal("fixture changed: marker present in raw bytes, test no longer proves the extract path")
 	}
-	s := newScanner(t, writeRules(t, vbaRule))
+	s := newScannerBudget(t, writeRules(t, vbaRule), loadInsensitiveScanTimeout)
 	m, err := scanT(s, doc, ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
@@ -460,7 +460,7 @@ func TestScanVBAGatedOnlyOnMacroStream(t *testing.T) {
 	// strip the console import line — newScanner compiles a single rule file and
 	// console may be unavailable; keep the rule self-contained.
 	rule := `rule VBA_Gated { strings: $kw = "Attribute VB_Name" condition: VBA and $kw }`
-	s := newScanner(t, writeRules(t, rule))
+	s := newScannerBudget(t, writeRules(t, rule), loadInsensitiveScanTimeout)
 
 	// (a) Macro doc → VBA stream carries the keyword AND VBA is set → fires.
 	if m, err := scanT(s, macroDoc(t), ScanMeta{}); err != nil || len(m) != 1 || m[0].Rule != "VBA_Gated" {
@@ -490,7 +490,7 @@ func TestScanVBAGatedOnlyOnMacroStream(t *testing.T) {
 
 // The extract counters must move for a macro doc and stay put for a non-doc.
 func TestScanExtractMetrics(t *testing.T) {
-	s := newScanner(t, writeRules(t, vbaRule))
+	s := newScannerBudget(t, writeRules(t, vbaRule), loadInsensitiveScanTimeout)
 	if _, err := scanT(s, macroDoc(t), ScanMeta{}); err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestScanExtractMetrics(t *testing.T) {
 // A malformed OLE attachment must be counted (Docs+Failed) yet never fail the
 // scan — fail-open: the raw verdict (here, EICAR matching) survives.
 func TestScanMalformedOLECountedButFailsOpen(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	poison := append(append([]byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}, eicar()...),
 		bytes.Repeat([]byte{0x7F}, 2048)...)
 	m, err := scanT(s, poison, ScanMeta{})
@@ -533,7 +533,7 @@ func TestScanMalformedOLECountedButFailsOpen(t *testing.T) {
 // (VBA=false) and fire on a decompressed macro stream (VBA=true). Without
 // defineExternals declaring VBA at compile, this rule would not even load.
 func TestScanOneVBAExternalVariable(t *testing.T) {
-	s := newScanner(t, writeRules(t, "rule Needs_VBA { condition: VBA }"))
+	s := newScannerBudget(t, writeRules(t, "rule Needs_VBA { condition: VBA }"), loadInsensitiveScanTimeout)
 	rules := s.rules.Load()
 	if m, err := s.scanOne(rules, []byte("x"), scanVars{}, 0); err != nil || len(m) != 0 {
 		t.Fatalf("VBA=false (raw) must not match: %+v err=%v", m, err)
@@ -544,7 +544,7 @@ func TestScanOneVBAExternalVariable(t *testing.T) {
 }
 
 func TestScanOneMetaLessMatchHasNilMeta(t *testing.T) {
-	s := newScanner(t, writeRules(t, `rule No_Meta { strings: $x = "TOKEN" condition: $x }`))
+	s := newScannerBudget(t, writeRules(t, `rule No_Meta { strings: $x = "TOKEN" condition: $x }`), loadInsensitiveScanTimeout)
 	m, err := s.scanOne(s.rules.Load(), []byte("TOKEN"), scanVars{}, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -562,7 +562,7 @@ func TestScanOneMetaLessMatchHasNilMeta(t *testing.T) {
 // point of the feature (THOR/Loki name-keyed rules). The body bytes are clean,
 // so a match can only come from the external variable.
 func TestScanFilenameExternalVariable(t *testing.T) {
-	s := newScanner(t, writeRules(t, `rule Bad_Ext { condition: filename matches /\.exe$/ }`))
+	s := newScannerBudget(t, writeRules(t, `rule Bad_Ext { condition: filename matches /\.exe$/ }`), loadInsensitiveScanTimeout)
 	clean := []byte("a perfectly innocent email body")
 	if m, err := scanT(s, clean, ScanMeta{}); err != nil || len(m) != 0 {
 		t.Fatalf("no filename must not match: %+v err=%v", m, err)
@@ -578,7 +578,7 @@ func TestScanFilenameExternalVariable(t *testing.T) {
 // The extension external variable (lowercased, dot included) must drive a rule
 // independently of filename, including on a mixed-case name.
 func TestScanExtensionExternalVariable(t *testing.T) {
-	s := newScanner(t, writeRules(t, `rule Bad_Scr { condition: extension == ".scr" }`))
+	s := newScannerBudget(t, writeRules(t, `rule Bad_Scr { condition: extension == ".scr" }`), loadInsensitiveScanTimeout)
 	clean := []byte("a perfectly innocent email body")
 	if m, err := scanT(s, clean, NewScanMeta("greeting.GIF")); err != nil || len(m) != 0 {
 		t.Fatalf(".gif must not match .scr rule: %+v err=%v", m, err)
@@ -591,7 +591,7 @@ func TestScanExtensionExternalVariable(t *testing.T) {
 // InQuest's Outlook-message rule uses `file_type contains "outlook"` rather
 // than THOR/Loki's `filetype`. Only .msg/.oft names get that narrow hint.
 func TestScanFileTypeExternalVariable(t *testing.T) {
-	s := newScanner(t, writeRules(t, `rule Outlook_Type { condition: file_type contains "outlook" }`))
+	s := newScannerBudget(t, writeRules(t, `rule Outlook_Type { condition: file_type contains "outlook" }`), loadInsensitiveScanTimeout)
 	clean := []byte("a perfectly innocent email body")
 	if m, err := scanT(s, clean, NewScanMeta("invoice.txt")); err != nil || len(m) != 0 {
 		t.Fatalf(".txt must not set outlook file_type: %+v err=%v", m, err)
@@ -636,7 +636,7 @@ func TestNewScanMeta(t *testing.T) {
 }
 
 func TestReloadMetrics(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	// NewScanner already did the initial load: 1 attempt, 1 success, rules=1.
 	rm := s.ReloadMetrics()
 	if rm.Attempts < 1 || rm.Successes < 1 || rm.Rules != 1 {
@@ -657,7 +657,7 @@ func TestReloadMetrics(t *testing.T) {
 
 func TestReloadMetricsFailure(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	if err := os.WriteFile(filepath.Join(dir, "eicar.yar"), []byte("rule broken {"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -696,7 +696,7 @@ func TestReloadMetricsCountCacheLockFailure(t *testing.T) {
 // silently-broken daily rebuild is observable.
 func TestReloadMetricsModUnix(t *testing.T) {
 	dir := writeRules(t, eicarRule)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	if mu := s.ReloadMetrics().ModUnix; mu <= 0 {
 		t.Fatalf("ModUnix not set after load: %d", mu)
 	}
@@ -737,7 +737,7 @@ func TestRulesetModUnix(t *testing.T) {
 // and ReloadAll() fire simultaneously. Run with -race to verify no data
 // races exist in the scanner pool / rule-generation machinery.
 func TestScanRaceReload(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	benign := []byte("a perfectly innocent email body")
 
 	n := runtime.NumCPU()
@@ -817,7 +817,7 @@ func TestStreamDeduplication(t *testing.T) {
 	}
 	// Use a rule that matches the VBA attribute header present in all streams.
 	rule := `rule VBA_Attr { strings: $a = "Attribute VB_Name" condition: $a }`
-	s := newScanner(t, writeRules(t, rule))
+	s := newScannerBudget(t, writeRules(t, rule), loadInsensitiveScanTimeout)
 	if s.ExtractMetrics().Deduped != 0 {
 		t.Fatal("precondition: Deduped should start at 0")
 	}
@@ -844,7 +844,7 @@ func TestPerStreamKeyReuse(t *testing.T) {
 		t.Fatalf("fixture unavailable: %v", err)
 	}
 	rule := `rule VBA_Attr { strings: $a = "Attribute VB_Name" condition: $a }`
-	s := newScanner(t, writeRules(t, rule))
+	s := newScannerBudget(t, writeRules(t, rule), loadInsensitiveScanTimeout)
 	m, err := scanT(s, buf, ScanMeta{})
 	if err != nil {
 		t.Fatal(err)
@@ -858,7 +858,7 @@ func TestPerStreamKeyReuse(t *testing.T) {
 	// A second scan with the handler-supplied RawKey set must dedup identically:
 	// rawSeed prefers meta.RawKey, and that value equals streamDedupKey(buf), so
 	// the raw-body skip + feed seed behave the same as the CLI (zero RawKey) path.
-	s2 := newScanner(t, writeRules(t, rule))
+	s2 := newScannerBudget(t, writeRules(t, rule), loadInsensitiveScanTimeout)
 	meta := ScanMeta{RawKey: StreamDedupKey(buf)}
 	m2, err := s2.Scan(buf, meta)
 	if err != nil {
@@ -876,7 +876,7 @@ func TestPerStreamKeyReuse(t *testing.T) {
 // on the same Scanner — it must NOT match, proving define() reset the external
 // rather than leaving the pooled scanner's stale value.
 func TestScanPooledScannerNoExternalLeak(t *testing.T) {
-	s := newScanner(t, writeRules(t, `rule Bad_Ext { condition: filename matches /\.exe$/ }`))
+	s := newScannerBudget(t, writeRules(t, `rule Bad_Ext { condition: filename matches /\.exe$/ }`), loadInsensitiveScanTimeout)
 	body := []byte("identical clean body bytes")
 
 	// Run several dirty scans first to seed the pool with a scanner whose
@@ -901,7 +901,7 @@ func TestScanPooledScannerNoExternalLeak(t *testing.T) {
 // Uses a filename-external rule so the pooled-scanner path is exercised.
 func TestScanPoolSurvivesReload(t *testing.T) {
 	dir := writeRules(t, `rule Old_Ext { condition: filename matches /\.exe$/ }`)
-	s := newScanner(t, dir)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
 	body := []byte("clean body bytes for reload test")
 
 	// Populate the pool with scanners bound to the OLD ruleset.

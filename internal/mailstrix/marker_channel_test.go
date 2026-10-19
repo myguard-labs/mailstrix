@@ -85,7 +85,7 @@ rule Control_Benign : maldoc
 // positive — the literal is yarad-synthetic), while a normal content rule on the
 // same buffer fires unaffected.
 func TestMarkerRuleRejectedOnRaw(t *testing.T) {
-	s := newScanner(t, writeRules(t, markerChannelRules))
+	s := newScannerBudget(t, writeRules(t, markerChannelRules), loadInsensitiveScanTimeout)
 
 	// Body contains BOTH literals, as an attacker-planted collision would.
 	body := []byte("harmless text OLEID-OBJECTPOOL more text BENIGN-CONTROL-LITERAL-XYZ end")
@@ -395,7 +395,7 @@ func TestBuildMarkerBundle_Completeness(t *testing.T) {
 // We confirm this by creating a scanner, clearing markerRules, and checking that
 // markerChannelScans increments and the collision filter still holds.
 func TestBuildMarkerBundle_Fallback(t *testing.T) {
-	s := newScanner(t, writeRules(t, markerChannelRules))
+	s := newScannerBudget(t, writeRules(t, markerChannelRules), loadInsensitiveScanTimeout)
 	// Simulate fallback: clear the marker bundle.
 	s.markerRules.Store(nil)
 
@@ -427,7 +427,7 @@ func TestMarkerChannelScansCounter(t *testing.T) {
 	// checking it increments when scanExtracted is invoked via the EXT-MISMATCH
 	// path. The extMismatch path is exercised in extmismatch_test.go; here we
 	// confirm markerChannelScans is accessible and starts at zero on a fresh scanner.
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	before := s.MarkerChannelScans()
 	if before != 0 {
 		t.Errorf("fresh scanner: MarkerChannelScans = %d, want 0", before)

@@ -201,7 +201,7 @@ func TestCAPENativeExtractedFailure(t *testing.T) {
 }
 
 func TestCAPENativeMalformedContainerRejected(t *testing.T) {
-	sc := newScanner(t, writeRules(t, `rule Clean { condition: false }`))
+	sc := newScannerBudget(t, writeRules(t, `rule Clean { condition: false }`), loadInsensitiveScanTimeout)
 	malformed := append(
 		[]byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1},
 		bytes.Repeat([]byte{0xAB}, 4096)...,

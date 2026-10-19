@@ -129,7 +129,7 @@ func TestFilterDeniedDoesNotTagAllow(t *testing.T) {
 }
 
 func TestGetScannerStaleRulesDoNotReplacePool(t *testing.T) {
-	s := newScanner(t, writeRules(t, eicarRule))
+	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
 	cur := s.rules.Load()
 	sc, gen, err := s.getScanner(cur)
 	if err != nil {
