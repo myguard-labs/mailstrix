@@ -1196,6 +1196,8 @@ assert_marker_published() {
     grep -E '^stage-verify .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: staged verification did not use the release strixd image"
     grep -E '^probe .*--network none sha256:markerverifier -h' "$EVENTS" >/dev/null || assert_event "${name}: release strixd was not probed for -require-marker"
     grep -E '^verify .*sha256:markerverifier .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: post-publish verification is not marker-gated"
+    grep -E '^stage-verify .*size=4g' "$EVENTS" >/dev/null || assert_event "${name}: staged marker gate lacks the 4g tmpfs"
+    grep -E '^verify .*size=4g .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: post-publish marker gate lacks the 4g tmpfs"
     grep -Fx 'dockerfile Dockerfile.release rules-export' "$EVENTS" >/dev/null || assert_event "${name}: bundle not built with the release toolchain"
     ! grep -Fx 'dockerfile Dockerfile rules-export' "$EVENTS" >/dev/null || assert_event "${name}: the unmarked build ran despite a marker export"
     # Same fixture twice -> byte-identical tree asset.

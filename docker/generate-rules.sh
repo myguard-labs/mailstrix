@@ -597,6 +597,11 @@ note "version ${PREV} -> ${VERSION}, libyara ${LIBYARA}, size ${SIZE}, sha256 ${
 # it. A failure here publishes nothing new (the release is still untouched).
 VERIFY_IMAGE="$VERIFIER_IMAGE"
 VERIFY_EXTRA=()
+# /tmp of a fetch-rules verifier holds the downloaded bundle; with a marker tree it
+# also holds the archive (<=1 GiB) and the extracted tree (<=2 GiB) at once, the
+# client caps in fetchrules_marker.go. tmpfs size is a ceiling, not an allocation.
+VERIFY_TMPFS="size=2g"
+MARKER_GATE_TMPFS="size=4g"
 if [ "$MARKER_PUBLISH" -eq 1 ]; then
     NIGHTLY_STAGE=verify
     STAGE="${WORK}/stage"
@@ -629,7 +634,7 @@ PY
         ''|*[!0-9]*) die "could not start the local server for the staged candidate" ;;
     esac
     docker run --rm --read-only --network host \
-        --tmpfs /tmp:rw,nosuid,nodev,size=2g \
+        --tmpfs "/tmp:rw,nosuid,nodev,${MARKER_GATE_TMPFS}" \
         "$MARKER_VERIFIER_IMAGE" -url "http://127.0.0.1:${stage_port}" -allow-http \
         -timeout 5m -expected-version "$VERSION" -require-marker \
         || die "staged marker tree did not verify and load with the ${MARKER_TAG} strixd; nothing was published"
@@ -638,6 +643,7 @@ PY
     exec {server_fd}<&-
     VERIFY_IMAGE="$MARKER_VERIFIER_IMAGE"
     VERIFY_EXTRA=(-require-marker)
+    VERIFY_TMPFS="$MARKER_GATE_TMPFS"
     NIGHTLY_STAGE=build
     note "marker tree verified against ${MARKER_TAG}: ${MARKER_ASSET}"
 fi
@@ -678,7 +684,7 @@ PUBLISH_STATE=published
 NIGHTLY_STAGE=verify
 verified=0
 for attempt in 1 2 3 4 5; do
-	if docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,size=2g \
+	if docker run --rm --read-only --tmpfs "/tmp:rw,nosuid,nodev,${VERIFY_TMPFS}" \
 		"$VERIFY_IMAGE" -url "https://github.com/${REPO}/releases/download/${TAG}" \
 		-timeout 5m -expected-version "$VERSION" ${VERIFY_EXTRA[@]+"${VERIFY_EXTRA[@]}"}; then
         verified=1
