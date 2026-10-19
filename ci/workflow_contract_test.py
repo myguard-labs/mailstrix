@@ -963,6 +963,62 @@ class RequiredCheck(unittest.TestCase):
             self.assertFalse(verdict(selected, results))
 
 
+class NightlyMarkerImageContract(unittest.TestCase):
+    """The nightly must prove its own binaries load markers before publishing."""
+
+    def check(self, nightly):
+        jobs = nightly["jobs"]
+        marker = jobs["marker-image"]
+        self.assertIn("binaries", marker["needs"])
+        self.assertEqual(marker["permissions"], {"contents": "read"})
+        download = next(
+            s for s in marker["steps"] if s.get("name") == "download amd64 binaries"
+        )
+        # Its own just-built artifact, never a downloaded published release.
+        self.assertEqual(download["with"], {"name": "bin-amd64", "path": "out/"})
+        run = marker["steps"][-1]["run"]
+        self.assertIn("bash ci/release_marker_image_test.sh amd64 out", run)
+        self.assertNotIn("gh release", run)
+        self.assertNotIn("releases/download", run)
+        for step in marker["steps"]:
+            self.assertNotIn("gh release", step.get("run", ""))
+        publish = jobs["publish"]
+        self.assertIn("marker-image", publish["needs"])
+        self.assertIn("needs.marker-image.result == 'success'", publish["if"])
+
+    def test_shipped_nightly_proves_markers(self):
+        self.check(workflow_document("NIGHTLY_WORKFLOW_TEST_PATH", "nightly.yml"))
+
+    def test_removed_or_miswired_proof_fails(self):
+        base = workflow_document("NIGHTLY_WORKFLOW_TEST_PATH", "nightly.yml")
+
+        def mutate(fn):
+            doc = json.loads(json.dumps(base))
+            fn(doc)
+            return doc
+
+        def drop_job(d):
+            del d["jobs"]["marker-image"]
+
+        def drop_need(d):
+            d["jobs"]["publish"]["needs"].remove("marker-image")
+
+        def downloaded(d):
+            d["jobs"]["marker-image"]["steps"][-1]["run"] = (
+                "gh release download nightly\nbash ci/release_marker_image_test.sh amd64 out"
+            )
+
+        def wrong_artifact(d):
+            for s in d["jobs"]["marker-image"]["steps"]:
+                if s.get("name") == "download amd64 binaries":
+                    s["with"]["name"] = "bin-arm64"
+
+        for fn in (drop_job, drop_need, downloaded, wrong_artifact):
+            with self.subTest(case=fn.__name__):
+                with self.assertRaises((AssertionError, KeyError)):
+                    self.check(mutate(fn))
+
+
 class BinaryWorkflowContract(unittest.TestCase):
     """Keep the tag release wired to the reusable, pinned binary build."""
 
