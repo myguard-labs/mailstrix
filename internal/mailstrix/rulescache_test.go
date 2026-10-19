@@ -2,11 +2,15 @@ package mailstrix
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	yara "github.com/hillu/go-yara/v4"
+	"golang.org/x/sys/unix"
 )
 
 func quietLog(string, ...any) {}
@@ -130,6 +134,83 @@ func TestEnsureCachedRulesCleansRollbackOnlyAfterRecovery(t *testing.T) {
 	}
 }
 
+// TestEnsureCachedRulesCleansFetchTempsWithoutTrustedManifest: stale fetch temps
+// are reclaimed on the untrusted-manifest early return too, while rollback
+// directories beside an untrusted cache are retained.
+func TestEnsureCachedRulesCleansFetchTempsWithoutTrustedManifest(t *testing.T) {
+	cases := []struct {
+		name     string
+		manifest string // "" means no manifest file is written
+	}{
+		{name: "no manifest", manifest: ""},
+		{name: "untrusted manifest", manifest: `{"version":3}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			cachePath := filepath.Join(cacheDir, cachedRulesName)
+			compiledYac(t, cachePath, cacheRuleB)
+			if tc.manifest != "" {
+				if err := os.WriteFile(filepath.Join(cacheDir, manifestName), []byte(tc.manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stage := filepath.Join(cacheDir, ".marker-stage-x")
+			dl := filepath.Join(cacheDir, ".compiled-dl-x.tmp")
+			fresh := filepath.Join(cacheDir, ".marker-stage-fresh")
+			rollback := filepath.Join(cacheDir, ".rules-rollback-keep")
+			for _, d := range []string{stage, fresh, rollback} {
+				if err := os.Mkdir(d, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(dl, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ageFetchTemp(t, stage)
+			ageFetchTemp(t, dl)
+
+			cfg := &Config{CacheDir: cacheDir}
+			if err := EnsureCachedRules(cfg, quietLog); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RulesPath != cachePath {
+				t.Errorf("RulesPath = %q, want %q", cfg.RulesPath, cachePath)
+			}
+			if exists(stage) || exists(dl) {
+				t.Errorf("stale fetch temporaries remain")
+			}
+			if !exists(fresh) {
+				t.Errorf("fresh .marker-stage-fresh was removed")
+			}
+			if !exists(rollback) {
+				t.Errorf("rollback directory removed beside untrusted cache")
+			}
+		})
+	}
+}
+
+// TestEnsureCachedRulesCleansFetchTempsOnErrorPath: cleanup runs before the seed
+// checks, so a stale temp is reclaimed even when startup returns an error.
+func TestEnsureCachedRulesCleansFetchTempsOnErrorPath(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	dl := filepath.Join(cacheDir, ".compiled-dl-y.tmp")
+	if err := os.WriteFile(dl, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageFetchTemp(t, dl)
+	cfg := &Config{CacheDir: cacheDir, SeedRules: "/nonexistent/seed.yac"}
+	if err := EnsureCachedRules(cfg, quietLog); err == nil {
+		t.Fatal("expected an error when cache empty and seed unusable")
+	}
+	if exists(dl) {
+		t.Errorf("stale .compiled-dl-y.tmp remains after error return")
+	}
+}
+
 func TestCleanupRollbackDirsTreatsCachePathLiterally(t *testing.T) {
 	parent := t.TempDir()
 	cacheDir := filepath.Join(parent, "cache[ab]")
@@ -238,5 +319,147 @@ func TestEnsureCachedRulesNoSeedErrors(t *testing.T) {
 	cfg := &Config{CacheDir: cacheDir, SeedRules: "/nonexistent/seed.yac"}
 	if err := EnsureCachedRules(cfg, quietLog); err == nil {
 		t.Fatal("expected an error when cache empty and seed unusable")
+	}
+}
+
+func ageFetchTemp(t *testing.T, path string) {
+	t.Helper()
+	old := time.Now().Add(-staleFetchTempAge - time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+func TestCleanupStaleFetchTemps(t *testing.T) {
+	cacheDir := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "keep.txt")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mkdir := func(name string) string {
+		p := filepath.Join(cacheDir, name)
+		if err := os.MkdirAll(filepath.Join(p, "sub"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "sub", "f"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mkfile := func(name string) string {
+		p := filepath.Join(cacheDir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	oldStage := mkdir(".marker-stage-old")
+	oldDL := mkfile(".compiled-dl-old.tmp")
+	freshStage := mkdir(".marker-stage-fresh")
+	freshDL := mkfile(".compiled-dl-fresh.tmp")
+	live := mkfile("compiled.yac")
+	bareStage := mkdir(".marker-stage") // no dash suffix: not ours
+	wrongSuffix := mkfile(".compiled-dl-old.dat")
+	fileNamedStage := mkfile(".marker-stage-file") // wrong type for its name
+	dirNamedDL := mkdir(".compiled-dl-dir.tmp")    // wrong type for its name
+	link := filepath.Join(cacheDir, ".marker-stage-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	dlLink := filepath.Join(cacheDir, ".compiled-dl-link.tmp")
+	if err := os.Symlink(victim, dlLink); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{oldStage, oldDL, live, bareStage, wrongSuffix, fileNamedStage, dirNamedDL} {
+		ageFetchTemp(t, p)
+	}
+	// os.Chtimes follows links; age the links themselves.
+	old := time.Now().Add(-staleFetchTempAge - time.Hour)
+	for _, l := range []string{link, dlLink} {
+		ts := []unix.Timespec{unix.NsecToTimespec(old.UnixNano()), unix.NsecToTimespec(old.UnixNano())}
+		if err := unix.UtimesNanoAt(unix.AT_FDCWD, l, ts, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cleanupStaleFetchTemps(cacheDir, quietLog)
+
+	for _, gone := range []string{oldStage, oldDL, link, dlLink} {
+		if exists(gone) {
+			t.Errorf("stale %s remains", filepath.Base(gone))
+		}
+	}
+	for _, kept := range []string{freshStage, freshDL, live, bareStage, wrongSuffix, fileNamedStage, dirNamedDL, victim, filepath.Join(outside)} {
+		if !exists(kept) {
+			t.Errorf("%s was removed", kept)
+		}
+	}
+}
+
+func TestCleanupStaleFetchTempsBoundary(t *testing.T) {
+	cacheDir := t.TempDir()
+	p := filepath.Join(cacheDir, ".compiled-dl-edge.tmp")
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mt := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(p, mt, mt); err != nil {
+		t.Fatal(err)
+	}
+	cleanupStaleFetchTempsAt(cacheDir, mt, quietLog) // mtime == cutoff: kept
+	if !exists(p) {
+		t.Fatal("entry at the cutoff was removed")
+	}
+	cleanupStaleFetchTempsAt(cacheDir, mt.Add(time.Second), quietLog)
+	if exists(p) {
+		t.Fatal("entry older than the cutoff remains")
+	}
+}
+
+func TestCleanupStaleFetchTempsLogsAndContinues(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	cacheDir := t.TempDir()
+	stuck := filepath.Join(cacheDir, ".marker-stage-a-stuck")
+	if err := os.MkdirAll(filepath.Join(stuck, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stuck, 0o500); err != nil { // cannot unlink children
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stuck, 0o700) })
+	next := filepath.Join(cacheDir, ".marker-stage-z-next")
+	if err := os.Mkdir(next, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dl := filepath.Join(cacheDir, ".compiled-dl-z.tmp")
+	if err := os.WriteFile(dl, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{stuck, next, dl} {
+		ageFetchTemp(t, p)
+	}
+	var logs []string
+	cleanupStaleFetchTemps(cacheDir, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	if len(logs) != 1 || !strings.Contains(logs[0], ".marker-stage-a-stuck") {
+		t.Fatalf("logs = %q, want one warning naming the stuck entry", logs)
+	}
+	if exists(next) || exists(dl) {
+		t.Fatal("cleanup stopped at the first failure")
+	}
+}
+
+func TestCleanupStaleFetchTempsMissingDirLogs(t *testing.T) {
+	var logs []string
+	cleanupStaleFetchTemps(filepath.Join(t.TempDir(), "absent"), func(f string, a ...any) { logs = append(logs, f) })
+	if len(logs) != 1 {
+		t.Fatalf("logs = %q, want one warning", logs)
 	}
 }

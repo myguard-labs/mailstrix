@@ -215,6 +215,22 @@ COPY docker/export-compiler-inputs.py /usr/local/bin/
 RUN if [ "$(cat /tmp/release/mode)" = marker ]; then cmd="export-marker"; else cmd="export"; fi \
     && python3 /usr/local/bin/export-compiler-inputs.py "${cmd}" /rules /rules-export
 
+# ---- rules export (for docker/generate-rules.sh; not a runtime image) ------
+# `docker buildx build -f docker/Dockerfile.release --build-arg RELEASE_TAG=<tag>
+# --target rules-export --output type=local,dest=out .` drops the bundle compiled
+# with the release's exact marker toolchain plus its marker tree, so the
+# publisher can sign a marker field that binds to that release's binary.
+FROM scratch AS rules-export
+COPY --from=rules-export-inputs /rules-export/ /
+
+# ---- rules verifier (for docker/generate-rules.sh; not a runtime image) -----
+# The released strixd itself: the binary whose linked libyara/compiler identity
+# a published marker tree must bind to, used for `fetch-rules -verify-only
+# -require-marker`. No baked rules and no production cache.
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS rules-verifier
+COPY --from=fetch /out/bin/strixd /usr/local/bin/strixd
+ENTRYPOINT ["/usr/local/bin/strixd", "fetch-rules", "-verify-only"]
+
 # ---- final (distroless, nonroot) -------------------------------------------
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
 ARG VERSION

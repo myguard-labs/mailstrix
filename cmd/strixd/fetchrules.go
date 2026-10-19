@@ -27,11 +27,28 @@ func cmdFetchRules(args []string) int {
 	url := fs.String("url", firstNonEmpty(cfg.RulesURL, mailstrix.DefaultRulesURL), "base URL holding compiled.yac + its manifest (MAILSTRIX_RULES_URL)")
 	cacheDir := fs.String("cache-dir", firstNonEmpty(cfg.CacheDir, "/var/cache/mailstrix"), "cache dir for the live bundle (MAILSTRIX_CACHE_DIR)")
 	allowHTTP := fs.Bool("allow-http", cfg.RulesAllowHTTP, "permit a plain-http -url; https-to-http redirects stay refused (MAILSTRIX_RULES_ALLOW_HTTP)")
-	timeout := fs.Duration("timeout", 60*time.Second, "overall HTTP timeout")
+	timeout := fs.Duration("timeout", defaultFetchTimeout, "overall HTTP timeout; when not set and MAILSTRIX_RULES_MARKERS is not off, defaults to "+markerFetchTimeout.String()+" to cover the marker tree")
 	allowDrop := fs.Bool("allow-count-drop", cfg.AllowRulesCountDrop, "install a bundle with zero rules or under half the current rule count (MAILSTRIX_RULES_ALLOW_COUNT_DROP)")
 	verifyOnly := fs.Bool("verify-only", false, "verify into a fresh temporary cache and remove it; never touch the configured cache")
 	expectedVersion := fs.Int("expected-version", 0, "with -verify-only, require this published version")
+	requireMarker := fs.Bool("require-marker", false, "with -verify-only, fail unless the published marker tree verifies and loads against this binary")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	// MAILSTRIX_RULES_MARKERS=auto|off; an invalid value aborts before any request.
+	if err := cfg.ValidateRulesMarkers(); err != nil {
+		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
+		return 2
+	}
+	timeoutSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "timeout" {
+			timeoutSet = true
+		}
+	})
+	*timeout = effectiveFetchTimeout(*timeout, timeoutSet, cfg.RulesMarkersOff())
+	if *requireMarker && !*verifyOnly {
+		fmt.Fprintln(os.Stderr, "require-marker requires verify-only")
 		return 2
 	}
 	if *expectedVersion < 0 || (*expectedVersion > 0 && !*verifyOnly) {
@@ -83,7 +100,7 @@ func cmdFetchRules(args []string) int {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
 		return 2
 	}
-	res, err := mailstrix.FetchRulesWithExtraKeys(ctx, *url, *cacheDir, libyaraVersion, hc, *allowHTTP, extraKeys)
+	res, err := mailstrix.FetchRulesWithOptions(ctx, *url, *cacheDir, libyaraVersion, hc, mailstrix.FetchRulesOptions{AllowHTTP: *allowHTTP, ExtraSigningKeys: extraKeys, Markers: cfg.RulesMarkers})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "strixd fetch-rules:", err)
 		return 2
@@ -107,14 +124,56 @@ func cmdFetchRules(args []string) int {
 			return 2
 		}
 		fmt.Printf("verify-rules: version=%d libyara=%s size=%d checksum=%s loadable=true\n", m.Version, m.Libyara, m.Size, m.Checksum)
+		fmt.Printf("verify-rules: marker=%s\n", res.Marker)
+		if *requireMarker {
+			if err := requireMarkerInstalled(res.Marker); err != nil {
+				fmt.Fprintln(os.Stderr, "verify-rules:", err)
+				return 2
+			}
+		}
 		return 0
 	}
 	if res.Updated {
 		fmt.Printf("fetch-rules: %s — restart or SIGHUP strixd to load the new bundle\n", res.Reason)
+		fmt.Printf("fetch-rules: marker tree %s\n", res.Marker)
 	} else {
 		fmt.Printf("fetch-rules: %s\n", res.Reason)
 	}
 	return 0
+}
+
+const (
+	// defaultFetchTimeout is the -timeout default with markers off: one small bundle.
+	defaultFetchTimeout = 60 * time.Second
+	// markerFetchTimeout is the default when markers are enabled. The marker tree
+	// gets only what the core bundle leaves of the budget, and a large tree would
+	// otherwise time out and silently fall back to the full ruleset. It matches
+	// the daemon's MAILSTRIX_RULES_FETCH_TIMEOUT default.
+	markerFetchTimeout = 5 * time.Minute
+)
+
+// effectiveFetchTimeout picks the fetch deadline: an explicit -timeout always
+// wins; otherwise 5m when markers are enabled (auto, empty) and 60s when off.
+func effectiveFetchTimeout(flagValue time.Duration, explicit bool, markersOff bool) time.Duration {
+	if explicit {
+		return flagValue
+	}
+	if markersOff {
+		return flagValue
+	}
+	return markerFetchTimeout
+}
+
+// requireMarkerInstalled is the -require-marker gate: only a marker tree that
+// was downloaded, hash-checked, extracted and loaded by this binary's loader
+// counts. Every other outcome (no field, disabled, wrong toolchain, invalid
+// field or tree) is a failure, so a publisher can refuse a candidate whose tree
+// would silently fall back to the full ruleset on clients.
+func requireMarkerInstalled(status string) error {
+	if status != mailstrix.MarkerStatusInstalled {
+		return fmt.Errorf("marker tree required but status is %q", status)
+	}
+	return nil
 }
 
 func firstNonEmpty(vals ...string) string {

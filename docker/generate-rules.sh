@@ -18,6 +18,15 @@
 #   libyara    the libyara version that compiled it (the skew guard)
 #   rules      rule count (sanity / display)
 #   size       .yac size in bytes (sanity)
+#   marker     OPTIONAL {asset,sha256,size,libyara_sha256,compiler_sha256,main_sha256}
+#              describing marker-tree.tar.gz, the signed marker artifact tree that
+#              lets strixd keep its marker speed gain after a rules refresh. It is
+#              published only when the bundle was compiled with the latest
+#              release's exact yarac + libyara.a (docker/Dockerfile.release,
+#              docker/release-marker-toolchain.sh) AND that release's strixd
+#              loaded the staged candidate with `fetch-rules -verify-only
+#              -require-marker` before upload. Any other outcome publishes the
+#              bundle, manifest and signature exactly as before, with no field.
 #
 # Detached signature (compiled.yac.manifest.json.sig), published beside it:
 #   base64 of the raw 64-byte ed25519 signature over the exact manifest bytes.
@@ -40,7 +49,9 @@
 #   MAILSTRIX_RULES_SIGNING_KEY wins and the build-env fallback is skipped, so
 #   CI and manual runs are unchanged. Neither value is ever printed, logged, or
 #   placed on a command line.
-# Env overrides: REPO (owner/name), TAG (default rules-current).
+# Env overrides: REPO (owner/name), TAG (default rules-current),
+#   MARKER_RELEASE_TAG (release whose marker toolchain compiles the bundle;
+#   default: the latest published release; "off" disables the marker tree).
 #   Every documented rule-source build-arg is passed through to the Dockerfile
 #   when set in the environment: YARAFORGE_SET, YARAFORGE_URL, SIGBASE_REF,
 #   ANYRUN(/_REF), DIDIER(/_REF), BARTBLAZE(/_REF), INQUEST(/_REF),
@@ -171,7 +182,11 @@ failure_notice() {  # failure_notice <exit-code>
 # Discord delivery itself is the publisher-only best-effort exception; build,
 # publish, and verify failures remain fatal. A receipt-emission fault cannot
 # mask the original failure after its stage-specific alert is sent.
-cleanup() { [ -z "$WORK" ] || rm -rf "${WORK:?}"; }
+SERVER_PID=""
+cleanup() {
+    [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
+    [ -z "$WORK" ] || rm -rf "${WORK:?}"
+}
 trap cleanup EXIT
 # shellcheck disable=SC2154  # rc IS assigned (rc=$?) inside the trap-quoted string
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then _FAILURE_EXIT=$rc; [ "$_RECEIPT_EMITTING" -eq 0 ] || NIGHTLY_STAGE=receipt; shout_fail "$(failure_notice "$rc")"; fi; exit $rc' ERR
@@ -329,7 +344,6 @@ printf '%s\n' '{"schema":"mailstrix-rules-signing-preflight-v1"}' >"$PREFLIGHT_M
 # Forward every documented rule-source build-arg that is set in the environment
 # so the published rolling bundle honours the same pin/toggle knobs as a direct
 # `docker build --build-arg …` of the image.
-note "building rules (CACHEBUST forces a fresh fetch of the public rulesets)…"
 build_args=""
 for v in MAILSTRIX_PROFILE YARAFORGE_SET YARAFORGE_FILTER YARAFORGE_URL SIGBASE_REF \
          ANYRUN ANYRUN_REF DIDIER DIDIER_REF BARTBLAZE BARTBLAZE_REF \
@@ -338,19 +352,85 @@ for v in MAILSTRIX_PROFILE YARAFORGE_SET YARAFORGE_FILTER YARAFORGE_URL SIGBASE_
     [ "${val:-}" = set ] || continue
     eval "build_args=\"\$build_args --build-arg $v=\${$v}\""
 done
-# shellcheck disable=SC2086  # build_args is a deliberately word-split arg list
-docker buildx build \
-    --target rules-export \
-    --build-arg "CACHEBUST=$(date +%s)" \
-    $build_args \
-    --output "type=local,dest=${WORK}" \
-    -f "${HERE}/docker/Dockerfile" "${HERE}"
 
-YAC="${WORK}/compiled.yac"
+# Marker tree (decision D2: latest-release toolchain only). A marker artifact
+# binds to the exact yarac and libyara.a linked into the binary that loads it,
+# and libyara.a is not byte-reproducible (docker/release-marker-toolchain.sh), so
+# the bundle and its tree are compiled together with the latest release's own
+# toolchain through docker/Dockerfile.release. Every failure on this path (no
+# release, legacy release without toolchain assets, toolchain not linked into the
+# release strixd, a build error) falls back to the unchanged build below and
+# publishes no marker field; it never fails the publication.
+EXPORT_DIR="$WORK"
+MARKER_VERIFIER_IMAGE=""
+MARKER_TAG="${MARKER_RELEASE_TAG-}"
+if [ "${MARKER_RELEASE_TAG+set}" != set ]; then
+    MARKER_TAG="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+fi
+case "$MARKER_TAG" in
+    v[0-9]*) case "$MARKER_TAG" in *[!A-Za-z0-9._-]*) MARKER_TAG="" ;; esac ;;
+    *) MARKER_TAG="" ;;
+esac
+
+build_marker_export() {  # build_marker_export <tag>; 0 only for a complete marker export + verifier
+    local tag="$1" out="${WORK}/marker-export"
+    mkdir -p "$out" || return 1
+    # shellcheck disable=SC2086  # build_args is a deliberately word-split arg list
+    docker buildx build \
+        --target rules-export \
+        --build-arg "RELEASE_TAG=${tag}" \
+        --build-arg "CACHEBUST=$(date +%s)" \
+        $build_args \
+        --output "type=local,dest=${out}" \
+        -f "${HERE}/docker/Dockerfile.release" "${HERE}" || return 1
+    [ -s "${out}/compiled.yac" ] && [ -f "${out}/libyara.version" ] \
+        && [ -d "${out}/compiler-inputs" ] && [ -d "${out}/marker-artifact" ] || return 1
+    # The released strixd is the binary that must load the tree.
+    docker buildx build --target rules-verifier --load \
+        --build-arg "RELEASE_TAG=${tag}" \
+        --iidfile "${WORK}/marker-verifier.iid" \
+        -f "${HERE}/docker/Dockerfile.release" "${HERE}" || return 1
+    [ -s "${WORK}/marker-verifier.iid" ] || return 1
+    MARKER_VERIFIER_IMAGE="$(<"${WORK}/marker-verifier.iid")"
+    [ -n "$MARKER_VERIFIER_IMAGE" ] || return 1
+    # A marker-capable release built before -require-marker existed cannot run
+    # the staged gate; without this probe every publication would die there
+    # instead of falling back. `-h` prints the flag list and exits 2.
+    local usage
+    usage="$(docker run --rm --network none "$MARKER_VERIFIER_IMAGE" -h 2>&1 || true)"
+    grep -qF -- '-require-marker' <<<"$usage" || {
+        note "the ${tag} strixd has no -require-marker gate; publishing without a marker tree"
+        MARKER_VERIFIER_IMAGE=""
+        return 1
+    }
+}
+if [ -n "$MARKER_TAG" ]; then
+    note "building rules with the ${MARKER_TAG} marker toolchain…"
+    if build_marker_export "$MARKER_TAG"; then
+        EXPORT_DIR="${WORK}/marker-export"
+    else
+        note "no marker-capable build from ${MARKER_TAG}; publishing without a marker tree"
+        rm -rf "${WORK}/marker-export" "${WORK}/marker-verifier.iid"
+        MARKER_VERIFIER_IMAGE=""
+    fi
+fi
+
+if [ -z "$MARKER_VERIFIER_IMAGE" ]; then
+    note "building rules (CACHEBUST forces a fresh fetch of the public rulesets)…"
+    # shellcheck disable=SC2086  # build_args is a deliberately word-split arg list
+    docker buildx build \
+        --target rules-export \
+        --build-arg "CACHEBUST=$(date +%s)" \
+        $build_args \
+        --output "type=local,dest=${WORK}" \
+        -f "${HERE}/docker/Dockerfile" "${HERE}"
+fi
+
+YAC="${EXPORT_DIR}/compiled.yac"
 [ -s "$YAC" ] || die "no compiled.yac produced"
-SOURCES="${WORK}/sources.json"
+SOURCES="${EXPORT_DIR}/sources.json"
 [ -f "$SOURCES" ] || note "no sources.json in export — provenance will be absent from manifest"
-LIBYARA="$(tr -d '[:space:]' < "${WORK}/libyara.version")"
+LIBYARA="$(tr -d '[:space:]' < "${EXPORT_DIR}/libyara.version")"
 [ -n "$LIBYARA" ] || die "could not determine libyara version"
 
 # Build the matching native consumer, then load the exact exported bundle before
@@ -456,6 +536,36 @@ else
         > "$MANIFEST"
 fi
 
+# 3a) Marker field. Pack the tree from the marker export and bind it into the
+# manifest, so the signature below covers it. Any packing problem drops only the
+# marker (the bundle still publishes as before).
+MARKER_ASSET="marker-tree.tar.gz"
+MARKER_FILE="${WORK}/${MARKER_ASSET}"
+MARKER_PUBLISH=0
+if [ -n "$MARKER_VERIFIER_IMAGE" ]; then
+    marker_json=""
+    if python3 "${HERE}/docker/pack-marker-tree.py" "$EXPORT_DIR" "$MARKER_FILE" \
+        && [ -f "${EXPORT_DIR}/marker-artifact/abi/libyara.a" ] \
+        && [ -f "${EXPORT_DIR}/marker-artifact/abi/yarac" ]; then
+        marker_json="$(jq -cn \
+            --arg asset "$MARKER_ASSET" \
+            --arg sha256 "$(sha256sum "$MARKER_FILE" | awk '{print $1}')" \
+            --argjson size "$(stat -c '%s' "$MARKER_FILE")" \
+            --arg libyara "$(sha256sum "${EXPORT_DIR}/marker-artifact/abi/libyara.a" | awk '{print $1}')" \
+            --arg compiler "$(sha256sum "${EXPORT_DIR}/marker-artifact/abi/yarac" | awk '{print $1}')" \
+            --arg main "$SUM" \
+            '{asset:$asset, sha256:$sha256, size:$size, libyara_sha256:$libyara, compiler_sha256:$compiler, main_sha256:$main}')" || marker_json=""
+    fi
+    if [ -n "$marker_json" ] \
+        && jq --argjson marker "$marker_json" '. + {marker:$marker}' "$MANIFEST" > "${MANIFEST}.marker" \
+        && mv "${MANIFEST}.marker" "$MANIFEST"; then
+        MARKER_PUBLISH=1
+    else
+        note "could not pack or bind the marker tree; publishing without a marker tree"
+        rm -f "${MANIFEST}.marker" "$MARKER_FILE"
+    fi
+fi
+
 # 3b) Sign the manifest. strixd refuses any remote manifest without a valid
 # ed25519 signature from a key compiled into the binary, so an unsigned
 # publication would be rejected by every client (and by the post-publish
@@ -482,6 +592,62 @@ MANIFEST_SIG="${MANIFEST}.sig"
 
 note "version ${PREV} -> ${VERSION}, libyara ${LIBYARA}, size ${SIZE}, sha256 ${SUM:0:12}…"
 
+# 3c) Prove the marker tree before anything is uploaded: serve the staged
+# candidate on loopback and let the release's own strixd fetch, verify and load
+# it. A failure here publishes nothing new (the release is still untouched).
+VERIFY_IMAGE="$VERIFIER_IMAGE"
+VERIFY_EXTRA=()
+# /tmp of a fetch-rules verifier holds the downloaded bundle; with a marker tree it
+# also holds the archive (<=1 GiB) and the extracted tree (<=2 GiB) at once, the
+# client caps in fetchrules_marker.go. tmpfs size is a ceiling, not an allocation.
+VERIFY_TMPFS="size=2g"
+MARKER_GATE_TMPFS="size=4g"
+if [ "$MARKER_PUBLISH" -eq 1 ]; then
+    NIGHTLY_STAGE=verify
+    STAGE="${WORK}/stage"
+    mkdir -p "$STAGE"
+    cp "$YAC" "${STAGE}/compiled.yac"
+    cp "$MANIFEST" "${STAGE}/compiled.yac.manifest.json"
+    cp "$MANIFEST_SIG" "${STAGE}/compiled.yac.manifest.json.sig"
+    cp "$MARKER_FILE" "${STAGE}/${MARKER_ASSET}"
+    cat >"${WORK}/serve-stage.py" <<'PY'
+import functools
+import http.server
+import sys
+
+
+class Quiet(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+handler = functools.partial(Quiet, directory=sys.argv[1])
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+PY
+    exec {server_fd}< <(exec python3 -u "${WORK}/serve-stage.py" "$STAGE")
+    SERVER_PID=$!
+    stage_port=""
+    read -r -t 30 -u "$server_fd" stage_port || true
+    case "$stage_port" in
+        ''|*[!0-9]*) die "could not start the local server for the staged candidate" ;;
+    esac
+    docker run --rm --read-only --network host \
+        --tmpfs "/tmp:rw,nosuid,nodev,${MARKER_GATE_TMPFS}" \
+        "$MARKER_VERIFIER_IMAGE" -url "http://127.0.0.1:${stage_port}" -allow-http \
+        -timeout 5m -expected-version "$VERSION" -require-marker \
+        || die "staged marker tree did not verify and load with the ${MARKER_TAG} strixd; nothing was published"
+    kill "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
+    exec {server_fd}<&-
+    VERIFY_IMAGE="$MARKER_VERIFIER_IMAGE"
+    VERIFY_EXTRA=(-require-marker)
+    VERIFY_TMPFS="$MARKER_GATE_TMPFS"
+    NIGHTLY_STAGE=build
+    note "marker tree verified against ${MARKER_TAG}: ${MARKER_ASSET}"
+fi
+
 # 4) Publish to the rolling release (create once if absent), clobbering assets.
 # Reuse the HTTP-status probe from step 1 (same reason: gh's exit status is not
 # trustworthy here). RELEASE_HTTP is 200 or 404 by now — anything else already died.
@@ -499,6 +665,11 @@ fi
 # Publish the manifest last. During the rolling asset replacement window an
 # older manifest can describe the new bytes; consumers reject and retry later.
 gh release upload "$TAG" --repo "$REPO" --clobber "$YAC"
+# The marker tree goes up BEFORE the signature and manifest that reference it, so
+# no client ever sees a signed manifest naming a missing or older tree asset.
+if [ "$MARKER_PUBLISH" -eq 1 ]; then
+    gh release upload "$TAG" --repo "$REPO" --clobber "$MARKER_FILE"
+fi
 # The signature goes up BEFORE the manifest it covers: during the rolling
 # replacement window a client must never see a new manifest paired with the
 # previous signature, which it would (correctly) refuse.
@@ -513,9 +684,9 @@ PUBLISH_STATE=published
 NIGHTLY_STAGE=verify
 verified=0
 for attempt in 1 2 3 4 5; do
-	if docker run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,size=2g \
-		"$VERIFIER_IMAGE" -url "https://github.com/${REPO}/releases/download/${TAG}" \
-		-timeout 5m -expected-version "$VERSION"; then
+	if docker run --rm --read-only --tmpfs "/tmp:rw,nosuid,nodev,${VERIFY_TMPFS}" \
+		"$VERIFY_IMAGE" -url "https://github.com/${REPO}/releases/download/${TAG}" \
+		-timeout 5m -expected-version "$VERSION" ${VERIFY_EXTRA[@]+"${VERIFY_EXTRA[@]}"}; then
         verified=1
         break
     fi

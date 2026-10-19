@@ -309,6 +309,10 @@ func cmdServe(args []string) (exitCode int) {
 		log.Printf("[mailstrix] %v", err)
 		return 2
 	}
+	if err := cfg.ValidateRulesMarkers(); err != nil {
+		log.Printf("[mailstrix] %v", err)
+		return 2
+	}
 
 	logf := func(format string, a ...any) { log.Printf("[mailstrix] "+format, a...) }
 

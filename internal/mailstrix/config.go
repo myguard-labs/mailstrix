@@ -90,6 +90,11 @@ type Config struct {
 	// TLS). Off by default: rule fetches require https, and a redirect from https
 	// to http is refused even when this is set.
 	RulesAllowHTTP bool // MAILSTRIX_RULES_ALLOW_HTTP (default false)
+	// RulesMarkers selects the optional signed marker tree: "auto" (default,
+	// also when empty) installs it when the manifest carries one for this
+	// binary's libyara build; "off" installs compiled.yac only and never
+	// downloads the tree. Any other value is a startup error.
+	RulesMarkers string // MAILSTRIX_RULES_MARKERS
 
 	// RulesExtraSigningKeys holds additional trusted rules-manifest signing
 	// public keys (raw 32-byte ed25519, base64, comma-separated). It is ADDITIVE
@@ -279,6 +284,7 @@ func LoadConfig() *Config {
 		RulesFetchTimeout: envDur("MAILSTRIX_RULES_FETCH_TIMEOUT", 5*60),
 		RulesURL:          envStr("MAILSTRIX_RULES_URL", DefaultRulesURL),
 		RulesAllowHTTP:    envBool("MAILSTRIX_RULES_ALLOW_HTTP"),
+		RulesMarkers:      strings.TrimSpace(os.Getenv(rulesMarkersEnv)),
 
 		RulesExtraSigningKeys: envList(rulesExtraSigningKeysEnv),
 		ScanTimeout:           envDur("MAILSTRIX_SCAN_TIMEOUT", 8),
@@ -551,6 +557,20 @@ func (c *Config) ValidateRulesSigningKeys() error {
 	}
 	logRulesSigningTrust(extra)
 	return nil
+}
+
+// ValidateRulesMarkers refuses a MAILSTRIX_RULES_MARKERS value other than
+// auto or off (empty is auto). Called once from startup and fetch-rules.
+func (c *Config) ValidateRulesMarkers() error {
+	_, err := parseRulesMarkersMode(c.RulesMarkers)
+	return err
+}
+
+// RulesMarkersOff reports whether MAILSTRIX_RULES_MARKERS selects "off". An
+// invalid value reports false; ValidateRulesMarkers is the place that refuses it.
+func (c *Config) RulesMarkersOff() bool {
+	off, err := parseRulesMarkersMode(c.RulesMarkers)
+	return err == nil && off
 }
 
 // ErrWildcardBind reports a wildcard ICAP/clamd TCP bind without opt-in.

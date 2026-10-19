@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,6 +46,12 @@ type RulesManifest struct {
 	Rules     int          `json:"rules"`             // rule count (display)
 	Size      int64        `json:"size"`              // compiled.yac bytes (sanity)
 	Sources   []RuleSource `json:"sources,omitempty"` // per-ruleset provenance
+
+	// marker is the validated optional signed marker field of a remote manifest
+	// (nil when absent or invalid); markerErr records why an invalid one was
+	// ignored. Neither is persisted in the local record.
+	marker    *rulesMarker
+	markerErr error
 }
 
 // FetchResult reports what FetchRules did, for logging and the CLI exit code.
@@ -54,6 +61,9 @@ type FetchResult struct {
 	NewVersion       int  // version after (== LocalVersion when not updated)
 	Reason           string
 	PublishedVersion int // latest validated remote manifest, even on later failure
+	// Marker is the marker-tree outcome of an update (MarkerStatus* prefix,
+	// optionally followed by ": <reason>"); empty when nothing was installed.
+	Marker string
 }
 
 // fetchOptions groups optional parameters passed to fetchRules.
@@ -73,6 +83,28 @@ type fetchOptions struct {
 	// reload is called after both cache files have been installed; it must leave
 	// the active scanner unchanged on error and must not reacquire the cache lock.
 	reload func() error
+	// markersOff (MAILSTRIX_RULES_MARKERS=off) installs compiled.yac only and
+	// never downloads the marker tree.
+	markersOff bool
+	// logf receives marker-tree diagnostics; nil uses the standard logger.
+	logf func(format string, args ...any)
+}
+
+// FetchRulesOptions are the optional FetchRulesWithOptions parameters.
+type FetchRulesOptions struct {
+	AllowHTTP        bool                // MAILSTRIX_RULES_ALLOW_HTTP
+	ExtraSigningKeys []ed25519.PublicKey // MAILSTRIX_RULES_EXTRA_SIGNING_KEYS (additive only)
+	Markers          string              // MAILSTRIX_RULES_MARKERS: "auto" (or empty) or "off"
+}
+
+// FetchRulesWithOptions is FetchRulesWithExtraKeys plus the marker-tree mode.
+// An invalid Markers value is refused before any request.
+func FetchRulesWithOptions(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *http.Client, o FetchRulesOptions) (FetchResult, error) {
+	off, err := parseRulesMarkersMode(o.Markers)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	return fetchRules(ctx, baseURL, cacheDir, ourLibyara, hc, fetchOptions{allowHTTP: o.AllowHTTP, extraSigningKeys: o.ExtraSigningKeys, markersOff: off})
 }
 
 // FetchRules implements the manifest-driven update: fetch the remote manifest,
@@ -95,9 +127,14 @@ type fetchOptions struct {
 //  3. remote.Libyara != ourLibyara     => refuse (skew), keep current.
 //  4. GET compiled.yac, verify size + sha256 against the manifest. Mismatch =>
 //     discard, keep current.
-//  5. Back up the live bundle, replace both cache files under the cache lock,
-//     and restore the cache pair and pre-existing backup on a reported install
-//     or daemon reload failure.
+//  5. Optional marker tree (manifest "marker" field, MAILSTRIX_RULES_MARKERS
+//     not off, this binary's libyara/compiler identity matching): download,
+//     verify size + sha256, extract safely and prove it with the marker loader
+//     against the staged bundle. Any tree failure only drops the tree; the
+//     verified compiled.yac still installs and scans use the full ruleset.
+//  6. Back up the live bundle, replace both cache files (and the marker tree)
+//     under the cache lock, and restore the cache pair, pre-existing backup
+//     and previous tree on a reported install or daemon reload failure.
 //
 // baseURL must be https. Plain http is accepted only when allowHTTP is set
 // (MAILSTRIX_RULES_ALLOW_HTTP); any other scheme or a missing host is refused
@@ -272,6 +309,10 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	if err != nil {
 		return res, fmt.Errorf("downloaded bundle does not load (keeping current cache): %w", err)
 	}
+	markerStage, markerStatus := prepareRemoteMarkerTree(ctx, hc, base, cacheDir, tmp, remote, opts)
+	if markerStage != "" {
+		defer func() { _ = os.RemoveAll(markerStage) }()
+	}
 
 	unlock, err = lockRules(ctx, cacheDir)
 	if err != nil {
@@ -318,8 +359,9 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 			}
 		}
 	}
+	tree := newMarkerTreeSwap(cacheDir, rollbackDir)
 	rollback := func(cause error) error {
-		var recovery error
+		recovery := tree.restore()
 		for i, path := range paths {
 			var err error
 			if existed[i] {
@@ -347,6 +389,14 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 			return res, fmt.Errorf("backup current bundle: %w", err)
 		}
 	}
+	if err := tree.retire(); err != nil {
+		return res, rollback(fmt.Errorf("retire marker tree: %w", err))
+	}
+	if markerStage != "" {
+		if err := tree.install(markerStage); err != nil {
+			return res, rollback(fmt.Errorf("install marker tree: %w", err))
+		}
+	}
 	if err := os.Rename(tmp, cachePath); err != nil {
 		return res, rollback(fmt.Errorf("install bundle: %w", err))
 	}
@@ -360,6 +410,7 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	}
 
 	res.Updated = true
+	res.Marker = markerStatus
 	res.NewVersion = remote.Version
 	res.Reason = fmt.Sprintf("updated v%d -> v%d", local.Version, remote.Version)
 	return res, nil
@@ -514,7 +565,74 @@ func fetchManifest(ctx context.Context, hc *http.Client, base string, keys []ed2
 	if err != nil || len(sum) != sha256.Size {
 		return m, fmt.Errorf("manifest checksum must contain 32 bytes")
 	}
+	// The optional marker field is parsed from the same signed bytes. Per its
+	// contract an invalid field drops only the marker; compiled.yac proceeds.
+	m.marker, _, m.markerErr = manifestMarker(body, m.Checksum)
 	return m, nil
+}
+
+// Marker-tree budget. The tree (archive up to 1 GiB) must not consume the whole
+// fetch deadline: compiled.yac has to keep time to lock, count, swap and reload
+// (a tree failure only drops the marker part). The reserve left to the core
+// install is max(markerCoreReserveMin, markerCoreReserveFraction of the
+// remaining budget). Variables so tests can shorten them.
+var (
+	markerCoreReserveMin      = 15 * time.Second
+	markerCoreReserveFraction = 4 // reserve at least 1/N of the remaining budget
+)
+
+// markerTreeContext derives the context for tree preparation. Without a parent
+// deadline there is no extra limit. Otherwise the child deadline is
+// now + remaining - reserve; when remaining <= reserve ok is false and the
+// caller must skip the tree without any download. The cancel func is always
+// non-nil.
+func markerTreeContext(parent context.Context) (context.Context, context.CancelFunc, bool) {
+	deadline, has := parent.Deadline()
+	if !has {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, true
+	}
+	remaining := time.Until(deadline)
+	reserve := max(markerCoreReserveMin, remaining/time.Duration(markerCoreReserveFraction))
+	if remaining <= reserve {
+		return parent, func() {}, false
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline.Add(-reserve))
+	return ctx, cancel, true
+}
+
+// prepareRemoteMarkerTree decides and, when warranted, stages the marker tree
+// for remote. It never fails the update: every problem is logged, reported in
+// the returned status, and leaves the full-ruleset fallback in place.
+func prepareRemoteMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, remote RulesManifest, opts fetchOptions) (string, string) {
+	logf := opts.logf
+	if logf == nil {
+		logf = func(format string, args ...any) { log.Printf("[mailstrix] "+format, args...) }
+	}
+	switch {
+	case opts.markersOff:
+		return "", MarkerStatusDisabled
+	case remote.markerErr != nil:
+		logf("ERROR: rules manifest v%d marker field ignored (compiled.yac installs; full ruleset fallback): %v", remote.Version, remote.markerErr)
+		return "", MarkerStatusRejected + ": " + remote.markerErr.Error()
+	case remote.marker == nil:
+		return "", MarkerStatusAbsent
+	case !markerABIMatches(remote.marker):
+		logf("PERF-18: rules manifest v%d marker tree targets another libyara/compiler build; full ruleset fallback", remote.Version)
+		return "", MarkerStatusSkipped + ": linked libyara/compiler identity differs"
+	}
+	mctx, cancel, ok := markerTreeContext(ctx)
+	defer cancel()
+	if !ok {
+		logf("ERROR: rules manifest v%d marker tree skipped: remaining fetch budget is below the reserve kept for installing compiled.yac (full ruleset fallback)", remote.Version)
+		return "", MarkerStatusSkipped + ": fetch budget below the reserve kept for the compiled.yac install"
+	}
+	stage, err := stageMarkerTree(mctx, hc, base, cacheDir, bundle, remote.marker)
+	if err != nil {
+		logf("ERROR: rules manifest v%d marker tree refused (compiled.yac installs; full ruleset fallback): %v", remote.Version, err)
+		return "", MarkerStatusRejected + ": " + err.Error()
+	}
+	return stage, MarkerStatusInstalled
 }
 
 // downloadToTemp streams url into a new temp file in dir, returning its path.

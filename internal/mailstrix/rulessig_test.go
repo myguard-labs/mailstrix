@@ -634,7 +634,7 @@ func TestLoadConfigReadsExtraSigningKeys(t *testing.T) {
 // must expose no skip/disable switch. The user's decision forbids one, and a
 // future "temporary" flag here would silently reopen the bypass.
 func TestNoVerificationBypassExists(t *testing.T) {
-	for _, path := range []string{"rulessig.go", "fetchrules.go", "rulesupdate.go"} {
+	for _, path := range []string{"rulessig.go", "fetchrules.go", "fetchrules_marker.go", "rulesupdate.go"} {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
