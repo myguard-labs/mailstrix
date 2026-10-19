@@ -1262,8 +1262,13 @@ class NightlyWorkflowContract(unittest.TestCase):
         )
         self.assertEqual(workflow["permissions"]["contents"], "read")
         jobs = workflow["jobs"]
-        self.assertEqual(jobs["publish"]["needs"], ["plan", "gate", "binaries"])
-        self.assertEqual(jobs["publish"]["if"], "needs.binaries.result == 'success'")
+        self.assertEqual(
+            jobs["publish"]["needs"], ["plan", "gate", "binaries", "marker-image"]
+        )
+        self.assertEqual(
+            jobs["publish"]["if"],
+            "needs.binaries.result == 'success' && needs.marker-image.result == 'success'",
+        )
         self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
         for name, job in jobs.items():
             if name != "publish":
