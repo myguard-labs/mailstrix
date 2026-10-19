@@ -45,6 +45,9 @@ func EnsureCachedRules(cfg *Config, logf func(string, ...any)) error {
 	if err := os.MkdirAll(cfg.CacheDir, 0o750); err != nil {
 		return fmt.Errorf("cache dir %s: %w", cfg.CacheDir, err)
 	}
+	// Reclaim crashed-fetch temporaries on every startup path below, including the
+	// untrusted-manifest early return and the reseed paths.
+	cleanupStaleFetchTemps(cfg.CacheDir, logf)
 	cachePath := filepath.Join(cfg.CacheDir, cachedRulesName)
 
 	// Trust the cache only if it is non-empty AND actually loads under this
@@ -103,7 +106,6 @@ func EnsureCachedRules(cfg *Config, logf func(string, ...any)) error {
 // process only after startup has established a coherent verified cache or a
 // known-good seed. An incoherent cache retains them as operator recovery data.
 func cleanupRollbackDirs(cacheDir string, logf func(string, ...any)) {
-	cleanupStaleFetchTemps(cacheDir, logf)
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		logf("WARNING: list stale rules rollback directories: %v", err)
@@ -134,7 +136,8 @@ const staleFetchTempAge = 6 * time.Hour
 // whose own mtime (Lstat, never following links) is older than staleFetchTempAge
 // are touched. A symlink with a matching name is removed as a link only; its
 // target is never read or deleted. Errors are logged and never abort startup.
-// The caller holds .rules.lock.
+// EnsureCachedRules calls it under .rules.lock on every startup path, independent
+// of rollback-directory cleanup.
 func cleanupStaleFetchTemps(cacheDir string, logf func(string, ...any)) {
 	cleanupStaleFetchTempsAt(cacheDir, time.Now().Add(-staleFetchTempAge), logf)
 }

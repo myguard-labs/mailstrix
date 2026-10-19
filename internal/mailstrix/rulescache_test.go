@@ -134,6 +134,83 @@ func TestEnsureCachedRulesCleansRollbackOnlyAfterRecovery(t *testing.T) {
 	}
 }
 
+// TestEnsureCachedRulesCleansFetchTempsWithoutTrustedManifest: stale fetch temps
+// are reclaimed on the untrusted-manifest early return too, while rollback
+// directories beside an untrusted cache are retained.
+func TestEnsureCachedRulesCleansFetchTempsWithoutTrustedManifest(t *testing.T) {
+	cases := []struct {
+		name     string
+		manifest string // "" means no manifest file is written
+	}{
+		{name: "no manifest", manifest: ""},
+		{name: "untrusted manifest", manifest: `{"version":3}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			cachePath := filepath.Join(cacheDir, cachedRulesName)
+			compiledYac(t, cachePath, cacheRuleB)
+			if tc.manifest != "" {
+				if err := os.WriteFile(filepath.Join(cacheDir, manifestName), []byte(tc.manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stage := filepath.Join(cacheDir, ".marker-stage-x")
+			dl := filepath.Join(cacheDir, ".compiled-dl-x.tmp")
+			fresh := filepath.Join(cacheDir, ".marker-stage-fresh")
+			rollback := filepath.Join(cacheDir, ".rules-rollback-keep")
+			for _, d := range []string{stage, fresh, rollback} {
+				if err := os.Mkdir(d, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(dl, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ageFetchTemp(t, stage)
+			ageFetchTemp(t, dl)
+
+			cfg := &Config{CacheDir: cacheDir}
+			if err := EnsureCachedRules(cfg, quietLog); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.RulesPath != cachePath {
+				t.Errorf("RulesPath = %q, want %q", cfg.RulesPath, cachePath)
+			}
+			if exists(stage) || exists(dl) {
+				t.Errorf("stale fetch temporaries remain")
+			}
+			if !exists(fresh) {
+				t.Errorf("fresh .marker-stage-fresh was removed")
+			}
+			if !exists(rollback) {
+				t.Errorf("rollback directory removed beside untrusted cache")
+			}
+		})
+	}
+}
+
+// TestEnsureCachedRulesCleansFetchTempsOnErrorPath: cleanup runs before the seed
+// checks, so a stale temp is reclaimed even when startup returns an error.
+func TestEnsureCachedRulesCleansFetchTempsOnErrorPath(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	dl := filepath.Join(cacheDir, ".compiled-dl-y.tmp")
+	if err := os.WriteFile(dl, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageFetchTemp(t, dl)
+	cfg := &Config{CacheDir: cacheDir, SeedRules: "/nonexistent/seed.yac"}
+	if err := EnsureCachedRules(cfg, quietLog); err == nil {
+		t.Fatal("expected an error when cache empty and seed unusable")
+	}
+	if exists(dl) {
+		t.Errorf("stale .compiled-dl-y.tmp remains after error return")
+	}
+}
+
 func TestCleanupRollbackDirsTreatsCachePathLiterally(t *testing.T) {
 	parent := t.TempDir()
 	cacheDir := filepath.Join(parent, "cache[ab]")
@@ -311,7 +388,7 @@ func TestCleanupStaleFetchTemps(t *testing.T) {
 		}
 	}
 
-	cleanupRollbackDirs(cacheDir, quietLog)
+	cleanupStaleFetchTemps(cacheDir, quietLog)
 
 	for _, gone := range []string{oldStage, oldDL, link, dlLink} {
 		if exists(gone) {
