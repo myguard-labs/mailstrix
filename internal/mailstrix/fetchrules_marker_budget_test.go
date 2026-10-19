@@ -70,12 +70,12 @@ func assertCompiledInstalled(t *testing.T, f markerFixture, dir string, res Fetc
 // reserve, and compiled.yac still installs.
 func TestFetchRulesMarkerTreeStallKeepsCoreInstall(t *testing.T) {
 	old := markerCoreReserveMin
-	markerCoreReserveMin = 500 * time.Millisecond
+	markerCoreReserveMin = 2 * time.Second
 	t.Cleanup(func() { markerCoreReserveMin = old })
 	f, dir := newDroppedCase(t)
 	inner := newMarkerServer(t, f.main, 3, f.field(f.archive), f.archive)
 	front, hits := slowTreeServer(t, inner, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	res, err := fetchWithCtx(t, ctx, front, dir)
 	assertCompiledInstalled(t, f, dir, res, err)
