@@ -103,6 +103,7 @@ func EnsureCachedRules(cfg *Config, logf func(string, ...any)) error {
 // process only after startup has established a coherent verified cache or a
 // known-good seed. An incoherent cache retains them as operator recovery data.
 func cleanupRollbackDirs(cacheDir string, logf func(string, ...any)) {
+	cleanupStaleFetchTemps(cacheDir, logf)
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		logf("WARNING: list stale rules rollback directories: %v", err)
@@ -115,6 +116,63 @@ func cleanupRollbackDirs(cacheDir string, logf func(string, ...any)) {
 		dir := filepath.Join(cacheDir, entry.Name())
 		if err := os.RemoveAll(dir); err != nil {
 			logf("WARNING: remove stale rules rollback directory %s: %v", dir, err)
+		}
+	}
+}
+
+// staleFetchTempAge is how old a fetch temporary must be before startup
+// cleanup removes it. .marker-stage-* directories and .compiled-dl-*.tmp files
+// are created BEFORE .rules.lock is taken, so a concurrently running
+// fetch-rules may legitimately own a fresh one. A fetch is bounded by its
+// timeout (default 5m, operator-tunable) and by the 1 GiB / 2 GiB size caps, so
+// no realistic run keeps one of these for hours; 6h is far above that while
+// still reclaiming the space of a crashed or OOM-killed run on the next start.
+const staleFetchTempAge = 6 * time.Hour
+
+// cleanupStaleFetchTemps removes .marker-stage-* directories and
+// .compiled-dl-*.tmp files that a crashed fetch left in cacheDir. Only entries
+// whose own mtime (Lstat, never following links) is older than staleFetchTempAge
+// are touched. A symlink with a matching name is removed as a link only; its
+// target is never read or deleted. Errors are logged and never abort startup.
+// The caller holds .rules.lock.
+func cleanupStaleFetchTemps(cacheDir string, logf func(string, ...any)) {
+	cleanupStaleFetchTempsAt(cacheDir, time.Now().Add(-staleFetchTempAge), logf)
+}
+
+func cleanupStaleFetchTempsAt(cacheDir string, cutoff time.Time, logf func(string, ...any)) {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		logf("WARNING: list stale rules fetch temporaries: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		isStage := strings.HasPrefix(name, ".marker-stage-")
+		isDownload := strings.HasPrefix(name, ".compiled-dl-") && strings.HasSuffix(name, ".tmp")
+		if !isStage && !isDownload {
+			continue
+		}
+		path := filepath.Join(cacheDir, name)
+		fi, err := os.Lstat(path)
+		if err != nil {
+			continue // vanished: a concurrent fetch finished or cleaned up
+		}
+		if !fi.ModTime().Before(cutoff) {
+			continue
+		}
+		mode := fi.Mode()
+		switch {
+		case mode&os.ModeSymlink != 0:
+			err = os.Remove(path) // the link itself, never its target
+		case isStage && mode.IsDir():
+			err = os.RemoveAll(path)
+		case isDownload && mode.IsRegular():
+			err = os.Remove(path)
+		default:
+			continue // wrong type for its name: not ours
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			logf("WARNING: remove stale rules fetch temporary %s: %v", path, err)
 		}
 	}
 }

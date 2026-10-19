@@ -566,6 +566,13 @@ func (c *Config) ValidateRulesMarkers() error {
 	return err
 }
 
+// RulesMarkersOff reports whether MAILSTRIX_RULES_MARKERS selects "off". An
+// invalid value reports false; ValidateRulesMarkers is the place that refuses it.
+func (c *Config) RulesMarkersOff() bool {
+	off, err := parseRulesMarkersMode(c.RulesMarkers)
+	return err == nil && off
+}
+
 // ErrWildcardBind reports a wildcard ICAP/clamd TCP bind without opt-in.
 var ErrWildcardBind = errors.New("wildcard bind requires MAILSTRIX_ALLOW_WILDCARD_BIND=1")
 

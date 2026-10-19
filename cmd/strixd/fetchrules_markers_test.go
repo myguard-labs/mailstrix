@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	yara "github.com/hillu/go-yara/v4"
 	"github.com/myguard-labs/mailstrix/internal/mailstrix"
@@ -87,5 +88,38 @@ func TestFetchRulesCLIReportsMarkerStatus(t *testing.T) {
 		if code != 0 || !strings.Contains(out, tc.want) {
 			t.Fatalf("mode=%s exit=%d stdout=%q, want %q", tc.mode, code, out, tc.want)
 		}
+	}
+}
+
+// The fetch deadline is marker-aware: 5m when markers are enabled, 60s when
+// off, and an explicit -timeout wins in both modes.
+func TestEffectiveFetchTimeout(t *testing.T) {
+	cases := []struct {
+		name      string
+		flag      time.Duration
+		explicit  bool
+		markerOff bool
+		want      time.Duration
+	}{
+		{"default markers auto", defaultFetchTimeout, false, false, 5 * time.Minute},
+		{"default markers off", defaultFetchTimeout, false, true, 60 * time.Second},
+		{"explicit markers auto", 90 * time.Second, true, false, 90 * time.Second},
+		{"explicit markers off", 90 * time.Second, true, true, 90 * time.Second},
+		{"explicit equal to default still wins", defaultFetchTimeout, true, false, 60 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := effectiveFetchTimeout(tc.flag, tc.explicit, tc.markerOff); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The flag help advertises the marker-aware default.
+func TestFetchRulesTimeoutHelpMentionsMarkerDefault(t *testing.T) {
+	var code int
+	stderr := captureStderr(t, func() { code = cmdFetchRules([]string{"-h"}) })
+	_ = code
+	if !strings.Contains(stderr, "5m0s") {
+		t.Fatalf("help does not mention the marker default: %q", stderr)
 	}
 }

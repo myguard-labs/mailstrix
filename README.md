@@ -367,9 +367,17 @@ download is a temporary file removed after verification. The code caps the
 signed archive at 1 GiB and the extracted tree at 2 GiB and 131072 entries, so
 the real size is whatever the release publishes. The bound costs about 184 MiB
 of peak RSS, about 3 s of extra startup and about 1.85 s per reload for artifact
-verification. A crash in the middle of an update can leave `.marker-stage-*` or
-`.rules-rollback-*` directories in the cache; remove them by hand when no update
-is running.
+verification. A crash in the middle of an update can leave `.marker-stage-*` directories,
+`.compiled-dl-*.tmp` download files or `.rules-rollback-*` directories in the
+cache. Startup removes `.marker-stage-*` and `.compiled-dl-*.tmp` entries older
+than 6 hours (a younger one may belong to a fetch running right now; symlinks
+with those names are removed as links, never followed). `.rules-rollback-*`
+follows the rule below. Failures to remove are logged and do not stop startup.
+
+`strixd fetch-rules -timeout` defaults to 60s with `MAILSTRIX_RULES_MARKERS=off`
+and to 5m otherwise, matching `MAILSTRIX_RULES_FETCH_TIMEOUT`, so a large marker
+tree is not cut short and silently replaced by the full ruleset. An explicit
+`-timeout` always wins.
 
 `MAILSTRIX_RULES_MARKERS` takes `auto` (the default) or `off`. With `off`,
 `fetch-rules` downloads no tree. The next newer bundle it installs contains
