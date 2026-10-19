@@ -358,7 +358,7 @@ optional `marker` field. `fetch-rules` installs the tree only when the running
 binary links the same libyara and yarac that built it, which is the latest
 release toolchain. Other binaries, and source builds without that identity,
 report `skipped` and keep the full main ruleset. Detection is the same either
-way; only the speed differs. On the c88 measurement (15425 rules), marker-bearing
+way; only the speed differs. In one measurement against 15425 rules, marker-bearing
 attachments had a median scan of 3.13 ms against 5.04 ms on the fallback, with
 identical matches.
 
