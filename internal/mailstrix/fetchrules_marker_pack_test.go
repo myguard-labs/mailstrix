@@ -102,6 +102,7 @@ func TestPackMarkerTreeRefuses(t *testing.T) {
 		want  string
 	}{
 		{"missing marker-artifact", func(root string) { _ = os.RemoveAll(filepath.Join(root, "marker-artifact")) }, "missing required entry"},
+		{"missing sources.json", func(root string) { _ = os.Remove(filepath.Join(root, "sources.json")) }, "missing required entry: sources.json"},
 		{"symlink inside tree", func(root string) {
 			if err := os.Symlink("/etc/passwd", filepath.Join(root, "compiler-inputs", "link")); err != nil {
 				t.Fatal(err)

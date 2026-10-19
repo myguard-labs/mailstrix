@@ -1252,6 +1252,7 @@ assert_pack_deterministic_and_strict() {
     mkdir -p "$tree/compiler-inputs/main" "$tree/marker-artifact/abi"
     printf 'x' >"$tree/compiler-inputs/main/z"; printf 'y' >"$tree/compiler-inputs/a"
     printf 'z' >"$tree/marker-artifact/abi/yarac"; printf '4.5.2\n' >"$tree/libyara.version"
+    printf '{}\n' >"$tree/sources.json"
     printf 'ignored' >"$tree/compiled.yac"
     python3 "$pack" "$tree" "$a" || assert_event 'pack: valid tree refused'
     touch -d '2001-01-01' "$tree/compiler-inputs/a" "$tree/libyara.version"
@@ -1265,7 +1266,10 @@ assert_pack_deterministic_and_strict() {
     ln -s /etc/passwd "$tree/compiler-inputs/link"
     ! python3 "$pack" "$tree" "$test_root/pack-c.tar.gz" 2>"$test_root/pack.err" || assert_event 'pack: symlink accepted'
     grep -F 'not a regular file' "$test_root/pack.err" >/dev/null || assert_event 'pack: symlink diagnostic'
-    rm "$tree/compiler-inputs/link"; rm -rf "$tree/marker-artifact"
+    rm "$tree/compiler-inputs/link"; mv "$tree/sources.json" "$test_root/sources.json.aside"
+    ! python3 "$pack" "$tree" "$test_root/pack-s.tar.gz" 2>"$test_root/pack.err" || assert_event 'pack: missing sources.json accepted'
+    grep -F 'missing required entry: sources.json' "$test_root/pack.err" >/dev/null || assert_event 'pack: missing-sources diagnostic'
+    mv "$test_root/sources.json.aside" "$tree/sources.json"; rm -rf "$tree/marker-artifact"
     ! python3 "$pack" "$tree" "$test_root/pack-d.tar.gz" 2>"$test_root/pack.err" || assert_event 'pack: missing marker-artifact accepted'
     grep -F 'missing required entry' "$test_root/pack.err" >/dev/null || assert_event 'pack: missing-entry diagnostic'
 }

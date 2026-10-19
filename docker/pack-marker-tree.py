@@ -21,7 +21,9 @@ from pathlib import Path
 
 DIRS = ("compiler-inputs", "marker-artifact")
 FILES = ("libyara.version", "sources.json")
-REQUIRED = ("compiler-inputs", "marker-artifact", "libyara.version")
+# Every entry is required: loadMarkerArtifact reads sources.json and binds its
+# hash in the artifact index, so a tree without it can never load on a client.
+REQUIRED = DIRS + FILES
 MAX_ARCHIVE = 1 << 30
 MAX_TREE = 2 << 30
 MAX_ENTRIES = 1 << 17
