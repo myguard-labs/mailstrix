@@ -92,6 +92,28 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0:detect_odr_violation=0
         run: go test -asan -p 1 -timeout 30m ./...
 
+  release-libyara-repro:
+    # The published marker artifact binds to the release toolchain, so build
+    # its yara stage twice from scratch here (not per PR: bounds builder load).
+    runs-on: [self-hosted, builder02, docker]
+    # Two no-cache arm64 yara builds run under QEMU emulation.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3 arm64 emulation
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - name: release libyara.a is byte-reproducible across two no-cache yara builds (${{ matrix.arch }})
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUN_ID: ${{ github.run_id }}
+        run: ci/libyara-repro-check.sh docker/Dockerfile.release "mailstrix-repro-maint-${RUN_ID}-${ARCH}" "linux/${ARCH}"
+
   codeql:
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 20

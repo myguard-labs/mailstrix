@@ -1038,7 +1038,7 @@ class BinaryWorkflowContract(unittest.TestCase):
         self.assertEqual(caller["with"]["version"], "${{ github.ref_name }}")
         self.assertEqual(caller["permissions"]["contents"], "read")
         self.assertEqual(jobs["debs"]["needs"], "binaries")
-        self.assertEqual(jobs["release"]["needs"], ["binaries", "debs", "marker-image"])
+        self.assertEqual(jobs["release"]["needs"], ["binaries", "debs", "marker-image", "libyara-repro"])
         marker = jobs["marker-image"]
         self.assertEqual(marker["needs"], "binaries")
         self.assertEqual(marker["permissions"], {"contents": "read"})
@@ -1429,15 +1429,18 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["compiler-inputs"]["steps"]
         self.assertIn("ci/libyara-repro-check.sh", [step.get("run") for step in steps])
 
-    def run_script(self, hashes):
+    def run_script(self, hashes, script=None, args=()):
         """Run the real script with a fake docker that emits the given libyara.a bytes."""
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (tmp / "bin").mkdir()
         counter = tmp / "count"
         counter.write_text("0")
+        argv_log = tmp / "argv.log"
+        argv_log.touch()
         fake = tmp / "bin/docker"
         fake.write_text(textwrap.dedent(f"""\
             #!/usr/bin/env bash
+            echo "$*" >> {argv_log}
             case "$1" in
               cp)
                 n=$(( $(cat {counter}) + 1 )); echo $n > {counter}
@@ -1450,23 +1453,233 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             """))
         fake.chmod(0o755)
         env = dict(os.environ, PATH=f"{tmp / 'bin'}:{os.environ['PATH']}")
-        return subprocess.run(
-            ["bash", str(ROOT / "ci/libyara-repro-check.sh")],
+        result = subprocess.run(
+            ["bash", str(script or ROOT / "ci/libyara-repro-check.sh"), *args],
             env=env, capture_output=True, text=True, check=False,
         )
+        return result, argv_log.read_text().splitlines()
 
     def test_identical_archives_pass(self):
-        result = self.run_script(["same", "same"])
+        result, _ = self.run_script(["same", "same"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("reproducible", result.stdout)
 
+    def assert_two_no_cache_builds(self, lines):
+        builds = [i for i, l in enumerate(lines) if l.startswith("buildx build ")]
+        self.assertEqual(len(builds), 2, lines)
+        for i in builds:
+            self.assertIn("--no-cache", lines[i].split())
+            tokens = lines[i].split()
+            self.assertEqual(tokens.count("--load"), 1, lines[i])
+            self.assertEqual(tokens.count("--target"), 1, lines[i])
+            self.assertEqual(tokens[tokens.index("--target") + 1], "yara", lines[i])
+        for i in builds:
+            nxt = [l for l in lines[i + 1:] if l.startswith(("buildx build ", "cp "))]
+            self.assertTrue(nxt and nxt[0].startswith("cp "), lines)
+            source = nxt[0].split()[1]
+            self.assertTrue(source.endswith(":/usr/local/lib/libyara.a"), nxt[0])
+            self.assertGreater(len(source), len(":/usr/local/lib/libyara.a"), nxt[0])
+
+    def test_docker_argv_two_no_cache_yara_builds_each_extracted(self):
+        result, lines = self.run_script(["same", "same"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_two_no_cache_builds(lines)
+
+    def mutated_script(self, old, new):
+        text = (ROOT / "ci/libyara-repro-check.sh").read_text()
+        self.assertIn(old, text)
+        copy = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (copy / "ci").mkdir()
+        script = copy / "ci/libyara-repro-check.sh"
+        script.write_text(text.replace(old, new))
+        return script
+
+    def test_dropping_no_cache_is_detected(self):
+        script = self.mutated_script('buildx build --no-cache --load "${platform_args[@]}" --target', 'buildx build --load "${platform_args[@]}" --target')
+        _, lines = self.run_script(["same", "same"], script=script)
+        builds = [l for l in lines if l.startswith("buildx build ")]
+        # The mutant still builds twice; only the missing flag must trip the check.
+        self.assertEqual(len(builds), 2, lines)
+        self.assertTrue(all("--no-cache" not in b.split() for b in builds), lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_wrong_archive_source_is_detected(self):
+        script = self.mutated_script(
+            '"$extract:/usr/local/lib/libyara.a"', '"$extract:/usr/local/lib/libyara.a.bak"')
+        _, lines = self.run_script(["same", "same"], script=script)
+        self.assertEqual(len([l for l in lines if l.startswith("cp ")]), 2, lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_plain_docker_build_is_detected(self):
+        script = self.mutated_script("docker buildx build --no-cache", "docker build --no-cache")
+        _, lines = self.run_script(["same", "same"], script=script)
+        self.assertEqual(len([l for l in lines if l.startswith("build ")]), 2, lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_dropping_load_is_detected(self):
+        script = self.mutated_script("--no-cache --load", "--no-cache")
+        _, lines = self.run_script(["same", "same"], script=script)
+        self.assertEqual(len([l for l in lines if l.startswith("buildx build ")]), 2, lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_wrong_target_stage_is_detected(self):
+        script = self.mutated_script("--target yara", "--target yara-debug")
+        _, lines = self.run_script(["same", "same"], script=script)
+        builds = [l for l in lines if l.startswith("buildx build ")]
+        # The mutant still builds twice with --no-cache; only the stage must trip the check.
+        self.assertEqual(len(builds), 2, lines)
+        for b in builds:
+            self.assertIn("--no-cache", b.split(), b)
+            self.assertIn("yara-debug", b.split(), b)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_single_build_is_detected(self):
+        script = self.mutated_script("for n in 1 2; do", "for n in 1; do")
+        _, lines = self.run_script(["same", "same"], script=script)
+        builds = [l for l in lines if l.startswith("buildx build ")]
+        # The mutant builds once with the right flags; only the count must trip it.
+        self.assertEqual(len(builds), 1, lines)
+        self.assertIn("--no-cache", builds[0].split())
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_release_dockerfile_arg_is_passed_to_build(self):
+        result, lines = self.run_script(
+            ["same", "same"], args=("docker/Dockerfile.release", "mailstrix-repro-release"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        builds = [l for l in lines if l.startswith("buildx build ")]
+        self.assertEqual(len(builds), 2, lines)
+        for b in builds:
+            tokens = b.split()
+            self.assertIn("-f", tokens, b)
+            self.assertEqual(tokens[tokens.index("-f") + 1], "docker/Dockerfile.release", b)
+
+    RELEASE_RUN = ('ci/libyara-repro-check.sh docker/Dockerfile.release '
+                   '"mailstrix-repro-release-${RUN_ID}-${ARCH}" "linux/${ARCH}"')
+    MAINT_RUN = ('ci/libyara-repro-check.sh docker/Dockerfile.release '
+                 '"mailstrix-repro-maint-${RUN_ID}-${ARCH}" "linux/${ARCH}"')
+    REPRO_CHECK = "ci/libyara-repro-check.sh"
+
+    def repro_step(self, job):
+        return next(s for s in job["steps"] if s.get("run", "").startswith(self.REPRO_CHECK))
+
+    def assert_repro_job_covers_both_arches(self, job, expected_run):
+        self.assertEqual(sorted(job["strategy"]["matrix"]["arch"]), ["amd64", "arm64"])
+        self.assertIs(job["strategy"].get("fail-fast"), False)
+        self.assertGreaterEqual(job["timeout-minutes"], 120)
+        steps = job["steps"]
+        runs = [s for s in steps if s.get("run", "").startswith("ci/libyara-repro-check.sh")]
+        self.assertEqual(len(runs), 1, steps)
+        self.assertEqual(runs[0]["run"], expected_run)
+        self.assertEqual(
+            runs[0]["env"], {"ARCH": "${{ matrix.arch }}", "RUN_ID": "${{ github.run_id }}"})
+        uses = [s.get("uses", "") for s in steps]
+        self.assertTrue(any(u.startswith("docker/setup-qemu-action@") for u in uses), uses)
+        self.assertTrue(any(u.startswith("docker/setup-buildx-action@") for u in uses), uses)
+
+    def test_maintenance_runs_release_dockerfile_check_for_every_arch(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
+        job = doc["jobs"]["release-libyara-repro"]
+        self.assert_repro_job_covers_both_arches(job, self.MAINT_RUN)
+
+    def test_repro_prefixes_differ_and_are_run_scoped(self):
+        def repro_run(path, job):
+            doc = yaml.safe_load((ROOT / path).read_text())
+            steps = doc["jobs"][job]["steps"]
+            runs = [s["run"] for s in steps if s.get("run", "").startswith(self.REPRO_CHECK)]
+            self.assertEqual(len(runs), 1, path)
+            return runs[0]
+        release = repro_run(".github/workflows/release.yml", "libyara-repro")
+        maint = repro_run(".github/workflows/maintenance.yml", "release-libyara-repro")
+        self.assertIn('"mailstrix-repro-release-${RUN_ID}-${ARCH}"', release)
+        self.assertIn('"mailstrix-repro-maint-${RUN_ID}-${ARCH}"', maint)
+        self.assertNotEqual(release, maint)
+        for run in (release, maint):
+            self.assertIn("${RUN_ID}", run)
+
+    def test_maintenance_prefix_without_run_id_is_detected(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
+        job = doc["jobs"]["release-libyara-repro"]
+        step = self.repro_step(job)
+        old = "mailstrix-repro-maint-${RUN_ID}-"
+        step["run"] = step["run"].replace(old, "mailstrix-repro-maint-")
+        with self.assertRaises(AssertionError):
+            self.assert_repro_job_covers_both_arches(job, self.MAINT_RUN)
+
+    def test_repro_step_without_run_id_env_is_detected(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        job = doc["jobs"]["libyara-repro"]
+        del self.repro_step(job)["env"]["RUN_ID"]
+        with self.assertRaises(AssertionError):
+            self.assert_repro_job_covers_both_arches(job, self.RELEASE_RUN)
+
+    def test_release_workflow_runs_release_check_before_publish(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        jobs = doc["jobs"]
+        gate = [n for n, j in jobs.items() if any(
+            s.get("run", "").startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
+            for s in j.get("steps", []))]
+        self.assertEqual(gate, ["libyara-repro"], gate)
+        self.assert_repro_job_covers_both_arches(jobs["libyara-repro"], self.RELEASE_RUN)
+        self.assertIn("libyara-repro", jobs["release"]["needs"])
+
+    def test_release_matrix_without_arm64_is_detected(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        job = doc["jobs"]["libyara-repro"]
+        job["strategy"]["matrix"]["arch"] = ["amd64"]
+        with self.assertRaises(AssertionError):
+            self.assert_repro_job_covers_both_arches(job, self.RELEASE_RUN)
+
+    def test_platform_arg_is_passed_to_both_builds_and_creates(self):
+        result, lines = self.run_script(
+            ["same", "same"],
+            args=("docker/Dockerfile.release", "mailstrix-repro-release-arm64", "linux/arm64"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_platform_passed(lines)
+
+    def assert_platform_passed(self, lines):
+        for verb in ("buildx build", "create"):
+            cmds = [l.split() for l in lines if l.startswith(verb + " ")]
+            self.assertEqual(len(cmds), 2, lines)
+            for t in cmds:
+                self.assertIn("--platform", t, lines)
+                self.assertEqual(t[t.index("--platform") + 1], "linux/arm64", t)
+
+    def test_no_platform_arg_adds_no_platform_token(self):
+        result, lines = self.run_script(["same", "same"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for l in lines:
+            self.assertNotIn("--platform", l.split(), l)
+            if l.startswith("buildx build "):
+                self.assertEqual(l.split().count("--load"), 1, l)
+            else:
+                self.assertNotIn("--load", l.split(), l)
+
+    def test_dropping_platform_passing_is_detected(self):
+        script = self.mutated_script('"${platform_args[@]}" ', "")
+        _, lines = self.run_script(
+            ["same", "same"], script=script,
+            args=("docker/Dockerfile.release", "p", "linux/arm64"))
+        with self.assertRaises(AssertionError):
+            self.assert_platform_passed(lines)
+
+    def test_per_pr_ci_does_not_run_release_check(self):
+        self.assertNotIn("Dockerfile.release --", WORKFLOW.read_text())
+        self.assertNotIn("libyara-repro-check.sh docker/Dockerfile.release",
+                         WORKFLOW.read_text())
+
     def test_differing_archives_fail(self):
-        result = self.run_script(["one", "two"])
+        result, _ = self.run_script(["one", "two"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not byte-reproducible", result.stderr)
 
     def test_missing_archive_fails(self):
-        result = self.run_script(["same"])
+        result, _ = self.run_script(["same"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no such file", result.stderr)
         self.assertNotIn("not byte-reproducible", result.stderr)
