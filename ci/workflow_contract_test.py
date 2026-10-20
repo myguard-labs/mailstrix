@@ -1492,7 +1492,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         return script
 
     def test_dropping_no_cache_is_detected(self):
-        script = self.mutated_script("build --no-cache --target", "build --target")
+        script = self.mutated_script('build --no-cache "${platform_args[@]}" --target', 'build "${platform_args[@]}" --target')
         _, lines = self.run_script(["same", "same"], script=script)
         builds = [l for l in lines if l.startswith("build ")]
         # The mutant still builds twice; only the missing flag must trip the check.
@@ -1534,23 +1534,72 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             self.assertIn("-f", tokens, b)
             self.assertEqual(tokens[tokens.index("-f") + 1], "docker/Dockerfile.release", b)
 
-    def test_maintenance_runs_release_dockerfile_check(self):
+    RELEASE_RUN = ('ci/libyara-repro-check.sh docker/Dockerfile.release '
+                   '"mailstrix-repro-release-${ARCH}" "linux/${ARCH}"')
+
+    def assert_repro_job_covers_both_arches(self, job):
+        self.assertEqual(sorted(job["strategy"]["matrix"]["arch"]), ["amd64", "arm64"])
+        self.assertIs(job["strategy"].get("fail-fast"), False)
+        self.assertGreaterEqual(job["timeout-minutes"], 120)
+        steps = job["steps"]
+        runs = [s for s in steps if s.get("run", "").startswith("ci/libyara-repro-check.sh")]
+        self.assertEqual(len(runs), 1, steps)
+        self.assertEqual(runs[0]["run"], self.RELEASE_RUN)
+        self.assertEqual(runs[0]["env"], {"ARCH": "${{ matrix.arch }}"})
+        uses = [s.get("uses", "") for s in steps]
+        self.assertTrue(any(u.startswith("docker/setup-qemu-action@") for u in uses), uses)
+        self.assertTrue(any(u.startswith("docker/setup-buildx-action@") for u in uses), uses)
+
+    def test_maintenance_runs_release_dockerfile_check_for_every_arch(self):
         doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
-        runs = [s.get("run", "") for j in doc["jobs"].values() for s in j.get("steps", [])]
-        self.assertTrue(any(
-            r.startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
-            for r in runs), runs)
+        self.assert_repro_job_covers_both_arches(doc["jobs"]["release-libyara-repro"])
 
     def test_release_workflow_runs_release_check_before_publish(self):
         doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
         jobs = doc["jobs"]
-        runs = {n: [s.get("run", "") for s in j.get("steps", [])]
-                for n, j in jobs.items()}
-        gate = [n for n, rs in runs.items() if any(
-            r.strip() == "ci/libyara-repro-check.sh docker/Dockerfile.release "
-                         "mailstrix-repro-release" for r in rs)]
-        self.assertEqual(gate, ["libyara-repro"], runs)
+        gate = [n for n, j in jobs.items() if any(
+            s.get("run", "").startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
+            for s in j.get("steps", []))]
+        self.assertEqual(gate, ["libyara-repro"], gate)
+        self.assert_repro_job_covers_both_arches(jobs["libyara-repro"])
         self.assertIn("libyara-repro", jobs["release"]["needs"])
+
+    def test_release_matrix_without_arm64_is_detected(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        job = doc["jobs"]["libyara-repro"]
+        job["strategy"]["matrix"]["arch"] = ["amd64"]
+        with self.assertRaises(AssertionError):
+            self.assert_repro_job_covers_both_arches(job)
+
+    def test_platform_arg_is_passed_to_both_builds_and_creates(self):
+        result, lines = self.run_script(
+            ["same", "same"],
+            args=("docker/Dockerfile.release", "mailstrix-repro-release-arm64", "linux/arm64"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_platform_passed(lines)
+
+    def assert_platform_passed(self, lines):
+        for verb in ("build", "create"):
+            cmds = [l.split() for l in lines if l.startswith(verb + " ")]
+            self.assertEqual(len(cmds), 2, lines)
+            for t in cmds:
+                self.assertIn("--platform", t, lines)
+                self.assertEqual(t[t.index("--platform") + 1], "linux/arm64", t)
+
+    def test_no_platform_arg_adds_no_platform_token(self):
+        result, lines = self.run_script(["same", "same"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for l in lines:
+            self.assertNotIn("--platform", l.split(), l)
+            self.assertNotIn("--load", l.split(), l)
+
+    def test_dropping_platform_passing_is_detected(self):
+        script = self.mutated_script('"${platform_args[@]}" ', "")
+        _, lines = self.run_script(
+            ["same", "same"], script=script,
+            args=("docker/Dockerfile.release", "p", "linux/arm64"))
+        with self.assertRaises(AssertionError):
+            self.assert_platform_passed(lines)
 
     def test_per_pr_ci_does_not_run_release_check(self):
         self.assertNotIn("Dockerfile.release --", WORKFLOW.read_text())
