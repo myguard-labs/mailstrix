@@ -1510,14 +1510,19 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             self.assert_two_no_cache_builds(lines)
 
     def test_release_dockerfile_arg_is_passed_to_build(self):
-        _, lines = self.run_script(
-            ["same", "same"], args=("docker/Dockerfile.release",))
-        self.assertTrue(all("-f docker/Dockerfile.release" in l
-                            for l in lines if l.startswith("build ")), lines)
+        result, lines = self.run_script(
+            ["same", "same"], args=("docker/Dockerfile.release", "mailstrix-repro-release"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        builds = [l for l in lines if l.startswith("build ")]
+        self.assertEqual(len(builds), 2, lines)
+        for b in builds:
+            tokens = b.split()
+            self.assertIn("-f", tokens, b)
+            self.assertEqual(tokens[tokens.index("-f") + 1], "docker/Dockerfile.release", b)
 
     def test_maintenance_runs_release_dockerfile_check(self):
         doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
-        runs = [s.get("run", "") for j in doc["jobs"].values() for s in j["steps"]]
+        runs = [s.get("run", "") for j in doc["jobs"].values() for s in j.get("steps", [])]
         self.assertTrue(any(
             r.startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
             for r in runs), runs)
