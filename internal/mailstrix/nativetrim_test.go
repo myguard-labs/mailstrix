@@ -116,3 +116,50 @@ func TestArmNativeTrimFiresAfterCollection(t *testing.T) {
 		t.Fatalf("re-armed trim calls = %d, want 2", got)
 	}
 }
+
+// A scan holding the retired ruleset across a successful reload frees it on its
+// own release, after the reload's trim. That late free must trim again.
+func TestReloadTrimsAfterLateLastRelease(t *testing.T) {
+	dir := writeRules(t, eicarRule)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
+	var calls atomic.Int32
+	s.trimHook = func() { calls.Add(1) }
+	lease := s.acquireScanLease()
+	if err := s.Reload(); err != nil {
+		lease.release()
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		lease.release()
+		t.Fatalf("trim calls at reload = %d, want 1", got)
+	}
+	lease.release()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("trim calls after late release = %d, want 2", got)
+	}
+	lease2 := s.acquireScanLease() // current generation, no reload: no trim
+	lease2.release()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("release of live generation trimmed: %d", got)
+	}
+}
+
+// Negative control: a failed reload retires nothing, so a held generation's
+// later release must not trim.
+func TestFailedReloadLateReleaseDoesNotTrim(t *testing.T) {
+	dir := writeRules(t, eicarRule)
+	s := newScannerBudget(t, dir, loadInsensitiveScanTimeout)
+	var calls atomic.Int32
+	s.trimHook = func() { calls.Add(1) }
+	lease := s.acquireScanLease()
+	if err := os.WriteFile(filepath.Join(dir, "eicar.yar"), []byte("rule broken {"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(); err == nil {
+		t.Fatal("broken reload should error")
+	}
+	lease.release()
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("trim after failed reload + release = %d, want 0", got)
+	}
+}

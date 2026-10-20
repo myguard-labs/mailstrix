@@ -840,6 +840,19 @@ func (s *Scanner) publishReload(b *reloadBundle) *generationPin {
 			}
 		}
 	}
+	if oldGeneration != nil {
+		for _, old := range oldGeneration.owners {
+			shared := false
+			for _, owner := range owners {
+				if owner == old {
+					shared = true
+				}
+			}
+			if !shared {
+				oldGeneration.replaced = append(oldGeneration.replaced, old)
+			}
+		}
+	}
 	s.generation = &generationPin{refs: 1, owners: owners}
 	if old := s.fp.Load(); old != nil {
 		s.reloadPrevFP.Store(old)
@@ -880,6 +893,21 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 			retireStale(&s.bigScanners, &s.bigRules)
 		}
 		retired.release()
+		if reloaded && retired != nil {
+			// A scan or pooled scanner still holding a retired ruleset frees it
+			// later, on its own path, possibly after the trim below already ran.
+			// Owners not yet destroyed trim again when their last holder lets go.
+			hook := s.trimHook
+			for _, owner := range retired.replaced {
+				owner.armLateTrim(func() {
+					if hook != nil {
+						hook()
+						return
+					}
+					armNativeTrim()
+				})
+			}
+		}
 		for _, candidate := range candidates {
 			candidate.release()
 		}

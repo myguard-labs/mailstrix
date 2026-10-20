@@ -104,6 +104,26 @@ type nativeRulesOwner struct {
 	destroyed      bool
 	destroyClaimed bool
 	observer       *ruleGenerationObserver
+	lateTrim       func() // set by armLateTrim; called once after native destruction; mu
+}
+
+// armLateTrim asks for a heap trim when this owner's native rules are freed
+// later than the caller's own release, i.e. by whoever drops the last
+// reference. It reports false when destruction was already claimed, in which
+// case the caller's own trim covers the free. fn must be cheap and must not
+// take Scanner locks: it runs on the releasing (possibly scan) goroutine or
+// the finalizer goroutine.
+func (o *nativeRulesOwner) armLateTrim(fn func()) bool {
+	if o == nil {
+		return false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.destroyClaimed {
+		return false
+	}
+	o.lateTrim = fn
+	return true
 }
 
 func (o *nativeRulesOwner) retain() {
@@ -151,7 +171,12 @@ func (o *nativeRulesOwner) destroy() {
 	o.observer.destroy(o.rules, key)
 	o.mu.Lock()
 	o.destroyed = true
+	late := o.lateTrim
+	o.lateTrim = nil
 	o.mu.Unlock()
+	if late != nil {
+		late()
+	}
 	runtime.KeepAlive(o)
 }
 

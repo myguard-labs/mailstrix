@@ -44,6 +44,10 @@ type generationPin struct {
 	mu     sync.Mutex
 	refs   int
 	owners []*nativeRulesOwner
+	// replaced is the subset of owners a successful reload dropped from the
+	// live set (not shared with the new generation). Written by publishReload
+	// before the pin is returned for release, read only by that reload.
+	replaced []*nativeRulesOwner
 }
 
 func (g *generationPin) retain() {
