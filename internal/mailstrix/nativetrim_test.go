@@ -73,11 +73,23 @@ func TestNativeTrimIsSafe(t *testing.T) {
 // yet must still trim once a natural collection has run: arming schedules one
 // trim after the next GC, and reloads that overlap share it.
 func TestArmNativeTrimFiresAfterCollection(t *testing.T) {
+	// An earlier test may have left the real sentinel pending. Let it fire
+	// before swapping the hooks: force-resetting trimArmed would let its stale
+	// finalizer disarm the flag mid-test, so the second arm below would create a
+	// second sentinel and the "exactly 1" count would see 2. A stale sentinel
+	// captured the real nativeTrim, so its trim never touches the counter.
+	drainDeadline := time.Now().Add(10 * time.Second)
+	for trimArmed.Load() && time.Now().Before(drainDeadline) {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if trimArmed.Load() {
+		t.Fatal("earlier trim sentinel still pending after 10s of collections")
+	}
 	var calls atomic.Int32
 	oldFn, oldDelay := nativeTrimFn, trimDelay
 	nativeTrimFn, trimDelay = func() { calls.Add(1) }, 5*time.Millisecond
 	t.Cleanup(func() { nativeTrimFn, trimDelay = oldFn, oldDelay })
-	trimArmed.Store(false) // earlier tests may have left the real sentinel pending
 	armNativeTrim()
 	armNativeTrim() // overlapping reload shares the pending sentinel
 	deadline := time.Now().Add(10 * time.Second)
