@@ -1429,15 +1429,18 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["compiler-inputs"]["steps"]
         self.assertIn("ci/libyara-repro-check.sh", [step.get("run") for step in steps])
 
-    def run_script(self, hashes):
+    def run_script(self, hashes, script=None, args=()):
         """Run the real script with a fake docker that emits the given libyara.a bytes."""
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (tmp / "bin").mkdir()
         counter = tmp / "count"
         counter.write_text("0")
+        argv_log = tmp / "argv.log"
+        self.argv_log = argv_log
         fake = tmp / "bin/docker"
         fake.write_text(textwrap.dedent(f"""\
             #!/usr/bin/env bash
+            echo "$*" >> {argv_log}
             case "$1" in
               cp)
                 n=$(( $(cat {counter}) + 1 )); echo $n > {counter}
@@ -1451,25 +1454,63 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         fake.chmod(0o755)
         env = dict(os.environ, PATH=f"{tmp / 'bin'}:{os.environ['PATH']}")
         return subprocess.run(
-            ["bash", str(ROOT / "ci/libyara-repro-check.sh")],
+            ["bash", str(script or ROOT / "ci/libyara-repro-check.sh"), *args],
             env=env, capture_output=True, text=True, check=False,
         )
+
+    def run_script_args(self, hashes, script=None, args=()):
+        """Like run_script but with a script override and argv; returns docker argv lines."""
+        script = script or ROOT / "ci/libyara-repro-check.sh"
+        result = self.run_script(hashes, script=script, args=args)
+        return result, self.argv_log.read_text().splitlines()
 
     def test_identical_archives_pass(self):
         result = self.run_script(["same", "same"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("reproducible", result.stdout)
 
-    def test_differing_archives_fail(self):
-        result = self.run_script(["one", "two"])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not byte-reproducible", result.stderr)
+    def assert_two_no_cache_builds(self, lines):
+        builds = [i for i, l in enumerate(lines) if l.startswith("build ")]
+        self.assertEqual(len(builds), 2, lines)
+        for i in builds:
+            self.assertIn("--no-cache", lines[i].split())
+            self.assertIn("--target yara", lines[i])
+        for i in builds:
+            nxt = [l for l in lines[i + 1:] if l.startswith(("build ", "cp "))]
+            self.assertTrue(nxt and nxt[0].startswith("cp "), lines)
+            self.assertIn("/usr/local/lib/libyara.a", nxt[0])
 
-    def test_missing_archive_fails(self):
-        result = self.run_script(["same"])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no such file", result.stderr)
-        self.assertNotIn("not byte-reproducible", result.stderr)
+    def test_docker_argv_two_no_cache_yara_builds_each_extracted(self):
+        result, lines = self.run_script_args(["same", "same"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_two_no_cache_builds(lines)
+
+    def mutated_script(self, old, new):
+        text = (ROOT / "ci/libyara-repro-check.sh").read_text()
+        self.assertIn(old, text)
+        copy = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (copy / "ci").mkdir()
+        script = copy / "ci/libyara-repro-check.sh"
+        script.write_text(text.replace(old, new))
+        return script
+
+    def test_dropping_no_cache_is_detected(self):
+        script = self.mutated_script("build --no-cache --target", "build --target")
+        _, lines = self.run_script_args(["same", "same"], script=script)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_single_build_is_detected(self):
+        script = self.mutated_script("for n in 1 2; do", "for n in 1; do")
+        _, lines = self.run_script_args(["same", "same"], script=script)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_release_dockerfile_arg_is_passed_to_build(self):
+        _, lines = self.run_script_args(
+            ["same", "same"], args=("docker/Dockerfile.release",))
+        self.assertTrue(all("-f docker/Dockerfile.release" in l
+                            for l in lines if l.startswith("build ")), lines)
 
 
 if __name__ == "__main__":
