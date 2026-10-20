@@ -111,7 +111,8 @@ jobs:
       - name: release libyara.a is byte-reproducible across two no-cache yara builds (${{ matrix.arch }})
         env:
           ARCH: ${{ matrix.arch }}
-        run: ci/libyara-repro-check.sh docker/Dockerfile.release "mailstrix-repro-release-${ARCH}" "linux/${ARCH}"
+          RUN_ID: ${{ github.run_id }}
+        run: ci/libyara-repro-check.sh docker/Dockerfile.release "mailstrix-repro-maint-${RUN_ID}-${ARCH}" "linux/${ARCH}"
 
   codeql:
     runs-on: [self-hosted, builder02, lxc]

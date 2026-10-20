@@ -1560,24 +1560,63 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             self.assertEqual(tokens[tokens.index("-f") + 1], "docker/Dockerfile.release", b)
 
     RELEASE_RUN = ('ci/libyara-repro-check.sh docker/Dockerfile.release '
-                   '"mailstrix-repro-release-${ARCH}" "linux/${ARCH}"')
+                   '"mailstrix-repro-release-${RUN_ID}-${ARCH}" "linux/${ARCH}"')
+    MAINT_RUN = ('ci/libyara-repro-check.sh docker/Dockerfile.release '
+                 '"mailstrix-repro-maint-${RUN_ID}-${ARCH}" "linux/${ARCH}"')
+    REPRO_CHECK = "ci/libyara-repro-check.sh"
 
-    def assert_repro_job_covers_both_arches(self, job):
+    def repro_step(self, job):
+        return next(s for s in job["steps"] if s.get("run", "").startswith(self.REPRO_CHECK))
+
+    def assert_repro_job_covers_both_arches(self, job, expected_run):
         self.assertEqual(sorted(job["strategy"]["matrix"]["arch"]), ["amd64", "arm64"])
         self.assertIs(job["strategy"].get("fail-fast"), False)
         self.assertGreaterEqual(job["timeout-minutes"], 120)
         steps = job["steps"]
         runs = [s for s in steps if s.get("run", "").startswith("ci/libyara-repro-check.sh")]
         self.assertEqual(len(runs), 1, steps)
-        self.assertEqual(runs[0]["run"], self.RELEASE_RUN)
-        self.assertEqual(runs[0]["env"], {"ARCH": "${{ matrix.arch }}"})
+        self.assertEqual(runs[0]["run"], expected_run)
+        self.assertEqual(
+            runs[0]["env"], {"ARCH": "${{ matrix.arch }}", "RUN_ID": "${{ github.run_id }}"})
         uses = [s.get("uses", "") for s in steps]
         self.assertTrue(any(u.startswith("docker/setup-qemu-action@") for u in uses), uses)
         self.assertTrue(any(u.startswith("docker/setup-buildx-action@") for u in uses), uses)
 
     def test_maintenance_runs_release_dockerfile_check_for_every_arch(self):
         doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
-        self.assert_repro_job_covers_both_arches(doc["jobs"]["release-libyara-repro"])
+        job = doc["jobs"]["release-libyara-repro"]
+        self.assert_repro_job_covers_both_arches(job, self.MAINT_RUN)
+
+    def test_repro_prefixes_differ_and_are_run_scoped(self):
+        def repro_run(path, job):
+            doc = yaml.safe_load((ROOT / path).read_text())
+            steps = doc["jobs"][job]["steps"]
+            runs = [s["run"] for s in steps if s.get("run", "").startswith(self.REPRO_CHECK)]
+            self.assertEqual(len(runs), 1, path)
+            return runs[0]
+        release = repro_run(".github/workflows/release.yml", "libyara-repro")
+        maint = repro_run(".github/workflows/maintenance.yml", "release-libyara-repro")
+        self.assertIn('"mailstrix-repro-release-${RUN_ID}-${ARCH}"', release)
+        self.assertIn('"mailstrix-repro-maint-${RUN_ID}-${ARCH}"', maint)
+        self.assertNotEqual(release, maint)
+        for run in (release, maint):
+            self.assertIn("${RUN_ID}", run)
+
+    def test_maintenance_prefix_without_run_id_is_detected(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
+        job = doc["jobs"]["release-libyara-repro"]
+        step = self.repro_step(job)
+        old = "mailstrix-repro-maint-${RUN_ID}-"
+        step["run"] = step["run"].replace(old, "mailstrix-repro-maint-")
+        with self.assertRaises(AssertionError):
+            self.assert_repro_job_covers_both_arches(job, self.MAINT_RUN)
+
+    def test_repro_step_without_run_id_env_is_detected(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        job = doc["jobs"]["libyara-repro"]
+        del self.repro_step(job)["env"]["RUN_ID"]
+        with self.assertRaises(AssertionError):
+            self.assert_repro_job_covers_both_arches(job, self.RELEASE_RUN)
 
     def test_release_workflow_runs_release_check_before_publish(self):
         doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
@@ -1586,7 +1625,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             s.get("run", "").startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
             for s in j.get("steps", []))]
         self.assertEqual(gate, ["libyara-repro"], gate)
-        self.assert_repro_job_covers_both_arches(jobs["libyara-repro"])
+        self.assert_repro_job_covers_both_arches(jobs["libyara-repro"], self.RELEASE_RUN)
         self.assertIn("libyara-repro", jobs["release"]["needs"])
 
     def test_release_matrix_without_arm64_is_detected(self):
@@ -1594,7 +1633,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         job = doc["jobs"]["libyara-repro"]
         job["strategy"]["matrix"]["arch"] = ["amd64"]
         with self.assertRaises(AssertionError):
-            self.assert_repro_job_covers_both_arches(job)
+            self.assert_repro_job_covers_both_arches(job, self.RELEASE_RUN)
 
     def test_platform_arg_is_passed_to_both_builds_and_creates(self):
         result, lines = self.run_script(
