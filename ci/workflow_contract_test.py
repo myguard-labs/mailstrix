@@ -1512,6 +1512,29 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         self.assertTrue(all("-f docker/Dockerfile.release" in l
                             for l in lines if l.startswith("build ")), lines)
 
+    def test_maintenance_runs_release_dockerfile_check(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
+        runs = [s.get("run", "") for j in doc["jobs"].values() for s in j["steps"]]
+        self.assertTrue(any(
+            r.startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
+            for r in runs), runs)
+
+    def test_per_pr_ci_does_not_run_release_check(self):
+        self.assertNotIn("Dockerfile.release --", WORKFLOW.read_text())
+        self.assertNotIn("libyara-repro-check.sh docker/Dockerfile.release",
+                         WORKFLOW.read_text())
+
+    def test_differing_archives_fail(self):
+        result = self.run_script(["one", "two"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not byte-reproducible", result.stderr)
+
+    def test_missing_archive_fails(self):
+        result = self.run_script(["same"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no such file", result.stderr)
+        self.assertNotIn("not byte-reproducible", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
