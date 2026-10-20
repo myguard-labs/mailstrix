@@ -1469,7 +1469,9 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         self.assertEqual(len(builds), 2, lines)
         for i in builds:
             self.assertIn("--no-cache", lines[i].split())
-            self.assertIn("--target yara", lines[i])
+            tokens = lines[i].split()
+            self.assertEqual(tokens.count("--target"), 1, lines[i])
+            self.assertEqual(tokens[tokens.index("--target") + 1], "yara", lines[i])
         for i in builds:
             nxt = [l for l in lines[i + 1:] if l.startswith(("build ", "cp "))]
             self.assertTrue(nxt and nxt[0].startswith("cp "), lines)
@@ -1496,6 +1498,18 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         # The mutant still builds twice; only the missing flag must trip the check.
         self.assertEqual(len(builds), 2, lines)
         self.assertTrue(all("--no-cache" not in b.split() for b in builds), lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_wrong_target_stage_is_detected(self):
+        script = self.mutated_script("--target yara", "--target yara-debug")
+        _, lines = self.run_script(["same", "same"], script=script)
+        builds = [l for l in lines if l.startswith("build ")]
+        # The mutant still builds twice with --no-cache; only the stage must trip the check.
+        self.assertEqual(len(builds), 2, lines)
+        for b in builds:
+            self.assertIn("--no-cache", b.split(), b)
+            self.assertIn("yara-debug", b.split(), b)
         with self.assertRaises(AssertionError):
             self.assert_two_no_cache_builds(lines)
 
