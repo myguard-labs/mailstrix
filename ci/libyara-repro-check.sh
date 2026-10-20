@@ -4,18 +4,20 @@
 # Usage: ci/libyara-repro-check.sh [Dockerfile] [image-tag-prefix] [platform]
 # platform (e.g. linux/arm64) selects the published architecture to check; it
 # is passed to both builds. Unset keeps the builder's default platform.
+# Builds use `docker buildx build`, like build-binaries.yml, so the check runs on
+# the same Buildx builder the published binaries use.
 set -euo pipefail
 declare -A sha
 cd "$(dirname "$0")/.."
 dockerfile="${1:-docker/Dockerfile}"
 prefix="${2:-mailstrix-repro}-$$"
 platform="${3:-}"
-# --load keeps the image in the local store even when the active buildx
-# builder uses a docker-container driver (as after setup-buildx-action).
+# --load is always passed: it keeps the image in the local store with both the
+# docker driver and the docker-container driver (as after setup-buildx-action).
 platform_args=()
 create_args=()
 if [ -n "$platform" ]; then
-	platform_args=(--platform "$platform" --load)
+	platform_args=(--platform "$platform")
 	create_args=(--platform "$platform")
 fi
 work="$(mktemp -d)"
@@ -27,7 +29,7 @@ cleanup() {
 }
 trap cleanup EXIT
 for n in 1 2; do
-	docker build --no-cache "${platform_args[@]}" --target yara -f "$dockerfile" -t "$prefix-$n" .
+	docker buildx build --no-cache --load "${platform_args[@]}" --target yara -f "$dockerfile" -t "$prefix-$n" .
 	docker create "${create_args[@]}" --name "$extract" --label "myguard.run=$prefix" "$prefix-$n" >/dev/null
 	docker cp "$extract:/usr/local/lib/libyara.a" "$work/libyara-$n.a"
 	docker container rm -f "$extract" >/dev/null

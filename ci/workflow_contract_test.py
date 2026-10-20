@@ -1465,17 +1465,20 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         self.assertIn("reproducible", result.stdout)
 
     def assert_two_no_cache_builds(self, lines):
-        builds = [i for i, l in enumerate(lines) if l.startswith("build ")]
+        builds = [i for i, l in enumerate(lines) if l.startswith("buildx build ")]
         self.assertEqual(len(builds), 2, lines)
         for i in builds:
             self.assertIn("--no-cache", lines[i].split())
             tokens = lines[i].split()
+            self.assertEqual(tokens.count("--load"), 1, lines[i])
             self.assertEqual(tokens.count("--target"), 1, lines[i])
             self.assertEqual(tokens[tokens.index("--target") + 1], "yara", lines[i])
         for i in builds:
-            nxt = [l for l in lines[i + 1:] if l.startswith(("build ", "cp "))]
+            nxt = [l for l in lines[i + 1:] if l.startswith(("buildx build ", "cp "))]
             self.assertTrue(nxt and nxt[0].startswith("cp "), lines)
-            self.assertIn("/usr/local/lib/libyara.a", nxt[0])
+            source = nxt[0].split()[1]
+            self.assertTrue(source.endswith(":/usr/local/lib/libyara.a"), nxt[0])
+            self.assertGreater(len(source), len(":/usr/local/lib/libyara.a"), nxt[0])
 
     def test_docker_argv_two_no_cache_yara_builds_each_extracted(self):
         result, lines = self.run_script(["same", "same"])
@@ -1492,19 +1495,41 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         return script
 
     def test_dropping_no_cache_is_detected(self):
-        script = self.mutated_script('build --no-cache "${platform_args[@]}" --target', 'build "${platform_args[@]}" --target')
+        script = self.mutated_script('buildx build --no-cache --load "${platform_args[@]}" --target', 'buildx build --load "${platform_args[@]}" --target')
         _, lines = self.run_script(["same", "same"], script=script)
-        builds = [l for l in lines if l.startswith("build ")]
+        builds = [l for l in lines if l.startswith("buildx build ")]
         # The mutant still builds twice; only the missing flag must trip the check.
         self.assertEqual(len(builds), 2, lines)
         self.assertTrue(all("--no-cache" not in b.split() for b in builds), lines)
         with self.assertRaises(AssertionError):
             self.assert_two_no_cache_builds(lines)
 
+    def test_wrong_archive_source_is_detected(self):
+        script = self.mutated_script(
+            '"$extract:/usr/local/lib/libyara.a"', '"$extract:/usr/local/lib/libyara.a.bak"')
+        _, lines = self.run_script(["same", "same"], script=script)
+        self.assertEqual(len([l for l in lines if l.startswith("cp ")]), 2, lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_plain_docker_build_is_detected(self):
+        script = self.mutated_script("docker buildx build --no-cache", "docker build --no-cache")
+        _, lines = self.run_script(["same", "same"], script=script)
+        self.assertEqual(len([l for l in lines if l.startswith("build ")]), 2, lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_dropping_load_is_detected(self):
+        script = self.mutated_script("--no-cache --load", "--no-cache")
+        _, lines = self.run_script(["same", "same"], script=script)
+        self.assertEqual(len([l for l in lines if l.startswith("buildx build ")]), 2, lines)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
     def test_wrong_target_stage_is_detected(self):
         script = self.mutated_script("--target yara", "--target yara-debug")
         _, lines = self.run_script(["same", "same"], script=script)
-        builds = [l for l in lines if l.startswith("build ")]
+        builds = [l for l in lines if l.startswith("buildx build ")]
         # The mutant still builds twice with --no-cache; only the stage must trip the check.
         self.assertEqual(len(builds), 2, lines)
         for b in builds:
@@ -1516,7 +1541,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
     def test_single_build_is_detected(self):
         script = self.mutated_script("for n in 1 2; do", "for n in 1; do")
         _, lines = self.run_script(["same", "same"], script=script)
-        builds = [l for l in lines if l.startswith("build ")]
+        builds = [l for l in lines if l.startswith("buildx build ")]
         # The mutant builds once with the right flags; only the count must trip it.
         self.assertEqual(len(builds), 1, lines)
         self.assertIn("--no-cache", builds[0].split())
@@ -1527,7 +1552,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         result, lines = self.run_script(
             ["same", "same"], args=("docker/Dockerfile.release", "mailstrix-repro-release"))
         self.assertEqual(result.returncode, 0, result.stderr)
-        builds = [l for l in lines if l.startswith("build ")]
+        builds = [l for l in lines if l.startswith("buildx build ")]
         self.assertEqual(len(builds), 2, lines)
         for b in builds:
             tokens = b.split()
@@ -1579,7 +1604,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         self.assert_platform_passed(lines)
 
     def assert_platform_passed(self, lines):
-        for verb in ("build", "create"):
+        for verb in ("buildx build", "create"):
             cmds = [l.split() for l in lines if l.startswith(verb + " ")]
             self.assertEqual(len(cmds), 2, lines)
             for t in cmds:
@@ -1591,7 +1616,10 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for l in lines:
             self.assertNotIn("--platform", l.split(), l)
-            self.assertNotIn("--load", l.split(), l)
+            if l.startswith("buildx build "):
+                self.assertEqual(l.split().count("--load"), 1, l)
+            else:
+                self.assertNotIn("--load", l.split(), l)
 
     def test_dropping_platform_passing_is_detected(self):
         script = self.mutated_script('"${platform_args[@]}" ', "")
