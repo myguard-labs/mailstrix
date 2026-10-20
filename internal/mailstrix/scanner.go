@@ -79,6 +79,9 @@ type Scanner struct {
 	scanTimeout    time.Duration
 	logf           func(string, ...any)
 
+	// trimHook replaces nativeTrim in tests; nil means the real trim.
+	trimHook func()
+
 	// bigRules is the small, high-signal "big-file" ruleset used by the
 	// oversized-buffer cost gate (STAB/BIGFILE). A full-ruleset scan of a multi-MB
 	// buffer is inherently unbounded and can time out (fail-open => malware MISSED),
@@ -865,6 +868,7 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	s.mu.Lock()
 	var retired *generationPin
 	var candidates []*nativeRulesOwner
+	reloaded := false
 	defer func() {
 		s.mu.Unlock()
 		// Drain stale pools after BOTH publication and preparation unlock,
@@ -878,6 +882,12 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 		retired.release()
 		for _, candidate := range candidates {
 			candidate.release()
+		}
+		// Only a published reload retired an old ruleset; a failed or closed
+		// reload freed nothing worth trimming. Runs after the unlocks above so
+		// it never delays scans or publication.
+		if reloaded {
+			s.trimNativeHeap()
 		}
 	}()
 	s.generationMu.RLock()
@@ -957,8 +967,18 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	})
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())
+	reloaded = true
 
 	return nil
+}
+
+// trimNativeHeap schedules returning freed libyara memory to the OS after a reload.
+func (s *Scanner) trimNativeHeap() {
+	if s.trimHook != nil {
+		s.trimHook()
+		return
+	}
+	armNativeTrim()
 }
 
 // Fingerprint returns a short hash identifying the active rule set, prefixed
