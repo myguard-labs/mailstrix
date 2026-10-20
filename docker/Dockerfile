@@ -24,13 +24,16 @@ RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VER
     && cp /tmp/yara.tar.gz /opt/compiler-input-proof/yara.tar.gz \
     && tar -xzf /tmp/yara.tar.gz -C /tmp \
     && rm /tmp/yara.tar.gz
+# The fixed random seed and build-dir prefix map keep libyara.a byte-reproducible,
+# so one published marker artifact binds across rebuilds of a release.
 WORKDIR /tmp/yara-${YARA_VERSION}
 # No --enable-magic / --enable-cuckoo: email-attachment scanning needs neither,
 # and dropping them removes the libmagic/libjansson runtime deps so the
 # distroless base-debian12 final image needs only glibc + libssl + libz. Crypto
 # (--with-crypto) stays for the "hash" module many public rules use.
 RUN ./bootstrap.sh \
-    && CFLAGS="-O2 -flto -DNDEBUG" LDFLAGS="-flto" \
+    && CFLAGS="-O2 -flto -DNDEBUG -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
+       LDFLAGS="-flto -frandom-seed=mailstrix-yara" \
        ./configure --disable-shared --enable-static --with-crypto \
     && make -j"$(nproc)" && make install && ldconfig
 # Keep the untouched static compiler for local equivalence controls. Instrument

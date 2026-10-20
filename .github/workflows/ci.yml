@@ -100,6 +100,8 @@ jobs:
           fetch-depth: 0
       - name: require native compiler proof prerequisites
         run: ci/compiler-input-check.sh --prerequisites-only
+      - name: libyara.a is byte-reproducible across two no-cache yara builds
+        run: ci/libyara-repro-check.sh
       - name: exact compiler input static prerequisites and controls
         env:
           MX_INPUT_STAGE_MODE: >-

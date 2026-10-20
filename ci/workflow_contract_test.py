@@ -1413,5 +1413,64 @@ class NightlyWorkflowContract(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
 
 
+class LibyaraReproducibilityContract(unittest.TestCase):
+    """libyara.a must stay byte-reproducible and be checked twice in CI."""
+
+    FLAGS = ("-frandom-seed=mailstrix-yara", "-ffile-prefix-map=/tmp/yara-${YARA_VERSION}=.")
+
+    def test_both_dockerfiles_carry_reproducibility_flags(self):
+        for name in ("Dockerfile", "Dockerfile.release"):
+            text = (ROOT / "docker" / name).read_text()
+            for flag in self.FLAGS:
+                with self.subTest(dockerfile=name, flag=flag):
+                    self.assertGreaterEqual(text.count(flag), 1)
+
+    def test_ci_runs_the_two_build_comparison(self):
+        steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["compiler-inputs"]["steps"]
+        self.assertIn("ci/libyara-repro-check.sh", [step.get("run") for step in steps])
+
+    def run_script(self, hashes):
+        """Run the real script with a fake docker that emits the given libyara.a bytes."""
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (tmp / "bin").mkdir()
+        counter = tmp / "count"
+        counter.write_text("0")
+        fake = tmp / "bin/docker"
+        fake.write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env bash
+            case "$1" in
+              cp)
+                n=$(( $(cat {counter}) + 1 )); echo $n > {counter}
+                contents=({" ".join(repr(h) for h in hashes)})
+                # A cp past the provided archives fails like a missing file.
+                [ "$n" -le "${{#contents[@]}}" ] || {{ echo "no such file" >&2; exit 1; }}
+                printf '%s' "${{contents[$((n-1))]}}" > "$3" ;;
+              *) : ;;
+            esac
+            """))
+        fake.chmod(0o755)
+        env = dict(os.environ, PATH=f"{tmp / 'bin'}:{os.environ['PATH']}")
+        return subprocess.run(
+            ["bash", str(ROOT / "ci/libyara-repro-check.sh")],
+            env=env, capture_output=True, text=True, check=False,
+        )
+
+    def test_identical_archives_pass(self):
+        result = self.run_script(["same", "same"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("reproducible", result.stdout)
+
+    def test_differing_archives_fail(self):
+        result = self.run_script(["one", "two"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not byte-reproducible", result.stderr)
+
+    def test_missing_archive_fails(self):
+        result = self.run_script(["same"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no such file", result.stderr)
+        self.assertNotIn("not byte-reproducible", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
