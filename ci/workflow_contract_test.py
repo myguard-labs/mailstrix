@@ -1038,7 +1038,7 @@ class BinaryWorkflowContract(unittest.TestCase):
         self.assertEqual(caller["with"]["version"], "${{ github.ref_name }}")
         self.assertEqual(caller["permissions"]["contents"], "read")
         self.assertEqual(jobs["debs"]["needs"], "binaries")
-        self.assertEqual(jobs["release"]["needs"], ["binaries", "debs", "marker-image"])
+        self.assertEqual(jobs["release"]["needs"], ["binaries", "debs", "marker-image", "libyara-repro"])
         marker = jobs["marker-image"]
         self.assertEqual(marker["needs"], "binaries")
         self.assertEqual(marker["permissions"], {"contents": "read"})
@@ -1436,7 +1436,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         counter = tmp / "count"
         counter.write_text("0")
         argv_log = tmp / "argv.log"
-        self.argv_log = argv_log
+        argv_log.touch()
         fake = tmp / "bin/docker"
         fake.write_text(textwrap.dedent(f"""\
             #!/usr/bin/env bash
@@ -1453,19 +1453,14 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             """))
         fake.chmod(0o755)
         env = dict(os.environ, PATH=f"{tmp / 'bin'}:{os.environ['PATH']}")
-        return subprocess.run(
+        result = subprocess.run(
             ["bash", str(script or ROOT / "ci/libyara-repro-check.sh"), *args],
             env=env, capture_output=True, text=True, check=False,
         )
-
-    def run_script_args(self, hashes, script=None, args=()):
-        """Like run_script but with a script override and argv; returns docker argv lines."""
-        script = script or ROOT / "ci/libyara-repro-check.sh"
-        result = self.run_script(hashes, script=script, args=args)
-        return result, self.argv_log.read_text().splitlines()
+        return result, argv_log.read_text().splitlines()
 
     def test_identical_archives_pass(self):
-        result = self.run_script(["same", "same"])
+        result, _ = self.run_script(["same", "same"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("reproducible", result.stdout)
 
@@ -1481,7 +1476,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             self.assertIn("/usr/local/lib/libyara.a", nxt[0])
 
     def test_docker_argv_two_no_cache_yara_builds_each_extracted(self):
-        result, lines = self.run_script_args(["same", "same"])
+        result, lines = self.run_script(["same", "same"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_two_no_cache_builds(lines)
 
@@ -1496,18 +1491,26 @@ class LibyaraReproducibilityContract(unittest.TestCase):
 
     def test_dropping_no_cache_is_detected(self):
         script = self.mutated_script("build --no-cache --target", "build --target")
-        _, lines = self.run_script_args(["same", "same"], script=script)
+        _, lines = self.run_script(["same", "same"], script=script)
+        builds = [l for l in lines if l.startswith("build ")]
+        # The mutant still builds twice; only the missing flag must trip the check.
+        self.assertEqual(len(builds), 2, lines)
+        self.assertTrue(all("--no-cache" not in b.split() for b in builds), lines)
         with self.assertRaises(AssertionError):
             self.assert_two_no_cache_builds(lines)
 
     def test_single_build_is_detected(self):
         script = self.mutated_script("for n in 1 2; do", "for n in 1; do")
-        _, lines = self.run_script_args(["same", "same"], script=script)
+        _, lines = self.run_script(["same", "same"], script=script)
+        builds = [l for l in lines if l.startswith("build ")]
+        # The mutant builds once with the right flags; only the count must trip it.
+        self.assertEqual(len(builds), 1, lines)
+        self.assertIn("--no-cache", builds[0].split())
         with self.assertRaises(AssertionError):
             self.assert_two_no_cache_builds(lines)
 
     def test_release_dockerfile_arg_is_passed_to_build(self):
-        _, lines = self.run_script_args(
+        _, lines = self.run_script(
             ["same", "same"], args=("docker/Dockerfile.release",))
         self.assertTrue(all("-f docker/Dockerfile.release" in l
                             for l in lines if l.startswith("build ")), lines)
@@ -1519,18 +1522,29 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             r.startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
             for r in runs), runs)
 
+    def test_release_workflow_runs_release_check_before_publish(self):
+        doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        jobs = doc["jobs"]
+        runs = {n: [s.get("run", "") for s in j.get("steps", [])]
+                for n, j in jobs.items()}
+        gate = [n for n, rs in runs.items() if any(
+            r.strip() == "ci/libyara-repro-check.sh docker/Dockerfile.release "
+                         "mailstrix-repro-release" for r in rs)]
+        self.assertEqual(gate, ["libyara-repro"], runs)
+        self.assertIn("libyara-repro", jobs["release"]["needs"])
+
     def test_per_pr_ci_does_not_run_release_check(self):
         self.assertNotIn("Dockerfile.release --", WORKFLOW.read_text())
         self.assertNotIn("libyara-repro-check.sh docker/Dockerfile.release",
                          WORKFLOW.read_text())
 
     def test_differing_archives_fail(self):
-        result = self.run_script(["one", "two"])
+        result, _ = self.run_script(["one", "two"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not byte-reproducible", result.stderr)
 
     def test_missing_archive_fails(self):
-        result = self.run_script(["same"])
+        result, _ = self.run_script(["same"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no such file", result.stderr)
         self.assertNotIn("not byte-reproducible", result.stderr)

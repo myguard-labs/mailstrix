@@ -116,8 +116,23 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # The release publishes the marker artifact bound to this toolchain, so
+  # build the yara stage twice from scratch and require identical libyara.a.
+  libyara-repro:
+    needs: gate
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+        with:
+          persist-credentials: false
+      - name: release libyara.a is byte-reproducible across two no-cache yara builds
+        run: ci/libyara-repro-check.sh docker/Dockerfile.release mailstrix-repro-release
+
   release:
-    needs: [binaries, debs, marker-image]
+    needs: [binaries, debs, marker-image, libyara-repro]
     runs-on: [self-hosted, builder02, lxc]
     permissions:
       contents: write   # create GitHub release + upload assets
