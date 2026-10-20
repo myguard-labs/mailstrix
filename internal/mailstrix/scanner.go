@@ -79,6 +79,9 @@ type Scanner struct {
 	scanTimeout    time.Duration
 	logf           func(string, ...any)
 
+	// trimHook replaces nativeTrim in tests; nil means the real trim.
+	trimHook func()
+
 	// bigRules is the small, high-signal "big-file" ruleset used by the
 	// oversized-buffer cost gate (STAB/BIGFILE). A full-ruleset scan of a multi-MB
 	// buffer is inherently unbounded and can time out (fail-open => malware MISSED),
@@ -837,6 +840,19 @@ func (s *Scanner) publishReload(b *reloadBundle) *generationPin {
 			}
 		}
 	}
+	if oldGeneration != nil {
+		for _, old := range oldGeneration.owners {
+			shared := false
+			for _, owner := range owners {
+				if owner == old {
+					shared = true
+				}
+			}
+			if !shared {
+				oldGeneration.replaced = append(oldGeneration.replaced, old)
+			}
+		}
+	}
 	s.generation = &generationPin{refs: 1, owners: owners}
 	if old := s.fp.Load(); old != nil {
 		s.reloadPrevFP.Store(old)
@@ -865,6 +881,7 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	s.mu.Lock()
 	var retired *generationPin
 	var candidates []*nativeRulesOwner
+	reloaded := false
 	defer func() {
 		s.mu.Unlock()
 		// Drain stale pools after BOTH publication and preparation unlock,
@@ -876,8 +893,29 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 			retireStale(&s.bigScanners, &s.bigRules)
 		}
 		retired.release()
+		if reloaded && retired != nil {
+			// A scan or pooled scanner still holding a retired ruleset frees it
+			// later, on its own path, possibly after the trim below already ran.
+			// Owners not yet destroyed trim again when their last holder lets go.
+			hook := s.trimHook
+			for _, owner := range retired.replaced {
+				owner.armLateTrim(func() {
+					if hook != nil {
+						hook()
+						return
+					}
+					armNativeTrim()
+				})
+			}
+		}
 		for _, candidate := range candidates {
 			candidate.release()
+		}
+		// Only a published reload retired an old ruleset; a failed or closed
+		// reload freed nothing worth trimming. Runs after the unlocks above so
+		// it never delays scans or publication.
+		if reloaded {
+			s.trimNativeHeap()
 		}
 	}()
 	s.generationMu.RLock()
@@ -957,8 +995,18 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 	})
 	s.reloadOK.Add(1)
 	s.reloadLastUnix.Store(time.Now().Unix())
+	reloaded = true
 
 	return nil
+}
+
+// trimNativeHeap schedules returning freed libyara memory to the OS after a reload.
+func (s *Scanner) trimNativeHeap() {
+	if s.trimHook != nil {
+		s.trimHook()
+		return
+	}
+	armNativeTrim()
 }
 
 // Fingerprint returns a short hash identifying the active rule set, prefixed
