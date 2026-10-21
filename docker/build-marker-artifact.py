@@ -302,19 +302,10 @@ def build(source):
             capture.begin(str(out), state["source_directory"])
         marker_root = Path(output.getvalue().strip())
         prefix = state["final"]["argv"][: 1 + 2 * len(capture.EXTERNALS)]
-        for c in selected:
-            require(
-                capture.run(
-                    marker_root,
-                    "validation",
-                    c["namespace"],
-                    c["path"],
-                    prefix
-                    + [c["namespace"] + ":" + c["path"], str(stage / "validation.yac")],
-                )
-                == 0,
-                "marker source validation failed",
-            )
+        codes = capture.validate(
+            marker_root, prefix, [(c["namespace"], c["path"]) for c in selected]
+        )
+        require(all(code == 0 for code in codes), "marker source validation failed")
         require(
             capture.run(
                 marker_root,
@@ -341,7 +332,7 @@ def build(source):
     # mistaken for published evidence. Source graphs survive failed builds.
     (stage / "markers.yac.inputs").unlink()
     marker_root.rename(stage / "graph")
-    for name in ("inspect", "inspect.c", "validation.yac"):
+    for name in ("inspect", "inspect.c"):
         (stage / name).unlink()
     rename = ctypes.CDLL(None, use_errno=True).renameat2
     rename.argtypes = (

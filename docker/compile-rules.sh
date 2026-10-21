@@ -28,27 +28,25 @@ EXT="-d filepath= -d filename= -d extension= -d filetype= -d file_type= -d owner
 HELPER="$(dirname "$0")/capture-compiler-inputs.py"
 retained="$(python3 "$HELPER" begin "$OUT" "$SRC")"
 good="$(mktemp)"
-tmpout="$(mktemp)"
-n=0
-skip=0
+list="$(mktemp)"
 for f in "$SRC"/*.yar "$SRC"/*.yara; do
 	[ -e "$f" ] || continue
-	ns="$(basename "$f")"
-	# shellcheck disable=SC2086
-	if python3 "$HELPER" run "$retained" validation "$ns" "$f" yarac $EXT "${ns}:${f}" "$tmpout" >/dev/null 2>&1; then
-		printf '%s:%s\n' "$ns" "$f" >>"$good"
-		n=$((n + 1))
-	else
-		status=$?
-		if [ "$status" -eq 125 ]; then
-			echo "compile-rules: input retention failed for $ns ($retained)" >&2
-			exit 125
-		fi
-		echo "compile-rules: skip $ns (uncompilable)" >&2
-		skip=$((skip + 1))
-	fi
+	printf '%s\n' "$f" >>"$list"
 done
-rm -f "$tmpout"
+# Validate every file on its own, in parallel (one helper process, one yarac per
+# file); the helper records the same per-file invocations, in this order, as a
+# serial loop would, and writes the accepted namespace:path roots to $good.
+status=0
+# shellcheck disable=SC2086
+python3 "$HELPER" validate "$retained" "$good" "$list" yarac $EXT || status=$?
+if [ "$status" -ne 0 ]; then
+	echo "compile-rules: input retention failed ($retained)" >&2
+	exit 125
+fi
+total="$(wc -l <"$list")"
+n="$(wc -l <"$good")"
+skip=$((total - n))
+rm -f "$list"
 
 [ "$n" -gt 0 ] || {
 	echo "compile-rules: nothing compiled from $SRC" >&2

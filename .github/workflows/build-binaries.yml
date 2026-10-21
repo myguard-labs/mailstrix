@@ -19,8 +19,9 @@ permissions:
 
 jobs:
   binaries:
-    # One runner per arch so the slow arm64 QEMU build runs in parallel.
-    runs-on: [self-hosted, builder02, docker]
+    # One runner per arch, each building natively: arm64 on GitHub's hosted arm
+    # runner (no QEMU; the same pinned images give the same bytes as emulation).
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || fromJSON('["self-hosted","builder02","docker"]') }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3 arm64 emulation
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: build binaries (${{ matrix.arch }})

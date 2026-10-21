@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from itertools import pairwise, permutations
 from pathlib import Path
@@ -1898,6 +1899,175 @@ int main(void) {
             )
         with self.assertRaises(capture.RetentionError):
             capture.final_inputs({"final": None})
+
+    def serial_records(self, files):
+        """The pre-batch loop: one `run ... validation` per file, in order."""
+        out = self.root / "serial.yac"
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            capture.begin(str(out), str(self.src))
+        root = Path(printed.getvalue().strip())
+        prefix = [str(COMPILER)] + [
+            v for e in capture.EXTERNALS for v in ("-d", f"{e['name']}={e['value']}")
+        ]
+        with mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}):
+            for f in files:
+                ns = os.path.basename(f)
+                with contextlib.redirect_stderr(io.TextIOWrapper(io.BytesIO())):
+                    capture.run(
+                        root,
+                        "validation",
+                        ns,
+                        f,
+                        prefix + [f"{ns}:{f}", str(self.root / "serial-one.yac")],
+                    )
+        return root, prefix
+
+    def test_parallel_validation_matches_serial_records(self):
+        self.fixture()
+        files = sorted(
+            str(p) for p in self.src.iterdir() if p.suffix in (".yar", ".yara")
+        )
+        serial, prefix = self.serial_records(files)
+        out = self.root / "batch.yac"
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            capture.begin(str(out), str(self.src))
+        batch = Path(printed.getvalue().strip())
+        listing = self.root / "list"
+        listing.write_text("".join(f + "\n" for f in files))
+        good = self.root / "good"
+        errors = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}),
+            contextlib.redirect_stderr(errors),
+        ):
+            self.assertEqual(
+                capture.validate_files(batch, str(good), str(listing), prefix), 0
+            )
+        self.assertEqual(capture.read_cursor(batch), (len(files), False))
+        self.assertEqual(capture.read_cursor(serial), (len(files), False))
+        accepted = []
+        for i, f in enumerate(files):
+            one = capture.invocation_record(serial, "validation", i)
+            two = capture.invocation_record(batch, "validation", i)
+            # Only the scratch output path differs; verify ignores argv[-1].
+            self.assertEqual(one["argv"][:-1], two["argv"][:-1])
+            for record in (one, two):
+                del record["argv"]
+            self.assertEqual(one, two)
+            if two["accepted"]:
+                accepted.append(f"{os.path.basename(f)}:{f}")
+        self.assertEqual(good.read_text().splitlines(), accepted)
+        self.assertEqual(len(accepted), 2)
+        for f in files:
+            ns = os.path.basename(f)
+            skipped = f"compile-rules: skip {ns} (uncompilable)" in errors.getvalue()
+            self.assertEqual(skipped, f"{ns}:{f}" not in accepted)
+        self.assertEqual([p.name for p in batch.glob(".validation-*")], [])
+
+    def test_parallel_validation_records_input_order_not_completion_order(self):
+        files = [str(self.src / f"r{i}.yar") for i in range(6)]
+        for f in files:
+            Path(f).write_text("rule R { condition: true }\n")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            capture.begin(str(self.out), str(self.src))
+        root = Path(printed.getvalue().strip())
+        capture.write_cursor(root, 3, False)
+        finished = []
+
+        def compiler(argv, **kwargs):
+            # Later inputs finish first; odd inputs are rejected.
+            i = int(Path(argv[-2].split(":", 1)[1]).stem[1:])
+            time.sleep(0.05 * (len(files) - i))
+            Path(kwargs["env"]["MAILSTRIX_COMPILER_INPUT_LOG"]).write_bytes(b"t")
+            finished.append(i)
+            return mock.Mock(returncode=i % 2)
+
+        def observed(_root, data, code, **_kw):
+            return {"sources": [], "includes": [], "code": code}
+
+        with (
+            mock.patch.object(capture.subprocess, "run", side_effect=compiler),
+            mock.patch.object(capture, "parse_trace", side_effect=observed),
+        ):
+            codes = capture.validate(
+                root, ["yarac"], [(os.path.basename(f), f) for f in files], jobs=6
+            )
+        self.assertNotEqual(finished, sorted(finished))
+        self.assertEqual(codes, [0, 1, 0, 1, 0, 1])
+        self.assertEqual(capture.read_cursor(root), (9, False))
+        for i, f in enumerate(files):
+            record = capture.invocation_record(root, "validation", 3 + i)
+            self.assertEqual(record["candidate"]["path"], f)
+            self.assertEqual(record["accepted"], i % 2 == 0)
+        self.assertFalse((root / "invocations/validation-2.json").exists())
+        self.assertFalse((root / "invocations/validation-9.json").exists())
+
+    def test_parallel_validation_boundaries_and_failures(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            capture.begin(str(self.out), str(self.src))
+        root = Path(printed.getvalue().strip())
+        # Empty input: no records, cursor untouched, empty accepted list.
+        listing = self.root / "list"
+        listing.write_text("")
+        good = self.root / "good"
+        self.assertEqual(capture.validate_files(root, str(good), str(listing), []), 0)
+        self.assertEqual(good.read_text(), "")
+        self.assertEqual(capture.read_cursor(root), (0, False))
+        self.assertEqual(list((root / "invocations").iterdir()), [])
+        f = self.src / "one.yar"
+        f.write_text("rule One { condition: true }\n")
+        # A retention failure (exit 125) aborts the batch; the cursor stays put.
+        with (
+            mock.patch.object(
+                capture.subprocess, "run", return_value=mock.Mock(returncode=125)
+            ),
+            self.assertRaisesRegex(capture.RetentionError, "exit 125"),
+        ):
+            capture.validate(root, ["yarac"], [("one.yar", str(f))])
+        self.assertEqual(capture.read_cursor(root), (0, False))
+        self.assertEqual([p.name for p in root.glob(".validation-*")], [])
+        # A completed (final) cursor or an overflowing batch is refused.
+        capture.write_cursor(root, 0, True)
+        with self.assertRaisesRegex(capture.RetentionError, "phase"):
+            capture.validate(root, ["yarac"], [("one.yar", str(f))])
+        capture.write_cursor(root, 2**64 - 1, False)
+        with self.assertRaisesRegex(capture.RetentionError, "phase"):
+            capture.validate(root, ["yarac"], [("one.yar", str(f))])
+
+    def test_compile_rules_retention_failure_exits_125(self):
+        (self.src / "one.yar").write_text("rule One { condition: true }\n")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "yarac"
+        fake.write_text("#!/bin/sh\nexit 125\n")
+        fake.chmod(0o755)
+        env = dict(self.env, PATH=str(bin_dir) + os.pathsep + self.env["PATH"])
+        result = self.execute(
+            ["sh", REPO / "docker/compile-rules.sh", self.src, self.out], env=env
+        )
+        self.assertEqual(result.returncode, 125, result.stderr)
+        self.assertIn(b"input retention failed", result.stderr)
+        self.assertFalse(self.out.exists())
+
+    def test_store_concurrent_identical_objects(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            capture.begin(str(self.out), str(self.src))
+        root = Path(printed.getvalue().strip())
+        data = os.urandom(1 << 20)
+        with capture.ThreadPoolExecutor(max_workers=16) as pool:
+            refs = list(pool.map(lambda _: capture.store(root, data), range(64)))
+        self.assertEqual(
+            {r["sha256"] for r in refs}, {hashlib.sha256(data).hexdigest()}
+        )
+        self.assertEqual(capture.get(root, refs[0]), data)
+        self.assertEqual(
+            sorted(p.name for p in (root / "objects").iterdir()), [refs[0]["sha256"]]
+        )
 
 
 if __name__ == "__main__":
