@@ -2014,7 +2014,9 @@ int main(void) {
         listing = self.root / "list"
         listing.write_text("")
         good = self.root / "good"
-        self.assertEqual(capture.validate_files(root, str(good), str(listing), []), 0)
+        self.assertEqual(
+            capture.main(["validate", str(root), str(good), str(listing)]), 0
+        )
         self.assertEqual(good.read_text(), "")
         self.assertEqual(capture.read_cursor(root), (0, False))
         self.assertEqual(list((root / "invocations").iterdir()), [])

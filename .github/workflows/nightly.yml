@@ -1,11 +1,13 @@
 # Build fresh amd64 + arm64 nightly binaries from main, but only when what ships
 # (the Go sources and docker/ build inputs, tests excluded) changed since the
 # commit the current rolling `nightly` release was built from. The published
-# release is replaced, never appended to. mailstrix:testing is built from it.
+# release is replaced, never appended to. The binaries are built and proven
+# natively on GitHub-hosted runners of each architecture. dockerized's 12:00 UTC daily builds
+# mailstrix:testing from this release, so it runs two hours earlier.
 name: nightly
 on:
   schedule:
-    - cron: "0 9 * * *"  # 09:00 UTC
+    - cron: "0 10 * * *"  # 10:00 UTC, before the 12:00 UTC dockerized daily
   workflow_dispatch:
     inputs:
       force:
@@ -22,7 +24,7 @@ concurrency:
 
 jobs:
   plan:
-    runs-on: [self-hosted, builder02, docker]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       skip: ${{ steps.release.outputs.skip }}
@@ -33,21 +35,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: ensure gh CLI
-        run: |
-          # Bounded retry: a brief mirror/proxy outage must not fail the job.
-          command -v gh >/dev/null || {
-            for attempt in 1 2 3 4; do
-              sudo apt-get -o Acquire::Retries=3 update \
-                && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gh \
-                && break
-              if [ "$attempt" -eq 4 ]; then
-                echo "ensure gh CLI: giving up after $attempt attempts" >&2
-                exit 1
-              fi
-              sleep $((attempt * 5))
-            done
-          }
       - name: compare nightly target with main
         id: release
         env:
@@ -97,24 +84,27 @@ jobs:
       actions: write  # ci.yml's docker job uses the buildx GHA cache
     uses: ./.github/workflows/ci.yml
 
+  # Builds alongside the gate instead of after it; publish waits for both.
   binaries:
-    needs: [plan, gate]
-    if: needs.plan.outputs.skip == 'false' && needs.gate.result == 'success'
+    needs: plan
+    if: needs.plan.outputs.skip == 'false'
     permissions:
       contents: read
+      actions: write  # buildx GHA layer cache
     uses: ./.github/workflows/build-binaries.yml
     with:
       version: ${{ needs.plan.outputs.version }}
       arches: '["amd64","arm64"]'
+      gha-cache: true
 
   # Prove Dockerfile.release turns these exact nightly binaries and marker
   # toolchain into an image whose strixd loads the marker artifact, before the
-  # assets are published. Same proof as release.yml's marker-image job, and
-  # likewise native per arch (arm64 on GitHub's hosted arm runner, no QEMU).
+  # assets are published. Same proof as release.yml's marker-image job, native
+  # per arch on GitHub-hosted runners (no QEMU).
   marker-image:
     needs: [plan, binaries]
     if: needs.binaries.result == 'success'
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || fromJSON('["self-hosted","builder02","docker"]') }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -144,8 +134,10 @@ jobs:
 
   publish:
     needs: [plan, gate, binaries, marker-image]
-    if: needs.binaries.result == 'success' && needs.marker-image.result == 'success'
-    runs-on: [self-hosted, builder02, lxc]
+    if: >-
+      needs.gate.result == 'success' && needs.binaries.result == 'success'
+      && needs.marker-image.result == 'success'
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
@@ -169,23 +161,6 @@ jobs:
           done
           sha256sum "${files[@]}" > SHA256SUMS
           sha256sum -c SHA256SUMS
-
-      # The self-hosted lxc runner image does not ship the gh CLI.
-      - name: ensure gh CLI
-        run: |
-          # Bounded retry: a brief mirror/proxy outage must not fail the job.
-          command -v gh >/dev/null || {
-            for attempt in 1 2 3 4; do
-              sudo apt-get -o Acquire::Retries=3 update \
-                && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gh \
-                && break
-              if [ "$attempt" -eq 4 ]; then
-                echo "ensure gh CLI: giving up after $attempt attempts" >&2
-                exit 1
-              fi
-              sleep $((attempt * 5))
-            done
-          }
 
       - name: publish rolling nightly
         env:

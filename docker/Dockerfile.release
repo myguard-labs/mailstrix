@@ -38,6 +38,8 @@ ARG RELEASE_TAG
 #                      set fails the build; it never falls back to downloading.
 # Any other value names no stage and fails the build.
 ARG RELEASE_SOURCE=download
+# Build speed, as in docker/Dockerfile: apt lists and .debs live in BuildKit
+# cache mounts, dpkg runs under eatmydata, libyara compiles through ccache.
 
 # ---- fetch release binaries (per target architecture) -----------------------
 # Runs natively on the build platform (no QEMU for a cross-arch build): it only
@@ -47,9 +49,12 @@ ARG VERSION
 ARG RELEASE_TAG
 ARG TARGETARCH
 RUN test -n "${VERSION}" || test -n "${RELEASE_TAG}" || (echo "VERSION or RELEASE_TAG build-arg is required" >&2; exit 1)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        curl ca-certificates
 # Strip a leading v if the caller passed a tag-style version.
 # Download release binaries and SHA256SUMS, then verify each fetched asset.
 # The source-compile Dockerfile builds from trusted source; this variant pulls
@@ -121,10 +126,13 @@ FROM fetch-${RELEASE_SOURCE} AS fetch
 #      stage; the final image carries no libyara (binaries are prelinked). ------
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS yara
 ARG YARA_VERSION
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential automake libtool make pkg-config \
-        libssl-dev curl ca-certificates python3 \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        build-essential automake libtool make pkg-config ccache \
+        libssl-dev curl ca-certificates python3
 RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
         -o /tmp/yara.tar.gz \
     && echo "1f87056fcb10ee361936ee7b0548444f7974612ebb0e681734d8de7df055d1ec  /tmp/yara.tar.gz" | sha256sum -c - \
@@ -133,8 +141,11 @@ RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VER
 # The fixed random seed and build-dir prefix map keep libyara.a byte-reproducible,
 # so one published marker artifact binds across rebuilds of a release.
 WORKDIR /tmp/yara-${YARA_VERSION}
-RUN ./bootstrap.sh \
-    && CFLAGS="-O2 -flto -DNDEBUG -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    ./bootstrap.sh \
+    && CC="ccache gcc" \
+       CFLAGS="-O2 -flto -DNDEBUG -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
        LDFLAGS="-flto -frandom-seed=mailstrix-yara" \
        ./configure --disable-shared --enable-static --with-crypto \
     && make -j"$(nproc)" && make install && ldconfig
@@ -142,18 +153,22 @@ RUN ./bootstrap.sh \
 # needs the instrumented yarac. Same patch as docker/Dockerfile (runtime logging
 # stays off unless the helper sets MAILSTRIX_COMPILER_INPUT_LOG).
 COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py /tmp/capture/
-RUN python3 /tmp/capture/patch-compiler-input-capture.py . \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    python3 /tmp/capture/patch-compiler-input-capture.py . \
     && make -j"$(nproc)" && make install && ldconfig
 
 # ---- rules sources ----------------------------------------------------------
-# Same as docker/Dockerfile: fetching and filtering the public rulesets is
+# As in docker/Dockerfile: fetching and filtering the public rulesets is
 # architecture-independent, so it runs natively on the build platform; only the
 # compile in `rules` runs per target architecture (emulated for a cross build).
 # Unchanged upstream rules keep that compile layer cached.
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS rules-src
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates unzip python3 \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        curl ca-certificates unzip python3
 # filter-rules.py beside fetch-rules.sh (resolved via $(dirname "$0")) for the
 # `mail` profile per-rule mail-relevance/license filter.
 COPY docker/fetch-rules.sh docker/filter-rules.py /usr/local/bin/

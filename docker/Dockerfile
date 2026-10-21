@@ -10,13 +10,22 @@
 ARG GO_VERSION=1.26.9
 ARG YARA_VERSION=4.5.2
 
+# Build speed: every apt install keeps its package lists and downloaded .debs
+# in BuildKit cache mounts (docker-clean would delete the .debs) and runs dpkg
+# under eatmydata, which drops its fsync calls; a build container never needs
+# them. The libyara build compiles through a ccache mount: ccache returns the
+# exact object bytes the compiler produced, so libyara.a stays reproducible.
+
 # ---- libyara (static) -------------------------------------------------------
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS yara
 ARG YARA_VERSION
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential automake libtool make pkg-config \
-        libssl-dev curl ca-certificates python3 \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        build-essential automake libtool make pkg-config ccache \
+        libssl-dev curl ca-certificates python3
 RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
         -o /tmp/yara.tar.gz \
     && echo "1f87056fcb10ee361936ee7b0548444f7974612ebb0e681734d8de7df055d1ec  /tmp/yara.tar.gz" | sha256sum -c - \
@@ -31,15 +40,19 @@ WORKDIR /tmp/yara-${YARA_VERSION}
 # and dropping them removes the libmagic/libjansson runtime deps so the
 # distroless base-debian12 final image needs only glibc + libssl + libz. Crypto
 # (--with-crypto) stays for the "hash" module many public rules use.
-RUN ./bootstrap.sh \
-    && CFLAGS="-O2 -flto -DNDEBUG -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    ./bootstrap.sh \
+    && CC="ccache gcc" \
+       CFLAGS="-O2 -flto -DNDEBUG -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
        LDFLAGS="-flto -frandom-seed=mailstrix-yara" \
        ./configure --disable-shared --enable-static --with-crypto \
     && make -j"$(nproc)" && make install && ldconfig
 # Keep the untouched static compiler for local equivalence controls. Instrument
 # only native source read observation points; the runtime leaves logging unset.
 COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py /tmp/capture/
-RUN mkdir -p /opt/compiler-input-proof \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    mkdir -p /opt/compiler-input-proof \
     && cp /usr/local/bin/yarac /opt/compiler-input-proof/yarac-original \
     && cp /usr/local/lib/libyara.a /opt/compiler-input-proof/libyara-original.a \
     && python3 /tmp/capture/patch-compiler-input-capture.py . \
@@ -60,9 +73,12 @@ COPY --from=marker-fixture /fixture/marker-runtime.zip /marker-runtime.zip
 
 # ---- go build ---------------------------------------------------------------
 FROM golang:${GO_VERSION}-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc pkg-config libssl-dev zlib1g-dev libzstd-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        gcc pkg-config libssl-dev zlib1g-dev libzstd-dev
 # bring in the statically built libyara
 COPY --from=yara /usr/local/lib/libyara.a /usr/local/lib/
 COPY --from=yara /usr/local/bin/yarac /opt/marker-compiler/yarac
@@ -210,23 +226,25 @@ FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b
 COPY --from=build /out/strixd /usr/local/bin/strixd
 ENTRYPOINT ["/usr/local/bin/strixd", "fetch-rules", "-verify-only"]
 
-# ---- rules ------------------------------------------------------------------
-# FROM the yara stage so we have `yarac` (the libyara compiler) from the exact
-# same libyara build go-yara links against — a .yac is version-locked to its
-# compiler. Fetch the public rulesets, then precompile them into one .yac so the
-# runtime never compiles ~10k rules itself (that peaked >3 GB and OOM-killed).
-FROM yara AS rules
-# curl and ca-certificates are inherited from the yara stage.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        unzip python3 \
-    && rm -rf /var/lib/apt/lists/*
+# ---- rules sources ----------------------------------------------------------
+# Fetching and filtering the public rulesets is architecture-independent, so it
+# runs natively on the build platform; only the compile in `rules` runs per
+# target architecture (emulated for a cross build). Unchanged upstream rules
+# keep that compile layer cached.
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS rules-src
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends eatmydata \
+    && eatmydata apt-get install -y --no-install-recommends \
+        curl ca-certificates unzip python3
 # filter-rules.py must sit beside fetch-rules.sh (resolved via $(dirname "$0"))
 # so the `mail` profile per-rule mail-relevance/license filter runs.
-COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py /usr/local/bin/
+COPY docker/fetch-rules.sh docker/filter-rules.py /usr/local/bin/
 # Repo-tracked local rules (our own heuristics, e.g. the mraptor-style maldoc
 # rule) baked alongside the fetched public sets so they ship in the seed .yac.
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
-RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh /usr/local/bin/filter-rules.py
+RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/filter-rules.py
 ARG CACHEBUST=unset
 # LOCAL_ONLY=1 skips all network rule fetches; only docker/local-rules/ are
 # compiled into the seed .yac. GitHub CI + release builds set this (the heavy
@@ -262,9 +280,21 @@ RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
         YARAIFY="${YARAIFY}" YARAIFY_URL="${YARAIFY_URL}" \
         /usr/local/bin/fetch-rules.sh /rules/src \
     && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/src/ \
-    && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
     && mkdir -p /rules/local-src \
-    && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/local-src/ \
+    && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/local-src/
+
+# ---- rules ------------------------------------------------------------------
+# FROM the yara stage so we have `yarac` (the libyara compiler) from the exact
+# same libyara build go-yara links against — a .yac is version-locked to its
+# compiler. Precompile the fetched rulesets into one .yac so the runtime never
+# compiles ~10k rules itself (that peaked >3 GB and OOM-killed).
+FROM yara AS rules
+# python3 is inherited from the yara stage; the sources come from rules-src.
+# capture-compiler-inputs.py beside compile-rules.sh ($(dirname "$0") lookup).
+COPY docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py /usr/local/bin/
+RUN chmod +x /usr/local/bin/compile-rules.sh
+COPY --from=rules-src /rules/ /rules/
+RUN /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac \
     && /usr/local/bin/compile-rules.sh /rules/local-src /rules/local.yac \
     && python3 /usr/local/bin/build-marker-artifact.py /rules \
     && rm -rf /rules/src /rules/local-src \
