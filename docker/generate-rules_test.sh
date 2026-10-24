@@ -39,6 +39,12 @@ FIXTURE_PEM_B64="$(printf '%s' "$FIXTURE_PEM" | base64 -w0)"
 cat >"$test_root/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$1" = image ]; then
+    [ "$*" = "image inspect --format {{.Architecture}} sha256:markerverifier" ] || exit 63
+    [ "${FAIL_ARCH_INSPECT:-0}" -eq 0 ] || exit 64
+    printf '%s\n' "${RELEASE_ARCH-amd64}"
+    exit 0
+fi
 if [ "$1" = run ]; then
     if [[ " $* " == *' sha256:markerverifier -h '* ]]; then
         # Flag probe of the release strixd. VERIFIER_NO_REQUIRE_MARKER=1 models a
@@ -127,6 +133,15 @@ if [ "$dockerfile" = Dockerfile.release ]; then
                         printf 'marker' > "$dir/marker-artifact/binding.json"
                         printf 'fixture-yarac' > "$dir/marker-artifact/abi/yarac"
                         printf 'fixture-libyara' > "$dir/marker-artifact/abi/libyara.a"
+                        abi="$dir/marker-artifact/abi"
+                        case "${ABI_MODE:-}" in
+                            missing-compiler) rm "$abi/yarac" ;;
+                            missing-library) rm "$abi/libyara.a" ;;
+                            empty-compiler) : > "$abi/yarac" ;;
+                            empty-library) : > "$abi/libyara.a" ;;
+                            symlink-compiler) mv "$abi/yarac" "$abi/yarac-real"; ln -s yarac-real "$abi/yarac" ;;
+                            symlink-library) mv "$abi/libyara.a" "$abi/library-real"; ln -s library-real "$abi/libyara.a" ;;
+                        esac
                         [ -z "${MARKER_SYMLINK:-}" ] || ln -s /etc/passwd "$dir/compiler-inputs/escape"
                     fi
                     shift
@@ -163,6 +178,14 @@ case "${2:-}" in
     repos/*/releases/latest)
         printf '%s\n' "${LATEST_TAG-}"
         ;;
+    download)
+        [ "$#" -eq 9 ] && [ "$3" = "${EXPECTED_MARKER_TAG-v1.2.3}" ] \
+            && [ "$4" = --repo ] && [ "$5" = myguard-labs/mailstrix ] \
+            && [ "$6" = --pattern ] && [ "$7" = SHA256SUMS ] \
+            && [ "$8" = --output ] || exit 65
+        printf 'release-sums %s\n' "$3" >> "$EVENTS"
+        bash "$MARKER_SUMS_TEST" --fixture "$9"
+        ;;
     create)
         printf 'create\n' >> "$EVENTS"
         [ "${FAIL_CREATE:-0}" -eq 0 ] || exit 49
@@ -190,6 +213,7 @@ case "${2:-}" in
         ;;
 esac
 STUB
+export MARKER_SUMS_TEST="$here/../ci/generate_rules_marker_sums_test.sh"
 
 # The Go compiler and its built `rulessign` helper are stubbed: this harness
 # covers the publisher's orchestration (preflight, signature produced, uploaded,
@@ -1202,6 +1226,7 @@ assert_marker_published() {
     grep -E '^verify .*size=4g .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: post-publish marker gate lacks the 4g tmpfs"
     grep -Fx 'dockerfile Dockerfile.release rules-export' "$EVENTS" >/dev/null || assert_event "${name}: bundle not built with the release toolchain"
     ! grep -Fx 'dockerfile Dockerfile rules-export' "$EVENTS" >/dev/null || assert_event "${name}: the unmarked build ran despite a marker export"
+    grep -Fx 'release-sums v1.2.3' "$EVENTS" >/dev/null || assert_event "${name}: selected release SHA256SUMS not fetched"
     # Same fixture twice -> byte-identical tree asset.
     cp "${EVENTS}.tree" "$test_root/tree-first"
     run_script LATEST_TAG=v1.2.3
@@ -1230,6 +1255,8 @@ assert_marker_skipped() {  # assert_marker_skipped <case> <env-assignment>...
     signed="$(grep '^signed-sha ' "$EVENTS" | tail -n1)"
     [ "$signed" = "signed-sha ${manifest_sha}" ] || assert_event "${name}: signature does not cover the uploaded manifest"
 }
+# shellcheck source=ci/generate_rules_marker_sums_test.sh
+source "$here/../ci/generate_rules_marker_sums_test.sh"
 # Toolchain / libyara hashes do not match the release strixd (the toolchain
 # build exits non-zero), a legacy release without marker support, a tree the
 # packer refuses (symlink), an unusable tag, and the operator opt-out.

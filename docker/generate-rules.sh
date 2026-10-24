@@ -372,6 +372,50 @@ case "$MARKER_TAG" in
     *) MARKER_TAG="" ;;
 esac
 
+verify_marker_release_abi() {  # <tag> <export-dir> <verifier-image>
+    local sums="${WORK}/marker-release.SHA256SUMS" arch
+    # Use the actual verifier's architecture, not the host's (the Docker daemon
+    # or buildx builder may target another architecture).
+    arch="$(docker image inspect --format '{{.Architecture}}' "$3")" || return 1
+    case "$arch" in amd64|arm64) ;; *) return 1 ;; esac
+    gh release download "$1" --repo "$REPO" --pattern SHA256SUMS --output "$sums" || return 1
+    # Dockerfile.release fetches these exact asset names. Independently bind
+    # the exported ABI bytes to the selected release before trusting the tree;
+    # a matching version string alone does not establish compiler identity.
+    python3 - "$sums" "$2" "$arch" <<'PY'
+import hashlib
+from pathlib import Path
+import re
+import sys
+
+sums, export, arch = sys.argv[1:]
+try:
+    entries = {}
+    lines = Path(sums).read_text(encoding="ascii").splitlines()
+    if not lines:
+        raise ValueError("empty SHA256SUMS")
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-fA-F]{64})  (\S+)", line)
+        if match is None or match[2] in entries:
+            raise ValueError("malformed or duplicate SHA256SUMS entry")
+        entries[match[2]] = match[1].lower()
+    for local, asset in (("yarac", f"yarac-linux-{arch}"),
+                         ("libyara.a", f"libyara-linux-{arch}.a")):
+        path = Path(export) / "marker-artifact" / "abi" / local
+        if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            raise ValueError("missing regular ABI file")
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if entries.get(asset) != digest.hexdigest():
+            raise ValueError("release ABI checksum mismatch or missing entry")
+except (OSError, UnicodeError, ValueError) as error:
+    print(f"generate-rules: cannot bind marker ABI to release SHA256SUMS: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 build_marker_export() {  # build_marker_export <tag>; 0 only for a complete marker export + verifier
     local tag="$1" out="${WORK}/marker-export"
     mkdir -p "$out" || return 1
@@ -415,6 +459,10 @@ build_marker_export() {  # build_marker_export <tag>; 0 only for a complete mark
     [ -s "${WORK}/marker-verifier.iid" ] || return 1
     MARKER_VERIFIER_IMAGE="$(<"${WORK}/marker-verifier.iid")"
     [ -n "$MARKER_VERIFIER_IMAGE" ] || return 1
+    if ! verify_marker_release_abi "$tag" "$out" "$MARKER_VERIFIER_IMAGE"; then
+        note "cannot verify the ${tag} marker toolchain against release SHA256SUMS; publishing the unmarked HEAD build"
+        return 1
+    fi
     # A marker-capable release built before -require-marker existed cannot run
     # the staged gate; without this probe every publication would die there
     # instead of falling back. `-h` prints the flag list and exits 2.
