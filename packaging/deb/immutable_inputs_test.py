@@ -1187,8 +1187,14 @@ def _release_local_tokens(root: Path, text: str) -> frozenset[str]:
     ]
     if (
         declarations in (["ARG RELEASE_SOURCE=download"], ["ARG RELEASE_SOURCE=local"])
-        and re.search(r"(?mi)^FROM\s+\S+\s+AS\s+fetch-download$", text)
-        and re.search(r"(?mi)^FROM\s+\S+\s+AS\s+fetch-local$", text)
+        and re.search(
+            r"(?mi)^FROM(?:\s+--platform=\S+)?\s+\S+\s+AS\s+fetch-download$",
+            text,
+        )
+        and re.search(
+            r"(?mi)^FROM(?:\s+--platform=\S+)?\s+\S+\s+AS\s+fetch-local$",
+            text,
+        )
         and re.search(r"(?m)^FROM fetch-\$\{RELEASE_SOURCE\} AS fetch$", text)
         and _release_source_values_literal(root)
     ):

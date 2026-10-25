@@ -1,49 +1,55 @@
 #!/bin/sh
-# Every helper that docker/compile-rules.sh or docker/fetch-rules.sh resolves via
-# $(dirname "$0")/<name> must be COPY'd into /usr/local/bin/ by the `rules` stage
-# of BOTH docker/Dockerfile and docker/Dockerfile.release (#525 regression: the
-# release rules stage lacked capture-compiler-inputs.py).
+# Every helper that docker/fetch-rules.sh or docker/compile-rules.sh resolves via
+# $(dirname "$0")/<name> must be COPY'd into /usr/local/bin/ by the stage that
+# runs that script, in BOTH docker/Dockerfile and docker/Dockerfile.release:
+# fetch-rules.sh runs in `rules-src`, compile-rules.sh in `rules` (#525
+# regression: the release rules stage lacked capture-compiler-inputs.py).
 # Usage: dockerfile_rules_helpers_test.sh            (real files + self-controls)
 #        dockerfile_rules_helpers_test.sh --check ROOT   (check one tree only)
 set -eu
 
-# helpers ROOT -> sorted helper names referenced by the stage scripts.
+# helpers SCRIPT -> sorted helper names that stage script references.
 helpers() {
 	# Existence guard runs outside the pipeline: a pipeline's status is sort's.
-	for s in "$1/docker/compile-rules.sh" "$1/docker/fetch-rules.sh"; do
-		[ -f "$s" ] || { echo "FAIL: missing $s" >&2; return 2; }
-	done
-	for s in "$1/docker/compile-rules.sh" "$1/docker/fetch-rules.sh"; do
-		# shellcheck disable=SC2016 # literal $(dirname "$0") is the pattern
-		sed -n 's/.*\$(dirname "\$0")\/\([A-Za-z0-9_.-]*\).*/\1/p' "$s"
-	done | sort -u
+	[ -f "$1" ] || { echo "FAIL: missing $1" >&2; return 2; }
+	# shellcheck disable=SC2016 # literal $(dirname "$0") is the pattern
+	sed -n 's/.*\$(dirname "\$0")\/\([A-Za-z0-9_.-]*\).*/\1/p' "$1" | sort -u
 }
 
-# copied DOCKERFILE -> basenames COPY'd into /usr/local/bin/ inside the rules stage.
+# copied DOCKERFILE STAGE -> basenames COPY'd into /usr/local/bin/ inside STAGE.
 copied() {
-	awk '
-		/^[[:space:]]*FROM[[:space:]]/ { in_rules = ($0 ~ /[[:space:]][Aa][Ss][[:space:]]+rules[[:space:]]*$/) ; next }
-		in_rules && /^[[:space:]]*COPY[[:space:]]/ {
+	awk -v stage="$2" '
+		/^[[:space:]]*FROM[[:space:]]/ {
+			n = split($0, f, /[[:space:]]+/)
+			in_stage = (n >= 2 && tolower(f[n - 1]) == "as" && f[n] == stage)
+			next
+		}
+		in_stage && /^[[:space:]]*COPY[[:space:]]/ {
 			n = split($0, f, /[[:space:]]+/)
 			if (f[n] != "/usr/local/bin/") next
 			for (i = 1; i <= n; i++) if (f[i] ~ /^docker\//) { sub(/^docker\//, "", f[i]); print f[i] }
 		}' "$1" | sort -u
 }
 
-# check ROOT -> 0 when every referenced helper is COPY'd in both Dockerfiles.
+# check ROOT -> 0 when each script's helpers are COPY'd into its own stage of
+# both Dockerfiles.
 check() {
 	root=$1
-	need=$(helpers "$root") || return 2
-	[ -n "$need" ] || { echo "FAIL: no dirname helper references found (parser drift?)" >&2; return 2; }
+	fetch=$(helpers "$root/docker/fetch-rules.sh") || return 2
+	compile=$(helpers "$root/docker/compile-rules.sh") || return 2
+	[ -n "$fetch$compile" ] || { echo "FAIL: no dirname helper references found (parser drift?)" >&2; return 2; }
 	rc=0
 	for df in docker/Dockerfile docker/Dockerfile.release; do
 		[ -f "$root/$df" ] || { echo "FAIL: missing $root/$df" >&2; return 2; }
-		have=$(copied "$root/$df")
-		for h in $need; do
-			if ! printf '%s\n' "$have" | grep -qx -- "$h"; then
-				echo "FAIL: $df rules stage does not COPY $h into /usr/local/bin/" >&2
-				rc=1
-			fi
+		for pair in "rules-src:$fetch" "rules:$compile"; do
+			stage=${pair%%:*}
+			have=$(copied "$root/$df" "$stage")
+			for h in ${pair#*:}; do
+				if ! printf '%s\n' "$have" | grep -qx -- "$h"; then
+					echo "FAIL: $df $stage stage does not COPY $h into /usr/local/bin/" >&2
+					rc=1
+				fi
+			done
 		done
 	done
 	return "$rc"
@@ -57,7 +63,7 @@ fi
 
 # Positive: the real tree.
 check "$here"
-echo "PASS: real Dockerfiles copy every dirname helper: $(helpers "$here" | tr '\n' ' ')"
+echo "PASS: real Dockerfiles copy every dirname helper: $(helpers "$here/docker/fetch-rules.sh" | tr '\n' ' ')$(helpers "$here/docker/compile-rules.sh" | tr '\n' ' ')"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -69,8 +75,8 @@ mk() { # mk DIR : copy the real inputs
 
 # Negative control: drop the helper from the release COPY line -> must fail.
 mk "$tmp/neg"
-sed -i '/AS rules/,/^FROM .* AS final/ s# docker/capture-compiler-inputs\.py##' "$tmp/neg/docker/Dockerfile.release"
-if copied "$tmp/neg/docker/Dockerfile.release" | grep -qx capture-compiler-inputs.py; then
+sed -i '/AS rules$/,/^FROM .* AS final/ s# docker/capture-compiler-inputs\.py##' "$tmp/neg/docker/Dockerfile.release"
+if copied "$tmp/neg/docker/Dockerfile.release" rules | grep -qx capture-compiler-inputs.py; then
 	echo "FAIL: negative fixture was not mutated" >&2; exit 1
 fi
 if check "$tmp/neg" 2>"$tmp/neg.err"; then
@@ -79,19 +85,36 @@ fi
 grep -q 'Dockerfile.release rules stage does not COPY capture-compiler-inputs.py' "$tmp/neg.err"
 echo "PASS: negative control red: $(cat "$tmp/neg.err")"
 
-# Negative control 2: a COPY in a non-rules stage does not count.
+# Negative control 2: a COPY in an unrelated stage does not count.
 mk "$tmp/stage"
-sed -i 's#^COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/filter-rules.py /usr/local/bin/#COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py /usr/local/bin/#' "$tmp/stage/docker/Dockerfile.release"
+sed -i 's#^COPY docker/fetch-rules.sh docker/filter-rules.py /usr/local/bin/#COPY docker/fetch-rules.sh /usr/local/bin/#' "$tmp/stage/docker/Dockerfile.release"
+if copied "$tmp/stage/docker/Dockerfile.release" rules-src | grep -qx filter-rules.py; then
+	echo "FAIL: stage fixture was not mutated" >&2; exit 1
+fi
 printf 'FROM scratch AS other\nCOPY docker/filter-rules.py /usr/local/bin/\n' >>"$tmp/stage/docker/Dockerfile.release"
 if check "$tmp/stage" 2>/dev/null; then
-	echo "FAIL: COPY outside rules stage was accepted" >&2; exit 1
+	echo "FAIL: COPY outside the rules-src stage was accepted" >&2; exit 1
 fi
-echo "PASS: COPY outside the rules stage rejected"
+echo "PASS: COPY outside the owning stage rejected"
+
+# Negative control 3: a fetch helper in the compile stage is the wrong stage.
+mk "$tmp/wrong"
+sed -i 's#^COPY docker/fetch-rules.sh docker/filter-rules.py /usr/local/bin/#COPY docker/fetch-rules.sh /usr/local/bin/#' "$tmp/wrong/docker/Dockerfile"
+sed -i 's#^COPY docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py /usr/local/bin/#&\nCOPY docker/filter-rules.py /usr/local/bin/#' "$tmp/wrong/docker/Dockerfile"
+if ! copied "$tmp/wrong/docker/Dockerfile" rules | grep -qx filter-rules.py; then
+	echo "FAIL: wrong-stage fixture was not mutated" >&2; exit 1
+fi
+if check "$tmp/wrong" 2>"$tmp/wrong.err"; then
+	echo "FAIL: fetch helper copied only into the rules stage was accepted" >&2; exit 1
+fi
+grep -q 'docker/Dockerfile rules-src stage does not COPY filter-rules.py' "$tmp/wrong.err"
+echo "PASS: helper in the wrong stage rejected"
 
 # Boundary: helpers split over several COPY lines still pass.
 mk "$tmp/split"
-sed -i 's#^COPY docker/fetch-rules.sh docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py /usr/local/bin/#COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/\nCOPY docker/capture-compiler-inputs.py docker/build-marker-artifact.py /usr/local/bin/\nCOPY docker/filter-rules.py /usr/local/bin/#' "$tmp/split/docker/Dockerfile"
-if [ "$(grep -c '^COPY docker/.*/usr/local/bin/$' "$tmp/split/docker/Dockerfile")" -lt 3 ]; then
+sed -i 's#^COPY docker/compile-rules.sh docker/capture-compiler-inputs.py docker/build-marker-artifact.py /usr/local/bin/#COPY docker/compile-rules.sh /usr/local/bin/\nCOPY docker/capture-compiler-inputs.py /usr/local/bin/\nCOPY docker/build-marker-artifact.py /usr/local/bin/#' "$tmp/split/docker/Dockerfile"
+if [ "$(copied "$tmp/split/docker/Dockerfile" rules | wc -l)" -ne 3 ] \
+	|| [ "$(grep -c '^COPY docker/[^ ]* /usr/local/bin/$' "$tmp/split/docker/Dockerfile")" -lt 3 ]; then
 	echo "FAIL: split fixture was not mutated" >&2; exit 1
 fi
 check "$tmp/split"

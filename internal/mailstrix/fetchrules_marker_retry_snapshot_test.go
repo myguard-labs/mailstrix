@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func cleanupRetrySnapshots(t *testing.T, dir string) {
@@ -120,10 +122,25 @@ func TestMarkerRetrySnapshotCleanupTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	ageFetchTemp(t, file)
+	// Age the link itself: os.Chtimes would follow and age its outside target.
+	old := time.Now().Add(-staleFetchTempAge - time.Hour)
+	ts := []unix.Timespec{unix.NsecToTimespec(old.UnixNano()), unix.NsecToTimespec(old.UnixNano())}
+	if err := unix.UtimesNanoAt(unix.AT_FDCWD, link, ts, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(fresh, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cleanupRetrySnapshots(t, dir)
+	unlock, err := lockRules(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	var logs []string
+	cleanupStaleFetchTemps(dir, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	if len(logs) != 0 {
+		t.Fatalf("cleanup warned for a stale file, stale symlink or fresh directory: %q", logs)
+	}
 	for _, path := range []string{link, file, fresh, filepath.Join(outside, "keep")} {
 		if !exists(path) {
 			t.Fatalf("cleanup removed non-stale or malformed snapshot %s", path)

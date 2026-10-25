@@ -2,6 +2,7 @@
 set -eu
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 python3 - "$root/.github/workflows" <<'PY'
+import copy
 import pathlib
 import sys
 
@@ -16,24 +17,102 @@ canary_routes = {
     "cross-slot-negative-control": ["self-hosted", "b02lxc", "lxc", "ci-slot-builder02-runner-02"],
 }
 
-for path in workflows.glob("*.y*ml"):
-    workflow = yaml.safe_load(path.read_text()) or {}
-    for name, job in workflow.get("jobs", {}).items():
-        runs_on = job.get("runs-on")
-        if runs_on is None:
-            continue
-        if isinstance(runs_on, str):
-            assert runs_on == "ubuntu-24.04-arm", f"{path}:{name}: unexpected hosted runner"
-            continue
-        assert isinstance(runs_on, list), f"{path}:{name}: runner group is forbidden"
-        if path.name == "runner-isolation.yml":
-            assert runs_on == canary_routes[name], f"{path}:{name}: slot affinity lost"
-        else:
-            assert runs_on in (
-                ["self-hosted", "builder02", "docker"],
-                ["self-hosted", "builder02", "lxc"],
-            ), f"{path}:{name}: wrong shared builder route"
-        assert not ({"mailstrix", "ephemeral", "canary-leave", "canary-prove"} & set(runs_on))
+# These are the intended native and hosted routes, not a general exception to
+# disposable self-hosted slots. Keep the workflow/job and matrix shape bound.
+hosted_native = "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
+hybrid_native = (
+    "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || "
+    "fromJSON('[\"self-hosted\",\"builder02\",\"docker\"]') }}"
+)
+both_arches = {"arch": ["amd64", "arm64"]}
+allowed_string_routes = {
+    ("ci.yml", "pr-marker-image"): (hosted_native, both_arches),
+    ("build-binaries.yml", "binaries"): (
+        hosted_native, {"arch": "${{ fromJSON(inputs.arches) }}"},
+    ),
+    ("nightly.yml", "plan"): ("ubuntu-24.04", None),
+    ("nightly.yml", "marker-image"): (hosted_native, both_arches),
+    ("nightly.yml", "publish"): ("ubuntu-24.04", None),
+    ("release.yml", "marker-image"): (hybrid_native, both_arches),
+    ("release.yml", "libyara-repro"): (hybrid_native, both_arches),
+    ("maintenance.yml", "release-libyara-repro"): (hybrid_native, both_arches),
+    ("maintenance.yml", "race-arm64"): ("ubuntu-24.04-arm", None),
+}
+
+
+def validate_routes(documents):
+    for filename, document in documents.items():
+        for name, job in document.get("jobs", {}).items():
+            runs_on = job.get("runs-on")
+            route = allowed_string_routes.get((filename, name))
+            if route is not None:
+                expected_runner, expected_matrix = route
+                assert runs_on == expected_runner, f"{filename}:{name}: wrong native/hosted route"
+                matrix = (job.get("strategy") or {}).get("matrix")
+                assert matrix == expected_matrix, f"{filename}:{name}: wrong architecture matrix"
+                continue
+            if runs_on is None:
+                continue
+            assert not isinstance(runs_on, str), f"{filename}:{name}: unexpected hosted runner"
+            assert isinstance(runs_on, list), f"{filename}:{name}: runner group is forbidden"
+            if filename == "runner-isolation.yml":
+                assert runs_on == canary_routes[name], f"{filename}:{name}: slot affinity lost"
+            else:
+                assert runs_on in (
+                    ["self-hosted", "builder02", "docker"],
+                    ["self-hosted", "builder02", "lxc"],
+                ), f"{filename}:{name}: wrong shared builder route"
+            assert not ({"mailstrix", "ephemeral", "canary-leave", "canary-prove"} & set(runs_on))
+
+
+documents = {
+    path.name: yaml.safe_load(path.read_text()) or {}
+    for path in workflows.glob("*.y*ml")
+}
+validate_routes(documents)
+
+
+def rejects_mutation(label, filename, name, mutate):
+    fixture = copy.deepcopy(documents)
+    mutate(fixture[filename]["jobs"][name])
+    try:
+        validate_routes(fixture)
+    except AssertionError:
+        print(f"ok - route control rejects {label}")
+    else:
+        raise AssertionError(f"route control accepted {label}")
+
+
+for (filename, name), (_, matrix) in allowed_string_routes.items():
+    rejects_mutation(
+        f"{filename}:{name} wrong host", filename, name,
+        lambda job: job.update({"runs-on": "ubuntu-latest"}),
+    )
+    rejects_mutation(
+        f"{filename}:{name} missing runner", filename, name,
+        lambda job: job.pop("runs-on"),
+    )
+    if matrix is not None:
+        rejects_mutation(
+            f"{filename}:{name} wrong architecture", filename, name,
+            lambda job: job.update({"strategy": {"matrix": {"arch": ["amd64"]}}}),
+        )
+        rejects_mutation(
+            f"{filename}:{name} extra architecture", filename, name,
+            lambda job: job.update({"strategy": {"matrix": {"arch": ["amd64", "arm64", "riscv64"]}}}),
+        )
+fixture = copy.deepcopy(documents)
+fixture["ci.yml"]["jobs"]["unknown-hosted-job"] = {"runs-on": "ubuntu-24.04-arm"}
+try:
+    validate_routes(fixture)
+except AssertionError:
+    print("ok - route control rejects unknown hosted job")
+else:
+    raise AssertionError("route control accepted unknown hosted job")
+rejects_mutation(
+    "canary slot regression", "runner-isolation.yml", "leave-lxc-state",
+    lambda job: job.update({"runs-on": ["self-hosted", "b02lxc", "lxc", "ci-slot-builder02-runner-02"]}),
+)
 
 workflow = yaml.safe_load((workflows / "runner-isolation.yml").read_text())
 assert workflow["concurrency"] == {

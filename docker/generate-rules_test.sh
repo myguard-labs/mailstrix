@@ -1178,6 +1178,23 @@ with tarfile.open(sys.argv[1], "r:gz") as tar:
 PY
 }
 
+marker_tmpfs_expected() {  # marker_tmpfs_expected <bundle> <tar.gz>
+    python3 - "$1" "$2" <<'PY'
+import sys
+import tarfile
+
+bundle = int(sys.argv[1])
+archive_size = __import__("os").stat(sys.argv[2]).st_size
+with tarfile.open(sys.argv[2], "r:gz") as archive:
+    members = archive.getmembers()
+tree_size = sum(member.size for member in members if member.isreg())
+payload = bundle + archive_size + tree_size
+needed = payload + len(members) * (2 * (64 << 10)) + (64 << 20) + (payload + 15) // 16
+allocation = ((needed + (1 << 20) - 1) // (1 << 20)) * (1 << 20)
+print(f"size={allocation}")
+PY
+}
+
 assert_marker_published() {
     local actual name=marker-published
     run_script LATEST_TAG=v1.2.3
@@ -1222,8 +1239,13 @@ assert_marker_published() {
     grep -E '^stage-verify .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: staged verification did not use the release strixd image"
     grep -E '^probe .*--network none sha256:markerverifier -h' "$EVENTS" >/dev/null || assert_event "${name}: release strixd was not probed for -require-marker"
     grep -E '^verify .*sha256:markerverifier .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: post-publish verification is not marker-gated"
-    grep -E '^stage-verify .*size=4g' "$EVENTS" >/dev/null || assert_event "${name}: staged marker gate lacks the 4g tmpfs"
-    grep -E '^verify .*size=4g .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: post-publish marker gate lacks the 4g tmpfs"
+    local expected_tmpfs
+    expected_tmpfs="$(marker_tmpfs_expected 1572864 "${EVENTS}.tree")"
+    grep -F "stage-verify run --rm --read-only --network host --tmpfs /tmp:rw,nosuid,nodev,${expected_tmpfs} sha256:markerverifier" "$EVENTS" >/dev/null \
+        || assert_event "${name}: staged marker gate does not use the artifact-derived tmpfs cap"
+    grep -F "verify run --rm --read-only --tmpfs /tmp:rw,nosuid,nodev,${expected_tmpfs} sha256:markerverifier" "$EVENTS" >/dev/null \
+        || assert_event "${name}: post-publish marker gate does not reuse the artifact-derived tmpfs cap"
+    [ "$expected_tmpfs" != size=4g ] || assert_event "${name}: marker tmpfs cap remained the fixed legacy value"
     grep -Fx 'dockerfile Dockerfile.release rules-export' "$EVENTS" >/dev/null || assert_event "${name}: bundle not built with the release toolchain"
     ! grep -Fx 'dockerfile Dockerfile rules-export' "$EVENTS" >/dev/null || assert_event "${name}: the unmarked build ran despite a marker export"
     grep -Fx 'release-sums v1.2.3' "$EVENTS" >/dev/null || assert_event "${name}: selected release SHA256SUMS not fetched"
@@ -1233,6 +1255,43 @@ assert_marker_published() {
     cmp -s "$test_root/tree-first" "${EVENTS}.tree" || assert_event "${name}: two publishes of one tree differ"
 }
 assert_marker_published
+
+# Exercise the production refusal point without allocating multi-GiB fixtures:
+# instrument only the disposable publisher copy with the client's maximum valid
+# component sizes. Their simultaneous lifecycle exceeds the publisher's bounded
+# tmpfs ceiling and must stop before signing, staged verification, or upload.
+assert_marker_tmpfs_ceiling_refuses_publication() {
+    local name=marker-tmpfs-ceiling actual script saved
+    script="$test_root/sandbox/project/docker/generate-rules.sh"
+    saved="$test_root/generate-rules.before-tmpfs-ceiling"
+    cp "$script" "$saved"
+    python3 - "$script" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+old = '''        "$SIZE" "$(stat -c '%s' "$MARKER_FILE")" \\
+        "$marker_tree_bytes" "$marker_tree_entries")" \\'''
+new = '''        "536870912" "1073741824" \\
+        "2147483648" "131072")" \\'''
+if source.count(old) != 1:
+    raise SystemExit("test instrumentation anchor count differs from one")
+path.write_text(source.replace(old, new))
+PY
+    run_script LATEST_TAG=v1.2.3
+    mv "$saved" "$script"
+    [ "$actual" -ne 0 ] || assert_event "${name}: simultaneous maximum artifacts were accepted"
+    grep -F 'marker tmpfs sizing: staged artifacts exceed the 4 GiB verifier ceiling' "$test_root/log" >/dev/null \
+        || assert_event "${name}: bounded ceiling diagnostic missing"
+    grep -F 'staged marker verifier tmpfs requirement is invalid or exceeds its bounded ceiling; nothing was published' "$test_root/log" >/dev/null \
+        || assert_event "${name}: prepublication refusal diagnostic missing"
+    [ "$(grep -c '^signed-sha ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: manifest was signed after sizing refusal"
+    [ "$(grep -c '^stage-verify ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: staged verifier ran after sizing refusal"
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: assets were uploaded after sizing refusal"
+    [ "$(grep -c '^create$' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: release was created after sizing refusal"
+}
+assert_marker_tmpfs_ceiling_refuses_publication
 
 # Without a marker field every pre-existing guarantee is unchanged.
 assert_marker_skipped() {  # assert_marker_skipped <case> <env-assignment>...

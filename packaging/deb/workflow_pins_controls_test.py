@@ -725,15 +725,18 @@ class TestWorkflowControls(unittest.TestCase):
             result = self.gate()
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
-    def release_fixture(self, extra: str = "", producer: bool = True) -> None:
+    def release_fixture(
+        self, extra: str = "", producer: bool = True, platform: bool = False
+    ) -> None:
         digest = "@sha256:" + "1" * 64
+        prefix = "--platform=$BUILDPLATFORM " if platform else ""
         self.write(
             "docker/Dockerfile.release",
             f"ARG YARA_VERSION={immutable_inputs.PinFixtures.yara_version}\n"
             + immutable_inputs.PinFixtures.yara
             + "\nARG RELEASE_SOURCE=download\n"
-            + f"FROM example.test/base:1{digest} AS fetch-download\n"
-            + f"FROM example.test/base:1{digest} AS fetch-local\n"
+            + f"FROM {prefix}example.test/base:1{digest} AS fetch-download\n"
+            + f"FROM {prefix}example.test/base:1{digest} AS fetch-local\n"
             + "COPY --from=local-artifacts / /in/\n"
             + "FROM fetch-${RELEASE_SOURCE} AS fetch\n"
             + extra,
@@ -750,6 +753,35 @@ class TestWorkflowControls(unittest.TestCase):
         self.release_fixture()
         result = self.gate()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_release_internal_stages_accept_supported_platform_prefix(self) -> None:
+        self.release_fixture(platform=True)
+        result = self.gate()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_release_platform_prefix_still_requires_both_literal_stages(self) -> None:
+        self.release_fixture(platform=True)
+        path = self.root / "docker/Dockerfile.release"
+        self.write(
+            "docker/Dockerfile.release",
+            path.read_text(encoding="utf-8").replace("AS fetch-local", "AS other"),
+        )
+        self.reject("use a literal token: fetch-download")
+
+    def test_release_platform_prefix_does_not_exempt_unpinned_external(self) -> None:
+        self.release_fixture(
+            "FROM --platform=$BUILDPLATFORM alpine AS extra\n", platform=True
+        )
+        self.reject("Docker external base must have a sha256 digest")
+
+    def test_release_platform_prefix_does_not_allow_dynamic_selector(self) -> None:
+        self.release_fixture(platform=True)
+        self.write(
+            "ci/other.sh",
+            "docker buildx build --build-arg RELEASE_SOURCE=$SOURCE "
+            "-f docker/Dockerfile.release .\n",
+        )
+        self.reject("use a literal token: fetch-download")
 
     def test_release_selector_requires_producer_for_context(self) -> None:
         self.release_fixture(producer=False)

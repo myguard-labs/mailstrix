@@ -9,6 +9,7 @@ native/manifest validation and other work outside the helper.
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -167,10 +168,61 @@ class ClosureScalingTests(unittest.TestCase):
             "COPY ci/ci_marker_closure_test.py /src/ci/ci_marker_closure_test.py",
             docker,
         )
-        self.assertIn(
-            '*" $(go list -m)/internal/mailstrix "*) python3 ci/ci_marker_closure_test.py --native-ci ;;',
-            docker,
-        )
+        stage = docker.split("FROM build AS test\n", 1)[1].split("\nFROM ", 1)[0]
+        commands = [
+            line[4:]
+            for line in stage.replace("\\\n", " ").splitlines()
+            if line.startswith("RUN ") and "--native-ci" in line
+        ]
+        self.assertEqual(len(commands), 1)
+        command = re.sub(r"--mount=\S+\s*", "", commands[0])
+        package = "github.com/myguard-labs/mailstrix/internal/mailstrix"
+        for scope, expected_calls in (
+            ("./...", 1),
+            (package, 1),
+            (f"example/other {package}", 1),
+            ("./... example/other", 1),
+            ("", 0),
+            ("example/other", 0),
+        ):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory:
+                fixture = Path(directory)
+                tools = fixture / "bin"
+                tools.mkdir()
+                go = tools / "go"
+                go.write_text(
+                    '#!/bin/sh\ncase "$1" in\n'
+                    'run) printf "%s\\n" "$SCOPE" ;;\n'
+                    'list) printf "%s\\n" github.com/myguard-labs/mailstrix ;;\n'
+                    "*) exit 64 ;;\nesac\n"
+                )
+                python = tools / "python3"
+                python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$GATE_TRACE"\n')
+                go.chmod(0o755)
+                python.chmod(0o755)
+                trace = fixture / "gate.trace"
+                result = subprocess.run(
+                    ["bash", "-ec", command],
+                    cwd=fixture,
+                    env=dict(
+                        os.environ,
+                        PATH=f"{tools}:{os.environ['PATH']}",
+                        SCOPE=scope,
+                        GATE_TRACE=str(trace),
+                    ),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = trace.read_text().splitlines() if trace.exists() else []
+                self.assertEqual(
+                    calls,
+                    ["ci/ci_marker_closure_test.py --native-ci"] * expected_calls,
+                )
+                self.assertEqual(
+                    (fixture / ".testscope-packages").read_text(), scope + "\n"
+                )
         self.assertLess(
             docker.index("--native-ci"),
             docker.index("go test -race"),

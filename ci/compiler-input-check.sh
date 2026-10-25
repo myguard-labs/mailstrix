@@ -56,7 +56,7 @@ if mode == "pr-marker":
     # Only these two named rules-stage additions are authorized. Removal of
     # either addition fails, as do unrelated rule or final-stage changes.
     additions = (
-        ("docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py", "docker/capture-compiler-inputs.py docker/filter-rules.py"),
+        ("docker/capture-compiler-inputs.py docker/build-marker-artifact.py /usr/local/bin/", "docker/capture-compiler-inputs.py /usr/local/bin/"),
         ("    && python3 /usr/local/bin/build-marker-artifact.py /rules " + chr(92) + chr(10), ""),
     )
     for added, original in additions:
@@ -164,11 +164,12 @@ if len(stages) < 2 or not re.search(r'\bAS[ \t]+yara[ \t]*$', stages[0].group(),
 # Only the native prerequisite belongs in this minimal context. Subsequent
 # fixture/build stages have their own COPY inputs and must remain excluded.
 source = source[:stages[1].start()]
-if source.count('RUN apt-get update') != 1:
+apt_install = 'RUN --mount=type=cache,target=/var/cache/apt,sharing=locked'
+if source.count(apt_install) != 1 or source.count('apt-get update') != 1:
     raise SystemExit('production yara-stage apt prerequisite changed')
-source = source.replace('RUN apt-get update', '''COPY deb.myguard.nl.gpg /etc/apt/keyrings/deb.myguard.nl.gpg
+source = source.replace(apt_install, '''COPY deb.myguard.nl.gpg /etc/apt/keyrings/deb.myguard.nl.gpg
 RUN echo "deb [signed-by=/etc/apt/keyrings/deb.myguard.nl.gpg] http://deb.myguard.nl:8888 bookworm main" > /etc/apt/sources.list.d/deb.myguard.nl.list
-RUN apt-get update''')
+''' + apt_install)
 source = source.replace('COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py',
                         'COPY compiler-input-capture.h patch-compiler-input-capture.py')
 # Coverage is a pinned Debian dependency of this disposable proof image only.

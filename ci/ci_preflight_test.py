@@ -91,16 +91,19 @@ class Preflight(unittest.TestCase):
     def test_removal_of_unmapped_input_stays_fail_closed(self):
         self.git("rm", "-q", "ci/old_unmapped_test.go")
         self.commit()
-        proc, _ = self.preflight(self.base)
+        proc, trace = self.preflight(self.base)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("unmapped changed path: ci/old_unmapped_test.go", proc.stderr)
+        self.assertEqual(trace, "")
 
     def test_one_unmapped_path_among_mapped_ones_fails(self):
         self.write("ci/status_log_test.go", "package ci // edit\n")
         self.write("ci/another_new_test.go", "package ci\n")
         self.commit()
-        proc, _ = self.preflight(self.base)
+        proc, trace = self.preflight(self.base)
         self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unmapped changed path: ci/another_new_test.go", proc.stderr)
+        self.assertEqual(trace, "")
 
     def test_default_base_is_merge_base_with_origin_main(self):
         self.git("update-ref", "refs/remotes/origin/main", self.base)
@@ -118,8 +121,10 @@ class Preflight(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
 
     def test_malformed_base_fails(self):
-        proc, _ = self.preflight("not-a-revision")
+        proc, trace = self.preflight("not-a-revision")
         self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(trace, "")
+        self.assertNotIn("changed paths mapped", proc.stdout)
 
     def test_shipped_repo_maps_its_own_ci_inputs(self):
         # Every tracked ci/ input must be known to the planner (no silent gaps).

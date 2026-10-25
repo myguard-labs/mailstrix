@@ -17,6 +17,30 @@ import yaml
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
 OPTIONAL = ("PARITY", "LINT", "RSPAMD", "SPAMASSASSIN")
 ROOT = Path(__file__).resolve().parents[1]
+# arm64 jobs build natively on GitHub's hosted arm runner; amd64 stays on the
+# self-hosted Docker profile. No arm64 job may fall back to QEMU emulation.
+NATIVE_RUNS_ON = (
+    "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || "
+    "fromJSON('[\"self-hosted\",\"builder02\",\"docker\"]') }}"
+)
+
+
+# The reusable binary build and the nightly's own marker proof run every arch
+# on GitHub-hosted runners.
+HOSTED_RUNS_ON = (
+    "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
+)
+
+
+def assert_native_arch_job(case, job, runs_on=NATIVE_RUNS_ON):
+    case.assertEqual(job["runs-on"], runs_on)
+    case.assertFalse(
+        any(
+            s.get("uses", "").startswith("docker/setup-qemu-action@")
+            for s in job["steps"]
+        ),
+        "arm64 must build natively, not under QEMU",
+    )
 
 
 class DockerGateTimeoutContract(unittest.TestCase):
@@ -547,7 +571,7 @@ for line in source.splitlines():
                 self.assertIn(message, result.stderr)
         # The marker mode grants only the two explicit construction additions;
         # both legacy and already-integrated baselines retain ordinary guards.
-        marker_copy = "docker/capture-compiler-inputs.py docker/build-marker-artifact.py docker/filter-rules.py"
+        marker_copy = "docker/capture-compiler-inputs.py docker/build-marker-artifact.py /usr/local/bin/"
         marker_run = (
             "    && python3 /usr/local/bin/build-marker-artifact.py /rules "
             + chr(92)
@@ -687,7 +711,11 @@ for line in source.splitlines():
         production = dockerfile.read_text()
         for old, marker in (
             (" AS yara\n", b"production yara-stage boundary changed"),
-            ("RUN apt-get update", b"production yara-stage apt prerequisite changed"),
+            (
+                "RUN --mount=type=cache,target=/var/cache/apt,",
+                b"production yara-stage apt prerequisite changed",
+            ),
+            ("apt-get update", b"production yara-stage apt prerequisite changed"),
         ):
             with self.subTest(marker=marker):
                 dockerfile.write_text(production.replace(old, "changed"))
@@ -717,9 +745,10 @@ def workflow_step(name):
     return step, textwrap.dedent(script)
 
 
-def required_check():
+def job_script(name):
     workflow = WORKFLOW.read_text()
-    job = workflow.split("  ci-ok:\n", 1)[1]
+    job = workflow.split(f"  {name}:\n", 1)[1]
+    job = re.split(r"^  [a-zA-Z0-9_-]+:\n", job, maxsplit=1, flags=re.MULTILINE)[0]
     block = job.split("        run: |\n", 1)[1]
     script = []
     for line in block.splitlines(keepends=True):
@@ -727,6 +756,49 @@ def required_check():
             break
         script.append(line)
     return job, textwrap.dedent("".join(script))
+
+
+def required_check():
+    return job_script("ci-ok")
+
+
+def parsed_lane_manifest():
+    planner = (ROOT / "scripts/ci-plan.sh").read_text(encoding="utf-8")
+    fragments = re.findall(
+        r"^lane_manifest(?:\+)?='([^']*)'$", planner, re.MULTILINE
+    )
+    return json.loads("".join(fragments))
+
+
+def lane_job_owners(lane_manifest):
+    owners = {}
+    for lane in lane_manifest["lanes"]:
+        for identity in lane["jobs"]:
+            if identity in owners:
+                raise AssertionError(f"duplicate lane job owner: {identity}")
+            owners[identity] = lane["id"]
+    return owners
+
+
+def workflow_check_owners(job_owners, overrides):
+    owners = {}
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(ROOT).as_posix()
+        for job_name, job in document["jobs"].items():
+            job_identity = f"{relative}#{job_name}"
+            if job_identity not in job_owners:
+                raise AssertionError(f"missing lane job owner: {job_identity}")
+            for index, step in enumerate(job.get("steps", ()), start=1):
+                step_name = step.get("name", f"step-{index}")
+                identity = f"{job_identity}#{index}:{step_name}"
+                if identity in owners:
+                    raise AssertionError(f"duplicate check identity: {identity}")
+                override_identity = f"{job_identity}#{step_name}"
+                owners[identity] = overrides.get(
+                    override_identity, (job_owners[job_identity], "job-default")
+                )
+    return owners
 
 
 def verdict(
@@ -738,6 +810,10 @@ def verdict(
     scanners="success",
     native_selected="false",
     native_result="skipped",
+    event_name="workflow_call",
+    release_image_selected="false",
+    pr_binaries_result="skipped",
+    pr_marker_image_result="skipped",
 ):
     env = dict(os.environ)
     env.update(
@@ -746,6 +822,10 @@ def verdict(
         SCANNERS_RESULT=scanners,
         NATIVE_SELECTED=native_selected,
         NATIVE_RESULT=native_result,
+        EVENT_NAME=event_name,
+        RELEASE_IMAGE_SELECTED=release_image_selected,
+        PR_BINARIES_RESULT=pr_binaries_result,
+        PR_MARKER_IMAGE_RESULT=pr_marker_image_result,
         PARITY_SELECTED=selected[0],
         GO_SELECTED=selected[1],
         SCOPE_SELECTED=selected[2],
@@ -894,7 +974,15 @@ class RequiredCheck(unittest.TestCase):
 
     def test_native_required_gate_failure_and_legitimate_skip(self):
         for selected in ("true", "false", "", "unexpected"):
-            for result in ("success", "skipped", "failure", "cancelled", ""):
+            for result in (
+                "success",
+                "skipped",
+                "failure",
+                "cancelled",
+                "timed_out",
+                "unknown",
+                "",
+            ):
                 with self.subTest(selected=selected, result=result):
                     self.assertEqual(
                         verdict(
@@ -910,9 +998,20 @@ class RequiredCheck(unittest.TestCase):
     def test_wiring(self):
         job, script = required_check()
         self.assertIn("if: ${{ always() }}", job)
-        self.assertIn(
-            "needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin, compiler-inputs]",
-            job,
+        self.assertEqual(
+            yaml.safe_load(WORKFLOW.read_text())["jobs"]["ci-ok"]["needs"],
+            [
+                "changes",
+                "docker",
+                "parity-isolation",
+                "lint",
+                "scanners",
+                "rspamd",
+                "spamassassin",
+                "compiler-inputs",
+                "pr-binaries",
+                "pr-marker-image",
+            ],
         )
         for name in (
             "changes",
@@ -923,16 +1022,30 @@ class RequiredCheck(unittest.TestCase):
             "rspamd",
             "spamassassin",
             "compiler-inputs",
+            "pr-binaries",
+            "pr-marker-image",
         ):
             self.assertIn(f"needs.{name}.result", job)
-        for name in ("parity", "go", "scope", "rspamd", "spamassassin"):
-            self.assertIn(f"needs.changes.outputs.{name}", job)
-        self.assertIn("require_selected", script)
+        for group in (
+            "static_analysis",
+            "go_correctness",
+            "native_builds_artifacts",
+            "contracts_integrations",
+        ):
+            self.assertIn(f"join_{group}", script)
 
     def test_selected_and_skipped_jobs(self):
         # Every selection combination succeeds only with its corresponding
         # success/skipped result; any other state must fail the stable check.
-        states = ("success", "skipped", "failure", "cancelled", "")
+        states = (
+            "success",
+            "skipped",
+            "failure",
+            "cancelled",
+            "timed_out",
+            "unknown",
+            "",
+        )
         for bits in itertools.product(("true", "false"), repeat=5):
             expected = (
                 bits[0] == "true",
@@ -954,13 +1067,204 @@ class RequiredCheck(unittest.TestCase):
         skipped = ("false",) * 5
         results = ("skipped",) * 4
         for job in ("changes", "docker", "scanners"):
-            for state in ("failure", "cancelled", "skipped", ""):
+            for state in (
+                "failure",
+                "cancelled",
+                "timed_out",
+                "unknown",
+                "skipped",
+                "",
+            ):
                 with self.subTest(job=job, state=state):
                     self.assertFalse(verdict(skipped, results, **{job: state}))
         for index in range(5):
             selected = list(skipped)
             selected[index] = ""
             self.assertFalse(verdict(selected, results))
+
+    def test_actual_caller_and_lane_predicate_table(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        jobs = workflow["jobs"]
+        events = workflow[True]
+        self.assertEqual(events["pull_request"]["branches"], ["main", "master"])
+        self.assertIn("workflow_call", events)
+        self.assertNotIn("pull_request_target", events)
+        for caller in ("nightly.yml", "release.yml"):
+            source = yaml.safe_load((ROOT / ".github/workflows" / caller).read_text())
+            self.assertEqual(
+                source["jobs"]["gate"]["uses"], "./.github/workflows/ci.yml"
+            )
+        self.assertNotIn(
+            "./.github/workflows/ci.yml",
+            (ROOT / ".github/workflows/maintenance.yml").read_text(),
+        )
+        for job, predicate in (
+            ("compiler-inputs", "needs.changes.outputs.native == 'true'"),
+            ("parity-isolation", "needs.changes.outputs.parity == 'true'"),
+            (
+                "lint",
+                "needs.changes.outputs.go == 'true' || needs.changes.outputs.scope == 'true'",
+            ),
+            ("rspamd", "needs.changes.outputs.rspamd == 'true'"),
+            ("spamassassin", "needs.changes.outputs.spamassassin == 'true'"),
+        ):
+            with self.subTest(job=job):
+                self.assertIn(predicate, jobs[job]["if"])
+        self.assertEqual(jobs["docker"]["if"], "${{ always() }}")
+        self.assertEqual(jobs["ci-ok"]["if"], "${{ always() }}")
+
+    def test_lane_manifest_owns_all_baseline_jobs_and_check_modes_once(self):
+        lane_manifest = parsed_lane_manifest()
+        job_owners = lane_job_owners(lane_manifest)
+        overrides = {
+            item["identity"]: (item["lane"], item["mode"])
+            for item in lane_manifest["step_overrides"]
+        }
+        self.assertEqual(len(overrides), len(lane_manifest["step_overrides"]))
+        check_owners = workflow_check_owners(job_owners, overrides)
+        aliases = lane_manifest["check_aliases"]
+        for alias in aliases:
+            current_suffix = f"#{alias['current'].rsplit('#', 1)[1]}"
+            self.assertTrue(
+                any(
+                    identity.split(":", 1)[1] == current_suffix.removeprefix("#")
+                    for identity in check_owners
+                    if identity.startswith(alias["current"].rsplit("#", 1)[0] + "#")
+                )
+            )
+            self.assertEqual(len(alias["baseline"]), len(set(alias["baseline"])))
+            self.assertEqual(alias["lane"], job_owners[alias["current"].rsplit("#", 1)[0]])
+        baseline_check_count = len(check_owners) + sum(
+            len(alias["baseline"]) - 1 for alias in aliases
+        )
+        self.assertEqual(len(job_owners), 35)
+        self.assertEqual(len(check_owners), 155)
+        self.assertEqual(baseline_check_count, 156)
+        observed_overrides = {
+            f"{identity.rsplit('#', 1)[0]}#{identity.rsplit(':', 1)[1]}"
+            for identity in check_owners
+            if identity.rsplit(':', 1)[1] in {item.rsplit("#", 1)[1] for item in overrides}
+        }
+        self.assertEqual(set(overrides), observed_overrides)
+        self.assertEqual(
+            next(
+                owner
+                for identity, owner in check_owners.items()
+                if identity.endswith(
+                    ":build test stage (affected vet + race tests in-image)"
+                )
+            ),
+            ("go-correctness", "production-yara-static-race-coverage"),
+        )
+
+
+class PRArtifactImageContract(unittest.TestCase):
+    """A selected PR must prove both native binaries in the same run."""
+
+    def test_shipped_route(self):
+        jobs = workflow_document("PR_WORKFLOW_TEST_PATH", "ci.yml")["jobs"]
+        self.assertEqual(
+            jobs["changes"]["outputs"]["release_image"],
+            "${{ steps.plan.outputs.release_image }}",
+        )
+        binaries = jobs["pr-binaries"]
+        self.assertEqual(binaries["needs"], "changes")
+        self.assertEqual(
+            binaries["if"],
+            "${{ github.event_name == 'pull_request' && needs.changes.outputs.release_image == 'true' }}",
+        )
+        self.assertEqual(binaries["permissions"], {"contents": "read"})
+        self.assertEqual(binaries["uses"], "./.github/workflows/build-binaries.yml")
+        self.assertEqual(
+            binaries["with"],
+            {
+                "version": "pr-${{ github.sha }}",
+                "arches": '["amd64","arm64"]',
+                "gha-cache": False,
+            },
+        )
+
+        marker = jobs["pr-marker-image"]
+        self.assertEqual(marker["needs"], ["changes", "pr-binaries"])
+        self.assertEqual(
+            marker["if"],
+            "${{ github.event_name == 'pull_request' && needs.changes.outputs.release_image == 'true' && needs.pr-binaries.result == 'success' }}",
+        )
+        self.assertEqual(marker["permissions"], {"contents": "read"})
+        self.assertEqual(marker["strategy"]["matrix"]["arch"], ["amd64", "arm64"])
+        self.assertIs(marker["strategy"]["fail-fast"], False)
+        assert_native_arch_job(self, marker, HOSTED_RUNS_ON)
+        download = next(
+            step
+            for step in marker["steps"]
+            if step.get("name") == "download PR arch binaries"
+        )
+        self.assertEqual(
+            download["with"], {"name": "bin-${{ matrix.arch }}", "path": "out/"}
+        )
+        build = marker["steps"][-1]
+        self.assertEqual(build["env"]["ARCH"], "${{ matrix.arch }}")
+        self.assertIn(
+            'bash ci/release_marker_image_test.sh "${ARCH}" out', build["run"]
+        )
+        self.assertIn("${RUN_ATTEMPT}", build["run"])
+        self.assertTrue(
+            all("gh release" not in step.get("run", "") for step in marker["steps"])
+        )
+        check = jobs["ci-ok"]
+        self.assertIn("pr-binaries", check["needs"])
+        self.assertIn("pr-marker-image", check["needs"])
+        env = check["steps"][0]["env"]
+        self.assertEqual(
+            env["RELEASE_IMAGE_SELECTED"],
+            "${{ needs.changes.outputs.release_image }}",
+        )
+        self.assertEqual(env["PR_BINARIES_RESULT"], "${{ needs.pr-binaries.result }}")
+        self.assertEqual(
+            env["PR_MARKER_IMAGE_RESULT"],
+            "${{ needs.pr-marker-image.result }}",
+        )
+        script = check["steps"][0]["run"]
+        self.assertIn(
+            'require_selected "$pr_image_selected" "$PR_BINARIES_RESULT"', script
+        )
+        self.assertIn(
+            'require_selected "$pr_image_selected" "$PR_MARKER_IMAGE_RESULT"', script
+        )
+
+    def test_selected_failure_and_reusable_skip(self):
+        skipped = ("false",) * 5
+        results = ("skipped",) * 4
+        cases = (
+            ("pull_request", "true", "success", "success", True),
+            ("pull_request", "true", "skipped", "success", False),
+            ("pull_request", "true", "success", "skipped", False),
+            ("pull_request", "true", "failure", "skipped", False),
+            ("pull_request", "true", "timed_out", "skipped", False),
+            ("pull_request", "true", "success", "unknown", False),
+            ("pull_request", "false", "skipped", "skipped", True),
+            ("pull_request", "false", "success", "success", False),
+            ("workflow_call", "true", "skipped", "skipped", True),
+            ("workflow_call", "true", "success", "success", False),
+            ("pull_request", "", "skipped", "skipped", False),
+            ("", "true", "skipped", "skipped", False),
+            ("other", "false", "skipped", "skipped", False),
+        )
+        for event, selected, binary, marker, expected in cases:
+            with self.subTest(
+                event=event, selected=selected, binary=binary, marker=marker
+            ):
+                self.assertEqual(
+                    verdict(
+                        skipped,
+                        results,
+                        event_name=event,
+                        release_image_selected=selected,
+                        pr_binaries_result=binary,
+                        pr_marker_image_result=marker,
+                    ),
+                    expected,
+                )
 
 
 class NightlyMarkerImageContract(unittest.TestCase):
@@ -971,13 +1275,19 @@ class NightlyMarkerImageContract(unittest.TestCase):
         marker = jobs["marker-image"]
         self.assertIn("binaries", marker["needs"])
         self.assertEqual(marker["permissions"], {"contents": "read"})
+        self.assertEqual(marker["strategy"]["matrix"]["arch"], ["amd64", "arm64"])
+        self.assertIs(marker["strategy"]["fail-fast"], False)
+        assert_native_arch_job(self, marker, HOSTED_RUNS_ON)
         download = next(
-            s for s in marker["steps"] if s.get("name") == "download amd64 binaries"
+            s for s in marker["steps"] if s.get("name") == "download arch binaries"
         )
         # Its own just-built artifact, never a downloaded published release.
-        self.assertEqual(download["with"], {"name": "bin-amd64", "path": "out/"})
+        self.assertEqual(
+            download["with"], {"name": "bin-${{ matrix.arch }}", "path": "out/"}
+        )
+        self.assertEqual(marker["steps"][-1]["env"]["ARCH"], "${{ matrix.arch }}")
         run = marker["steps"][-1]["run"]
-        self.assertIn("bash ci/release_marker_image_test.sh amd64 out", run)
+        self.assertIn('bash ci/release_marker_image_test.sh "${ARCH}" out', run)
         self.assertNotIn("gh release", run)
         self.assertNotIn("releases/download", run)
         for step in marker["steps"]:
@@ -1005,15 +1315,32 @@ class NightlyMarkerImageContract(unittest.TestCase):
 
         def downloaded(d):
             d["jobs"]["marker-image"]["steps"][-1]["run"] = (
-                "gh release download nightly\nbash ci/release_marker_image_test.sh amd64 out"
+                'gh release download nightly\nbash ci/release_marker_image_test.sh "${ARCH}" out'
             )
 
         def wrong_artifact(d):
             for s in d["jobs"]["marker-image"]["steps"]:
-                if s.get("name") == "download amd64 binaries":
-                    s["with"]["name"] = "bin-arm64"
+                if s.get("name") == "download arch binaries":
+                    s["with"]["name"] = "bin-amd64"
 
-        for fn in (drop_job, drop_need, downloaded, wrong_artifact):
+        def amd64_only(d):
+            d["jobs"]["marker-image"]["strategy"]["matrix"]["arch"] = ["amd64"]
+
+        def emulated(d):
+            d["jobs"]["marker-image"]["runs-on"] = ["self-hosted", "builder02", "docker"]
+
+        def self_hosted_amd64(d):
+            d["jobs"]["marker-image"]["runs-on"] = NATIVE_RUNS_ON
+
+        for fn in (
+            drop_job,
+            drop_need,
+            downloaded,
+            wrong_artifact,
+            amd64_only,
+            emulated,
+            self_hosted_amd64,
+        ):
             with (
                 self.subTest(case=fn.__name__),
                 self.assertRaises((AssertionError, KeyError)),
@@ -1023,6 +1350,20 @@ class NightlyMarkerImageContract(unittest.TestCase):
 
 class BinaryWorkflowContract(unittest.TestCase):
     """Keep the tag release wired to the reusable, pinned binary build."""
+
+    def test_selected_pr_binary_job_has_native_build_timeout(self):
+        """The selected PR route must call a bounded native binary matrix."""
+        ci_jobs = workflow_document("PR_WORKFLOW_TEST_PATH", "ci.yml")["jobs"]
+        self.assertEqual(
+            ci_jobs["pr-binaries"]["uses"],
+            "./.github/workflows/build-binaries.yml",
+        )
+        binaries = workflow_document(
+            "BINARY_WORKFLOW_TEST_PATH", "build-binaries.yml"
+        )
+        build = binaries["jobs"]["binaries"]
+        assert_native_arch_job(self, build, HOSTED_RUNS_ON)
+        self.assertGreaterEqual(build["timeout-minutes"], 60)
 
     def test_release_binary_contract(self):
         """The tag caller, inputs, artifacts and reviewed action pins agree."""
@@ -1037,11 +1378,16 @@ class BinaryWorkflowContract(unittest.TestCase):
         self.assertEqual(caller["uses"], "./.github/workflows/build-binaries.yml")
         self.assertEqual(caller["with"]["version"], "${{ github.ref_name }}")
         self.assertEqual(caller["permissions"]["contents"], "read")
+        # A tag release never reads a layer cache another run could have written.
+        self.assertNotIn("gha-cache", caller["with"])
+        self.assertNotIn("actions", caller["permissions"])
         self.assertEqual(jobs["debs"]["needs"], "binaries")
         self.assertEqual(jobs["release"]["needs"], ["binaries", "debs", "marker-image", "libyara-repro"])
         marker = jobs["marker-image"]
         self.assertEqual(marker["needs"], "binaries")
         self.assertEqual(marker["permissions"], {"contents": "read"})
+        assert_native_arch_job(self, marker)
+        assert_native_arch_job(self, jobs["libyara-repro"])
         self.assertEqual(marker["strategy"]["matrix"]["arch"], ["amd64", "arm64"])
         self.assertIs(marker["strategy"]["fail-fast"], False)
         marker_download = next(
@@ -1064,22 +1410,33 @@ class BinaryWorkflowContract(unittest.TestCase):
         self.assertIs(inputs["version"]["required"], True)
         self.assertEqual(inputs["arches"]["type"], "string")
         self.assertEqual(json.loads(inputs["arches"]["default"]), ["amd64", "arm64"])
+        self.assertEqual(inputs["gha-cache"]["type"], "boolean")
+        self.assertIs(inputs["gha-cache"]["default"], False)
         build = binaries["jobs"]["binaries"]
         self.assertEqual(
             build["strategy"]["matrix"]["arch"], "${{ fromJSON(inputs.arches) }}"
         )
+        assert_native_arch_job(self, build, HOSTED_RUNS_ON)
         steps = build["steps"]
-        self.assertEqual(steps[3]["env"]["VERSION"], "${{ inputs.version }}")
-        self.assertEqual(steps[3]["env"]["ARCH"], "${{ matrix.arch }}")
-        script = steps[3]["run"]
+        runtime = next(s for s in steps if s.get("name") == "expose buildx cache runtime")
+        self.assertEqual(runtime["if"], "inputs.gha-cache")
+        compile_step = next(s for s in steps if s.get("name", "").startswith("build binaries"))
+        self.assertEqual(compile_step["env"]["VERSION"], "${{ inputs.version }}")
+        self.assertEqual(compile_step["env"]["ARCH"], "${{ matrix.arch }}")
+        self.assertEqual(compile_step["env"]["GHA_CACHE"], "${{ inputs.gha-cache }}")
+        script = compile_step["run"]
+        self.assertIn('if [[ "${GHA_CACHE}" == true ]]; then', script)
+        self.assertIn('--cache-from "type=gha,scope=bin-${arch}"', script)
+        self.assertIn('--cache-to "type=gha,mode=max,scope=bin-${arch}"', script)
         self.assertIn('arch="${ARCH}"', script)
         self.assertIn('--build-arg "VERSION=${VERSION}"', script)
         for asset in ("strixd", "strix-scan", "strix-milter", "yarac"):
             self.assertIn(f'"out/{asset}-linux-${{arch}}"', script)
         self.assertIn('"dist/${arch}/yarac" "out/yarac-linux-${arch}"', script)
         self.assertIn('"dist/${arch}/libyara.a" "out/libyara-linux-${arch}.a"', script)
-        self.assertEqual(steps[4]["with"]["name"], "bin-${{ matrix.arch }}")
-        self.assertEqual(steps[4]["with"]["if-no-files-found"], "error")
+        upload = next(s for s in steps if s.get("name") == "upload arch binaries")
+        self.assertEqual(upload["with"]["name"], "bin-${{ matrix.arch }}")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
         for job in ("debs", "release"):
             download = next(
                 step
@@ -1116,8 +1473,8 @@ class BinaryWorkflowContract(unittest.TestCase):
 
         expected_pins = (
             "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
-            "docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130",
             "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f",
+            "actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd",
             "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
         )
         self.assertEqual(
@@ -1132,7 +1489,16 @@ class NightlyWorkflowContract(unittest.TestCase):
         """Load the candidate workflow or a mutated fixture."""
         return workflow_document("NIGHTLY_WORKFLOW_TEST_PATH", "nightly.yml")
 
-    def decision(self, release, *, ref="refs/heads/main", sha="a" * 40):
+    def decision(
+        self,
+        release,
+        *,
+        ref="refs/heads/main",
+        sha="a" * 40,
+        cwd=None,
+        target="",
+        force="false",
+    ):
         """Execute the real plan script while a fake gh supplies release state."""
         plan = self.nightly()["jobs"]["plan"]
         step = next(step for step in plan["steps"] if step.get("id") == "release")
@@ -1145,6 +1511,7 @@ class NightlyWorkflowContract(unittest.TestCase):
                 'case "$FAKE_RELEASE" in\n'
                 '  equal) printf "%s\\n" "$GITHUB_SHA";;\n'
                 '  different) printf "%040d\\n" 0;;\n'
+                '  target) printf "%s\\n" "$FAKE_TARGET";;\n'
                 '  missing) echo "release not found" >&2; exit 1;;\n'
                 '  denied) echo "HTTP 403" >&2; exit 1;;\n'
                 "esac\n",
@@ -1162,10 +1529,13 @@ class NightlyWorkflowContract(unittest.TestCase):
                 GITHUB_OUTPUT=str(output),
                 GH_CALLS=str(calls),
                 FAKE_RELEASE=release,
+                FAKE_TARGET=target,
+                FORCE=force,
             )
             result = subprocess.run(
                 ["bash", "-e", "-c", step["run"]],
                 env=env,
+                cwd=cwd,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1179,7 +1549,8 @@ class NightlyWorkflowContract(unittest.TestCase):
     def test_schedule_gate_and_amd64_build(self):
         """Only a fresh main commit may reach the reusable binary workflow."""
         workflow = self.nightly()
-        self.assertEqual(workflow[True]["schedule"], [{"cron": "0 9 * * *"}])
+        # Two hours before dockerized's 12:00 UTC daily builds :testing from it.
+        self.assertEqual(workflow[True]["schedule"], [{"cron": "0 10 * * *"}])
         self.assertIn("workflow_dispatch", workflow[True])
         jobs = workflow["jobs"]
         self.assertEqual(
@@ -1191,33 +1562,24 @@ class NightlyWorkflowContract(unittest.TestCase):
         self.assertEqual(jobs["gate"]["needs"], "plan")
         self.assertEqual(jobs["gate"]["uses"], "./.github/workflows/ci.yml")
         self.assertEqual(jobs["gate"]["if"], "needs.plan.outputs.skip == 'false'")
-        self.assertEqual(jobs["binaries"]["needs"], ["plan", "gate"])
+        # The binaries build alongside the gate; publish requires both.
+        self.assertEqual(jobs["binaries"]["needs"], "plan")
         self.assertEqual(
             jobs["binaries"]["uses"], "./.github/workflows/build-binaries.yml"
         )
         self.assertEqual(
             jobs["binaries"]["with"],
-            {"version": "${{ needs.plan.outputs.version }}", "arches": '["amd64"]'},
+            {
+                "version": "${{ needs.plan.outputs.version }}",
+                "arches": '["amd64","arm64"]',
+                "gha-cache": True,
+            },
         )
-        condition = jobs["binaries"]["if"]
-        predicate = re.fullmatch(
-            r"needs\.plan\.outputs\.skip == '([^']+)' && "
-            r"needs\.gate\.result == '([^']+)'",
-            condition,
+        self.assertEqual(
+            jobs["binaries"]["permissions"], {"contents": "read", "actions": "write"}
         )
-        self.assertIsNotNone(predicate, condition)
-        required_skip, required_gate = predicate.groups()
-        self.assertEqual((required_skip, required_gate), ("false", "success"))
-        for skip, gate, expected in (
-            ("false", "success", True),
-            ("false", "failure", False),
-            ("false", "cancelled", False),
-            ("true", "success", False),
-        ):
-            with self.subTest(skip=skip, gate=gate):
-                self.assertEqual(
-                    skip == required_skip and gate == required_gate, expected
-                )
+        self.assertEqual(jobs["binaries"]["if"], "needs.plan.outputs.skip == 'false'")
+        self.assertIn("needs.gate.result == 'success'", jobs["publish"]["if"])
 
     def test_equal_nightly_target_skips(self):
         """An already published main SHA must suppress the gate and build."""
@@ -1226,6 +1588,12 @@ class NightlyWorkflowContract(unittest.TestCase):
         self.assertIn("skip=true\n", output)
         self.assertIn("version=nightly-aaaaaaaaaaaa\n", output)
         self.assertIn("release view nightly --repo myguard-labs/mailstrix", calls)
+
+    def test_force_equal_nightly_target_builds(self):
+        """An explicit force request must rebuild an already published SHA."""
+        result, output, _ = self.decision("equal", force="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skip=false\n", output)
 
     def test_different_nightly_target_builds(self):
         """A changed main SHA must run the CI gate and amd64 build."""
@@ -1238,6 +1606,121 @@ class NightlyWorkflowContract(unittest.TestCase):
         result, output, _ = self.decision("missing")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("skip=false\n", output)
+
+    def git_history(self, root, *changes):
+        """Commit a baseline, then one commit per change; return every SHA."""
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-C", str(root), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        git("init", "-q")
+        git("config", "user.email", "ci@example.invalid")
+        git("config", "user.name", "ci")
+        git("config", "commit.gpgsign", "false")
+        shas = []
+        for change in ({"internal/x.go": "package x\n"}, *changes):
+            for name, body in change.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body)
+            git("add", "-A")
+            git("commit", "-q", "-m", "c")
+            shas.append(git("rev-parse", "HEAD"))
+        return shas
+
+    def test_skips_unless_a_shipped_input_changed(self):
+        """Docs, CI and test-only commits keep the published nightly."""
+        cases = (
+            ({"README.md": "docs\n"}, "true"),
+            ({".github/workflows/x.yml": "on: push\n"}, "true"),
+            ({"internal/x_test.go": "package x\n"}, "true"),
+            ({"internal/testdata/f.bin": "x"}, "true"),
+            ({"ci/x.py": "x = 1\n"}, "true"),
+            ({"docker/generate-rules_test.sh": "#!/bin/sh\n"}, "true"),
+            ({"docker/INPUTS.md": "inputs\n"}, "true"),
+            ({"internal/x.go": "package x // changed\n"}, "false"),
+            ({"cmd/strixd/main.go": "package main\n"}, "false"),
+            ({"third_party/oleparse/a.go": "package a\n"}, "false"),
+            ({"go.mod": "module m\n"}, "false"),
+            ({"go.sum": "x\n"}, "false"),
+            ({"NOTICE": "updated attribution\n"}, "false"),
+            ({".dockerignore": "*\n!go.mod\n"}, "false"),
+            ({"docker/Dockerfile.release": "FROM scratch\n"}, "false"),
+            ({"docker/generate-rules.sh": "#!/bin/sh\n"}, "false"),
+            ({"docker/check-input.py": "print('ok')\n"}, "false"),
+            ({"docker/VERSION": "1\n"}, "false"),
+        )
+        for change, skip in cases:
+            with (
+                self.subTest(change=change),
+                tempfile.TemporaryDirectory(prefix="mailstrix-nightly-git-") as temp,
+            ):
+                base, head = self.git_history(Path(temp), change)
+                result, output, _ = self.decision(
+                    "target", sha=head, cwd=temp, target=base
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"skip={skip}\n", output)
+
+    def test_every_explicit_release_context_copy_selects_a_build(self):
+        """Every literal release COPY input is covered by the real Git plan."""
+        sources = set()
+        for line in (ROOT / "docker/Dockerfile.release").read_text().splitlines():
+            if line.startswith("COPY ") and "--from=" not in line:
+                sources.update(line.split()[1:-1])
+        self.assertIn("NOTICE", sources)
+        for source in sorted(sources):
+            path = source + "fixture.yara" if source.endswith("/") else source
+            with (
+                self.subTest(source=source),
+                tempfile.TemporaryDirectory(prefix="mailstrix-nightly-copy-") as temp,
+            ):
+                base, head = self.git_history(Path(temp), {path: "changed input\n"})
+                result, output, _ = self.decision(
+                    "target", sha=head, cwd=temp, target=base
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("skip=false\n", output)
+
+    def test_force_unknown_target_and_missing_release_build(self):
+        """Force, an unreachable target or no release all rebuild."""
+        with tempfile.TemporaryDirectory(prefix="mailstrix-nightly-git-") as temp:
+            base, head = self.git_history(Path(temp), {"README.md": "docs\n"})
+            for kwargs in (
+                {"release": "target", "target": base, "force": "true"},
+                {"release": "target", "target": "f" * 40},
+                {"release": "missing"},
+            ):
+                with self.subTest(**kwargs):
+                    release = kwargs.pop("release")
+                    result, output, _ = self.decision(
+                        release, sha=head, cwd=temp, **kwargs
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("skip=false\n", output)
+            # Negative control: the same docs-only history without force skips.
+            result, output, _ = self.decision("target", sha=head, cwd=temp, target=base)
+            self.assertIn("skip=true\n", output)
+
+    def test_plan_checks_out_full_history(self):
+        """The shipped-input diff needs the nightly target commit locally."""
+        steps = self.nightly()["jobs"]["plan"]["steps"]
+        checkout = steps[0]
+        self.assertEqual(
+            checkout["uses"],
+            "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
+        )
+        self.assertEqual(
+            checkout["with"], {"persist-credentials": False, "fetch-depth": 0}
+        )
+        dispatch = self.nightly()[True]["workflow_dispatch"]
+        self.assertEqual(dispatch["inputs"]["force"]["type"], "boolean")
+        self.assertIs(dispatch["inputs"]["force"]["default"], False)
 
     def test_release_lookup_error_fails_closed(self):
         """An API failure must not be mistaken for an absent release."""
@@ -1269,8 +1752,11 @@ class NightlyWorkflowContract(unittest.TestCase):
         )
         self.assertEqual(
             jobs["publish"]["if"],
-            "needs.binaries.result == 'success' && needs.marker-image.result == 'success'",
+            "needs.gate.result == 'success' && needs.binaries.result == 'success'"
+            " && needs.marker-image.result == 'success'",
         )
+        for name in ("plan", "publish"):
+            self.assertEqual(jobs[name]["runs-on"], "ubuntu-24.04")
         self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
         for name, job in jobs.items():
             if name != "publish":
@@ -1278,16 +1764,19 @@ class NightlyWorkflowContract(unittest.TestCase):
         download = next(
             step
             for step in jobs["publish"]["steps"]
-            if step.get("name") == "download amd64 binaries"
+            if step.get("name") == "download arch binaries"
         )
         self.assertEqual(
             download["uses"],
             "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
         )
-        self.assertEqual(download["with"], {"name": "bin-amd64", "path": "out/"})
+        self.assertEqual(
+            download["with"],
+            {"pattern": "bin-*", "merge-multiple": True, "path": "out/"},
+        )
 
-    def test_amd64_checksums_cover_exact_assets(self):
-        """All three downloaded binaries must be hashed before publication."""
+    def test_checksums_cover_exact_assets_for_both_arches(self):
+        """Every downloaded binary of both arches is hashed before publication."""
         step = next(
             step
             for step in self.nightly()["jobs"]["publish"]["steps"]
@@ -1297,12 +1786,16 @@ class NightlyWorkflowContract(unittest.TestCase):
             root = Path(temp)
             output = root / "out"
             output.mkdir()
-            names = (
-                "strixd-linux-amd64",
-                "strix-scan-linux-amd64",
-                "strix-milter-linux-amd64",
-                "yarac-linux-amd64",
-                "libyara-linux-amd64.a",
+            names = tuple(
+                name
+                for arch in ("amd64", "arm64")
+                for name in (
+                    f"strixd-linux-{arch}",
+                    f"strix-scan-linux-{arch}",
+                    f"strix-milter-linux-{arch}",
+                    f"yarac-linux-{arch}",
+                    f"libyara-linux-{arch}.a",
+                )
             )
             for name in names:
                 (output / name).write_bytes(name.encode())
@@ -1319,7 +1812,7 @@ class NightlyWorkflowContract(unittest.TestCase):
                 [line.split("  ", 1)[1] for line in sums.splitlines()], list(names)
             )
             self.assertIn("sha256sum -c SHA256SUMS", step["run"])
-            (output / names[1]).unlink()
+            (output / names[-1]).unlink()
             missing = subprocess.run(
                 ["bash", "-e", "-c", step["run"]],
                 cwd=root,
@@ -1374,7 +1867,7 @@ class NightlyWorkflowContract(unittest.TestCase):
             return result, calls.read_text().splitlines() if calls.exists() else []
 
     def test_first_publication_is_prerelease_and_never_latest(self):
-        """A missing nightly must be created with SHA target and six assets."""
+        """A missing nightly is created with SHA target and both arches' assets."""
         result, calls = self.publication("missing")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 2, calls)
@@ -1384,16 +1877,21 @@ class NightlyWorkflowContract(unittest.TestCase):
         self.assertIn("--target " + "a" * 40, create)
         self.assertIn("--prerelease", create_args)
         self.assertIn("--latest=false", create_args)
-        for asset in (
-            "strixd-linux-amd64",
-            "strix-scan-linux-amd64",
-            "strix-milter-linux-amd64",
-            "yarac-linux-amd64",
-            "libyara-linux-amd64.a",
-            "SHA256SUMS",
-        ):
-            self.assertIn("out/" + asset, create)
-        self.assertNotIn("arm64", create)
+        assets = ["SHA256SUMS"] + [
+            name
+            for arch in ("amd64", "arm64")
+            for name in (
+                f"strixd-linux-{arch}",
+                f"strix-scan-linux-{arch}",
+                f"strix-milter-linux-{arch}",
+                f"yarac-linux-{arch}",
+                f"libyara-linux-{arch}.a",
+            )
+        ]
+        self.assertEqual(
+            [a for a in create_args if a.startswith("out/")],
+            ["out/" + asset for asset in assets],
+        )
 
     def test_existing_publication_replaces_release_and_tag(self):
         """An old tag must be removed before the new SHA is recorded."""
@@ -1429,7 +1927,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["compiler-inputs"]["steps"]
         self.assertIn("ci/libyara-repro-check.sh", [step.get("run") for step in steps])
 
-    def run_script(self, hashes, script=None, args=()):
+    def run_script(self, hashes, script=None, args=(), cache_log=None):
         """Run the real script with a fake docker that emits the given libyara.a bytes."""
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         (tmp / "bin").mkdir()
@@ -1437,12 +1935,22 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         counter.write_text("0")
         argv_log = tmp / "argv.log"
         argv_log.touch()
+        compiler_log = tmp / "ccache.log"
+        compiler_log.write_text(
+            cache_log
+            if cache_log is not None
+            else "Executing /usr/bin/gcc -c fixture.c\nResult: disabled\n"
+        )
         fake = tmp / "bin/docker"
-        fake.write_text(textwrap.dedent(f"""\
+        fake.write_text(
+            textwrap.dedent(f"""\
             #!/usr/bin/env bash
             echo "$*" >> {argv_log}
             case "$1" in
               cp)
+                if [[ "$2" == *:/tmp/ccache-repro.log ]]; then
+                  cat {compiler_log} > "$3"; exit 0
+                fi
                 n=$(( $(cat {counter}) + 1 )); echo $n > {counter}
                 contents=({" ".join(repr(h) for h in hashes)})
                 # A cp past the provided archives fails like a missing file.
@@ -1450,12 +1958,16 @@ class LibyaraReproducibilityContract(unittest.TestCase):
                 printf '%s' "${{contents[$((n-1))]}}" > "$3" ;;
               *) : ;;
             esac
-            """))
+            """)
+        )
         fake.chmod(0o755)
         env = dict(os.environ, PATH=f"{tmp / 'bin'}:{os.environ['PATH']}")
         result = subprocess.run(
             ["bash", str(script or ROOT / "ci/libyara-repro-check.sh"), *args],
-            env=env, capture_output=True, text=True, check=False,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         return result, argv_log.read_text().splitlines()
 
@@ -1473,8 +1985,10 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             self.assertEqual(tokens.count("--load"), 1, lines[i])
             self.assertEqual(tokens.count("--target"), 1, lines[i])
             self.assertEqual(tokens[tokens.index("--target") + 1], "yara", lines[i])
+            self.assertIn("--build-arg", tokens)
+            self.assertEqual(tokens.count("CCACHE_DISABLE=1"), 1, lines[i])
         for i in builds:
-            nxt = [l for l in lines[i + 1:] if l.startswith(("buildx build ", "cp "))]
+            nxt = [l for l in lines[i + 1 :] if l.startswith(("buildx build ", "cp "))]
             self.assertTrue(nxt and nxt[0].startswith("cp "), lines)
             source = nxt[0].split()[1]
             self.assertTrue(source.endswith(":/usr/local/lib/libyara.a"), nxt[0])
@@ -1484,6 +1998,93 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         result, lines = self.run_script(["same", "same"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_two_no_cache_builds(lines)
+
+    def test_missing_compiler_cache_disable_is_detected(self):
+        script = self.mutated_script("--build-arg CCACHE_DISABLE=1 ", "")
+        result, lines = self.run_script(["same", "same"], script=script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with self.assertRaises(AssertionError):
+            self.assert_two_no_cache_builds(lines)
+
+    def test_cache_hits_or_absent_compiler_execution_fail_the_proof(self):
+        for log in (
+            "",
+            "Result: disabled\n",
+            "Executing /usr/bin/gcc --version\nResult: disabled\n",
+            "Executing /usr/bin/gcc -c x.c\nResult: direct_cache_hit\n",
+            "Executing /usr/bin/gcc -c x.c\nResult: disabled\nResult: cache_miss\n",
+        ):
+            with self.subTest(log=log):
+                result, _ = self.run_script(["same", "same"], cache_log=log)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("did not prove compiler-cache bypass", result.stderr)
+
+    def assert_cache_disable_transport(self, source):
+        """Execute both real Yara RUN commands with inert build-tool witnesses."""
+        stage = source.split(" AS yara\n", 1)[1].split("\nFROM ", 1)[0]
+        instructions = re.findall(r"(?m)^RUN .*?(?<!\\)$", stage, re.DOTALL)
+        commands = [
+            re.sub(r"^RUN --mount=\S+\s+", "", value).replace("\\\n", " ")
+            for value in instructions
+            if value.startswith("RUN --mount=type=cache,target=/root/.cache/ccache")
+        ]
+        self.assertEqual(len(commands), 2)
+        declaration = re.search(r"(?m)^ARG CCACHE_DISABLE(?:=(.*))?$", stage)
+        for command, proof in itertools.product(commands, (False, True)):
+            with tempfile.TemporaryDirectory(prefix="mailstrix-repro-env-") as temp:
+                fixture = Path(temp)
+                tools = fixture / "bin"
+                tools.mkdir()
+                trace = fixture / "trace"
+                witness = (
+                    '#!/bin/sh\nprintf "%s %s\\n" "$0" '
+                    '"${CCACHE_DISABLE-unset}" >> "$TRACE"\n'
+                )
+                for name in ("mkdir", "cp", "python3", "make", "ldconfig"):
+                    path = tools / name
+                    path.write_text(witness)
+                    path.chmod(0o755)
+                for name in ("bootstrap.sh", "configure"):
+                    path = fixture / name
+                    path.write_text(witness)
+                    path.chmod(0o755)
+                env = dict(
+                    os.environ, PATH=str(tools) + ":/usr/bin:/bin", TRACE=str(trace)
+                )
+                env.pop("CCACHE_DISABLE", None)
+                if declaration:
+                    env["CCACHE_DISABLE"] = "1" if proof else (declaration[1] or "")
+                result = subprocess.run(
+                    ["sh", "-ec", command],
+                    cwd=fixture,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observations = trace.read_text().splitlines()
+                self.assertTrue(any("/make " in line for line in observations))
+                self.assertEqual(
+                    {line.rsplit(" ", 1)[1] for line in observations},
+                    {"1" if proof else "unset"},
+                    "proof disablement or ordinary caching transport changed",
+                )
+
+    def test_both_yara_recipes_transport_disable_and_unset_default(self):
+        for name in ("Dockerfile", "Dockerfile.release"):
+            with self.subTest(recipe=name):
+                self.assert_cache_disable_transport(
+                    (ROOT / "docker" / name).read_text()
+                )
+
+    def test_removed_recipe_propagation_is_detected(self):
+        for name in ("Dockerfile", "Dockerfile.release"):
+            source = (ROOT / "docker" / name).read_text()
+            with self.subTest(recipe=name), self.assertRaises(AssertionError):
+                self.assert_cache_disable_transport(
+                    source.replace("ARG CCACHE_DISABLE\n", "")
+                )
 
     def mutated_script(self, old, new):
         text = (ROOT / "ci/libyara-repro-check.sh").read_text()
@@ -1506,9 +2107,11 @@ class LibyaraReproducibilityContract(unittest.TestCase):
 
     def test_wrong_archive_source_is_detected(self):
         script = self.mutated_script(
-            '"$extract:/usr/local/lib/libyara.a"', '"$extract:/usr/local/lib/libyara.a.bak"')
+            '"$extract:/usr/local/lib/libyara.a"',
+            '"$extract:/usr/local/lib/libyara.a.bak"',
+        )
         _, lines = self.run_script(["same", "same"], script=script)
-        self.assertEqual(len([l for l in lines if l.startswith("cp ")]), 2, lines)
+        self.assertEqual(len([l for l in lines if l.startswith("cp ")]), 4, lines)
         with self.assertRaises(AssertionError):
             self.assert_two_no_cache_builds(lines)
 
@@ -1571,7 +2174,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
     def assert_repro_job_covers_both_arches(self, job, expected_run):
         self.assertEqual(sorted(job["strategy"]["matrix"]["arch"]), ["amd64", "arm64"])
         self.assertIs(job["strategy"].get("fail-fast"), False)
-        self.assertGreaterEqual(job["timeout-minutes"], 120)
+        self.assertGreaterEqual(job["timeout-minutes"], 60)
         steps = job["steps"]
         runs = [s for s in steps if s.get("run", "").startswith("ci/libyara-repro-check.sh")]
         self.assertEqual(len(runs), 1, steps)
@@ -1579,7 +2182,7 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         self.assertEqual(
             runs[0]["env"], {"ARCH": "${{ matrix.arch }}", "RUN_ID": "${{ github.run_id }}"})
         uses = [s.get("uses", "") for s in steps]
-        self.assertTrue(any(u.startswith("docker/setup-qemu-action@") for u in uses), uses)
+        assert_native_arch_job(self, job)
         self.assertTrue(any(u.startswith("docker/setup-buildx-action@") for u in uses), uses)
 
     def test_maintenance_runs_release_dockerfile_check_for_every_arch(self):

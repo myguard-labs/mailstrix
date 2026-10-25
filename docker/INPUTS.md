@@ -1,16 +1,22 @@
 # Build input pins
 
 Dockerfiles pin external images by multi-platform index digest. The selected
-Debian bookworm-slim, Go 1.26.9-bookworm, distroless base-debian12:nonroot and
+Debian bookworm-slim, Go 1.26.10-bookworm, distroless base-debian12:nonroot and
 Dockerfile frontend indexes include both linux/amd64 and linux/arm64.
 Tags remain readable version labels; the digest selects the actual content.
 Update both together when changing Go versions.
 
-The input sources checked on 2026-09-05 (Go 1.26.9 index re-checked
-2026-10-09) were:
+`ci/libyara-repro-check.sh` performs two full no-layer-cache builds and passes
+`CCACHE_DISABLE=1` to bypass compiler-object reuse in both Yara recipes. Each
+leg checks the compiler execution log before comparing archives. Ordinary
+builds leave that proof argument unset, retaining normal ccache behavior;
+`CCACHE_DISABLE=0` is not a valid false default for ccache's environment flags.
+
+The input sources checked on 2026-09-05 (Go 1.26.10 index checked
+2026-10-24) were:
 
 - Debian and Go: the official `library/debian:bookworm-slim` and
-  `library/golang:1.26.9-bookworm` manifests on Docker Hub.
+  `library/golang:1.26.10-bookworm` manifests on Docker Hub.
 - Runtime: `gcr.io/distroless/base-debian12:nonroot` from the
   [distroless project](https://github.com/GoogleContainerTools/distroless).
 - Build frontend: the official `docker/dockerfile:1` manifest on Docker Hub.

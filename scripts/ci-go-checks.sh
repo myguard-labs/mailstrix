@@ -17,17 +17,23 @@ fi
 read -r -a package_args <<<"$packages"
 # Formatting follows selected package directories, including dependent consumers.
 directories=$(go list -f '{{.Dir}}' "${package_args[@]}")
-while IFS= read -r directory; do
-	unformatted=$(gofmt -l "$directory"/*.go)
+mapfile -t gosec_directories <<<"$directories"
+shopt -s nullglob
+go_files=()
+for directory in "${gosec_directories[@]}"; do
+	go_files+=("$directory"/*.go)
+done
+# Check all selected files in one gofmt process without expanding to other packages.
+if ((${#go_files[@]})); then
+	unformatted=$(gofmt -l "${go_files[@]}")
 	if [[ -n "$unformatted" ]]; then
 		printf 'gofmt needed:\n%s\n' "$unformatted" >&2
 		exit 1
 	fi
-done <<<"$directories"
+fi
 # Vet runs once in the Docker test stage with the production yara_static tag.
 staticcheck "${package_args[@]}"
 govulncheck "${package_args[@]}"
-mapfile -t gosec_directories <<<"$directories"
 gosec "${gosec_directories[@]}"
 # The replaced module's own tests are outside the root package graph.
 if [[ " ${CHANGED_FILES-} " == *' third_party/oleparse/'* || -z ${CHANGED_FILES-} ]]; then

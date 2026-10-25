@@ -289,11 +289,16 @@ class ReleaseTagContract(unittest.TestCase):
     def test_fetch_and_rules_cache_tokens_are_separate(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
         fetch = source.split(" AS fetch-download\n", 1)[1].split("\nFROM ", 1)[0]
-        rules = source.split(" AS rules\n", 1)[1].split("\nFROM ", 1)[0]
+        # The daily rules token busts the rules fetch, which runs in rules-src.
+        rules = source.split(" AS rules-src\n", 1)[1].split("\nFROM ", 1)[0]
         self.assertRegex(fetch, r"(?m)^ARG RELEASE_CACHEBUST$")
         self.assertNotRegex(fetch, r"(?im)^[ \t]*ARG[ \t]+CACHEBUST(?=[ \t=]|$)")
         self.assertNotRegex(fetch, r"\$(?:CACHEBUST\b|\{CACHEBUST(?:[^}]*)\})")
         self.assertRegex(rules, r"(?m)^ARG CACHEBUST=unset$")
+        self.assertNotRegex(rules, r"(?m)^ARG RELEASE_CACHEBUST")
+        self.assertLess(
+            rules.index("ARG CACHEBUST=unset"), rules.index("fetch-rules.sh /rules/src")
+        )
         self.assertLess(fetch.index("ARG RELEASE_CACHEBUST"), fetch.index("RUN VER="))
         for token in ("build-sha-a", "build-sha-b"):
             with self.subTest(token=token):

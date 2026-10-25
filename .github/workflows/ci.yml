@@ -34,6 +34,7 @@ jobs:
       go: ${{ steps.plan.outputs.go }}
       native: ${{ steps.plan.outputs.native }}
       image: ${{ steps.plan.outputs.image }}
+      release_image: ${{ steps.plan.outputs.release_image }}
       parity: ${{ steps.plan.outputs.parity }}
       postfix: ${{ steps.plan.outputs.postfix }}
       rspamd: ${{ steps.plan.outputs.rspamd }}
@@ -60,6 +61,7 @@ jobs:
       dockerignore: ${{ steps.plan.outputs.dockerignore }}
       docker: ${{ steps.plan.outputs.docker }}
       changed_files: ${{ steps.plan.outputs.changed_files }}
+      lane_manifest: ${{ steps.plan.outputs.lane_manifest }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -351,9 +353,11 @@ jobs:
       - name: shellcheck (all tracked shell scripts)
         if: needs.changes.outputs.shell == 'true'
         run: |
-          mapfile -d '' -t shell_scripts < <(
-            git ls-files -z -- '*.sh' 'contrib/sieve/strix-scan-wrapper'
-          )
+          shell_list=$(mktemp)
+          trap 'rm -f "$shell_list"' EXIT
+          git ls-files -z -- '*.sh' \
+            'contrib/sieve/strix-scan-wrapper' > "$shell_list"
+          mapfile -d '' -t shell_scripts < "$shell_list"
           test "${#shell_scripts[@]}" -gt 0
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 \
             "${shell_scripts[@]}"
@@ -399,8 +403,7 @@ jobs:
         if: needs.changes.outputs.qualification == 'true'
         run: |
           python3 -B packaging/deb/parity_qualification_artifact_test.py
-          python3 -B packaging/deb/parity_image_cleanup_test.py
-          python3 -B -m unittest discover -s ci -p 'parity_cache_test.py'
+          python3 -B scripts/ci-test-batch.py
 
       - name: self-hosted runners use disposable builder slots
         if: needs.changes.outputs.runners == 'true'
@@ -467,18 +470,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
-      - name: luacheck (Lua lint for rspamd plugin)
+      - name: Lua lint and unit tests (5.4 + 5.1)
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
-            apk add --no-cache luarocks5.4 lua5.4-dev gcc musl-dev >/dev/null 2>&1
+            apk add --no-cache luarocks5.4 lua5.4-dev gcc musl-dev \
+              lua5.1 lua5.4 >/dev/null 2>&1
             luarocks-5.4 install luacheck >/dev/null 2>&1
             luacheck contrib/rspamd/
-          '
-
-      - name: lua plugin unit tests (dedup + effort + explainability contracts)
-        run: |
-          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -ec '
-            apk add --no-cache lua5.1 lua5.4 >/dev/null 2>&1
             lua5.4 contrib/rspamd/test/mailstrix_dedup_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_effort_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_explain_spec.lua
@@ -535,21 +533,88 @@ jobs:
   # (workflow_call) so a tagged release re-runs docker+lint+scanners before
   # publishing. asan/codeql/fuzz run on the monthly cadence, not per release.
 
-  # Stable required check across selectively scheduled jobs. A planner failure,
-  # failed gate, or unexpected skip must not look like a successful narrow run.
+  # PR artifacts are retained only in this workflow run. The reusable nightly
+  # and release callers keep their own binary/image proof and skip these jobs.
+  pr-binaries:
+    needs: changes
+    if: >-
+      ${{ github.event_name == 'pull_request' &&
+      needs.changes.outputs.release_image == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      version: pr-${{ github.sha }}
+      arches: '["amd64","arm64"]'
+      gha-cache: false
+
+  pr-marker-image:
+    needs: [changes, pr-binaries]
+    if: >-
+      ${{ github.event_name == 'pull_request' &&
+      needs.changes.outputs.release_image == 'true' &&
+      needs.pr-binaries.result == 'success' }}
+    runs-on: >-
+      ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: download PR arch binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: bin-${{ matrix.arch }}
+          path: out/
+
+      - name: PR image loads native marker artifact (${{ matrix.arch }})
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          MAILSTRIX_RELEASE_MARKER_RUN="pr-${RUN_ID}-${RUN_ATTEMPT}-${ARCH}" \
+            bash ci/release_marker_image_test.sh "${ARCH}" out
+
+  # Stable required check across four logical groups. The component jobs still
+  # execute once; mixed-mode Docker status contributes to each owning group.
   ci-ok:
     if: ${{ always() }}
-    needs: [changes, docker, parity-isolation, lint, scanners, rspamd, spamassassin, compiler-inputs]
+    needs:
+      - changes
+      - docker
+      - parity-isolation
+      - lint
+      - scanners
+      - rspamd
+      - spamassassin
+      - compiler-inputs
+      - pr-binaries
+      - pr-marker-image
     runs-on: [self-hosted, builder02, docker]
     timeout-minutes: 5
     steps:
-      - name: require selected gates
+      - name: require selected CI groups
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DOCKER_RESULT: ${{ needs.docker.result }}
           SCANNERS_RESULT: ${{ needs.scanners.result }}
           NATIVE_SELECTED: ${{ needs.changes.outputs.native }}
           NATIVE_RESULT: ${{ needs.compiler-inputs.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_IMAGE_SELECTED: ${{ needs.changes.outputs.release_image }}
+          PR_BINARIES_RESULT: ${{ needs.pr-binaries.result }}
+          PR_MARKER_IMAGE_RESULT: ${{ needs.pr-marker-image.result }}
           PARITY_RESULT: ${{ needs.parity-isolation.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           RSPAMD_RESULT: ${{ needs.rspamd.result }}
@@ -561,22 +626,44 @@ jobs:
           SPAMASSASSIN_SELECTED: ${{ needs.changes.outputs.spamassassin }}
         run: |
           test "$CHANGES_RESULT" = success
-          test "$DOCKER_RESULT" = success
-          test "$SCANNERS_RESULT" = success
           require_selected() {
-            case "$1" in
-              true) test "$2" = success ;;
-              false) test "$2" = skipped ;;
+            case "$1:$2" in
+              true:success|false:skipped) ;;
               *) return 1 ;;
             esac
           }
-          require_selected "$NATIVE_SELECTED" "$NATIVE_RESULT"
-          require_selected "$PARITY_SELECTED" "$PARITY_RESULT"
-          case "$GO_SELECTED:$SCOPE_SELECTED" in
-            true:true|true:false|false:true) lint_selected=true ;;
-            false:false) lint_selected=false ;;
-            *) exit 1 ;;
-          esac
-          require_selected "$lint_selected" "$LINT_RESULT"
-          require_selected "$RSPAMD_SELECTED" "$RSPAMD_RESULT"
-          require_selected "$SPAMASSASSIN_SELECTED" "$SPAMASSASSIN_RESULT"
+          join_static_analysis() {
+            test "$SCANNERS_RESULT" = success
+            test "$DOCKER_RESULT" = success
+          }
+          join_go_correctness() {
+            test "$DOCKER_RESULT" = success
+            case "$GO_SELECTED:$SCOPE_SELECTED" in
+              true:true|true:false|false:true) selected=true ;;
+              false:false) selected=false ;;
+              *) return 1 ;;
+            esac
+            require_selected "$selected" "$LINT_RESULT"
+          }
+          join_native_builds_artifacts() {
+            require_selected "$NATIVE_SELECTED" "$NATIVE_RESULT"
+            case "$RELEASE_IMAGE_SELECTED" in true|false) ;; *) return 1 ;; esac
+            case "$EVENT_NAME" in
+              pull_request) pr_image_selected="$RELEASE_IMAGE_SELECTED" ;;
+              push|schedule) pr_image_selected=false ;;
+              workflow_dispatch|workflow_call) pr_image_selected=false ;;
+              *) return 1 ;;
+            esac
+            require_selected "$pr_image_selected" "$PR_BINARIES_RESULT"
+            require_selected "$pr_image_selected" "$PR_MARKER_IMAGE_RESULT"
+          }
+          join_contracts_integrations() {
+            test "$DOCKER_RESULT" = success
+            require_selected "$PARITY_SELECTED" "$PARITY_RESULT"
+            require_selected "$RSPAMD_SELECTED" "$RSPAMD_RESULT"
+            require_selected "$SPAMASSASSIN_SELECTED" "$SPAMASSASSIN_RESULT"
+          }
+          join_static_analysis
+          join_go_correctness
+          join_native_builds_artifacts
+          join_contracts_integrations

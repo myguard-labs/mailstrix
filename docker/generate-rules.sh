@@ -217,6 +217,68 @@ trap 'signal_abort 129' HUP
 
 die()  { note "ERROR: $*"; _FAILURE_EXIT=1; shout_fail "$*"; exit 1; }
 
+# BEGIN marker verifier tmpfs sizing contract
+# The marker verifier keeps the downloaded bundle, marker archive, and expanded
+# marker tree in its /tmp cache at the same time. Size that scratch space from
+# those actual staged artifacts. Supported ARM64 kernels may use 64 KiB pages,
+# so each archive member gets two such pages: one bounds a regular file's final
+# partial data page and one conservatively covers inode/dentry or directory
+# bookkeeping. The publisher's packer emits every traversed directory as an
+# archive member, so this count also covers nested directory creation. The fixed
+# reserve covers the small signed files, download page tails, empty rollback
+# scaffolding, and atomic metadata writes; the fresh verify-only cache has no
+# live files to copy and the client installs the staged bundle/tree by rename.
+# The client-side limits are repeated here so a larger or malformed candidate
+# is refused before release state changes.
+marker_gate_tmpfs_size() {  # marker_gate_tmpfs_size <bundle> <archive> <tree> <entries>
+    python3 - "$@" <<'PY'
+import re
+import sys
+
+names = ("bundle", "archive", "tree", "entries")
+limits = (512 << 20, 1 << 30, 2 << 30, 1 << 17)
+if len(sys.argv) != 5:
+    print("marker tmpfs sizing: expected four decimal inputs", file=sys.stderr)
+    raise SystemExit(2)
+
+values = []
+for name, raw, limit in zip(names, sys.argv[1:], limits):
+    if not re.fullmatch(r"[0-9]+", raw, flags=re.ASCII):
+        print(f"marker tmpfs sizing: malformed {name}", file=sys.stderr)
+        raise SystemExit(2)
+    value = int(raw, 10)
+    minimum = 4 if name == "entries" else 1
+    if value < minimum or value > limit:
+        print(f"marker tmpfs sizing: {name} outside client bounds", file=sys.stderr)
+        raise SystemExit(2)
+    values.append(value)
+
+bundle, archive, tree, entries = values
+payload = bundle + archive + tree
+needed = payload + entries * (2 * (64 << 10)) + (64 << 20) + (payload + 15) // 16
+allocation = ((needed + (1 << 20) - 1) // (1 << 20)) * (1 << 20)
+if allocation > 4 << 30:
+    print("marker tmpfs sizing: staged artifacts exceed the 4 GiB verifier ceiling", file=sys.stderr)
+    raise SystemExit(2)
+print(f"size={allocation}")
+PY
+}
+# END marker verifier tmpfs sizing contract
+
+marker_tree_metrics() {  # marker_tree_metrics <packed-tree>
+    python3 - "$1" <<'PY'
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    members = archive.getmembers()
+    if any(not (member.isdir() or member.isreg()) for member in members):
+        print("marker tmpfs sizing: packed tree has an unsupported member", file=sys.stderr)
+        raise SystemExit(2)
+    print(sum(member.size for member in members if member.isreg()), len(members))
+PY
+}
+
 # Bring up receipt/error handling before fallible startup work so a missing
 # credential, temporary directory, or repository path still produces one build
 # receipt. A missing notifier remains the approved best-effort exception.
@@ -612,6 +674,7 @@ fi
 MARKER_ASSET="marker-tree.tar.gz"
 MARKER_FILE="${WORK}/${MARKER_ASSET}"
 MARKER_PUBLISH=0
+MARKER_GATE_TMPFS=""
 if [ -n "$MARKER_VERIFIER_IMAGE" ]; then
     marker_json=""
     if python3 "${HERE}/docker/pack-marker-tree.py" "$EXPORT_DIR" "$MARKER_FILE" \
@@ -634,6 +697,23 @@ if [ -n "$MARKER_VERIFIER_IMAGE" ]; then
         note "could not pack or bind the marker tree; publishing without a marker tree"
         rm -f "${MANIFEST}.marker" "$MARKER_FILE"
     fi
+fi
+
+# Bind the verifier resource limit to the exact candidate that will be signed
+# and served. This runs after marker construction but before signing or any
+# release mutation, so malformed, oversized, or arithmetically unsafe inputs
+# cannot result in a partially published release.
+if [ "$MARKER_PUBLISH" -eq 1 ]; then
+    marker_metrics="$(marker_tree_metrics "$MARKER_FILE")" \
+        || die "cannot measure the staged marker tree; nothing was published"
+    read -r marker_tree_bytes marker_tree_entries marker_metrics_extra <<<"$marker_metrics"
+    if [ -z "$marker_tree_bytes" ] || [ -z "$marker_tree_entries" ] || [ -n "${marker_metrics_extra:-}" ]; then
+        die "staged marker tree metrics are malformed; nothing was published"
+    fi
+    MARKER_GATE_TMPFS="$(marker_gate_tmpfs_size \
+        "$SIZE" "$(stat -c '%s' "$MARKER_FILE")" \
+        "$marker_tree_bytes" "$marker_tree_entries")" \
+        || die "staged marker verifier tmpfs requirement is invalid or exceeds its bounded ceiling; nothing was published"
 fi
 
 # 3b) Sign the manifest. strixd refuses any remote manifest without a valid
@@ -667,12 +747,12 @@ note "version ${PREV} -> ${VERSION}, libyara ${LIBYARA}, size ${SIZE}, sha256 ${
 # it. A failure here publishes nothing new (the release is still untouched).
 VERIFY_IMAGE="$VERIFIER_IMAGE"
 VERIFY_EXTRA=()
-# /tmp of a fetch-rules verifier holds the downloaded bundle; with a marker tree it
-# also holds the archive (<=1 GiB) and the extracted tree (<=2 GiB) at once, the
-# client caps in fetchrules_marker.go. tmpfs size is a ceiling, not an allocation.
+# The non-marker verifier only downloads the compiled bundle. Marker candidates
+# use the candidate-specific bounded value computed above.
 VERIFY_TMPFS="size=2g"
-MARKER_GATE_TMPFS="size=4g"
 if [ "$MARKER_PUBLISH" -eq 1 ]; then
+    [ -n "$MARKER_GATE_TMPFS" ] \
+        || die "marker verifier tmpfs size was not derived; nothing was published"
     NIGHTLY_STAGE=verify
     STAGE="${WORK}/stage"
     mkdir -p "$STAGE"

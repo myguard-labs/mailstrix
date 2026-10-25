@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,60 @@ SPEC.loader.exec_module(impact)
 
 
 class ImpactTests(unittest.TestCase):
+    def test_batch_contract_selects_its_planner_job(self):
+        selected = impact.plan(["ci/ci_batch_test.py"])
+        self.assertTrue(selected["scope"])
+        self.assertFalse(selected["go"])
+        self.assertFalse(selected["image"])
+        self.assertEqual(selected["changed_files"], "--changed -- ")
+
+    def test_parity_batch_runner_selects_both_owning_controls(self):
+        selected = impact.plan(["scripts/ci-test-batch.py"])
+        self.assertTrue(selected["scope"])
+        self.assertTrue(selected["qualification"])
+        self.assertTrue(all(selected[key] for key in impact.RULES))
+
+    def test_selection_table_for_actual_pr_lanes(self):
+        cases = (
+            (["README.md"], {"readme"}, {"go", "native", "image", "docker"}),
+            (["internal/extract/pdf.go"], {"go", "image", "docker"}, {"native"}),
+            (
+                ["docker/compiler-input-capture.h"],
+                {"go", "native", "image", "docker"},
+                {"rspamd"},
+            ),
+            ([".github/workflows/ci.yml"], set(impact.RULES) | {"docker"}, set()),
+            (["scripts/ci-go-checks.sh"], set(impact.RULES) | {"docker"}, set()),
+        )
+        for paths, selected, skipped in cases:
+            with self.subTest(paths=paths):
+                result = impact.plan(paths)
+                self.assertTrue(all(result[key] for key in selected), result)
+                self.assertTrue(all(not result[key] for key in skipped), result)
+
+    def test_pr_release_image_selection(self):
+        for path in (
+            "cmd/strixd/main.go",
+            "docker/Dockerfile",
+            "docker/Dockerfile.release",
+            "docker/release-marker-toolchain.sh",
+            "ci/release_marker_image_test.sh",
+            ".github/workflows/build-binaries.yml",
+            ".github/workflows/nightly.yml",
+            ".github/workflows/ci.yml",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(impact.plan([path])["release_image"])
+        for path in (
+            "README.md",
+            "internal/extract/pdf_test.go",
+            ".github/workflows/maintenance.yml",
+            "ci/ci_gh_install_test.py",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(impact.plan([path])["release_image"])
+        self.assertTrue(impact.plan([], full=True)["release_image"])
+
     def test_marker_runtime_fixture_real_consumers(self):
         for path in (
             "ci/testdata/marker-runtime.zip",
@@ -382,7 +437,7 @@ class ImpactTests(unittest.TestCase):
         result = impact.plan([path])
         self.assertEqual(
             {key for key, value in result.items() if value is True},
-            {"dockerfiles"},
+            {"dockerfiles", "release_image"},
         )
         self.assertEqual(result["changed_files"], "--changed -- ")
         for unrelated in ["ci/unmapped_test.py", "ci/release_tag_test.py"]:
@@ -996,6 +1051,275 @@ class ImpactTests(unittest.TestCase):
             impact.main()
         self.assertEqual(error.exception.code, 2)
 
+    def test_lanes_contract_selects_its_planner_job(self):
+        result = impact.plan(["ci/ci_lanes_test.py"])
+        self.assertTrue(result["scope"])
+        self.assertFalse(result["go"])
+        self.assertFalse(result["image"])
+        self.assertEqual(result["changed_files"], "--changed -- ")
+
+    def test_strict_cli_mapped_input_succeeds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = pathlib.Path(temp) / "outputs"
+            with (
+                mock.patch.object(impact, "changed_paths", return_value=["README.md"]),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "ci-impact",
+                        "--strict",
+                        "--base",
+                        "base",
+                        "--output",
+                        str(output),
+                    ],
+                ),
+                mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+            ):
+                impact.main()
+            self.assertEqual(json.loads(stdout.getvalue()), impact.plan(["README.md"]))
+            self.assertIn("go=false\n", output.read_text())
+
+    def test_strict_cli_refusals_preserve_outputs(self):
+        for value in (
+            ["ci/new_unregistered_test.py"],
+            subprocess.CalledProcessError(128, "git"),
+            FileNotFoundError("git"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"),
+        ):
+            for existing in (False, True):
+                with (
+                    self.subTest(value=value, existing=existing),
+                    tempfile.TemporaryDirectory() as temp,
+                ):
+                    output = pathlib.Path(temp) / "outputs"
+                    if existing:
+                        output.write_text("sentinel\n")
+                    with (
+                        mock.patch.object(
+                            impact,
+                            "changed_paths",
+                            side_effect=value if isinstance(value, Exception) else None,
+                            return_value=value if isinstance(value, list) else None,
+                        ),
+                        mock.patch.object(
+                            sys,
+                            "argv",
+                            [
+                                "ci-impact",
+                                "--strict",
+                                "--base",
+                                "missing",
+                                "--output",
+                                str(output),
+                            ],
+                        ),
+                        mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+                        self.assertRaises(
+                            type(value)
+                            if isinstance(value, Exception)
+                            else impact.UnmappedPathError
+                        ),
+                    ):
+                        impact.main()
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(output.exists(), existing)
+                    if existing:
+                        self.assertEqual(output.read_text(), "sentinel\n")
+
+    def test_strict_cli_requires_base_unless_full(self):
+        with (
+            mock.patch.object(sys, "argv", ["ci-impact", "--strict"]),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            self.assertRaises(SystemExit) as error,
+        ):
+            impact.main()
+        self.assertEqual(error.exception.code, 2)
+        with (
+            mock.patch.object(sys, "argv", ["ci-impact", "--strict", "--full"]),
+            mock.patch.object(impact, "changed_paths") as changed,
+            mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+        ):
+            impact.main()
+        changed.assert_not_called()
+        self.assertEqual(json.loads(stdout.getvalue()), impact.plan([], full=True))
+
+    def test_strict_cli_hard_errors_precede_unknown_in_both_orders(self):
+        for hard_path, error in (
+            ("unsafe name.go", "unsafe changed path"),
+            ("packaging/deb/new-helper.sh", "unmapped executable packaging path"),
+        ):
+            for paths in (["a/new.surface", hard_path], [hard_path, "a/new.surface"]):
+                with self.subTest(paths=paths), tempfile.TemporaryDirectory() as temp:
+                    output = pathlib.Path(temp) / "outputs"
+                    with (
+                        mock.patch.object(impact, "changed_paths", return_value=paths),
+                        mock.patch.object(
+                            sys,
+                            "argv",
+                            [
+                                "ci-impact",
+                                "--strict",
+                                "--base",
+                                "base",
+                                "--output",
+                                str(output),
+                            ],
+                        ),
+                        mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+                        self.assertRaisesRegex(ValueError, error),
+                    ):
+                        impact.main()
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertFalse(output.exists())
+
+    def test_cli_unavailable_diff_selects_full_without_partial_outputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = pathlib.Path(temp) / "outputs"
+            for error in (
+                subprocess.CalledProcessError(128, "git"),
+                FileNotFoundError("git"),
+                UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"),
+            ):
+                with (
+                    self.subTest(error=type(error).__name__),
+                    mock.patch.object(impact, "changed_paths", side_effect=error),
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["ci-impact", "--base", "missing", "--output", str(output)],
+                    ),
+                    mock.patch.object(sys, "stdout", io.StringIO()) as stdout,
+                    mock.patch.object(sys, "stderr", io.StringIO()) as stderr,
+                ):
+                    impact.main()
+                    result = json.loads(stdout.getvalue())
+                    self.assertTrue(all(result[key] for key in impact.RULES))
+                    self.assertEqual(result["changed_files"], "")
+                    self.assertIn("selecting full CI", stderr.getvalue())
+                    self.assertIn("go=true\n", output.read_text())
+
+    def test_cli_unsafe_path_and_program_error_still_fail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = pathlib.Path(temp) / "outputs"
+            for value in (
+                ["file\nkey=true"],
+                ["packaging/deb/new-maintainer.sh"],
+                ValueError("program defect"),
+            ):
+                with (
+                    self.subTest(value=value),
+                    mock.patch.object(
+                        impact,
+                        "changed_paths",
+                        side_effect=value if isinstance(value, Exception) else None,
+                        return_value=value if isinstance(value, list) else None,
+                    ),
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["ci-impact", "--base", "base", "--output", str(output)],
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    impact.main()
+                self.assertFalse(output.exists())
+
+    def test_hard_path_errors_precede_unmapped_fallback_in_both_orders(self):
+        for hard_path, error in (
+            ("unsafe name.go", "unsafe changed path"),
+            ("packaging/deb/new-helper.sh", "unmapped executable packaging path"),
+        ):
+            for paths in (
+                ["a/new.surface", hard_path],
+                [hard_path, "a/new.surface"],
+                ["a/another.surface", "a/new.surface", hard_path],
+            ):
+                with self.subTest(paths=paths):
+                    with self.assertRaisesRegex(ValueError, error):
+                        impact.plan(paths)
+                    with tempfile.TemporaryDirectory() as temp:
+                        output = pathlib.Path(temp) / "outputs"
+                        with (
+                            mock.patch.object(
+                                impact, "changed_paths", return_value=paths
+                            ),
+                            mock.patch.object(
+                                sys,
+                                "argv",
+                                [
+                                    "ci-impact",
+                                    "--base",
+                                    "test",
+                                    "--output",
+                                    str(output),
+                                ],
+                            ),
+                            self.assertRaisesRegex(ValueError, error),
+                        ):
+                            impact.main()
+                        self.assertFalse(output.exists())
+
+    def test_ci_plan_actual_pr_and_reusable_callers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "scripts").mkdir()
+            for name in ("ci-plan.sh", "ci-impact.py"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-C", temp, *args], text=True
+                ).strip()
+
+            git("init", "-q")
+            git("config", "user.name", "CI Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            (root / "README.md").write_text("first\n")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            missing_base_output = root / "output-missing-base"
+            missing_base = subprocess.run(
+                ["bash", "scripts/ci-plan.sh"],
+                cwd=root,
+                env=dict(
+                    os.environ,
+                    EVENT_NAME="pull_request",
+                    GITHUB_OUTPUT=str(missing_base_output),
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_base.returncode, 0, missing_base.stderr)
+            self.assertTrue(json.loads(missing_base.stdout)["native"])
+            self.assertIn("release_image=true\n", missing_base_output.read_text())
+            missing_base_output.unlink()
+            (root / "README.md").write_text("second\n")
+            git("add", ".")
+            git("commit", "-qm", "docs")
+            for event, full in (("pull_request", False), ("workflow_call", True)):
+                with self.subTest(event=event):
+                    output = root / f"output-{event}"
+                    completed = subprocess.run(
+                        ["bash", "scripts/ci-plan.sh"],
+                        cwd=root,
+                        env=dict(
+                            os.environ, EVENT_NAME=event, GITHUB_OUTPUT=str(output)
+                        ),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    result = json.loads(completed.stdout)
+                    self.assertEqual(result["go"], full, completed.stderr)
+                    self.assertEqual(result["native"], full)
+                    self.assertEqual(result["readme"], True)
+                    self.assertIn(f"go={str(full).lower()}\n", output.read_text())
+
     def test_cli_empty_diff_without_output(self):
         empty = subprocess.CompletedProcess(["git"], 0, stdout=b"")
         with (
@@ -1046,14 +1370,43 @@ class ImpactTests(unittest.TestCase):
             self.assertTrue(plan["spamassassin"])
             self.assertIn("rspamd=true\n", output.read_text())
             (root / "unknown.bin").write_bytes(b"unknown")
-            git("add", ".")
+            git("add", "unknown.bin")
             git("commit", "-qm", "unknown")
-            before = output.read_text()
-            failed = subprocess.run(
+            recovered = subprocess.run(
                 command, cwd=temp, check=False, capture_output=True, text=True
             )
-            self.assertNotEqual(failed.returncode, 0)
-            self.assertIn("unmapped changed path", failed.stderr)
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn("unmapped changed path", recovered.stderr)
+            self.assertIn("selecting full CI", recovered.stderr)
+            fallback = json.loads(recovered.stdout)
+            self.assertTrue(all(fallback[key] for key in impact.RULES))
+            self.assertEqual(fallback["changed_files"], "")
+            self.assertTrue(output.read_text().endswith("docker=true\n"))
+            (root / "a").mkdir()
+            (root / "a/new.surface").write_text("unknown")
+            (root / "packaging/deb").mkdir(parents=True)
+            (root / "packaging/deb/new-helper.sh").write_text("#!/bin/sh\n")
+            git("add", "a/new.surface", "packaging/deb/new-helper.sh")
+            git("commit", "-qm", "unknown before required contract")
+            before = output.read_text()
+            blocked = subprocess.run(
+                command, cwd=temp, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("unmapped executable packaging path", blocked.stderr)
+            self.assertEqual(output.read_text(), before)
+            packaging_base = git("rev-parse", "HEAD")
+            (root / "a/new.surface").write_text("still unknown")
+            (root / "b unsafe.go").write_text("unsafe")
+            git("add", "a/new.surface", "b unsafe.go")
+            git("commit", "-qm", "unknown before unsafe")
+            unsafe_command = command.copy()
+            unsafe_command[3] = packaging_base
+            blocked = subprocess.run(
+                unsafe_command, cwd=temp, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("unsafe changed path", blocked.stderr)
             self.assertEqual(output.read_text(), before)
 
 
