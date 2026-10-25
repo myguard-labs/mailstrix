@@ -4,8 +4,10 @@
 Usage: ci-impact.py --base SHA --head SHA [--output FILE], or --full.
 Inputs: Git diff (NUL-delimited; renames include both sides). Outputs: JSON and
 optional GitHub job outputs. No builds, network or working-tree mutations.
-Unknown/unsafe paths fail before outputs are written. Extend RULES and GO_INPUTS
-when adding a new CI surface; test its positive and unrelated cases in ci/.
+Unmapped ordinary paths or unavailable diff data select full CI before outputs
+are written. Unsafe paths and missing executable packaging contracts remain
+errors. Extend RULES and GO_INPUTS when adding a new CI surface; test its
+positive and unrelated cases in ci/.
 """
 
 import argparse
@@ -13,6 +15,12 @@ import fnmatch
 import json
 import pathlib
 import subprocess
+import sys
+
+
+class UnmappedPathError(ValueError):
+    """A changed path has no registered CI consumer."""
+
 
 # Every existing gate keeps its own scope, rather than a single scanners flag.
 RULES = {
@@ -134,6 +142,8 @@ RULES = {
         "ci/compiler-input/io-faults.c",
         "ci/compiler-input/seek.c",
         "ci/ci_go_checks_test.py",
+        "ci/ci_batch_test.py",
+        "ci/ci_lanes_test.py",
         "ci/ci_apt_install_test.py",
         "ci/ci_gh_install_test.py",
         "ci/ci_preflight_test.py",
@@ -176,6 +186,7 @@ RULES = {
     ],
     "qualification": [
         "scripts/qualify-parity-isolation.sh",
+        "scripts/ci-test-batch.py",
         "packaging/deb/parity_image_cleanup_test.py",
         "packaging/deb/parity_qualification_artifact_test.py",
         "ci/parity_cache_test.py",
@@ -227,6 +238,21 @@ RULES = {
         "packaging/deb/dockerignore_collision_test.sh",
     ],
 }
+# A PR must prove the release image whenever its binaries, marker toolchain,
+# rules, or artifact-only CI route change. This is separate from the source
+# image and generic Dockerfile lint selections.
+RULES["release_image"] = [
+    *(path for path in RULES["image"] if path != "docker/bake.ci.hcl"),
+    "docker/Dockerfile.release",
+    "NOTICE",
+    "docker/release-marker-toolchain.sh",
+    "docker/release-local-artifacts.sh",
+    "ci/release_marker_image_test.sh",
+    "ci/ci_release_tag_test.py",
+    ".github/workflows/build-binaries.yml",
+    ".github/workflows/nightly.yml",
+    ".github/workflows/release.yml",
+]
 GO_INPUTS = [
     "ci/icap_admission_ordering_test.go",
     "ci/testdata/icap_admission_ordering_test.go",
@@ -334,6 +360,9 @@ def plan(paths, full=False):
     paths = list(paths)
     selected = set(RULES) if full else set()
     go_paths = set()
+    validated = []
+    # Hard input/contract errors take precedence over ordinary unmapped paths,
+    # independent of the order Git returns the changed files.
     for path in paths:
         if (
             not path
@@ -343,7 +372,6 @@ def plan(paths, full=False):
         ):
             raise ValueError(f"unsafe changed path: {path!r}")
         mapped = {key for key, patterns in RULES.items() if matches(path, patterns)}
-        selected.update(mapped)
         # Shell syntax is insufficient proof for new maintainer/helper behavior.
         # Require a named behavior contract before accepting executable packaging.
         if (
@@ -354,8 +382,13 @@ def plan(paths, full=False):
             raise ValueError(
                 f"unmapped executable packaging path: {path}; add its behavior contract"
             )
+        validated.append((path, mapped))
+    for path, mapped in validated:
+        selected.update(mapped)
         if not mapped and not matches(path, PASSIVE) and not matches(path, GO_INPUTS):
-            raise ValueError(f"unmapped changed path: {path}; add its CI consumers")
+            raise UnmappedPathError(
+                f"unmapped changed path: {path}; add its CI consumers"
+            )
         if matches(path, GO_INPUTS) and (
             not path.endswith(".md")
             or path
@@ -382,13 +415,14 @@ def plan(paths, full=False):
                 go_paths.add("internal/extract/rc4md5_fixture_test.go")
             selected.add("go")
     if not full:
-        if not any(
-            matches(p, RULES["image"])
-            and not p.endswith(("_test.go", ".md"))
-            and "/testdata/" not in p
-            for p in paths
-        ):
-            selected.discard("image")
+        for key in ("image", "release_image"):
+            if not any(
+                matches(p, RULES[key])
+                and not p.endswith(("_test.go", ".md"))
+                and "/testdata/" not in p
+                for p in paths
+            ):
+                selected.discard(key)
         if not any(
             matches(p, RULES["parity"])
             and not p.endswith(".md")
@@ -462,11 +496,26 @@ def main():
     parser.add_argument("--base")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--full", action="store_true")
+    parser.add_argument("--strict", action="store_true")
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
     if not args.full and not args.base:
         parser.error("--base is required unless --full is used")
-    result = plan([] if args.full else changed_paths(args.base, args.head), args.full)
+    if args.full:
+        result = plan([], full=True)
+    else:
+        try:
+            result = plan(changed_paths(args.base, args.head))
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            UnicodeError,
+            UnmappedPathError,
+        ) as error:
+            if args.strict:
+                raise
+            print(f"ci-impact: {error}; selecting full CI", file=sys.stderr)
+            result = plan([], full=True)
     if args.output:
         with args.output.open("a") as output:
             for key, value in result.items():

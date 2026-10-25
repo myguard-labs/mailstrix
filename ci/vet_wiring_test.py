@@ -27,6 +27,19 @@ def test_stage_command(text=None):
     return re.sub(r"--mount=\S+\s*", "", command)
 
 
+def fixture_stage_command(text=None):
+    if text is None:
+        text = (ROOT / "docker/Dockerfile").read_text()
+    stage = text.split("FROM build AS test\n", 1)[1].split("\nFROM ", 1)[0]
+    commands = [
+        line[4:]
+        for line in stage.replace("\\\n", " ").splitlines()
+        if line.startswith("RUN ") and "go run ./tools/testscope" in line
+    ]
+    assert len(commands) == 1, "expected exactly one test-stage selector RUN"
+    return re.sub(r"--mount=\S+\s*", "", commands[0])
+
+
 class VetWiringTests(unittest.TestCase):
     def test_extracts_vet_run_after_count_gate(self):
         command = test_stage_command()
@@ -34,6 +47,25 @@ class VetWiringTests(unittest.TestCase):
         self.assertIn("go test -race", command)
         self.assertNotIn("--native-ci", command)
         self.assertNotIn("--mount=", command)
+        self.assertIn("cat .testscope-packages", command)
+
+    def test_selector_plan_is_single_and_shared_by_both_runs(self):
+        source = (ROOT / "docker/Dockerfile").read_text()
+        stage = source.split("FROM build AS test\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertEqual(stage.count("go run ./tools/testscope"), 1)
+        self.assertIn("printf '%s\\n' \"$pkgs\" > .testscope-packages", stage)
+        self.assertIn("cat .testscope-packages", test_stage_command(source))
+
+    def test_duplicate_selector_mutation_is_rejected(self):
+        source = (ROOT / "docker/Dockerfile").read_text()
+        duplicate = source.replace(
+            'pkgs="$(cat .testscope-packages)"',
+            'pkgs="$(go run ./tools/testscope ${CHANGED_FILES})"',
+            1,
+        )
+        self.assertNotEqual(duplicate, source)
+        with self.assertRaisesRegex(AssertionError, "exactly one test-stage selector"):
+            fixture_stage_command(duplicate)
 
     def test_missing_ambiguous_and_incomplete_vet_run_are_rejected(self):
         source = (ROOT / "docker/Dockerfile").read_text()
@@ -47,8 +79,9 @@ class VetWiringTests(unittest.TestCase):
             ),
             (source.replace("go test", "go version"), "has no go test"),
         ):
-            with self.subTest(message=message), self.assertRaisesRegex(
-                AssertionError, message
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(AssertionError, message),
             ):
                 test_stage_command(text)
 
@@ -62,6 +95,7 @@ class VetWiringTests(unittest.TestCase):
         ci_pkg=False,
         ci_failure=False,
         changed="--changed -- affected/fixture.go",
+        remove_plan=False,
     ):
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory)
@@ -114,18 +148,31 @@ exec "$REAL_GO" "$@"
 """)
             shim.chmod(0o755)
             trace = fixture / "trace"
+            environment = dict(
+                os.environ,
+                PATH=f"{binary}:{os.environ['PATH']}",
+                REAL_GO=shutil.which("go"),
+                TRACE=str(trace),
+                SCOPE=scope,
+                SELECTOR_FAILURE=str(int(selector_failure)),
+                CHANGED_FILES="" if full else changed,
+            )
+            preparation = subprocess.run(
+                ["sh", "-c", fixture_stage_command()],
+                cwd=fixture,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if preparation.returncode:
+                return preparation, trace.read_text() if trace.exists() else ""
+            if remove_plan:
+                (fixture / ".testscope-packages").unlink()
             result = subprocess.run(
                 ["sh", "-c", test_stage_command()],
                 cwd=fixture,
-                env=dict(
-                    os.environ,
-                    PATH=f"{binary}:{os.environ['PATH']}",
-                    REAL_GO=shutil.which("go"),
-                    TRACE=str(trace),
-                    SCOPE=scope,
-                    SELECTOR_FAILURE=str(int(selector_failure)),
-                    CHANGED_FILES="" if full else changed,
-                ),
+                env=environment,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -135,6 +182,7 @@ exec "$REAL_GO" "$@"
     def test_affected_static_vet_passes_and_excludes_unaffected_violation(self):
         result, trace = self.invoke("./affected")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(trace.count("run ./tools/testscope"), 1)
         self.assertIn("vet -tags yara_static ./affected\n", trace)
         self.assertIn(
             "test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace
@@ -241,11 +289,18 @@ exec "$REAL_GO" "$@"
         self.assertNotIn("vet ", trace)
         self.assertNotIn("test ", trace)
 
+    def test_missing_shared_plan_fails_before_vet(self):
+        result, trace = self.invoke("./affected", remove_plan=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("vet ", trace)
+
     def test_failure_before_trace_creation_is_reported(self):
         with mock.patch(__name__ + ".test_stage_command", return_value="exit 42"):
             result, trace = self.invoke("./affected")
         self.assertEqual(result.returncode, 42)
-        self.assertEqual(trace, "")
+        self.assertEqual(trace.count("run ./tools/testscope"), 1)
+        self.assertNotIn("vet ", trace)
+        self.assertNotIn("test -race", trace)
 
     def test_workflow_builds_vet_stage_with_affected_selection(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()

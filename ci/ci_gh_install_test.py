@@ -76,14 +76,8 @@ def count(calls, word):
 class EnsureGhCli(unittest.TestCase):
     def test_all_expected_steps_present(self):
         found = sorted((w, j) for w, j, _ in steps())
-        self.assertEqual(
-            found,
-            [
-                ("nightly.yml", "plan"),
-                ("nightly.yml", "publish"),
-                ("release.yml", "release"),
-            ],
-        )
+        # nightly runs on GitHub-hosted images, which ship gh.
+        self.assertEqual(found, [("release.yml", "release")])
 
     def test_gh_present_skips_apt(self):
         for w, j, script in steps():

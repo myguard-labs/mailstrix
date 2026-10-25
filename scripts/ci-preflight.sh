@@ -13,7 +13,7 @@ base=${1-}
 if [[ -z "$base" ]]; then
 	base=$(git merge-base origin/main HEAD)
 fi
-plan=$(python3 "$here/ci-impact.py" --base "$base" --head HEAD)
+plan=$(python3 "$here/ci-impact.py" --strict --base "$base" --head HEAD)
 changed=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["changed_files"])' <<<"$plan")
 # Same argv construction as ci-go-checks.sh; empty means a full (non-PR) caller.
 if [[ -n "$changed" ]]; then

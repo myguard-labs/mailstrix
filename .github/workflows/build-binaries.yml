@@ -13,14 +13,23 @@ on:
         required: false
         type: string
         default: '["amd64","arm64"]'
+      gha-cache:
+        description: >-
+          Reuse and refresh the buildx layer cache in the GitHub Actions cache
+          (the caller grants actions: write). Tag releases build uncached.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   binaries:
-    # One runner per arch so the slow arm64 QEMU build runs in parallel.
-    runs-on: [self-hosted, builder02, docker]
+    # One GitHub-hosted runner per arch, each building natively (no QEMU; the
+    # same pinned images give the same bytes as emulation).
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -28,20 +37,40 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3 arm64 emulation
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      # BuildKit's type=gha cache needs the job's cache runtime in the step env.
+      - name: expose buildx cache runtime
+        if: inputs.gha-cache
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8
+        with:
+          script: |
+            if (!process.env.ACTIONS_RUNTIME_TOKEN || !(process.env.ACTIONS_RESULTS_URL || process.env.ACTIONS_CACHE_URL)) {
+              throw new Error("BuildKit cache runtime is unavailable");
+            }
+            core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+            for (const name of ["ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL", "ACTIONS_CACHE_URL", "ACTIONS_CACHE_SERVICE_V2"]) {
+              if (process.env[name]) core.exportVariable(name, process.env[name]);
+            }
 
       - name: build binaries (${{ matrix.arch }})
         env:
           VERSION: ${{ inputs.version }}
           ARCH: ${{ matrix.arch }}
+          GHA_CACHE: ${{ inputs.gha-cache }}
         run: |
           set -euo pipefail
           # ARCH is supplied by this step's env from the matrix.
           # shellcheck disable=SC2153
           arch="${ARCH}"
+          cache=()
+          if [[ "${GHA_CACHE}" == true ]]; then
+            cache=(--cache-from "type=gha,scope=bin-${arch}"
+              --cache-to "type=gha,mode=max,scope=bin-${arch}")
+          fi
           docker buildx build \
             --target bin \
+            "${cache[@]}" \
             --platform "linux/${arch}" \
             --build-arg "VERSION=${VERSION}" \
             --output "type=local,dest=dist/${arch}" \

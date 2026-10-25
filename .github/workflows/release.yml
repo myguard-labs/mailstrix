@@ -33,9 +33,9 @@ jobs:
   # fallback), and that a toolchain not linked into strixd fails the build.
   marker-image:
     needs: binaries
-    runs-on: [self-hosted, builder02, docker]
-    # arm64 rebuilds libyara and compiles rules under QEMU emulation.
-    timeout-minutes: 120
+    # Each arch builds natively; arm64 on GitHub's hosted arm runner, no QEMU.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || fromJSON('["self-hosted","builder02","docker"]') }}
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -45,7 +45,6 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3 arm64 emulation
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: download arch binaries
@@ -120,9 +119,9 @@ jobs:
   # build the yara stage twice from scratch and require identical libyara.a.
   libyara-repro:
     needs: gate
-    runs-on: [self-hosted, builder02, docker]
-    # Two no-cache arm64 yara builds run under QEMU emulation.
-    timeout-minutes: 120
+    # Each arch builds natively; arm64 on GitHub's hosted arm runner, no QEMU.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || fromJSON('["self-hosted","builder02","docker"]') }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -133,7 +132,6 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3 arm64 emulation
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
       - name: release libyara.a is byte-reproducible across two no-cache yara builds (${{ matrix.arch }})
         env:

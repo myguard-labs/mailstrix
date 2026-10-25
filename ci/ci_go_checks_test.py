@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class GoChecksTests(unittest.TestCase):
-    def invoke(self, scope, changed, failed=""):
+    def invoke(self, scope, changed, failed="", directories=("",), script=None):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
             trace = root / "trace"
@@ -26,6 +26,12 @@ if [[ $name == go && $1 == run ]]; then printf '%s\\n' "$SCOPE"; fi
 if [[ $name == go && $1 == list ]]; then printf '%s\\n' "$FIXTURE"; fi
 """)
             tool.chmod(0o755)
+            selected_dirs = []
+            for name in directories:
+                selected = root / name
+                selected.mkdir(parents=True, exist_ok=True)
+                (selected / "fixture.go").write_text("package fixture\n")
+                selected_dirs.append(str(selected))
             for name in ["go", "gofmt", "staticcheck", "govulncheck", "gosec"]:
                 (root / name).symlink_to(tool)
             environment = dict(
@@ -34,11 +40,11 @@ if [[ $name == go && $1 == list ]]; then printf '%s\\n' "$FIXTURE"; fi
                 TRACE=str(trace),
                 SCOPE=scope,
                 FAIL_TOOL=failed,
-                FIXTURE=temp,
+                FIXTURE="\n".join(selected_dirs),
                 CHANGED_FILES=changed,
             )
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts/ci-go-checks.sh")],
+                ["bash", str(script or ROOT / "scripts/ci-go-checks.sh")],
                 cwd=ROOT,
                 env=environment,
                 check=False,
@@ -46,6 +52,21 @@ if [[ $name == go && $1 == list ]]; then printf '%s\\n' "$FIXTURE"; fi
                 text=True,
             )
             return result, trace.read_text() if trace.exists() else ""
+
+    def test_multiple_selected_directories_share_one_gofmt_process(self):
+        result, trace = self.invoke(
+            "example/one example/two",
+            "--changed -- internal/one/file.go",
+            directories=("one", "two with space"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        formatted = [line for line in trace.splitlines() if line.startswith("gofmt ")]
+        self.assertEqual(len(formatted), 1, trace)
+        self.assertIn("/one/fixture.go>", formatted[0])
+        self.assertIn("/two with space/fixture.go>", formatted[0])
+        self.assertEqual(trace.count("go <list>"), 1)
+        for name in ("staticcheck", "govulncheck", "gosec"):
+            self.assertEqual(trace.count(name + " "), 1, trace)
 
     def test_affected_packages_reach_every_analyzer(self):
         result, trace = self.invoke(

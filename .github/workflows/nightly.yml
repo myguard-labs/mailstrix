@@ -1,9 +1,19 @@
-# Build fresh nightly binaries from main only when its commit has changed.
+# Build fresh amd64 + arm64 nightly binaries from main, but only when what ships
+# (the Go sources and docker/ build inputs, tests excluded) changed since the
+# commit the current rolling `nightly` release was built from. The published
+# release is replaced, never appended to. The binaries are built and proven
+# natively on GitHub-hosted runners of each architecture. dockerized's 12:00 UTC daily builds
+# mailstrix:testing from this release, so it runs two hours earlier.
 name: nightly
 on:
   schedule:
-    - cron: "0 9 * * *"  # 09:00 UTC
+    - cron: "0 10 * * *"  # 10:00 UTC, before the 12:00 UTC dockerized daily
   workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when no shipped input changed
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,31 +24,22 @@ concurrency:
 
 jobs:
   plan:
-    runs-on: [self-hosted, builder02, docker]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       skip: ${{ steps.release.outputs.skip }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - name: ensure gh CLI
-        run: |
-          # Bounded retry: a brief mirror/proxy outage must not fail the job.
-          command -v gh >/dev/null || {
-            for attempt in 1 2 3 4; do
-              sudo apt-get -o Acquire::Retries=3 update \
-                && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gh \
-                && break
-              if [ "$attempt" -eq 4 ]; then
-                echo "ensure gh CLI: giving up after $attempt attempts" >&2
-                exit 1
-              fi
-              sleep $((attempt * 5))
-            done
-          }
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
       - name: compare nightly target with main
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF" != refs/heads/main ]]; then
@@ -58,7 +59,19 @@ jobs:
             printf '%s\n' "$target" >&2
             exit 1
           fi
-          if [[ "$target" == "$GITHUB_SHA" ]]; then
+          # Inputs that change the shipped binaries or the Dockerfile.release
+          # image; tests and their fixtures do not.
+          shipped=(cmd internal third_party go.mod go.sum docker NOTICE .dockerignore
+            ':(exclude,glob)**/*_test.go' ':(exclude,glob)**/testdata/**'
+            ':(exclude,glob)docker/**/*_test.sh'
+            ':(exclude,glob)docker/**/*.md')
+          if [[ "$target" == "$GITHUB_SHA" && "$FORCE" != true ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$target" && "$FORCE" != true ]] \
+            && git cat-file -e "${target}^{commit}" 2>/dev/null \
+            && git diff --quiet "$target" "$GITHUB_SHA" -- "${shipped[@]}"; then
+            # An unknown target or a failed diff falls through to a build.
+            echo "no shipped input changed since nightly ${target}"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -73,98 +86,95 @@ jobs:
       actions: write  # ci.yml's docker job uses the buildx GHA cache
     uses: ./.github/workflows/ci.yml
 
+  # Builds alongside the gate instead of after it; publish waits for both.
   binaries:
-    needs: [plan, gate]
-    if: needs.plan.outputs.skip == 'false' && needs.gate.result == 'success'
+    needs: plan
+    if: needs.plan.outputs.skip == 'false'
     permissions:
       contents: read
+      actions: write  # buildx GHA layer cache
     uses: ./.github/workflows/build-binaries.yml
     with:
       version: ${{ needs.plan.outputs.version }}
-      arches: '["amd64"]'
+      arches: '["amd64","arm64"]'
+      gha-cache: true
 
   # Prove Dockerfile.release turns these exact nightly binaries and marker
   # toolchain into an image whose strixd loads the marker artifact, before the
-  # assets are published. Same proof as release.yml's marker-image job.
+  # assets are published. Same proof as release.yml's marker-image job, native
+  # per arch on GitHub-hosted runners (no QEMU).
   marker-image:
     needs: [plan, binaries]
     if: needs.binaries.result == 'success'
-    runs-on: [self-hosted, builder02, docker]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      - name: download amd64 binaries
+      - name: download arch binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
-          name: bin-amd64
+          name: bin-${{ matrix.arch }}
           path: out/
 
-      - name: nightly image loads markers (amd64)
+      - name: nightly image loads markers (${{ matrix.arch }})
         env:
+          ARCH: ${{ matrix.arch }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          MAILSTRIX_RELEASE_MARKER_RUN="nightly-${RUN_ID}-amd64" \
-            bash ci/release_marker_image_test.sh amd64 out
+          MAILSTRIX_RELEASE_MARKER_RUN="nightly-${RUN_ID}-${ARCH}" \
+            bash ci/release_marker_image_test.sh "${ARCH}" out
 
   publish:
     needs: [plan, gate, binaries, marker-image]
-    if: needs.binaries.result == 'success' && needs.marker-image.result == 'success'
-    runs-on: [self-hosted, builder02, lxc]
+    if: >-
+      needs.gate.result == 'success' && needs.binaries.result == 'success'
+      && needs.marker-image.result == 'success'
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
     steps:
-      - name: download amd64 binaries
+      - name: download arch binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: bin-amd64
+          pattern: bin-*
+          merge-multiple: true
           path: out/
 
       - name: checksums
         run: |
           set -euo pipefail
           cd out
-          sha256sum strixd-linux-amd64 strix-scan-linux-amd64 \
-            strix-milter-linux-amd64 yarac-linux-amd64 \
-            libyara-linux-amd64.a > SHA256SUMS
+          set --
+          for arch in amd64 arm64; do
+            set -- "$@" "strixd-linux-${arch}" "strix-scan-linux-${arch}" \
+              "strix-milter-linux-${arch}" "yarac-linux-${arch}" \
+              "libyara-linux-${arch}.a"
+          done
+          sha256sum "$@" > SHA256SUMS
           sha256sum -c SHA256SUMS
-
-      # The self-hosted lxc runner image does not ship the gh CLI.
-      - name: ensure gh CLI
-        run: |
-          # Bounded retry: a brief mirror/proxy outage must not fail the job.
-          command -v gh >/dev/null || {
-            for attempt in 1 2 3 4; do
-              sudo apt-get -o Acquire::Retries=3 update \
-                && sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends gh \
-                && break
-              if [ "$attempt" -eq 4 ]; then
-                echo "ensure gh CLI: giving up after $attempt attempts" >&2
-                exit 1
-              fi
-              sleep $((attempt * 5))
-            done
-          }
 
       - name: publish rolling nightly
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          assets=(
-            out/strixd-linux-amd64
-            out/strix-scan-linux-amd64
-            out/strix-milter-linux-amd64
-            out/yarac-linux-amd64
-            out/libyara-linux-amd64.a
-            out/SHA256SUMS
-          )
+          set -- out/SHA256SUMS
+          for arch in amd64 arm64; do
+            set -- "$@" "out/strixd-linux-${arch}" "out/strix-scan-linux-${arch}" \
+              "out/strix-milter-linux-${arch}" "out/yarac-linux-${arch}" \
+              "out/libyara-linux-${arch}.a"
+          done
           # target_commitish is ignored for an existing tag. Remove the old
           # release and tag so the replacement records this exact main SHA.
           if current=$(gh release view nightly \
@@ -180,4 +190,4 @@ jobs:
             --notes "Nightly build of ${GITHUB_SHA}" \
             --target "$GITHUB_SHA" \
             --prerelease --latest=false \
-            "${assets[@]}"
+            "$@"

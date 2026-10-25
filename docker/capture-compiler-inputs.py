@@ -11,11 +11,13 @@ paths. It never writes original source paths on the caller's filesystem.
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 EXTERNALS = [
@@ -59,7 +61,14 @@ def store(root, data):
     target = root / "objects" / sha
     if target.exists() and target.read_bytes() != data:
         raise RetentionError("retained object collision")
-    target.write_bytes(data)
+    # Parallel validations may store the same object: publish it atomically so
+    # a concurrent reader never sees a partial write as a collision. The name is
+    # joined to the lexical root (tempfile would normalize a `..` through a
+    # symlinked parent into a different directory).
+    tmp = target.with_name(f".object-{secrets.token_hex(8)}")
+    with open(tmp, "xb") as handle:
+        handle.write(data)
+    os.replace(tmp, target)
     return {"sha256": sha, "size": len(data)}
 
 
@@ -402,9 +411,16 @@ def run(root, phase, namespace, filename, argv):
     index, complete = read_cursor(root)
     if phase not in ("validation", "final") or complete:
         raise RetentionError("invalid capture invocation phase")
-    candidate = None
     if phase == "validation" and index == 2**64 - 1:
         raise RetentionError("invocation cursor overflow")
+    code = run_at(root, phase, index, namespace, filename, argv)
+    write_cursor(root, index + (phase == "validation"), phase == "final")
+    return code
+
+
+def run_at(root, phase, index, namespace, filename, argv, quiet=False):
+    """Record one invocation at a fixed index; the caller owns the cursor."""
+    candidate = None
     if phase == "validation":
         candidate = {
             "path": filename,
@@ -418,8 +434,15 @@ def run(root, phase, namespace, filename, argv):
     # Preserve compiler argv, cwd, stdout and diagnostics. Validation's caller
     # redirects output exactly as before; retained stderr is also forwarded.
     with error_log.open("wb") as errors:
-        result = subprocess.run(argv, env=env, stderr=errors, check=False)
-    sys.stderr.buffer.write(error_log.read_bytes())
+        result = subprocess.run(
+            argv,
+            env=env,
+            stderr=errors,
+            stdout=subprocess.DEVNULL if quiet else None,
+            check=False,
+        )
+    if not quiet:
+        sys.stderr.buffer.write(error_log.read_bytes())
     if result.returncode == 125:
         raise RetentionError("native retention failed (exit 125)")
     if result.returncode not in (0, 1):
@@ -445,8 +468,50 @@ def run(root, phase, namespace, filename, argv):
     if record.exists():
         raise RetentionError("invocation record already exists")
     save_json(record, {"phase": phase, "index": index, "invocation": invocation})
-    write_cursor(root, index + (phase == "validation"), phase == "final")
     return result.returncode
+
+
+def validate(root, prefix, roots, jobs=None):
+    """Validate roots serially by default; explicit jobs bound parallel work.
+
+    Same records as one `run ... validation` per root in order: indexes follow
+    the list, each run writes its own scratch output, and the cursor moves once,
+    after every record exists. Compiler stdout/stderr stay out of the caller's
+    streams (still retained), as the serial loop's redirect did. Any retention
+    failure aborts the batch. Returns the compiler exit codes in input order.
+    """
+    start, complete = read_cursor(root)
+    if complete or start + len(roots) >= 2**64:
+        raise RetentionError("invalid capture invocation phase")
+    scratch = root / f".validation-{secrets.token_hex(8)}"
+    scratch.mkdir()
+
+    def one(i):
+        ns, path = roots[i]
+        argv = prefix + [f"{ns}:{path}", str(scratch / f"{i}.yac")]
+        return run_at(root, "validation", start + i, ns, path, argv, quiet=True)
+
+    try:
+        with ThreadPoolExecutor(max_workers=jobs or 1) as pool:
+            codes = list(pool.map(one, range(len(roots))))
+    finally:
+        shutil.rmtree(scratch)
+    write_cursor(root, start + len(roots), False)
+    return codes
+
+
+def validate_files(root, good, filelist, prefix):
+    """compile-rules.sh entry: namespace = basename; accepted roots -> good."""
+    files = Path(filelist).read_text().splitlines()
+    roots = [(os.path.basename(f), f) for f in files]
+    accepted = []
+    for (ns, path), code in zip(roots, validate(root, prefix, roots)):
+        if code == 0:
+            accepted.append(f"{ns}:{path}\n")
+        else:
+            print(f"compile-rules: skip {ns} (uncompilable)", file=sys.stderr)
+    Path(good).write_text("".join(accepted))
+    return 0
 
 
 def final_inputs(state):
@@ -652,6 +717,10 @@ def main(argv):
         begin(argv[1], argv[2])
     elif command == "run":
         return run(Path(argv[1]), argv[2], argv[3], argv[4], argv[5:])
+    elif command == "validate":
+        # validate ROOT GOOD FILELIST COMPILER-ARGV...: FILELIST holds one
+        # source path per line; COMPILER-ARGV excludes the root and output.
+        return validate_files(Path(argv[1]), argv[2], argv[3], argv[4:])
     elif command == "finish":
         finish(Path(argv[1]))
     elif command == "verify":
