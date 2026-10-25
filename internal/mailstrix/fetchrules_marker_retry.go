@@ -35,7 +35,7 @@ const markerRetryMaxAttempts = 7 // exponent saturation: delays stay at one hour
 // .rules.lock, acquires the same lease nonblocking, and removes only stale,
 // unleased directories. Age alone never authorizes deleting an active snapshot.
 func lockMarkerRetrySnapshot(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- operator-cache MkdirTemp/ReadDir directory; O_DIRECTORY|O_NOFOLLOW rejects files/symlinks.
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func newMarkerRetry(marker *rulesMarker, err error, attempts int, now time.Time)
 		var network net.Error
 		var operation *net.OpError
 		transient = errors.As(download.err, &status) && (status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= 500 && status <= 599) ||
-			errors.As(download.err, &network) && network.Timeout() || errors.As(download.err, &operation) || errors.Is(download.err, io.ErrUnexpectedEOF)
+			errors.As(download.err, &network) && network.Timeout() || errors.As(download.err, &operation) || errors.Is(download.err, io.ErrUnexpectedEOF) || errors.Is(download.err, io.EOF)
 	}
 	if !transient {
 		return nil

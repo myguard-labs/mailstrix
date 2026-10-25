@@ -116,6 +116,49 @@ func TestFetchRulesMarkerRetrySameVersion(t *testing.T) {
 	assertRetryClean(t, dir)
 }
 
+func TestFetchRulesMarkerRetryEOFBeforeHeaders(t *testing.T) {
+	f, dir := newMarkerFixture(t), t.TempDir()
+	seedLocal(t, dir, 1, compiledYacBytes(t, "rule Old { condition: false }"))
+	log := &markerLog{}
+	scanner := cacheScanner(t, dir, log)
+	inner := newMarkerServer(t, f.main, 2, f.field(f.archive), f.archive)
+	var failMarker atomic.Bool
+	var closed atomic.Int64
+	failMarker.Store(true)
+	front := markerRetryServer(t, inner, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/"+testMarkerAsset && failMarker.Load() {
+			closed.Add(1)
+			// Abort every marker request until FetchRules returns: Transport
+			// may retry an idempotent GET on a previously reused connection.
+			panic(http.ErrAbortHandler)
+		}
+		return false
+	})
+	now := time.Unix(1700000000, 0)
+	opts := fetchOptions{now: func() time.Time { return now }, reload: scanner.reloadLockedCache, logf: log.logf}
+	first := retryFetch(t, front, dir, opts)
+	failMarker.Store(false)
+	if closed.Load() == 0 || inner.count("/"+testMarkerAsset) != 0 || !first.Updated || first.NewVersion != 2 || !strings.Contains(first.Marker, "EOF") || scanner.markerRules.Load() != nil {
+		t.Fatalf("initial EOF must install compiled-only v2: %+v closed=%d", first, closed.Load())
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, cachedRulesName)); err != nil || !bytes.Equal(got, f.main) {
+		t.Fatalf("EOF marker failure did not install the compiled bundle: %v", err)
+	}
+	r := retryRecord(t, dir)
+	if r == nil || r.Attempts != 1 || !r.After.Equal(now.Add(time.Minute)) {
+		t.Fatalf("EOF before response headers did not retain a transient marker receipt: %+v", r)
+	}
+	now = r.After
+	recovered := retryFetch(t, front, dir, opts)
+	if recovered.Updated || recovered.LocalVersion != 2 || recovered.NewVersion != 2 || recovered.Marker != MarkerStatusInstalled || scanner.markerRules.Load() == nil || !log.has(markerLoadedLog) {
+		t.Fatalf("same-version EOF retry did not install the bound marker tree: %+v", recovered)
+	}
+	if inner.count("/"+cachedRulesName) != 1 || inner.count("/"+testMarkerAsset) != 1 || retryRecord(t, dir) != nil {
+		t.Fatal("EOF recovery redownloaded the bundle or retained its retry receipt")
+	}
+	assertRetryClean(t, dir)
+}
+
 func TestFetchRulesMarkerRetryDisabledAndPermanent(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -417,7 +460,7 @@ func TestFetchRulesMarkerRetryClassification(t *testing.T) {
 			t.Errorf("transient HTTP %d not retried", code)
 		}
 	}
-	for _, err := range []error{nil, context.Canceled, errors.New("invalid archive"), markerDownloadError{rulesHTTPStatusError(404)}} {
+	for _, err := range []error{nil, context.Canceled, io.EOF, fmt.Errorf("outside marker: %w", io.EOF), &url.Error{Op: "Get", URL: "https://example.invalid", Err: io.EOF}, errors.New("invalid archive"), markerDownloadError{rulesHTTPStatusError(404)}} {
 		if r := newMarkerRetry(marker, err, 0, time.Now()); r != nil {
 			t.Errorf("permanent error %v created receipt %+v", err, r)
 		}
@@ -426,7 +469,7 @@ func TestFetchRulesMarkerRetryClassification(t *testing.T) {
 	if newMarkerRetry(marker, permanent, 0, time.Now()) != nil {
 		t.Fatal("permanent URL policy error created receipt")
 	}
-	for _, err := range []error{context.DeadlineExceeded, markerDownloadError{io.ErrUnexpectedEOF}, markerDownloadError{&net.OpError{Op: "read", Err: io.EOF}}} {
+	for _, err := range []error{context.DeadlineExceeded, markerDownloadError{io.EOF}, markerDownloadError{&url.Error{Op: "Get", URL: "https://example.invalid", Err: io.EOF}}, fmt.Errorf("marker operation: %w", markerDownloadError{io.EOF}), markerDownloadError{io.ErrUnexpectedEOF}, markerDownloadError{&net.OpError{Op: "read", Err: io.EOF}}} {
 		if newMarkerRetry(marker, err, 0, time.Now()) == nil {
 			t.Errorf("transient transport error %v not retried", err)
 		}
