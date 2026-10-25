@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,7 @@ class ImpactTests(unittest.TestCase):
             "cmd/strixd/main.go",
             "docker/Dockerfile",
             "docker/Dockerfile.release",
+            "NOTICE",
             "docker/release-marker-toolchain.sh",
             "ci/release_marker_image_test.sh",
             ".github/workflows/build-binaries.yml",
@@ -75,6 +77,67 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(impact.plan([path])["release_image"])
         self.assertTrue(impact.plan([], full=True)["release_image"])
+
+    def test_notice_only_real_git_plan_selects_release_image(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "scripts").mkdir()
+            for name in ("ci-impact.py", "ci-plan.sh"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            (root / "NOTICE").write_text("original notice\n")
+
+            def git(*args):
+                return subprocess.check_output(["git", "-C", temp, *args], text=True)
+
+            git("init", "-q")
+            git("config", "user.name", "CI Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("add", ".")
+            git("commit", "-qm", "base")
+            (root / "NOTICE").write_text("updated notice\n")
+            git("add", "NOTICE")
+            git("commit", "-qm", "notice only")
+            output = root / "outputs"
+            result = subprocess.run(
+                ["bash", "scripts/ci-plan.sh"],
+                cwd=root,
+                env=dict(
+                    os.environ, EVENT_NAME="pull_request", GITHUB_OUTPUT=str(output)
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(json.loads(result.stdout)["release_image"])
+            self.assertIn("release_image=true\n", output.read_text())
+            self.assertEqual(git("diff", "--name-only", "HEAD^1").splitlines(), ["NOTICE"])
+
+    def test_every_literal_release_context_copy_selects_pr_image(self):
+        instructions = []
+        pending = ""
+        for line in (ROOT / "docker/Dockerfile.release").read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            pending += line.removesuffix("\\").strip() + " "
+            if not line.endswith("\\"):
+                instructions.append(pending.strip())
+                pending = ""
+        sources = set()
+        for instruction in instructions:
+            if not instruction.startswith("COPY "):
+                continue
+            tokens = shlex.split(instruction)[1:]
+            if any(token.startswith("--from=") for token in tokens):
+                continue
+            sources.update(token for token in tokens[:-1] if not token.startswith("--"))
+        self.assertIn("NOTICE", sources)
+        for path in sorted(sources):
+            probe = path + "fixture.yara" if path.endswith("/") else path
+            with self.subTest(path=path):
+                self.assertTrue(impact.plan([probe])["release_image"])
 
     def test_marker_runtime_fixture_real_consumers(self):
         for path in (

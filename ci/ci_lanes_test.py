@@ -220,6 +220,176 @@ class FourLaneContract(unittest.TestCase):
                         run_required_gate(self.workflow, env).returncode, 0
                     )
 
+    def test_refusals_report_group_dependency_selection_and_result(self):
+        cases = (
+            (
+                {"CHANGES_RESULT": "failure"},
+                ("group=plan", "dependency=changes", "result=failure"),
+            ),
+            (
+                {"SCANNERS_RESULT": "failure"},
+                ("group=static-analysis", "dependency=scanners", "result=failure"),
+            ),
+            (
+                {"DOCKER_RESULT": "cancelled"},
+                ("group=static-analysis", "dependency=docker", "result=cancelled"),
+            ),
+            (
+                {"GO_SELECTED": "true", "LINT_RESULT": "failure"},
+                (
+                    "group=go-correctness",
+                    "dependency=lint",
+                    "selected=true",
+                    "result=failure",
+                ),
+            ),
+            (
+                {"GO_SELECTED": "invalid"},
+                ("group=go-correctness", "go_selected=invalid", "scope_selected=false"),
+            ),
+            (
+                {"SCOPE_SELECTED": ""},
+                ("group=go-correctness", "go_selected=false", "scope_selected="),
+            ),
+            (
+                {"NATIVE_SELECTED": "true", "NATIVE_RESULT": "failure"},
+                (
+                    "group=native-builds-artifacts",
+                    "dependency=compiler-inputs",
+                    "selected=true",
+                    "result=failure",
+                ),
+            ),
+            (
+                {"NATIVE_SELECTED": "invalid"},
+                (
+                    "group=native-builds-artifacts",
+                    "dependency=compiler-inputs",
+                    "selected=invalid",
+                    "result=skipped",
+                ),
+            ),
+            (
+                {"RELEASE_IMAGE_SELECTED": "invalid"},
+                ("group=native-builds-artifacts", "release_image_selected=invalid"),
+            ),
+            (
+                {"EVENT_NAME": "invalid"},
+                ("group=native-builds-artifacts", "event=invalid"),
+            ),
+            (
+                {
+                    "EVENT_NAME": "pull_request",
+                    "RELEASE_IMAGE_SELECTED": "true",
+                    "PR_BINARIES_RESULT": "failure",
+                },
+                (
+                    "group=native-builds-artifacts",
+                    "dependency=pr-binaries",
+                    "selected=true",
+                    "result=failure",
+                ),
+            ),
+            (
+                {
+                    "EVENT_NAME": "pull_request",
+                    "RELEASE_IMAGE_SELECTED": "true",
+                    "PR_BINARIES_RESULT": "success",
+                    "PR_MARKER_IMAGE_RESULT": "failure",
+                },
+                (
+                    "group=native-builds-artifacts",
+                    "dependency=pr-marker-image",
+                    "selected=true",
+                    "result=failure",
+                ),
+            ),
+            (
+                {"PARITY_SELECTED": "true", "PARITY_RESULT": "failure"},
+                (
+                    "group=contracts-integrations",
+                    "dependency=parity-isolation",
+                    "selected=true",
+                    "result=failure",
+                ),
+            ),
+            (
+                {"RSPAMD_SELECTED": "true", "RSPAMD_RESULT": "failure"},
+                (
+                    "group=contracts-integrations",
+                    "dependency=rspamd",
+                    "selected=true",
+                    "result=failure",
+                ),
+            ),
+            (
+                {"SPAMASSASSIN_SELECTED": "true", "SPAMASSASSIN_RESULT": "failure"},
+                (
+                    "group=contracts-integrations",
+                    "dependency=spamassassin",
+                    "selected=true",
+                    "result=failure",
+                ),
+            ),
+            (
+                {"LINT_RESULT": "success"},
+                (
+                    "group=go-correctness",
+                    "dependency=lint",
+                    "selected=false",
+                    "result=success",
+                ),
+            ),
+        )
+        for update, expected in cases:
+            with self.subTest(update=update):
+                env = dict(self.docs_only_env(), **update)
+                result = run_required_gate(self.workflow, env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ci-ok:", result.stderr)
+                self.assertIn(f"event={env['EVENT_NAME']}", result.stderr)
+                for value in expected:
+                    self.assertIn(value, result.stderr)
+        success = run_required_gate(self.workflow, self.docs_only_env())
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertEqual(success.stderr, "")
+
+    def test_each_group_reports_its_failed_docker_dependency(self):
+        prefix, calls = self.workflow.rsplit("          join_static_analysis\n", 1)
+        self.assertIn("join_contracts_integrations", calls)
+        for group in ("static_analysis", "go_correctness", "contracts_integrations"):
+            with self.subTest(group=group):
+                workflow = prefix + f"          join_{group}\n"
+                env = dict(self.docs_only_env(), DOCKER_RESULT="failure")
+                result = run_required_gate(workflow, env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"group={group.replace('_', '-')}", result.stderr)
+                self.assertIn("dependency=docker result=failure", result.stderr)
+
+    def test_valid_event_and_go_scope_combinations_stay_quiet(self):
+        for event in (
+            "pull_request",
+            "push",
+            "schedule",
+            "workflow_dispatch",
+            "workflow_call",
+        ):
+            for go in ("true", "false"):
+                for scope in ("true", "false"):
+                    with self.subTest(event=event, go=go, scope=scope):
+                        env = dict(
+                            self.docs_only_env(),
+                            EVENT_NAME=event,
+                            GO_SELECTED=go,
+                            SCOPE_SELECTED=scope,
+                            LINT_RESULT="success"
+                            if "true" in (go, scope)
+                            else "skipped",
+                        )
+                        result = run_required_gate(self.workflow, env)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stderr, "")
+
     def test_native_architecture_and_security_boundaries(self):
         self.assertIn("arches: '[\"amd64\",\"arm64\"]'", job_block(self.workflow, "pr-binaries"))
         marker = job_block(self.workflow, "pr-marker-image")

@@ -33,9 +33,9 @@ for f in "$SRC"/*.yar "$SRC"/*.yara; do
 	[ -e "$f" ] || continue
 	printf '%s\n' "$f" >>"$list"
 done
-# Validate every file on its own, in parallel (one helper process, one yarac per
-# file); the helper records the same per-file invocations, in this order, as a
-# serial loop would, and writes the accepted namespace:path roots to $good.
+# Validate every file on its own, serially by default (one helper process, one
+# yarac per file). The helper preserves per-file invocation order and writes
+# the accepted namespace:path roots to $good.
 status=0
 # shellcheck disable=SC2086
 python3 "$HELPER" validate "$retained" "$good" "$list" yarac $EXT || status=$?

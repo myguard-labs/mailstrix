@@ -319,6 +319,49 @@ class BatchRunnerTests(unittest.TestCase):
         self.assertEqual(len(expected), 36)
         self.assertEqual(len(expected), len(set(expected)))
         self.assertEqual(len(self.runner.SUITES), 2)
+        loaded = []
+        module_paths = {name: path for path, name in self.runner.SUITES}
+
+        def collect(suite):
+            for item in suite:
+                if isinstance(item, unittest.TestSuite):
+                    collect(item)
+                else:
+                    module, identity = item.id().split(".", 1)
+                    loaded.append(f"{module_paths[module]}::{identity}")
+            return unittest.TestResult()
+
+        with mock.patch.object(self.runner.unittest, "TextTestRunner") as runner:
+            runner.return_value.run.side_effect = collect
+            self.assertEqual(self.runner.main(), 0)
+        self.assertEqual(len(loaded), 36)
+        self.assertCountEqual(loaded, expected)
+
+    def test_same_count_loader_drop_duplicate_is_detected(self):
+        original = unittest.TestLoader.loadTestsFromModule
+
+        def flatten(suite):
+            for item in suite:
+                if isinstance(item, unittest.TestSuite):
+                    yield from flatten(item)
+                else:
+                    yield item
+
+        def wrong_ids(loader, module, *args, **kwargs):
+            suite = original(loader, module, *args, **kwargs)
+            if module.__name__ == self.runner.SUITES[0][1]:
+                cases = list(flatten(suite))
+                self.assertGreater(len(cases), 1)
+                return unittest.TestSuite(cases[1:] + [cases[1]])
+            return suite
+
+        with mock.patch.object(unittest.TestLoader, "loadTestsFromModule", wrong_ids):
+            red = unittest.TestResult()
+            self.__class__(
+                "test_exact_qualification_route_and_selected_suite_identities"
+            ).run(red)
+        self.assertEqual(len(red.failures), 1, red.errors)
+        self.assertIn("Element counts were not equal", red.failures[0][1])
 
     def test_removed_group_or_omitted_suite_mutants_are_detected(self):
         step = named_step("scanners", "parity qualification failure artifacts")

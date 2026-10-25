@@ -625,43 +625,50 @@ jobs:
           RSPAMD_SELECTED: ${{ needs.changes.outputs.rspamd }}
           SPAMASSASSIN_SELECTED: ${{ needs.changes.outputs.spamassassin }}
         run: |
-          test "$CHANGES_RESULT" = success
+          fail() {
+            printf 'ci-ok: %s (event=%s)\n' "$*" "$EVENT_NAME" >&2
+            return 1
+          }
+          test "$CHANGES_RESULT" = success || fail "group=plan dependency=changes result=$CHANGES_RESULT"
           require_selected() {
             case "$1:$2" in
               true:success|false:skipped) ;;
-              *) return 1 ;;
+              *) fail "group=$3 dependency=$4 selected=$1 result=$2" ;;
             esac
           }
           join_static_analysis() {
-            test "$SCANNERS_RESULT" = success
-            test "$DOCKER_RESULT" = success
+            test "$SCANNERS_RESULT" = success || fail "group=static-analysis dependency=scanners result=$SCANNERS_RESULT"
+            test "$DOCKER_RESULT" = success || fail "group=static-analysis dependency=docker result=$DOCKER_RESULT"
           }
           join_go_correctness() {
-            test "$DOCKER_RESULT" = success
+            test "$DOCKER_RESULT" = success || fail "group=go-correctness dependency=docker result=$DOCKER_RESULT"
             case "$GO_SELECTED:$SCOPE_SELECTED" in
               true:true|true:false|false:true) selected=true ;;
               false:false) selected=false ;;
-              *) return 1 ;;
+              *) fail "group=go-correctness go_selected=$GO_SELECTED scope_selected=$SCOPE_SELECTED" ;;
             esac
-            require_selected "$selected" "$LINT_RESULT"
+            require_selected "$selected" "$LINT_RESULT" go-correctness lint
           }
           join_native_builds_artifacts() {
-            require_selected "$NATIVE_SELECTED" "$NATIVE_RESULT"
-            case "$RELEASE_IMAGE_SELECTED" in true|false) ;; *) return 1 ;; esac
+            require_selected "$NATIVE_SELECTED" "$NATIVE_RESULT" native-builds-artifacts compiler-inputs
+            case "$RELEASE_IMAGE_SELECTED" in
+              true|false) ;;
+              *) fail "group=native-builds-artifacts release_image_selected=$RELEASE_IMAGE_SELECTED" ;;
+            esac
             case "$EVENT_NAME" in
               pull_request) pr_image_selected="$RELEASE_IMAGE_SELECTED" ;;
               push|schedule) pr_image_selected=false ;;
               workflow_dispatch|workflow_call) pr_image_selected=false ;;
-              *) return 1 ;;
+              *) fail "group=native-builds-artifacts unsupported event" ;;
             esac
-            require_selected "$pr_image_selected" "$PR_BINARIES_RESULT"
-            require_selected "$pr_image_selected" "$PR_MARKER_IMAGE_RESULT"
+            require_selected "$pr_image_selected" "$PR_BINARIES_RESULT" native-builds-artifacts pr-binaries
+            require_selected "$pr_image_selected" "$PR_MARKER_IMAGE_RESULT" native-builds-artifacts pr-marker-image
           }
           join_contracts_integrations() {
-            test "$DOCKER_RESULT" = success
-            require_selected "$PARITY_SELECTED" "$PARITY_RESULT"
-            require_selected "$RSPAMD_SELECTED" "$RSPAMD_RESULT"
-            require_selected "$SPAMASSASSIN_SELECTED" "$SPAMASSASSIN_RESULT"
+            test "$DOCKER_RESULT" = success || fail "group=contracts-integrations dependency=docker result=$DOCKER_RESULT"
+            require_selected "$PARITY_SELECTED" "$PARITY_RESULT" contracts-integrations parity-isolation
+            require_selected "$RSPAMD_SELECTED" "$RSPAMD_RESULT" contracts-integrations rspamd
+            require_selected "$SPAMASSASSIN_SELECTED" "$SPAMASSASSIN_RESULT" contracts-integrations spamassassin
           }
           join_static_analysis
           join_go_correctness

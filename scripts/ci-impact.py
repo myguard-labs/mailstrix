@@ -244,6 +244,7 @@ RULES = {
 RULES["release_image"] = [
     *(path for path in RULES["image"] if path != "docker/bake.ci.hcl"),
     "docker/Dockerfile.release",
+    "NOTICE",
     "docker/release-marker-toolchain.sh",
     "docker/release-local-artifacts.sh",
     "ci/release_marker_image_test.sh",
