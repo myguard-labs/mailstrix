@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +26,60 @@ type markerRetryState struct {
 }
 
 const markerRetryMaxAttempts = 7 // exponent saturation: delays stay at one hour
+
+// A retry snapshot moves from absent to leased while .rules.lock is held.
+// Its directory inode is the lease: no separate lease file can be missing,
+// replaced or inherited from another generation. The owner holds the flock
+// through staging, verification and removal, including after .rules.lock is
+// released. Process exit releases it automatically. Startup cleanup holds
+// .rules.lock, acquires the same lease nonblocking, and removes only stale,
+// unleased directories. Age alone never authorizes deleting an active snapshot.
+func lockMarkerRetrySnapshot(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// Cooperating writers replace the live bundle atomically under .rules.lock,
+// so a hardlink pins its old inode without copying and syncing the full file.
+// Copy symlinks instead: a relative link resolves differently inside snapshot.
+// The caller holds .rules.lock until the snapshot and retry claim are ready.
+func snapshotMarkerRetryBundle(src, dst string, link func(string, string) error) error {
+	fi, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().IsRegular() && link(src, dst) == nil {
+		return nil
+	}
+	return copyFileAtomic(src, dst)
+}
+
+func cleanupMarkerRetrySnapshot(path string) error {
+	lease, err := lockMarkerRetrySnapshot(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lease.Close() }()
+	opened, err := lease.Stat()
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(opened, current) {
+		return fmt.Errorf("retry snapshot changed during cleanup: %s", path)
+	}
+	return os.RemoveAll(path)
+}
 
 type rulesHTTPStatusError int
 
@@ -92,9 +147,18 @@ func retryRemoteMarker(ctx context.Context, hc *http.Client, base, cacheDir stri
 		unlock()
 		return res, err
 	}
-	defer func() { _ = os.RemoveAll(snapshot) }()
+	lease, err := lockMarkerRetrySnapshot(snapshot)
+	if err != nil {
+		_ = os.RemoveAll(snapshot)
+		unlock()
+		return res, err
+	}
+	defer func() {
+		_ = os.RemoveAll(snapshot)
+		_ = lease.Close()
+	}()
 	bundle := filepath.Join(snapshot, cachedRulesName)
-	if err := copyFileAtomic(cachePath, bundle); err != nil {
+	if err := snapshotMarkerRetryBundle(cachePath, bundle, os.Link); err != nil {
 		unlock()
 		return res, err
 	}

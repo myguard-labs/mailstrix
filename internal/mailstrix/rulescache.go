@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	yara "github.com/hillu/go-yara/v4"
@@ -132,7 +133,8 @@ func cleanupRollbackDirs(cacheDir string, logf func(string, ...any)) {
 const staleFetchTempAge = 6 * time.Hour
 
 // cleanupStaleFetchTemps removes .marker-stage-* directories and
-// .compiled-dl-*.tmp files that a crashed fetch left in cacheDir. Only entries
+// .compiled-dl-*.tmp files that a crashed fetch left in cacheDir, plus stale
+// .marker-retry-* directories whose per-snapshot lease is available. Only entries
 // whose own mtime (Lstat, never following links) is older than staleFetchTempAge
 // are touched. A symlink with a matching name is removed as a link only; its
 // target is never read or deleted. Errors are logged and never abort startup.
@@ -152,7 +154,8 @@ func cleanupStaleFetchTempsAt(cacheDir string, cutoff time.Time, logf func(strin
 		name := entry.Name()
 		isStage := strings.HasPrefix(name, ".marker-stage-")
 		isDownload := strings.HasPrefix(name, ".compiled-dl-") && strings.HasSuffix(name, ".tmp")
-		if !isStage && !isDownload {
+		isRetry := strings.HasPrefix(name, ".marker-retry-")
+		if !isStage && !isDownload && !isRetry {
 			continue
 		}
 		path := filepath.Join(cacheDir, name)
@@ -164,7 +167,12 @@ func cleanupStaleFetchTempsAt(cacheDir string, cutoff time.Time, logf func(strin
 			continue
 		}
 		mode := fi.Mode()
+		if isRetry && !mode.IsDir() {
+			continue // retry leases require a real directory, never a link or file
+		}
 		switch {
+		case isRetry:
+			err = cleanupMarkerRetrySnapshot(path)
 		case mode&os.ModeSymlink != 0:
 			err = os.Remove(path) // the link itself, never its target
 		case isStage && mode.IsDir():
@@ -174,7 +182,7 @@ func cleanupStaleFetchTempsAt(cacheDir string, cutoff time.Time, logf func(strin
 		default:
 			continue // wrong type for its name: not ours
 		}
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.EWOULDBLOCK) {
 			logf("WARNING: remove stale rules fetch temporary %s: %v", path, err)
 		}
 	}

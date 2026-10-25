@@ -8,4 +8,4 @@ test -s ci/testdata/marker-runtime.zip || {
 	printf 'prepare native fixtures first: python3 ci/prepare_marker_runtime.py\n' >&2
 	exit 1
 }
-exec go test -count=1 -race -tags yara_static -run '^TestFetchRulesMarkerRetry' ./internal/mailstrix
+exec go test -count=1 -race -tags yara_static -run '^Test(FetchRulesMarkerRetry|MarkerRetrySnapshot)' ./internal/mailstrix
