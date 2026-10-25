@@ -1047,7 +1047,7 @@ func TestManifestMarkerRejectsUndecodableManifest(t *testing.T) {
 func TestPrepareRemoteMarkerTreeDefaultLogger(t *testing.T) {
 	buf := captureLog(t)
 	remote := RulesManifest{Version: 9, markerErr: errors.New("bad marker")}
-	if stage, status := prepareRemoteMarkerTree(context.Background(), nil, "", t.TempDir(), "", remote, fetchOptions{}); stage != "" || !strings.HasPrefix(status, MarkerStatusRejected) {
+	if stage, status, _ := prepareRemoteMarkerTree(context.Background(), nil, "", t.TempDir(), "", remote, fetchOptions{}); stage != "" || !strings.HasPrefix(status, MarkerStatusRejected) {
 		t.Fatalf("stage=%q status=%q", stage, status)
 	}
 	if !strings.Contains(buf.String(), "[mailstrix] ERROR: rules manifest v9 marker field ignored") {

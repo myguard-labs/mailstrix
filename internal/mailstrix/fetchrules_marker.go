@@ -141,7 +141,7 @@ func markerABIMatches(m *rulesMarker) bool {
 func stageMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, m *rulesMarker) (string, error) {
 	archive, err := downloadToTemp(ctx, hc, base+"/"+m.Asset, cacheDir, m.Size)
 	if err != nil {
-		return "", fmt.Errorf("download marker tree: %w", err)
+		return "", fmt.Errorf("download marker tree: %w", markerDownloadError{err: err})
 	}
 	defer func() { _ = os.Remove(archive) }()
 	if err := verifyBundle(archive, RulesManifest{Size: m.Size, Checksum: "sha256:" + m.SHA256}); err != nil {

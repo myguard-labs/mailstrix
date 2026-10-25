@@ -52,6 +52,9 @@ type RulesManifest struct {
 	// ignored. Neither is persisted in the local record.
 	marker    *rulesMarker
 	markerErr error
+	// markerRetry is local-only recovery state, never taken from a signed remote
+	// manifest. It permits retrying only the exact marker that failed transiently.
+	markerRetry *markerRetryState
 }
 
 // FetchResult reports what FetchRules did, for logging and the CLI exit code.
@@ -61,7 +64,7 @@ type FetchResult struct {
 	NewVersion       int  // version after (== LocalVersion when not updated)
 	Reason           string
 	PublishedVersion int // latest validated remote manifest, even on later failure
-	// Marker is the marker-tree outcome of an update (MarkerStatus* prefix,
+	// Marker is the marker-tree outcome of an update or same-version recovery (MarkerStatus* prefix,
 	// optionally followed by ": <reason>"); empty when nothing was installed.
 	Marker string
 }
@@ -88,6 +91,8 @@ type fetchOptions struct {
 	markersOff bool
 	// logf receives marker-tree diagnostics; nil uses the standard logger.
 	logf func(format string, args ...any)
+	// now permits deterministic backoff tests without sleeping.
+	now func() time.Time
 }
 
 // FetchRulesOptions are the optional FetchRulesWithOptions parameters.
@@ -123,7 +128,9 @@ func FetchRulesWithOptions(ctx context.Context, baseURL, cacheDir, ourLibyara st
 //     An ALREADY-INSTALLED local manifest is never signature-checked, so an
 //     existing deployment keeps serving its cached bundle; it simply cannot be
 //     updated until the publisher signs.
-//  2. remote.Version <= local.Version  => up to date, nothing downloaded.
+//  2. remote.Version <= local.Version => up to date. A recorded transient
+//     marker failure may retry only its exact signed marker after backoff;
+//     recovery keeps the bundle/version and reports Updated=false.
 //  3. remote.Libyara != ourLibyara     => refuse (skew), keep current.
 //  4. GET compiled.yac, verify size + sha256 against the manifest. Mismatch =>
 //     discard, keep current.
@@ -281,6 +288,9 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 		return res, fmt.Errorf("published version %d is older than loaded version %d", remote.Version, opts.minimumVersion)
 	}
 	if remote.Version <= local.Version {
+		if remote.Version == local.Version && markerRetryMatches(local, remote, opts) {
+			return retryRemoteMarker(ctx, hc, base, cacheDir, remote, opts, res)
+		}
 		res.Reason = fmt.Sprintf("up to date (local v%d, remote v%d)", local.Version, remote.Version)
 		return res, nil
 	}
@@ -309,7 +319,8 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	if err != nil {
 		return res, fmt.Errorf("downloaded bundle does not load (keeping current cache): %w", err)
 	}
-	markerStage, markerStatus := prepareRemoteMarkerTree(ctx, hc, base, cacheDir, tmp, remote, opts)
+	markerStage, markerStatus, markerErr := prepareRemoteMarkerTree(ctx, hc, base, cacheDir, tmp, remote, opts)
+	remote.markerRetry = newMarkerRetry(remote.marker, markerErr, 0, markerRetryNow(opts))
 	if markerStage != "" {
 		defer func() { _ = os.RemoveAll(markerStage) }()
 	}
@@ -323,6 +334,13 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	res.LocalVersion, res.NewVersion = local.Version, local.Version
 	if remote.Version <= local.Version {
 		res.Reason = "up to date after concurrent update"
+		if markerStage != "" && markerRetryMatches(local, remote, opts) {
+			if err := installRetriedMarker(ctx, cacheDir, local, markerStage, opts); err != nil {
+				return res, err
+			}
+			res.Marker = MarkerStatusInstalled
+			res.Reason = fmt.Sprintf("marker tree recovered for v%d", local.Version)
+		}
 		return res, nil
 	}
 	// Refuse an empty or sharply shrunken ruleset (counted from the loaded bundle,
@@ -456,15 +474,16 @@ func LoadSources(dir string) []RuleSource {
 // readLocalManifest returns the cached manifest, or a zero-version manifest when
 // none exists / is unreadable (so a first run always sees an update available).
 func readLocalManifest(path string) RulesManifest {
-	var m RulesManifest
+	var record localRulesRecord
 	b, err := os.ReadFile(path) // #nosec G304 -- cache path is operator-configured
 	if err != nil {
 		return RulesManifest{}
 	}
-	if json.Unmarshal(b, &m) != nil {
+	if json.Unmarshal(b, &record) != nil {
 		return RulesManifest{}
 	}
-	return m
+	record.markerRetry = record.MarkerRetry
+	return record.RulesManifest
 }
 
 // A version only suppresses downloads when its record describes the actual
@@ -479,7 +498,7 @@ func trustedLocalManifest(bundle, path string) RulesManifest {
 }
 
 func writeLocalManifest(path string, m RulesManifest) error {
-	b, err := json.MarshalIndent(m, "", "  ")
+	b, err := json.MarshalIndent(localRulesRecord{RulesManifest: m, MarkerRetry: m.markerRetry}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -604,35 +623,35 @@ func markerTreeContext(parent context.Context) (context.Context, context.CancelF
 // prepareRemoteMarkerTree decides and, when warranted, stages the marker tree
 // for remote. It never fails the update: every problem is logged, reported in
 // the returned status, and leaves the full-ruleset fallback in place.
-func prepareRemoteMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, remote RulesManifest, opts fetchOptions) (string, string) {
+func prepareRemoteMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, remote RulesManifest, opts fetchOptions) (string, string, error) {
 	logf := opts.logf
 	if logf == nil {
 		logf = func(format string, args ...any) { log.Printf("[mailstrix] "+format, args...) }
 	}
 	switch {
 	case opts.markersOff:
-		return "", MarkerStatusDisabled
+		return "", MarkerStatusDisabled, nil
 	case remote.markerErr != nil:
 		logf("ERROR: rules manifest v%d marker field ignored (compiled.yac installs; full ruleset fallback): %v", remote.Version, remote.markerErr)
-		return "", MarkerStatusRejected + ": " + remote.markerErr.Error()
+		return "", MarkerStatusRejected + ": " + remote.markerErr.Error(), nil
 	case remote.marker == nil:
-		return "", MarkerStatusAbsent
+		return "", MarkerStatusAbsent, nil
 	case !markerABIMatches(remote.marker):
 		logf("PERF-18: rules manifest v%d marker tree targets another libyara/compiler build; full ruleset fallback", remote.Version)
-		return "", MarkerStatusSkipped + ": linked libyara/compiler identity differs"
+		return "", MarkerStatusSkipped + ": linked libyara/compiler identity differs", nil
 	}
 	mctx, cancel, ok := markerTreeContext(ctx)
 	defer cancel()
 	if !ok {
 		logf("ERROR: rules manifest v%d marker tree skipped: remaining fetch budget is below the reserve kept for installing compiled.yac (full ruleset fallback)", remote.Version)
-		return "", MarkerStatusSkipped + ": fetch budget below the reserve kept for the compiled.yac install"
+		return "", MarkerStatusSkipped + ": fetch budget below the reserve kept for the compiled.yac install", context.DeadlineExceeded
 	}
 	stage, err := stageMarkerTree(mctx, hc, base, cacheDir, bundle, remote.marker)
 	if err != nil {
 		logf("ERROR: rules manifest v%d marker tree refused (compiled.yac installs; full ruleset fallback): %v", remote.Version, err)
-		return "", MarkerStatusRejected + ": " + err.Error()
+		return "", MarkerStatusRejected + ": " + err.Error(), err
 	}
-	return stage, MarkerStatusInstalled
+	return stage, MarkerStatusInstalled, nil
 }
 
 // downloadToTemp streams url into a new temp file in dir, returning its path.
@@ -647,7 +666,7 @@ func downloadToTemp(ctx context.Context, hc *http.Client, url, dir string, size 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("status %d", resp.StatusCode)
+		return "", rulesHTTPStatusError(resp.StatusCode)
 	}
 	f, err := os.CreateTemp(dir, ".compiled-dl-*.tmp")
 	if err != nil {
