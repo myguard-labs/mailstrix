@@ -2,7 +2,7 @@ module github.com/myguard-labs/mailstrix
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/Teamwork/tnef v0.0.0-20200108124832-7deabccfdb32
