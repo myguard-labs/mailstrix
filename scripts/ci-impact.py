@@ -200,7 +200,11 @@ RULES = {
         "packaging/deb/rule_source_args_test.sh",
         "ci/fetch_rules_family_denylist_test.sh",
     ],
-    "filter": ["docker/filter-rules.py", "packaging/deb/filter_rules_test.sh"],
+    "filter": [
+        "docker/filter-rules.py",
+        "packaging/deb/filter_rules_test.sh",
+        "ci/filter_rules_regex_test.py",
+    ],
     "envkeys": [
         "ci/rules_polling_defaults_test.sh",
         "ci/dockerfile_rules_helpers_test.sh",

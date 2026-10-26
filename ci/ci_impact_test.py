@@ -30,6 +30,23 @@ class ImpactTests(unittest.TestCase):
         self.assertFalse(selected["image"])
         self.assertEqual(selected["changed_files"], "--changed -- ")
 
+    def test_filter_regex_controls_select_their_owning_shell_suite(self):
+        path = "ci/filter_rules_regex_test.py"
+        selected = impact.plan([path])
+        self.assertTrue(selected["filter"])
+        self.assertFalse(selected["image"])
+        self.assertFalse(selected["go"])
+        shell = (ROOT / "packaging/deb/filter_rules_test.sh").read_text()
+        self.assertIn('python3 -B "$root/ci/filter_rules_regex_test.py"', shell)
+        with (
+            mock.patch.dict(
+                impact.RULES,
+                filter=[name for name in impact.RULES["filter"] if name != path],
+            ),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+
     def test_parity_batch_runner_selects_both_owning_controls(self):
         selected = impact.plan(["scripts/ci-test-batch.py"])
         self.assertTrue(selected["scope"])

@@ -60,4 +60,5 @@ if [ -s "$bad" ]; then
     exit 1
 fi
 echo "ok   - filter-rules.py: KEEP-wins + private-kept + host-only-dropped"
+python3 -B "$root/ci/filter_rules_regex_test.py"
 echo "ALL OK"
