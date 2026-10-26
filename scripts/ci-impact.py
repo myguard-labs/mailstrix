@@ -258,8 +258,13 @@ RULES["release_image"] = [
     ".github/workflows/release.yml",
 ]
 GO_INPUTS = [
+    "ci/archive_decoder_incomplete_test.go",
+    "ci/testdata/archive_decoder_incomplete_test.go",
+    "ci/testdata/archive_decoder_http_test.go",
     "ci/icap_admission_ordering_test.go",
     "ci/testdata/icap_admission_ordering_test.go",
+    "ci/icap_identity_test.go",
+    "ci/testdata/icap_identity_test.go",
     "ci/clamd_admission_ordering_test.go",
     "ci/testdata/clamd_admission_ordering_test.go",
     "ci/cache_distribution/*.go",

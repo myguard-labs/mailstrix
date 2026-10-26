@@ -573,7 +573,9 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	// path does; autoEnvDefault needs the admission slot held above.
 	icapMeta := ScanMeta{RawKey: streamDedupKey(buf),
 		Effort: ResolveEffortLevel(0, false, s.autoEnvDefault(true), s.cfg.EffortMax)}
-	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap", buf, icapMeta)
+	// Resolved effort can change with load. Cache entries and in-flight scans
+	// must therefore share the same metadata as well as the same body.
+	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap:"+icapMeta.cacheKey(), buf, icapMeta)
 	if cacheStatus == "canceled" {
 		// A follower that stopped waiting on its leader has no verdict: answer
 		// 503 so the client retries or applies its own policy, never 204 clean.
