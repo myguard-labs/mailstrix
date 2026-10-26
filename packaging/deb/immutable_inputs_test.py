@@ -35,8 +35,8 @@ IMAGE_PINS = {
     "docker/dockerfile:1": (
         "ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32"
     ),
-    "gcr.io/distroless/base-debian12:nonroot": (
-        "7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5"
+    "gcr.io/distroless/base-debian13:nonroot": (
+        "f9518b74815721f537a7458cc693b4406208c04fce23bbffab511516117f34fd"
     ),
     "golang:1.26.10-bookworm": (
         "632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af"
@@ -1047,6 +1047,27 @@ class PinFixtures(unittest.TestCase):
             "label/digest pair",
             docker_errors(recipe.replace(digest, "2" * 64))[0],
         )
+
+    def test_runtime_stages_share_supported_nonroot_distroless_pin(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        image = (
+            "gcr.io/distroless/base-debian13:nonroot@sha256:"
+            "f9518b74815721f537a7458cc693b4406208c04fce23bbffab511516117f34fd"
+        )
+        expected_stages = {
+            "docker/Dockerfile": {"parity-runtime", "rules-verifier", "final"},
+            "docker/Dockerfile.release": {"rules-verifier", "final"},
+        }
+        for relative, stages in expected_stages.items():
+            text = (root / relative).read_text()
+            actual = {
+                match.group(2): match.group(1)
+                for match in re.finditer(r"(?m)^FROM (\S+) AS (\S+)$", text)
+                if match.group(2) in stages
+            }
+            with self.subTest(path=relative):
+                self.assertEqual(actual, {stage: image for stage in stages})
+                self.assertNotIn("gcr.io/distroless/base-debian12:", text)
 
     def test_yara_checksum_before_extract(self) -> None:
         self.assertEqual([], docker_errors(self.yara))
