@@ -1021,7 +1021,11 @@ func readICAPChunkedAppend(r *bufio.Reader, out []byte, maxBytes int64) ([]byte,
 			}
 			return out, hasIEOF, nil
 		}
-		if int64(len(out))+size > maxBytes {
+		// Compare against the remaining allowance instead of adding attacker-
+		// controlled size to the existing preview length: that sum can overflow
+		// int64 and bypass the limit before allocation or payload consumption.
+		used := int64(len(out))
+		if used > maxBytes || size > maxBytes-used {
 			return nil, false, errICAPBodyTooLarge
 		}
 		sizeInt := int(size)
