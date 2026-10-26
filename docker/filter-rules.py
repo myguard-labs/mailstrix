@@ -131,7 +131,6 @@ def split_rules(text):
         in_regex = False  # inside a /.../ regex literal
         in_line_comment = False
         in_block_comment = False
-        prev_sig = "{"  # last significant (non-space) char — to disambiguate `/`
         while j < n:
             c = text[j]
             nx = text[j + 1] if j + 1 < n else ""
@@ -148,9 +147,8 @@ def split_rules(text):
                 elif c == in_str:
                     in_str = None
             elif in_regex:
-                # A regex ends at an unescaped `/`. `[...]` classes may contain
-                # an escaped `/`; we only honor `\/` as escaped, good enough for
-                # YARA's flat regexes (no nested unescaped `/` in a class here).
+                # YARA ends a regex at the first unescaped `/`, including
+                # inside a character class; literal slashes must be escaped.
                 if c == "\\":
                     j += 1
                 elif c == "/":
@@ -162,9 +160,9 @@ def split_rules(text):
                 elif c == "/" and nx == "*":
                     in_block_comment = True
                     j += 1
-                elif c == "/" and prev_sig in ("=", "(", ",", "|", "&"):
-                    # `/` after an operator/'(' starts a regex literal
-                    # ($re = /.../, condition: ... matches /.../ ).
+                elif c == "/":
+                    # After comments, every `/` opens a YARA regex, including
+                    # after `matches`. Numeric division uses `\`, not `/`.
                     in_regex = True
                 elif c == '"':
                     in_str = '"'
@@ -175,8 +173,6 @@ def split_rules(text):
                     if depth == 0:
                         j += 1
                         break
-            if not c.isspace():
-                prev_sig = c
             j += 1
         body = text[i:j]
         tags_m = re.search(r'tags = "([^"]*)"', body)
