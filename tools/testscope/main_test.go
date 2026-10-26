@@ -37,6 +37,33 @@ func TestRarFixtureSelectsPublicCIConsumer(t *testing.T) {
 	}
 }
 
+func TestArchiveDecoderFixtureSelectsCIWrapper(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m/ci", Dir: "/r/ci"})
+	for _, file := range []string{
+		"ci/archive_decoder_incomplete_test.go",
+		"ci/testdata/archive_decoder_incomplete_test.go",
+		"ci/testdata/archive_decoder_http_test.go",
+	} {
+		got, err := selectChangedPackages([]string{file}, graph, "/r")
+		if err != nil || !reflect.DeepEqual(got, []string{"example.com/m/ci"}) {
+			t.Fatalf("%s: got %v, %v; want only CI wrapper package", file, got, err)
+		}
+	}
+}
+
+func TestICAPIdentityFixtureSelectsCIWrapper(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m/ci", Dir: "/r/ci"})
+	for _, file := range []string{
+		"ci/icap_identity_test.go",
+		"ci/testdata/icap_identity_test.go",
+	} {
+		got, err := selectChangedPackages([]string{file}, graph, "/r")
+		if err != nil || !reflect.DeepEqual(got, []string{"example.com/m/ci"}) {
+			t.Fatalf("%s: got %v, %v; want only CI wrapper package", file, got, err)
+		}
+	}
+}
+
 func sel(files ...string) string {
 	return strings.Join(selectPackages(files, testGraph(), "/r"), " ")
 }
