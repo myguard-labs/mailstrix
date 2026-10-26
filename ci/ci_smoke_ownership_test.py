@@ -1,5 +1,6 @@
 """Execute the real smoke scripts against a stateful, socket-free Docker fixture."""
 
+import concurrent.futures
 import io
 import json
 import os
@@ -319,16 +320,24 @@ class SmokeOwnershipTests(unittest.TestCase):
         self.assertEqual(set(state["created"]), set(state["removed"]))
 
     def test_create_start_partial_and_collision_errors_at_every_boundary(self):
-        for mode in (
+        modes = (
             "create-fail",
             "partial-create",
             "start-fail",
             "name-collision",
             "replaced-name",
-        ):
-            for fail_at in range(1, 17):
+        )
+        cases = tuple((mode, fail_at) for mode in modes for fail_at in range(1, 17))
+        self.assertEqual(len(cases), 80)
+        # Each invocation owns a private root and state file. Bound concurrency
+        # removes repeated process-startup wall time while retaining every case.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            results = {
+                case: executor.submit(self.invoke, *case) for case in cases
+            }
+            for (mode, fail_at), future in results.items():
                 with self.subTest(mode=mode, fail_at=fail_at):
-                    result, state = self.invoke(mode, fail_at)
+                    result, state = future.result()
                     self.assertNotEqual(result.returncode, 0)
                     self.assertGreaterEqual(
                         state["creates"], fail_at, "fault boundary never reached"
