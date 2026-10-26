@@ -708,19 +708,19 @@ class TestWorkflowControls(unittest.TestCase):
 
     def test_reviewed_gcr_image_aliases_remain_bound(self) -> None:
         digest = immutable_inputs.IMAGE_PINS[
-            "gcr.io/distroless/base-debian12:nonroot"
+            "gcr.io/distroless/base-debian13:nonroot"
         ]
         for host in ("GCR.IO", "gcr.io:443", "gcr.io:0443", "gcr.io."):
             self.write(
                 "packaging/tools/Dockerfile.gcr",
-                f"FROM {host}/distroless/base-debian12:nonroot@sha256:"
+                f"FROM {host}/distroless/base-debian13:nonroot@sha256:"
                 + "2" * 64
                 + "\n",
             )
             self.reject("label/digest pair does not match the reviewed pin")
             self.write(
                 "packaging/tools/Dockerfile.gcr",
-                f"FROM {host}/distroless/base-debian12:nonroot@sha256:{digest}\n",
+                f"FROM {host}/distroless/base-debian13:nonroot@sha256:{digest}\n",
             )
             result = self.gate()
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
