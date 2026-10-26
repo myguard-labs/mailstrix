@@ -179,7 +179,7 @@ func TestClientOmitsTokenHeaderWhenEmpty(t *testing.T) {
 			t.Error("token header sent despite an empty token")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Response{})
+		_ = json.NewEncoder(w).Encode(Response{Matches: []Match{}})
 	}))
 	defer srv.Close()
 

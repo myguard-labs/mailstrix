@@ -168,22 +168,10 @@ func TestEmulateXLMCells_FallbackStillWorksWithMarker(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestYARARule_FileExists(t *testing.T) {
-	// Walk up from the package dir to find the docker/local-rules path.
-	// The file is at a known relative location from the module root.
-	paths := []string{
-		"../../../../docker/local-rules/xlm_macrosheet.yara",
-		"../../../docker/local-rules/xlm_macrosheet.yara",
-	}
-	var data []byte
-	for _, p := range paths {
-		b, err := os.ReadFile(p)
-		if err == nil {
-			data = b
-			break
-		}
-	}
-	if data == nil {
-		t.Skip("xlm_macrosheet.yara not found relative to test dir — skipping file-content check")
+	// Go runs this test in internal/extract, two levels below the module root.
+	data, err := os.ReadFile("../../docker/local-rules/xlm_macrosheet.yara")
+	if err != nil {
+		t.Fatalf("read tracked XLM rule: %v", err)
 	}
 	if !bytes.Contains(data, []byte("XLM-EMUL-DEPTH")) {
 		t.Errorf("xlm_macrosheet.yara does not contain XLM-EMUL-DEPTH string")

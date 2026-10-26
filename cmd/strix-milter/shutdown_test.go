@@ -99,7 +99,7 @@ func TestShutdownDrainsAnInFlightSessionBeforeReturning(t *testing.T) {
 		enterOnce.Do(func() { close(entered) })
 		<-release
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(stub.Close)
 	defer func() {
