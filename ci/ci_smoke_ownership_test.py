@@ -273,6 +273,9 @@ class SmokeOwnershipTests(unittest.TestCase):
                 command, cwd=root, env=env, capture_output=True, check=False
             )
             state = json.loads(statepath.read_text())
+            self.assertNotIn(
+                b"Traceback", result.stderr, "fixture crashed, not a script failure"
+            )
             self.assertIn(
                 FOREIGN_ID, state["containers"], "cleanup deleted an unowned container"
             )
@@ -325,8 +328,11 @@ class SmokeOwnershipTests(unittest.TestCase):
         ):
             for fail_at in range(1, 17):
                 with self.subTest(mode=mode, fail_at=fail_at):
-                    result, _ = self.invoke(mode, fail_at)
+                    result, state = self.invoke(mode, fail_at)
                     self.assertNotEqual(result.returncode, 0)
+                    self.assertGreaterEqual(
+                        state["creates"], fail_at, "fault boundary never reached"
+                    )
 
     def test_foreign_cidfile_is_never_cleanup_authority(self):
         result, _ = self.invoke("foreign-cid")

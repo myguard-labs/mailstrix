@@ -283,6 +283,11 @@ class ImpactTests(unittest.TestCase):
                 ["go", "image"],
             ),
             ("ci/rules_polling_test.sh", ["image", "shell", "smoke"], ["go", "parity"]),
+            (
+                "ci/ci_smoke_ownership_test.py",
+                ["smoke"],
+                ["go", "image", "parity"],
+            ),
             ("docker/docker-compose.yml", ["envkeys"], ["go", "image"]),
             (
                 "packaging/deb/stop_timeout_test.sh",
