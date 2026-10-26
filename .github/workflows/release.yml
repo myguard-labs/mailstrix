@@ -68,6 +68,7 @@ jobs:
   debs:
     needs: binaries
     runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -142,6 +143,7 @@ jobs:
   release:
     needs: [binaries, debs, marker-image, libyara-repro]
     runs-on: [self-hosted, builder02, lxc]
+    timeout-minutes: 60
     permissions:
       contents: write   # create GitHub release + upload assets
     steps:
