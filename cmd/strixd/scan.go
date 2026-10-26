@@ -14,9 +14,10 @@ import (
 	"github.com/myguard-labs/mailstrix/internal/mailstrix"
 )
 
-// scanItem is one file's verdict in the JSON output. Err is set (and Matches
-// nil) when the file could not be read or scanned; the path still appears so a
-// pipeline sees every input accounted for.
+// scanItem is one file's verdict in the JSON output. Err is set when the file
+// could not be read or the scan could not complete. Read failures have no
+// matches; an incomplete scan may also return known Matches. The path still
+// appears so a pipeline sees every input accounted for.
 type scanItem struct {
 	Path    string            `json:"path"`
 	Matches []mailstrix.Match `json:"matches"`
@@ -219,30 +220,31 @@ func scanItemFromReader(path string, r io.Reader, scanner *mailstrix.Scanner, ma
 	meta.RawKey = mailstrix.StreamDedupKey(buf)
 	matches, err := scanner.Scan(buf, meta)
 	if err != nil {
-		return scanItem{Path: path, Err: err.Error()}
+		return scanItem{Path: path, Matches: matches, Err: err.Error()}
 	}
 	return scanItem{Path: path, Matches: matches}
 }
 
 // printItem renders one file's verdict in text mode. Clean files print a single
 // CLEAN line (suppressed under -quiet); a match prints one line per rule with its
-// source namespace so the operator sees WHICH ruleset fired.
+// source namespace so the operator sees WHICH ruleset fired. Partial results
+// print every known match and their scan error.
 func printItem(it scanItem, quiet bool) {
-	switch {
-	case it.Err != "":
-		fmt.Printf("%s: ERROR %s\n", it.Path, it.Err)
-	case len(it.Matches) == 0:
+	if len(it.Matches) == 0 && it.Err == "" {
 		if !quiet {
 			fmt.Printf("%s: CLEAN\n", it.Path)
 		}
-	default:
-		for _, m := range it.Matches {
-			if m.Namespace != "" {
-				fmt.Printf("%s: MATCH %s (%s)\n", it.Path, m.Rule, m.Namespace)
-			} else {
-				fmt.Printf("%s: MATCH %s\n", it.Path, m.Rule)
-			}
+		return
+	}
+	for _, m := range it.Matches {
+		if m.Namespace != "" {
+			fmt.Printf("%s: MATCH %s (%s)\n", it.Path, m.Rule, m.Namespace)
+		} else {
+			fmt.Printf("%s: MATCH %s\n", it.Path, m.Rule)
 		}
+	}
+	if it.Err != "" {
+		fmt.Printf("%s: ERROR %s\n", it.Path, it.Err)
 	}
 }
 

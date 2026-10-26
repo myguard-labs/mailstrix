@@ -29,6 +29,7 @@ class ImpactTests(unittest.TestCase):
             ("ci/ci_xlm_rule_locator_test.py", "scope"),
             ("ci/spamassassin_child_status.t", "spamassassin"),
             ("ci/verdict_envelope_test.go", "go"),
+            ("ci/local_scan_partial_test.go", "go"),
         ]:
             with self.subTest(path=path):
                 selected = impact.plan([path])
