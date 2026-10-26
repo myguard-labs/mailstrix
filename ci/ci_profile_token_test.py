@@ -3,10 +3,13 @@
 
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,10 +19,9 @@ class ProfileTokenTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             recorder = (
-                "#!/usr/bin/python3\n"
                 "import json,os,sys\n"
-                "name=os.path.basename(sys.argv[0])\n"
-                "args=sys.argv[1:]\n"
+                "name=os.path.basename(sys.argv[1])\n"
+                "args=sys.argv[2:]\n"
                 'header=sys.stdin.read() if name=="curl" and "@-" in args else ""\n'
                 'with open(os.environ["CAPTURE"],"a") as f:\n'
                 ' f.write(json.dumps({"command":name,"argv":args,"header":header})+"\\n")\n'
@@ -30,7 +32,11 @@ class ProfileTokenTest(unittest.TestCase):
             # Keep all children hermetic, including optional pprof and timestamp.
             for name in ["curl", "date", "go", "mkdir"]:
                 path = root / name
-                path.write_text(recorder)
+                # A quoted shell launcher also supports interpreter paths with spaces.
+                path.write_text(
+                    f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+                    f'-c {shlex.quote(recorder)} "$0" "$@"\n'
+                )
                 path.chmod(0o755)
             capture = root / "calls"
             env = dict(
@@ -101,6 +107,32 @@ class ProfileTokenTest(unittest.TestCase):
             result, calls = self.capture(token)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(calls, [])
+
+    def test_helpers_use_selected_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trace = root / "interpreter-calls"
+            interpreter = root / "selected python"
+            interpreter.write_text(
+                "#!/bin/sh\nset -eu\n"
+                'printf \'%s\\n\' "$3" >> "$PROFILE_INTERPRETER_TRACE"\n'
+                f'exec {shlex.quote(sys.executable)} "$@"\n'
+            )
+            interpreter.chmod(0o755)
+            with (
+                mock.patch.object(sys, "executable", str(interpreter)),
+                mock.patch.dict(os.environ, PROFILE_INTERPRETER_TRACE=str(trace)),
+            ):
+                result, calls = self.capture("synthetic-interpreter-fixture")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(calls), 4)
+            self.assertTrue(
+                trace.exists(), "helpers bypassed the selected Python interpreter"
+            )
+            self.assertCountEqual(
+                [Path(line).name for line in trace.read_text().splitlines()],
+                ["date", "mkdir", *(["curl", "go"] * 4)],
+            )
 
 
 if __name__ == "__main__":
