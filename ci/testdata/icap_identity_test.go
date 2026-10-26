@@ -3,7 +3,9 @@ package mailstrix
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -249,5 +251,45 @@ func TestICAPIdentityIncompleteNeverCached(t *testing.T) {
 	}
 	if got := engine.scans.Load(); got != 2 {
 		t.Fatalf("incomplete result reused: scans=%d", got)
+	}
+}
+
+func TestICAPIdentityProtocolNamespace(t *testing.T) {
+	for _, method := range []string{"REQMOD", "RESPMOD"} {
+		for _, filename := range []string{"icap", "icap:"} {
+			for _, httpFirst := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/http-first=%t", method, filename, httpFirst), func(t *testing.T) {
+					engine := &icapIdentityEngine{fakeEngine: &fakeEngine{fp: "identity"}}
+					s := icapIdentityServer(engine, 4, false)
+					httpRequest := func() {
+						req := httptest.NewRequest("POST", "/scan", strings.NewReader(icapIdentityBody))
+						req.Header.Set("Content-Length", fmt.Sprint(len(icapIdentityBody)))
+						req.Header.Set(filenameHeader, base64.StdEncoding.EncodeToString([]byte(filename)))
+						response := httptest.NewRecorder()
+						s.handleScan(response, req)
+						if response.Code != 200 {
+							t.Fatalf("HTTP control status=%d: %s", response.Code, response.Body.String())
+						}
+					}
+					icapRequest := func() { checkICAPIdentityReply(t, icapIdentityRequest(s, method, ""), 4) }
+					first, second := icapRequest, httpRequest
+					wantLastName := filename
+					if httpFirst {
+						first, second = httpRequest, icapRequest
+						wantLastName = ""
+					}
+					first()
+					second()
+					if engine.scans.Load() != 2 || engine.lastMeta.Load().Filename != wantLastName {
+						t.Fatalf("ICAP namespace collided with HTTP filename: scans=%d meta=%+v", engine.scans.Load(), engine.lastMeta.Load())
+					}
+					first()
+					second()
+					if engine.scans.Load() != 2 || s.metrics.cacheHit.Load() != 2 {
+						t.Fatalf("same-protocol repeats must reuse: scans=%d hits=%d", engine.scans.Load(), s.metrics.cacheHit.Load())
+					}
+				})
+			}
+		}
 	}
 }

@@ -38,7 +38,7 @@ func TestICAPIdentityFixture(t *testing.T) {
 		t.Fatalf("ICAP identity fixture failed: %v\n%s", err, out)
 	}
 	text := string(out)
-	for _, name := range []string{"TestICAPIdentityEffortCacheSeparation", "TestICAPIdentityDefaultsAndHeaders", "TestICAPIdentityConcurrentEfforts", "TestICAPIdentityIncompleteNeverCached"} {
+	for _, name := range []string{"TestICAPIdentityEffortCacheSeparation", "TestICAPIdentityDefaultsAndHeaders", "TestICAPIdentityConcurrentEfforts", "TestICAPIdentityIncompleteNeverCached", "TestICAPIdentityProtocolNamespace"} {
 		if !strings.Contains(text, "--- PASS: "+name+" (") {
 			t.Fatalf("ICAP identity fixture did not report PASS for %s:\n%s", name, out)
 		}

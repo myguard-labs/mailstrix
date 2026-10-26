@@ -575,7 +575,8 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 		Effort: ResolveEffortLevel(0, false, s.autoEnvDefault(true), s.cfg.EffortMax)}
 	// Resolved effort can change with load. Cache entries and in-flight scans
 	// must therefore share the same metadata as well as the same body.
-	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap:"+icapMeta.cacheKey(), buf, icapMeta)
+	// A NUL-delimited namespace cannot alias an HTTP filename's metadata key.
+	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap\x00"+icapMeta.cacheKey(), buf, icapMeta)
 	if cacheStatus == "canceled" {
 		// A follower that stopped waiting on its leader has no verdict: answer
 		// 503 so the client retries or applies its own policy, never 204 clean.
