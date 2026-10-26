@@ -274,6 +274,7 @@ GO_INPUTS = [
     "ci/cache_byte_bound_test.go",
     "ci/local_scan_partial_test.go",
     "ci/feed_set_bytes_test.go",
+    "ci/http_lifecycle_test.go",
     "ci/marker_runtime_fixture.py",
     "ci/prepare_marker_runtime.py",
     "ci/ci_marker_runtime_fixture_test.py",

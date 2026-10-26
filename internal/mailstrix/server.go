@@ -106,8 +106,14 @@ type Server struct {
 	info *log.Logger // access/info — stdout when MAILSTRIX_LOG_STDOUT, else stderr
 	errl *log.Logger // errors/warnings — always stderr
 
-	httpSrv  atomic.Pointer[http.Server] // set by ListenAndServe; used by Shutdown
-	draining atomic.Bool                 // true once Shutdown begins -> /ready 503s
+	// httpMu makes publication and the transition to draining one atomic choice.
+	// Before publication the server is idle. ListenAndServe may publish only from
+	// idle while draining is false. Shutdown makes draining terminal and snapshots
+	// the published server, if any. A starter delayed behind that transition must
+	// return ErrServerClosed; a server published first is owned by Shutdown.
+	httpMu   sync.Mutex
+	httpSrv  *http.Server
+	draining atomic.Bool // true once Shutdown begins -> /ready 503s
 
 	icapLn          atomic.Pointer[net.Listener]
 	icapDown        atomic.Bool // ICAP listener failed to bind or stopped accepting -> /ready 503s (COR-15)
@@ -177,7 +183,13 @@ func (s *Server) ListenAndServe() error {
 		WriteTimeout:      s.httpWriteTimeout(),
 		IdleTimeout:       60 * time.Second,
 	}
-	s.httpSrv.Store(srv)
+	s.httpMu.Lock()
+	if s.draining.Load() {
+		s.httpMu.Unlock()
+		return http.ErrServerClosed
+	}
+	s.httpSrv = srv
+	s.httpMu.Unlock()
 	s.logStartup(addr)
 	return srv.ListenAndServe()
 }
@@ -186,8 +198,10 @@ func (s *Server) ListenAndServe() error {
 // balancers stop sending new work) and gracefully drains in-flight requests
 // until ctx expires. Safe to call before ListenAndServe has stored the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.httpMu.Lock()
 	s.draining.Store(true)
-	srv := s.httpSrv.Load()
+	srv := s.httpSrv
+	s.httpMu.Unlock()
 	if srv == nil {
 		return nil
 	}
