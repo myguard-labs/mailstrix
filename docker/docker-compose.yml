@@ -77,9 +77,10 @@ services:
       # MAILSTRIX_STATUS_LOG: "1"           # off by default
       # MAILSTRIX_STATUS_INTERVAL: "900"    # seconds; floor 60
 
-      # --- Auth (required) --------------------------------------------------
-      # strixd refuses every /scan (503) until a token is set. The rspamd plugin
-      # must present the same value. Prefer the _FILE form (Docker secret).
+      # --- Auth (enabled for this reference deployment) --------------------
+      # Core auth is optional, but this Compose file deliberately enables it
+      # with a file-backed secret. Without the matching token /scan returns 401;
+      # if the source file is missing, Compose cannot create the service.
       MAILSTRIX_TOKEN_FILE: /run/secrets/mailstrix_token
 
     secrets:
@@ -114,6 +115,10 @@ networks:
 
 secrets:
   mailstrix_token:
-    file: ./secrets/mailstrix_token.txt    # one line: the shared secret
+    # Generate once without printing it: install -d -m 700 secrets &&
+    # (umask 077; openssl rand -hex 32 > secrets/mailstrix_token.txt) &&
+    # chmod 0444 secrets/mailstrix_token.txt
+    # The container runs as uid 65532; owner-only host files are unreadable.
+    file: ./secrets/mailstrix_token.txt
   abuse_ch_key:
     file: ./secrets/abuse_ch_key.txt   # one line: abuse.ch Auth-Key (URLhaus + MalwareBazaar)
