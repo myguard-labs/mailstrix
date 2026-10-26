@@ -227,6 +227,7 @@ RULES = {
     "smoke": [
         "scripts/smoke.sh",
         "ci/rules_polling_test.sh",
+        "ci/ci_smoke_ownership_test.py",
         ".github/workflows/ci.yml",
         "packaging/deb/smoke_shared_test.sh",
     ],

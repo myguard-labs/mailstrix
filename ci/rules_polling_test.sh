@@ -2,9 +2,10 @@
 # Real final-image contract: inherited daily polling starts; explicit 0 is offline.
 set -euo pipefail
 image=${1:-strixd:ci}
-name="mailstrix-polling-$$"
-cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+# The full smoke invocation and this standalone contract share ID-based cleanup.
+# shellcheck source=scripts/smoke.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../scripts/smoke.sh"
+smoke_resources_init
 
 for mode in default disabled; do
 	override=()
@@ -14,7 +15,7 @@ for mode in default disabled; do
 	# No external service is contacted: a refused loopback connection proves the
 	# startup attempt while retaining the baked rules. Plain http needs the
 	# explicit MAILSTRIX_RULES_ALLOW_HTTP opt-in. Match Compose hardening.
-	docker run -d --name "$name" --read-only --cap-drop ALL \
+	start_container "polling-$mode" --read-only --cap-drop ALL \
 		--security-opt no-new-privileges:true \
 		--tmpfs /tmp:mode=1777 \
 		--tmpfs /var/cache/mailstrix:uid=65532,gid=65532,mode=0755 \
@@ -22,7 +23,7 @@ for mode in default disabled; do
 		-e MAILSTRIX_RULES_URL=http://127.0.0.1:1 \
 		-e MAILSTRIX_RULES_ALLOW_HTTP=1 \
 		"${override[@]}" "$image" >/dev/null
-	port=$(docker port "$name" 8079/tcp)
+	port=$(docker port "$_container" 8079/tcp)
 	state=''
 	# Bound readiness, not test coverage: failure to reach the asserted state
 	# fails the test and includes daemon logs. Polling errors must be observable.
@@ -35,7 +36,7 @@ sys.exit(0 if sys.argv[1] == "disabled" or not s["enabled"] or s["last_failure_u
 ' "$mode" <<<"$state"; then
 			break
 		fi
-		if [[ $(docker inspect -f '{{.State.Running}}' "$name") != true ]]; then
+		if [[ $(docker inspect -f '{{.State.Running}}' "$_container") != true ]]; then
 			break
 		fi
 		sleep 1
@@ -52,9 +53,9 @@ else:
     assert s["last_check_unix"] == 0 and s["failures"] == 0, "explicit 0 must perform no startup check"
 print("PASS:", sys.argv[1], s)
 ' "$mode" <<<"$state"; then
-		docker logs "$name"
+		docker logs "$_container"
 		exit 1
 	fi
 	curl -fsS "http://$port/ready" >/dev/null
-	cleanup
+	remove_container "$_container" >/dev/null
 done
