@@ -884,6 +884,28 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_scanner_constructor_lifecycle_native_go_consumer(self):
+        path = "ci/scanner_constructor_lifecycle_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in [
+            "ci/scanner_constructor_lifecycle_test.py",
+            "ci/unmapped_test.go",
+        ]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
+        without_path = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_path),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+
     def test_threatfox_urlhaus_lifecycle_native_go_consumers(self):
         for name in ["threatfox", "urlhaus"]:
             path = f"ci/{name}_lifecycle_test.go"
