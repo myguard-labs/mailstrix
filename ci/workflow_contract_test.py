@@ -1351,6 +1351,15 @@ class NightlyMarkerImageContract(unittest.TestCase):
 class BinaryWorkflowContract(unittest.TestCase):
     """Keep the tag release wired to the reusable, pinned binary build."""
 
+    def test_release_packaging_and_publication_have_finite_timeouts(self):
+        """Keep both jobs within the release pipeline's maintained one-hour bound."""
+        jobs = workflow_document("RELEASE_WORKFLOW_TEST_PATH", "release.yml")["jobs"]
+        for name in ("debs", "release"):
+            with self.subTest(job=name):
+                minutes = jobs[name].get("timeout-minutes")
+                self.assertIs(type(minutes), int)
+                self.assertEqual(minutes, 60)
+
     def test_selected_pr_binary_job_has_native_build_timeout(self):
         """The selected PR route must call a bounded native binary matrix."""
         ci_jobs = workflow_document("PR_WORKFLOW_TEST_PATH", "ci.yml")["jobs"]
