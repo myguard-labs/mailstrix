@@ -310,6 +310,7 @@ GO_INPUTS = [
     "ci/go_coverage_test.py",
     "ci/clamd_cache_test.go",
     "ci/scanner_budget_test.go",
+    "ci/scanner_constructor_lifecycle_test.go",
     "ci/streamdedupkey_test.go",
     "ci/status_log_test.go",
     "ci/verdict_envelope_test.go",

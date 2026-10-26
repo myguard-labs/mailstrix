@@ -604,6 +604,7 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 		logf("ThreatFox IOC lookup enabled (refresh=%s, max_urls/msg=%d)", cfg.ThreatFoxRefresh, cfg.ThreatFoxMaxURLs)
 	}
 	if err := s.ReloadAll(); err != nil {
+		s.Close()
 		return nil, err
 	}
 	return s, nil
@@ -2461,6 +2462,9 @@ func (s *Scanner) publishDenylist(deny *map[string]struct{}) {
 // graceful shutdown. Both Close calls are nil-safe (no-op when the feed is
 // disabled) and idempotent. Call after the HTTP server has drained.
 func (s *Scanner) Close() {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.generationMu.Lock()
 	root := s.generation
