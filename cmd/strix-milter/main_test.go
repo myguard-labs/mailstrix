@@ -77,6 +77,10 @@ func headerValue(hs []stampedHeader, name string) (string, bool) {
 // scanStub is a fake strixd. It returns the given matches, or the given status.
 func scanStub(t *testing.T, matches []verdict.Match, status int) *httptest.Server {
 	t.Helper()
+	// Match the canonical server: a completed clean scan emits [], never null.
+	if matches == nil {
+		matches = []verdict.Match{}
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if status != http.StatusOK {
 			w.WriteHeader(status)
@@ -241,7 +245,7 @@ func TestOversizeIsNotScannedAsTruncatedPrefix(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		posted = append(posted, b)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -293,7 +297,7 @@ func TestExactlyMaxBodyIsScanned(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		got = len(b)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -412,7 +416,7 @@ func TestForgedHeaderIsNotFedToTheScanner(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posted, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -497,7 +501,7 @@ func TestSecondMessageOnSameConnectionIsIndependent(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, string(b))
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -541,7 +545,7 @@ func TestHeadersOnlyMessageIsStillScanned(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posted, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -564,7 +568,7 @@ func TestTokenIsSentAndFilenameEncoded(t *testing.T) {
 		gotToken = r.Header.Get("X-MAILSTRIX-Token")
 		gotName = r.Header.Get("X-MAILSTRIX-Filename")
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -721,7 +725,7 @@ func TestScannedMessageIncludesHeadersAndMIMEFraming(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posted, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -759,7 +763,7 @@ func TestScanSendsAFilenameSoNameKeyedRulesFire(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotName = r.Header.Get("X-MAILSTRIX-Filename")
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -1002,7 +1006,7 @@ func TestBodyBeforeEOHStillGetsAHeaderSeparator(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posted, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 
@@ -1037,7 +1041,7 @@ func TestScannedMessageParsesAsMIMEWithTheAttachment(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posted, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(verdict.Response{})
+		_ = json.NewEncoder(w).Encode(verdict.Response{Matches: []verdict.Match{}})
 	}))
 	t.Cleanup(srv.Close)
 

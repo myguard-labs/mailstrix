@@ -21,6 +21,15 @@ OUT="${3:-./pprof-$TS}"
 # Auth header only when a token is supplied (matches MAILSTRIX_METRICS_AUTH=1).
 AUTH=""
 if [ -n "${MAILSTRIX_TOKEN:-}" ]; then
+	# A bearer value cannot contain line breaks: curl's header input format
+	# treats them as separate headers. Reject them before starting any child.
+	case "$MAILSTRIX_TOKEN" in
+	*'
+'* | *"$(printf '\r')"*)
+		echo '[pprof-capture] token contains a line break' >&2
+		exit 1
+		;;
+	esac
 	AUTH="Authorization: Bearer ${MAILSTRIX_TOKEN}"
 fi
 
@@ -30,7 +39,8 @@ echo "[pprof-capture] base=$BASE cpu=${SECS}s out=$OUT"
 fetch() {
 	# fetch <path> <outfile>
 	if [ -n "$AUTH" ]; then
-		curl -fsS -H "$AUTH" "$BASE$1" -o "$OUT/$2"
+		# printf is a shell builtin; only the pipe carries the credential.
+		printf '%s\n' "$AUTH" | curl -fsS -H @- "$BASE$1" -o "$OUT/$2"
 	else
 		curl -fsS "$BASE$1" -o "$OUT/$2"
 	fi
@@ -40,9 +50,9 @@ fetch() {
 echo "[pprof-capture] cpu profile (${SECS}s; drive /scan load now)…"
 fetch "/debug/pprof/profile?seconds=${SECS}" cpu.pb.gz
 echo "[pprof-capture] heap / allocs / goroutine snapshots…"
-fetch "/debug/pprof/heap"            heap.pb.gz
-fetch "/debug/pprof/allocs"          allocs.pb.gz
-fetch "/debug/pprof/goroutine"       goroutine.pb.gz
+fetch "/debug/pprof/heap" heap.pb.gz
+fetch "/debug/pprof/allocs" allocs.pb.gz
+fetch "/debug/pprof/goroutine" goroutine.pb.gz
 
 # Top listings (best-effort: needs `go` on the capturing host; skipped if absent).
 if command -v go >/dev/null 2>&1; then

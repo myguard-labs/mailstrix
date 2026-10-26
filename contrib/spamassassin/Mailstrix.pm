@@ -359,8 +359,13 @@ sub _scan_shellout {
     local $/;
     $out = <$rd>;
     close($rd);
-    waitpid($pid, 0);
-    my $code = $? >> 8;
+    my $waited = waitpid($pid, 0);
+    my $status = $?;
+    if ($waited != $pid || $status == -1 || ($status & 127)) {
+        info("strixd: shellout child did not exit normally");
+        return;
+    }
+    my $code = $status >> 8;
 
     if ($code == 0) {
         dbg("strixd: shellout clean");

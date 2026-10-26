@@ -487,4 +487,15 @@ sub fake_scan {
     is($ok, undef, 'shellout degraded (client exit 2): undef, same as http degraded');
 }
 
+# Keep child-status process controls in the same isolated CI integration lane.
+{
+    open(my $child, '-|', $^X, "$FindBin::Bin/../../../ci/spamassassin_child_status.t") or die $!;
+    local $/;
+    my $output = <$child>;
+    close $child;
+    my $status = $?;
+    is($status, 0, 'child status integration controls pass');
+    diag($output) if $status;
+}
+
 done_testing();

@@ -94,9 +94,23 @@ func (c *Client) Scan(ctx context.Context, name string, buf []byte) ([]Match, er
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 
+	// Read one byte beyond the limit so a truncated prefix cannot hide an
+	// oversized response or trailing material after an otherwise valid verdict.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > maxResponseBody {
+		return nil, fmt.Errorf("response exceeds %d bytes", maxResponseBody)
+	}
 	var out Response
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(&out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	// The server always emits an array, including [] for a completed clean
+	// scan. A missing/null envelope or matches member is not a verdict.
+	if out.Matches == nil {
+		return nil, fmt.Errorf("decode response: missing or null matches")
 	}
 	// A degraded result with an actionable match is still a detection; without
 	// one it is not a clean verdict, so report it as an error (callers map it
