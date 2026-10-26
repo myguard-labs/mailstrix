@@ -38,7 +38,7 @@ RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VER
 WORKDIR /tmp/yara-${YARA_VERSION}
 # No --enable-magic / --enable-cuckoo: email-attachment scanning needs neither,
 # and dropping them removes the libmagic/libjansson runtime deps so the
-# distroless base-debian12 final image needs only glibc + libssl + libz. Crypto
+# distroless base-debian13 final image needs only glibc + libssl + libz. Crypto
 # (--with-crypto) stays for the "hash" module many public rules use.
 ENV CCACHE_DIR=/root/.cache/ccache
 # Only the independent reproducibility proof passes 1. Unset is normal caching;
@@ -94,7 +94,7 @@ WORKDIR /src
 COPY . .
 # The yara_static tag makes go-yara link libyara.a; libyara's own deps
 # (ssl/magic/jansson/z/zstd) and glibc stay dynamically linked and are provided
-# by the distroless base-debian12 final image. A full -static glibc link is
+# by the distroless base-debian13 final image. A full -static glibc link is
 # avoided on purpose: it makes dlopen/getaddrinfo fragile at runtime.
 ENV CGO_ENABLED=1 \
     PKG_CONFIG="pkg-config --static"
@@ -200,7 +200,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && go test -c -trimpath -tags yara_static -o /out/parity.test ./tools/parity \
     && mkdir /out/probe-writable
 
-FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS parity-runtime
+FROM gcr.io/distroless/base-debian13:nonroot@sha256:f9518b74815721f537a7458cc693b4406208c04fce23bbffab511516117f34fd AS parity-runtime
 COPY --from=parity-build /out/parity /usr/local/bin/parity
 COPY docker/local-rules/ /usr/share/mailstrix/parity-rules/
 USER 65534:65534
@@ -229,7 +229,7 @@ COPY --from=build /usr/local/lib/libyara.a /libyara.a
 
 # Post-publication verifier: no baked rules and no production cache mount.
 # Keep this before final so an untargeted build still produces the service image.
-FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS rules-verifier
+FROM gcr.io/distroless/base-debian13:nonroot@sha256:f9518b74815721f537a7458cc693b4406208c04fce23bbffab511516117f34fd AS rules-verifier
 COPY --from=build /out/strixd /usr/local/bin/strixd
 ENTRYPOINT ["/usr/local/bin/strixd", "fetch-rules", "-verify-only"]
 
@@ -322,7 +322,7 @@ FROM scratch AS rules-export
 COPY --from=rules-export-inputs /rules-export/ /
 
 # ---- final (distroless, nonroot) -------------------------------------------
-FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS final
+FROM gcr.io/distroless/base-debian13:nonroot@sha256:f9518b74815721f537a7458cc693b4406208c04fce23bbffab511516117f34fd AS final
 COPY --from=build /out/strixd /usr/local/bin/strixd
 # strix-scan (the lean CGO-free HTTP client) ships in PATH too, so the same image
 # can both SERVE (strixd) and be a labelling client via `docker exec <ctr>
