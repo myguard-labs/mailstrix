@@ -272,6 +272,7 @@ GO_INPUTS = [
     "ci/testdata/clamd_admission_ordering_test.go",
     "ci/cache_distribution/*.go",
     "ci/cache_byte_bound_test.go",
+    "ci/local_scan_partial_test.go",
     "ci/feed_set_bytes_test.go",
     "ci/marker_runtime_fixture.py",
     "ci/prepare_marker_runtime.py",
