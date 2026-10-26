@@ -292,6 +292,7 @@ GO_INPUTS = [
     "ci/cape_store_seam_test.go",
     "ci/decode_runs_test.go",
     "ci/decode_scalar_test.go",
+    "ci/ole_debug_test.go",
     "ci/extract_cap_stops_test.go",
     "ci/extract_verify_first_member_test.go",
     "ci/extract_lzma_dict_cap_test.go",
