@@ -211,6 +211,7 @@ RULES = {
         "ci/filter_rules_regex_test.py",
     ],
     "envkeys": [
+        "ci/ci_env_keys_test.py",
         "ci/rules_polling_defaults_test.sh",
         "ci/dockerfile_rules_helpers_test.sh",
         "docker/Dockerfile",
@@ -269,6 +270,7 @@ RULES["release_image"] = [
     ".github/workflows/release.yml",
 ]
 GO_INPUTS = [
+    "ci/scanner_fingerprint_test.go",
     "ci/archive_decoder_incomplete_test.go",
     "ci/testdata/archive_decoder_incomplete_test.go",
     "ci/testdata/archive_decoder_http_test.go",

@@ -74,6 +74,36 @@ func TestLoadConfigEnvOverride(t *testing.T) {
 	}
 }
 
+func TestCacheTTLConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  time.Duration
+	}{
+		{name: "default", want: time.Hour},
+		{name: "override", value: "12.5", set: true, want: 12500 * time.Millisecond},
+		{name: "zero disables caching", value: "0", set: true, want: 0},
+		{name: "invalid uses default", value: "invalid", set: true, want: time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !tt.set {
+				t.Setenv("MAILSTRIX_CACHE_TTL", "")
+				if err := os.Unsetenv("MAILSTRIX_CACHE_TTL"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv("MAILSTRIX_CACHE_TTL", tt.value)
+			}
+			if got := LoadConfig().CacheTTL; got != tt.want {
+				t.Fatalf("CacheTTL = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCacheByteLimitInvalidValuesUseDefault(t *testing.T) {
 	for _, value := range []string{"0", "-1", "invalid"} {
 		t.Run(value, func(t *testing.T) {

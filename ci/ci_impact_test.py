@@ -357,6 +357,16 @@ class ImpactTests(unittest.TestCase):
     def test_named_consumers_and_unrelated_controls(self):
         for path, selected, unrelated in [
             (
+                "ci/ci_env_keys_test.py",
+                ["envkeys"],
+                ["go", "image", "parity"],
+            ),
+            (
+                "ci/scanner_fingerprint_test.go",
+                ["go"],
+                ["image", "parity", "postfix"],
+            ),
+            (
                 "ci/rules_polling_defaults_test.sh",
                 ["envkeys", "shell"],
                 ["go", "image"],
