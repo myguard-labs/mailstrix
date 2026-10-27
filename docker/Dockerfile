@@ -175,16 +175,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && covered="" \
     && if [ -z "$pkgs" ]; then :; \
     elif [ -n "$CHANGED_FILES" ]; then \
-        go vet -tags yara_static $pkgs && go test -race -p 1 -timeout 30m -tags yara_static $pkgs; \
+        go vet -tags yara_static $pkgs && go test -count=1 -race -p 1 -timeout 30m -tags yara_static $pkgs; \
     else \
         go vet -tags yara_static $pkgs \
         && all="$(go list -tags yara_static $pkgs)" \
         && ci="$(go list -m)/ci" && rest="" && cipkg="" \
         && for p in $all; do if [ "$p" = "$ci" ]; then cipkg="$p"; else rest="$rest $p"; fi; done \
         && if [ -n "$rest" ]; then \
-            go test -race -p 1 -timeout 30m -tags yara_static -coverpkg=./... -coverprofile=/tmp/cover.out $rest && covered=1; \
+            go test -count=1 -race -p 1 -timeout 30m -tags yara_static -coverpkg=./... -coverprofile=/tmp/cover.out $rest && covered=1; \
         fi \
-        && if [ -n "$cipkg" ]; then go test -race -p 1 -timeout 30m -tags yara_static $cipkg; fi; \
+        && if [ -n "$cipkg" ]; then go test -count=1 -race -p 1 -timeout 30m -tags yara_static $cipkg; fi; \
     fi \
     && if [ -n "$covered" ]; then ci/go_coverage.sh /tmp/cover.out; fi
 
