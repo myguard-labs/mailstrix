@@ -65,7 +65,7 @@ docker run --rm --name mailstrix-clamd \
   -e MAILSTRIX_CLAMD_TCP_ADDR=0.0.0.0:3310 \
   -e MAILSTRIX_ALLOW_WILDCARD_BIND=1 \
   -p 127.0.0.1:3310:3310 \
-  myguard-labs/mailstrix
+  eilandert/mailstrix
 ```
 
 Use a build/release containing this adapter. This command does not publish the

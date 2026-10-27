@@ -4,7 +4,7 @@
 # env vars that mirror docker/docker-compose.yml in the repo.
 
 image:
-  repository: myguard-labs/mailstrix
+  repository: eilandert/mailstrix
   # tag: defaults to "" which falls back to Chart.appVersion via the mailstrix.image
   # helper. Set to "debian" for the glibc/debian variant, or pin a version.
   tag: ""

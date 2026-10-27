@@ -48,7 +48,7 @@ transport for both Sieve and SpamAssassin.
 
    ```sh
    docker run -d --name strixd -e MAILSTRIX_TOKEN_FILE=/run/secrets/mailstrix_token \
-       -p 8079:8079 myguard-labs/mailstrix
+       -p 8079:8079 eilandert/mailstrix
    ```
 
 2. **Install the plugin.** Drop `Mailstrix.pm`, `mailstrix.pre` and `mailstrix.cf` into your
