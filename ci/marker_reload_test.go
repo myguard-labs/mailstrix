@@ -11,7 +11,7 @@ import (
 	ms "github.com/myguard-labs/mailstrix/internal/mailstrix"
 )
 
-const markerBundleLogFormat = "PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): %d"
+const markerBundleLogFormat = "PERF-18: marker bundle built: %d total rules in separate compiled object; %d dependency rules retained, %d marker-tagged rules retained; safely pre-disabled denied rules: %d"
 const markerArtifactLogFormat = "PERF-18: marker artifact loaded: %d total rules in separate compiled object (main ruleset: %d rules; deny policy applied)"
 
 func TestP13MarkerBundleLogContract(t *testing.T) {
@@ -21,14 +21,14 @@ func TestP13MarkerBundleLogContract(t *testing.T) {
 	}
 	quoted := fmt.Sprintf("%q", markerBundleLogFormat)
 	if !strings.Contains(string(source), quoted) {
-		t.Fatalf("legacy full-bundle log no longer reports total allocation and separate ownership: want %s", quoted)
+		t.Fatalf("fallback full-bundle log no longer reports retained dependency and marker counts: want %s", quoted)
 	}
 	parity, err := os.ReadFile(filepath.Join("..", "tools", "parity", "main.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(parity), quoted) {
-		t.Fatalf("parity scanner does not accept the exact full-bundle success log: want %s", quoted)
+		t.Fatalf("parity scanner does not accept the exact fallback full-bundle success log: want %s", quoted)
 	}
 	if strings.Contains(string(source), "producing a tiny") || strings.Contains(string(source), "marker rules active") || strings.Contains(string(source), "eligible rules pre-disabled by denylist") {
 		t.Fatal("legacy full-bundle description again implies a small allocation, active denied markers, or additive deny counts")

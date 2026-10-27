@@ -787,7 +787,7 @@ func (s *Scanner) reloadBigBundle(deny map[string]struct{}, dlFP string, bigRule
 	if s.bigSrcFile != "" {
 		bigSrc = s.bigSrcFile
 	}
-	// PERF-30: pre-disable denied rules before exposing the fresh big-bundle.
+	// Apply the dependency-safe pre-disable policy before publication.
 	bigDisabled := disableDeniedRules(big, deny)
 	// The threshold changes which effective ruleset scans a given body. Bind it
 	// to the successfully loaded big-file bundle identity so replicas with
@@ -947,11 +947,9 @@ func (s *Scanner) reloadLockedCacheDeny(denyOverride *map[string]struct{}) error
 
 	candidates = append(candidates, observedRuleGenerations.adopt(rules))
 
-	// PERF-30: pre-disable denied rules in the NEWLY LOADED bundle before it is
-	// exposed to scanners. This is safe: the object is fresh from LoadRules/compile
-	// and no scanner holds a reference to it yet (we have not called Swap yet).
-	// disableDeniedRules skips global and private rules to avoid silently suppressing
-	// non-denied rules that reference them in their conditions.
+	// Apply the dependency-safe pre-disable policy to the newly loaded bundle
+	// before it is exposed to scanners. Public, global and private rules remain
+	// enabled so compiled dependencies retain valid evaluation state.
 	deny := s.effectiveDeny(denyOverride)
 	mainDisabled := disableDeniedRules(rules, deny)
 
@@ -1115,44 +1113,30 @@ func denylistHash(deny map[string]struct{}) string {
 	return hex.EncodeToString(h[:8])
 }
 
-// disableDeniedRules disables, in the C YARA object, every rule in rules whose
-// lowercase identifier matches a key in deny. Returns the count of rules
-// disabled.
+// disableDeniedRules returns the number of rules that can safely be disabled in
+// the C YARA object. The current go-yara API does not expose the compiled rule
+// dependency graph, so no public rule can be proven unreferenced here and the
+// safe count is always zero.
 //
 // Safety constraints:
 //   - Global and private rules are NEVER disabled regardless of the denylist.
 //     In YARA a global rule's condition is implicitly ANDed into every rule in
 //     the same namespace; a private rule may be referenced in another rule's
-//     condition. Pre-disabling either could silently suppress a non-denied rule's
-//     match — a false-negative in a rule we DO want. The post-match filterDenied
-//     remains the correctness authority and still drops denied global/private
-//     matches.
-//   - Canary mode: pre-disabling is independent of canary — canary tags ALL
-//     surviving matches (post-filterDenied), so a pre-disabled rule simply
-//     produces no match to tag; filterDenied has already determined it was denied.
-//   - This function is called on a freshly-loaded *yara.Rules object before it
-//     is swapped into the atomic.Pointer and exposed to scanners. It is therefore
-//     safe from concurrent-access races: no scanner has a reference to this
-//     object yet.
+//     condition.
+//   - Ordinary public rules are also left enabled because other public rules can
+//     reference them. In libyara 4.5.2, disabling a referenced rule makes that
+//     reference undefined and silently suppresses its dependent. The post-match
+//     filterDenied remains the correctness authority and drops denied matches
+//     without changing dependency evaluation.
+//   - Canary mode remains downstream of filterDenied, so denied matches are
+//     removed before surviving matches are tagged.
+//   - Callers retain this hook and its count so a future go-yara API that exposes
+//     authoritative dependencies can safely restore selective pre-disabling.
 func disableDeniedRules(rules *yara.Rules, deny map[string]struct{}) int {
 	if len(deny) == 0 || rules == nil {
 		return 0
 	}
-	allRules := rules.GetRules()
-	disabled := 0
-	for i := range allRules {
-		r := &allRules[i]
-		// Skip global and private rules — see comment above.
-		if r.IsGlobal() || r.IsPrivate() {
-			continue
-		}
-		name := strings.ToLower(r.Identifier())
-		if _, denied := deny[name]; denied {
-			r.Disable()
-			disabled++
-		}
-	}
-	return disabled
+	return 0
 }
 
 // fingerprint hashes the sorted rule identities (namespace + identifier) so the
@@ -1397,18 +1381,11 @@ func compileDir(dir string, logf func(string, ...any)) (*yara.Rules, error) {
 	return compileRuleFiles(dir, files, logf)
 }
 
-// buildMarkerBundle compiles the same ruleset as the main set (from srcFile or
-// srcDir) and disables every rule that is NOT tagged "marker". The resulting
-// bundle still contains the full rule allocation; only its enabled rule set is
-// narrowed for PERF-18 marker-channel scans. The main *yara.Rules and the bundle
-// are separate C objects (separate compilations), so Disable calls on one do not
-// affect the other.
-//
-// Completeness argument: filterMarkerChannel keeps ONLY marker-tagged hits from
-// the Markers channel. Therefore the only rules that contribute matches on that
-// channel are marker-tagged rules. Disabling all non-marker rules produces a
-// bundle whose scan output is a superset of what filterMarkerChannel would retain
-// from a full-set scan — identical retained output. Kept as belt-and-suspenders.
+// buildMarkerBundle is the source fallback used when the prepared marker
+// artifact is unavailable. It compiles an independent copy of the main set and
+// keeps every rule enabled because marker-tagged rules can reference untagged
+// rules. filterMarkerChannel retains only marker-tagged output. The normal
+// prepared-artifact path remains the native-proved marker dependency closure.
 //
 // Returns nil, nil when srcFile and srcDir are both empty (no source to
 // recompile). Returns an error on compilation failure; the caller falls back to
@@ -1435,7 +1412,7 @@ func buildMarkerBundleFromFiles(srcFile, srcDir string, validatedFiles []string,
 	if err != nil {
 		return nil, fmt.Errorf("marker bundle compile: %w", err)
 	}
-	disableNonMarkerRules(bundle, deny, logf)
+	prepareFallbackMarkerRules(bundle, deny, logf)
 	return bundle, nil
 }
 
@@ -1457,28 +1434,24 @@ func cloneMarkerBundle(rules *yara.Rules, deny map[string]struct{}, logf func(st
 	if err != nil {
 		return nil, fmt.Errorf("marker bundle read: %w", err)
 	}
-	disableNonMarkerRules(bundle, deny, logf)
+	prepareFallbackMarkerRules(bundle, deny, logf)
 	return bundle, nil
 }
 
-func disableNonMarkerRules(bundle *yara.Rules, deny map[string]struct{}, logf func(string, ...any)) {
-	// Disable every rule that is NOT tagged "marker" so the bundle only fires
-	// on marker-tagged rules. Enable/Disable operate on this C object only;
-	// the main rules set is unaffected.
+func prepareFallbackMarkerRules(bundle *yara.Rules, deny map[string]struct{}, logf func(string, ...any)) {
 	allRules := bundle.GetRules()
-	disabled, total := 0, len(allRules)
+	markers := 0
 	for i := range allRules {
-		if !matchIsMarker(Match{Tags: allRules[i].Tags()}) {
-			allRules[i].Disable()
-			disabled++
+		if matchIsMarker(Match{Tags: allRules[i].Tags()}) {
+			markers++
 		}
 	}
-	// Pre-disable runtime-denied rules (PERF-30). filterDenied remains the
-	// post-match authority; this only avoids unnecessary C scanning work.
-	// Global/private rules are intentionally skipped (dependency hazard).
+	// Leave non-marker rules enabled because marker-tagged rules can reference
+	// them. filterMarkerChannel is the output boundary and retains only marker
+	// matches; filterDenied remains the deny-policy boundary.
 	mbDisabled := disableDeniedRules(bundle, deny)
-	logf("PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): %d",
-		total, disabled, total-disabled, mbDisabled)
+	logf("PERF-18: marker bundle built: %d total rules in separate compiled object; %d dependency rules retained, %d marker-tagged rules retained; safely pre-disabled denied rules: %d",
+		len(allRules), len(allRules)-markers, markers, mbDisabled)
 }
 
 // ruleSetupError marks a compiler-setup failure (compiler creation or external
