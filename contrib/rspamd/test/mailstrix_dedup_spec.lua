@@ -1,101 +1,137 @@
 #!/usr/bin/env lua
 --[[
-mailstrix_dedup_spec.lua — standalone test (plain lua5.4, no rspamd) for the
-AUDIT-LUA-NAMESPACE-DEDUPE fix in rspamd/plugins/mailstrix.lua.
+mailstrix_dedup_spec.lua — loads the production Rspamd plugin with mocked
+Rspamd APIs and exercises its registered callback. Scanner match identity is
+(namespace, rule): same-named rules from different source files must survive,
+while repeated reports of the same identity must collapse.
 
-The plugin can't be unit-loaded here (it `require`s rspamd_logger/_http/_util at
-load and registers symbols against the rspamd_config global). So this mirrors the
-exact dedup contract of process_results' `add()` closure: distinct matches are
-bucketed under a `seen` set keyed per match, and a YARA scanner match's identity
-is (namespace, rule) — NOT rule alone. Two same-named rules shipped by different
-files are DISTINCT hits and must both survive; keying on rule alone would drop the
-second and let it inherit the first's tier/weight (twin of the fixed Go
-mergeMatches namespace bug). If the plugin's key expression is ever reverted to
-rule-only, the "different namespace" assertion below fails.
-
-Run: lua5.4 rspamd/test/mailstrix_dedup_spec.lua   (exit 0 = pass, 1 = fail)
+Run: lua5.4 contrib/rspamd/test/mailstrix_dedup_spec.lua
+The optional first argument selects a plugin path for isolated mutation tests.
 --]]
 
--- dedup_key MUST stay byte-identical to the key built in mailstrix.lua process_results.
-local function dedup_key(m)
-  return "y:" .. (m.namespace or "") .. "\31" .. m.rule
-end
+local here = arg[0]:match("^(.*)/[^/]*$") or "."
+local plugin = arg[1] or here .. "/../plugins/mailstrix.lua"
+local function noop() end
 
--- add mirrors process_results' add(): inserts opt under sym only if the key is
--- unseen; tracks the strongest weight per symbol. Returns the bucket table.
-local function new_collector()
-  local seen, buckets = {}, {}
-  local function add(sym, opt, key, weight)
-    weight = weight or 1.0
-    if seen[key] then return end
-    seen[key] = true
-    local b = buckets[sym]
-    if not b then
-      b = { opts = {}, weight = weight }
-      buckets[sym] = b
-    elseif weight > b.weight then
-      b.weight = weight
+package.loaded.rspamd_logger = { errx = noop, warnx = noop, infox = noop }
+package.loaded.rspamd_regexp = { create_cached = function() return {} end }
+package.loaded.rspamd_util = { encode_base64 = function(s) return s end }
+package.loaded.lua_cfg_utils = { push_config_error = noop }
+package.loaded.lua_util = {
+  override_defaults = function(defaults, opts)
+    for k, v in pairs(opts) do
+      if type(v) == type(defaults[k]) then defaults[k] = v end
     end
-    b.opts[#b.opts + 1] = opt
-  end
-  return add, buckets
-end
+    return defaults
+  end,
+}
 
 local failures = 0
+local assertions = 0
 local function check(cond, msg)
+  assertions = assertions + 1
   if not cond then
     io.stderr:write("FAIL: " .. msg .. "\n")
     failures = failures + 1
   end
 end
 
--- 1. Same rule name, DIFFERENT namespace (file) → two distinct hits, both kept.
-do
-  local add, buckets = new_collector()
-  local a = { rule = "http", namespace = "rulesA.yar" }
-  local b = { rule = "http", namespace = "rulesB.yar" }
-  add("STRIX", a.rule, dedup_key(a), 1.0)
-  add("STRIX", b.rule, dedup_key(b), 1.0)
-  check(#buckets["STRIX"].opts == 2,
-    "same rule from two namespaces must NOT collapse (got " ..
-    #buckets["STRIX"].opts .. " opt(s), want 2)")
+local function run(matches)
+  local callback
+  local requests = 0
+  local results = {}
+
+  package.loaded.rspamd_http = {
+    request = function(req)
+      requests = requests + 1
+      req.callback(nil, 200, "synthetic")
+      return true
+    end,
+  }
+  package.loaded.ucl = {
+    parser = function()
+      return {
+        parse_string = function() return true end,
+        get_object = function() return { matches = matches } end,
+      }
+    end,
+  }
+  rspamd_config = {
+    get_all_opt = function()
+      return { scan_parts = false }
+    end,
+    register_symbol = function(_, symbol)
+      if symbol.callback then callback = symbol.callback end
+      return 1
+    end,
+  }
+
+  local chunk, load_err = loadfile(plugin)
+  check(chunk ~= nil, "production plugin loads: " .. tostring(load_err))
+  if not chunk then return results, requests end
+  local ok, run_err = pcall(chunk)
+  check(ok, "production plugin initializes: " .. tostring(run_err))
+  check(type(callback) == "function", "production callback is registered")
+  if not ok or type(callback) ~= "function" then return results, requests end
+
+  callback({
+    get_user = noop,
+    get_content = function() return "synthetic mail" end,
+    get_parts = function() return {} end,
+    insert_result = function(_, symbol, weight, opts)
+      results[symbol] = { weight = weight, opts = opts }
+    end,
+  })
+  return results, requests
 end
 
--- 2. Identical (namespace, rule) seen twice (e.g. matched in two scanned buffers)
---    → deduped to one.
-do
-  local add, buckets = new_collector()
-  local m = { rule = "Cobalt_Strike", namespace = "apt.yar" }
-  add("STRIX_MALWARE", m.rule, dedup_key(m), 5.0)
-  add("STRIX_MALWARE", m.rule, dedup_key(m), 5.0)
-  check(#buckets["STRIX_MALWARE"].opts == 1,
-    "identical namespace+rule must dedup to 1 (got " ..
-    #buckets["STRIX_MALWARE"].opts .. ")")
+local function options_for(matches)
+  local results, requests = run(matches)
+  check(requests == 1, "production callback submits exactly one message scan")
+  return results.STRIX and results.STRIX.opts or {}, results
 end
 
--- 3. Different rule, same namespace → distinct.
-do
-  local add, buckets = new_collector()
-  local a = { rule = "foo", namespace = "x.yar" }
-  local b = { rule = "bar", namespace = "x.yar" }
-  add("STRIX", a.rule, dedup_key(a), 1.0)
-  add("STRIX", b.rule, dedup_key(b), 1.0)
-  check(#buckets["STRIX"].opts == 2, "distinct rules in one namespace must both survive")
-end
+-- Positive regression case: namespace is part of a scanner match's identity.
+local opts = options_for({
+  { rule = "http", namespace = "rulesA.yar" },
+  { rule = "http", namespace = "rulesB.yar" },
+})
+check(#opts == 2, "same rule from different namespaces must both survive")
+check(opts[1] == "http (rulesA.yar)", "first namespace remains visible")
+check(opts[2] == "http (rulesB.yar)", "second namespace remains visible")
 
--- 4. The pre-fix key (rule alone) WOULD have collapsed case 1 — assert the new
---    key actually distinguishes them, so a regression to rule-only is caught.
-do
-  local a = { rule = "http", namespace = "rulesA.yar" }
-  local b = { rule = "http", namespace = "rulesB.yar" }
-  check(dedup_key(a) ~= dedup_key(b),
-    "dedup_key must differ when only the namespace differs (regression guard)")
-  local c = { rule = "http", namespace = "rulesA.yar" }
-  check(dedup_key(a) == dedup_key(c), "dedup_key must match for identical namespace+rule")
-end
+-- Duplicate reports from multiple scanned buffers collapse to one option.
+opts = options_for({
+  { rule = "Cobalt_Strike", namespace = "apt.yar" },
+  { rule = "Cobalt_Strike", namespace = "apt.yar" },
+})
+check(#opts == 1, "identical namespace and rule must deduplicate")
+check(opts[1] == "Cobalt_Strike (apt.yar)", "deduplicated option keeps provenance")
+
+-- The other identity axis remains significant too.
+opts = options_for({
+  { rule = "alpha", namespace = "shared.yar" },
+  { rule = "beta", namespace = "shared.yar" },
+})
+check(#opts == 2, "different rules in one namespace must both survive")
+
+-- Boundary: absent and empty namespaces are the same normalized identity.
+opts = options_for({
+  { rule = "unnamed", namespace = nil },
+  { rule = "unnamed", namespace = "" },
+})
+check(#opts == 1, "missing and empty namespaces must deduplicate")
+check(opts[1] == "unnamed", "empty namespace must not add provenance text")
+
+-- Negative: malformed scanner records without a rule never emit a result.
+local _, results = options_for({
+  { namespace = "rulesA.yar" },
+  { namespace = "rulesB.yar", meta = { score = 100 } },
+})
+check(next(results) == nil, "matches without a rule must be ignored")
 
 if failures > 0 then
-  io.stderr:write(failures .. " assertion(s) failed\n")
+  io.stderr:write(failures .. " of " .. assertions .. " assertions failed\n")
   os.exit(1)
 end
-print("mailstrix_dedup_spec: all assertions passed")
+print("mailstrix_dedup_spec: " .. assertions .. " production-callback assertions passed")

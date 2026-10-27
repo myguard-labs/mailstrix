@@ -245,7 +245,7 @@ class BatchWorkflowTests(unittest.TestCase):
             self.assertIn(f"<{package}>", trace)
         self.assertEqual(trace.count("luarocks-5.4 <install> <luacheck>"), 1)
         self.assertEqual(trace.count("luacheck <contrib/rspamd/>"), 1)
-        self.assertEqual(trace.count("lua5.4 <contrib/rspamd/test/"), 6)
+        self.assertEqual(trace.count("lua5.4 <contrib/rspamd/test/"), 7)
         self.assertEqual(trace.count("lua5.1 <contrib/rspamd/test/"), 2)
 
     def test_lua_missing_tool_and_middle_failure_propagate(self):
@@ -271,7 +271,7 @@ class BatchWorkflowTests(unittest.TestCase):
             with self.subTest(restored=expected):
                 result, trace = self.lua(script=script)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                covered = trace.count("lua5.4 <contrib/rspamd/test/") == 6
+                covered = trace.count("lua5.4 <contrib/rspamd/test/") == 7
                 self.assertEqual(covered, expected)
 
     def test_lua_disabled_linter_mutant_is_detected(self):

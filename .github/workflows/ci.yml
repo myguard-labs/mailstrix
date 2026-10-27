@@ -29,7 +29,9 @@ permissions:
 jobs:
   changes:
     runs-on: [self-hosted, builder02, docker]
-    timeout-minutes: 5
+    # Planner controls took 3.7m on the self-hosted runner before the uncached
+    # contract-fixture image pull; 10m leaves bounded room for both required gates.
+    timeout-minutes: 10
     outputs:
       go: ${{ steps.plan.outputs.go }}
       native: ${{ steps.plan.outputs.native }}
@@ -68,7 +70,15 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
       - name: impact planner regression controls
-        run: python3 -B -m unittest discover -s ci -p 'ci_*_test.py'
+        run: |
+          planner_deps="$(mktemp -d)"
+          trap 'rm -rf "$planner_deps"' EXIT
+          python3 -m pip install --disable-pip-version-check --no-cache-dir \
+            --target "$planner_deps" \
+            pycryptodomex==3.23.0 \
+            pyzipper==0.4.0
+          PYTHONPATH="$planner_deps${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 -B -m unittest discover -s ci -p 'ci_*_test.py'
       - name: required check contract fixtures
         run: |
           docker run --rm -v "$PWD:/repo:ro" -w /repo \
@@ -478,6 +488,7 @@ jobs:
             luarocks-5.4 install luacheck >/dev/null 2>&1
             luacheck contrib/rspamd/
             lua5.4 contrib/rspamd/test/mailstrix_dedup_spec.lua
+            lua5.4 contrib/rspamd/test/mailstrix_pw_header_once_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_effort_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_explain_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_feed_routing_spec.lua

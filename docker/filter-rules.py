@@ -36,6 +36,7 @@ valid bundle). Reports kept/dropped with reason breakdown. Idempotent; reads one
 
 Usage: filter-rules.py IN.yar OUT.yar
 """
+
 import re
 import sys
 from collections import Counter
@@ -50,7 +51,7 @@ DROP_SOURCES = {
 
 # license_url substrings that mark a non-redistributable (non-commercial) license.
 DROP_LICENSE_SUBSTR = (
-    "by-nc",            # CC BY-NC*
+    "by-nc",  # CC BY-NC*
     "creativecommons.org/licenses/by-nc",
     "noncommercial",
 )
@@ -58,37 +59,142 @@ DROP_LICENSE_SUBSTR = (
 # --- mail-relevance: DROP signals (host/runtime-only, never an attachment) -----
 # Matched against the rule's tags + name (case-insensitive whole-word where sane).
 DROP_TAGS = {
-    "MEMORY",      # memory-dump only
-    "LOG",         # log-artifact rules
+    "MEMORY",  # memory-dump only
+    "LOG",  # log-artifact rules
 }
 # Rule-name / tag tokens that mark host-only classes.
 DROP_NAME_SUBSTR = (
-    "LOLDRIVERS",      # kernel driver allow/deny — not a mail vector
+    "LOLDRIVERS",  # kernel driver allow/deny — not a mail vector
     "_DRIVER_",
-    "MALCONFSCAN",     # memory config scanner
+    "MALCONFSCAN",  # memory config scanner
     "_MEMORY_",
     "_PCAP_",
     "_NETWORK_TRAFFIC",
 )
 # Linux/ELF-only families: e.g. "Linux_", "_ELF_", "Unix_". Mail to a Windows
 # user base; keep cross-platform loaders but drop pure-ELF host implants.
-LINUX_ONLY_RE = re.compile(r"(?:^|_)(LINUX|ELF|UNIX|FREEBSD)_", re.I)
+LINUX_ONLY_RE = re.compile(r"(?:^|_)(LINUX|ELF|UNIX|FREEBSD)_", re.IGNORECASE)
+SECTION_MARKER_RE = re.compile(
+    r"(meta|strings|condition)(?:\s|//[^\n]*(?:\n|$)|/\*.*?\*/)*:", re.DOTALL
+)
 
 # --- mail-relevance: KEEP signals (override; the 35-gap + carrier families) ----
 # If a rule matches any KEEP token it is kept even if a soft DROP signal hits
 # (KEEP wins over the heuristic drops, NOT over license/MALPEDIA/MEMORY).
-KEEP_SUBSTR = tuple(s.upper() for s in (
-    # document/script carriers
-    "MALDOC", "MACRO", "VBA", "OOXML", "RTF", "DOCM", "XLSM", "XLSB", "XLS",
-    "DOC_", "PDF", "ONENOTE", "LNK", "HTA", "VBS", "JS_", "JSE", "WSF",
-    "POWERSHELL", "PS1", "SCRIPT", "DDE", "EQUATION", "CVE_2017_11882",
-    "CVE_2017_8759", "CVE_2022_30190", "FOLLINA", "PHISH", "DROPPER",
-    "DOWNLOADER", "LOADER", "STEALER", "RAT_", "_RAT", "KEYLOGGER",
-    # 35-gap families
-    "HANCITOR", "LOKIBOT", "NANOCORE", "AGENTTESLA", "AGENT_TESLA", "FORMBOOK",
-    "BUMBLEBEE", "MALLOX", "TARGETCOMPANY", "GULOADER", "EMOTET", "QAKBOT",
-    "ICEDID", "REMCOS", "ASYNCRAT", "SNAKE", "GuLoader".upper(),
-))
+KEEP_SUBSTR = tuple(
+    s.upper()
+    for s in (
+        # document/script carriers
+        "MALDOC",
+        "MACRO",
+        "VBA",
+        "OOXML",
+        "RTF",
+        "DOCM",
+        "XLSM",
+        "XLSB",
+        "XLS",
+        "DOC_",
+        "PDF",
+        "ONENOTE",
+        "LNK",
+        "HTA",
+        "VBS",
+        "JS_",
+        "JSE",
+        "WSF",
+        "POWERSHELL",
+        "PS1",
+        "SCRIPT",
+        "DDE",
+        "EQUATION",
+        "CVE_2017_11882",
+        "CVE_2017_8759",
+        "CVE_2022_30190",
+        "FOLLINA",
+        "PHISH",
+        "DROPPER",
+        "DOWNLOADER",
+        "LOADER",
+        "STEALER",
+        "RAT_",
+        "_RAT",
+        "KEYLOGGER",
+        # 35-gap families
+        "HANCITOR",
+        "LOKIBOT",
+        "NANOCORE",
+        "AGENTTESLA",
+        "AGENT_TESLA",
+        "FORMBOOK",
+        "BUMBLEBEE",
+        "MALLOX",
+        "TARGETCOMPANY",
+        "GULOADER",
+        "EMOTET",
+        "QAKBOT",
+        "ICEDID",
+        "REMCOS",
+        "ASYNCRAT",
+        "SNAKE",
+        "GuLoader".upper(),
+    )
+)
+
+
+def without_comments(text):
+    """Mask YARA comments while preserving offsets and quoted strings."""
+    masked = list(text)
+    in_string = False
+    i = 0
+    while i < len(text):
+        if in_string:
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == '"':
+                in_string = False
+            i += 1
+            continue
+        if text[i] == '"':
+            in_string = True
+            i += 1
+            continue
+        if text.startswith("//", i):
+            end = text.find("\n", i + 2)
+            if end == -1:
+                end = len(text)
+            masked[i:end] = " " * (end - i)
+            i = end
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = len(text) if end == -1 else end + 2
+            for pos in range(i, end):
+                if masked[pos] != "\n":
+                    masked[pos] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(masked)
+
+
+def rule_header(text, start):
+    """Return the first uncommented opening brace and the masked header."""
+    i = start
+    while i < len(text):
+        if text.startswith("//", i):
+            end = text.find("\n", i + 2)
+            i = len(text) if end == -1 else end + 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end == -1 else end + 2
+            continue
+        if text[i] == "{":
+            return i, without_comments(text[start:i])
+        i += 1
+    return -1, ""
 
 
 def split_rules(text):
@@ -98,17 +204,18 @@ def split_rules(text):
     string literals are NOT brace-counted (a `{` inside a // or "…" must not
     open a block)."""
     # Header (imports/comments) up to first `rule `.
-    m = re.search(r"^\s*(?:private\s+|global\s+)*rule\s", text, re.M)
+    m = re.search(r"^\s*(?:private\s+|global\s+)*rule\s", text, re.MULTILINE)
     if not m:
         yield text, False, None, None, None, False
         return
-    header = text[:m.start()]
+    header = text[: m.start()]
     yield header, False, None, None, None, False
 
     i = m.start()
     n = len(text)
     rule_re = re.compile(
-        r"(?:private\s+|global\s+)*rule\s+([A-Za-z_][\w]*)", re.M)
+        r"(?:private\s+|global\s+)*rule\s+([A-Za-z_][\w]*)", re.MULTILINE
+    )
     while i < n:
         rm = rule_re.search(text, i)
         if not rm:
@@ -117,11 +224,11 @@ def split_rules(text):
             break
         # emit any inter-rule gap (whitespace/comments) as a non-rule chunk
         if rm.start() > i:
-            yield text[i:rm.start()], False, None, None, None, False
+            yield text[i : rm.start()], False, None, None, None, False
             i = rm.start()
         name = rm.group(1)
         # find opening brace of the rule body
-        brace = text.find("{", rm.end())
+        brace, header = rule_header(text, rm.end())
         if brace == -1:
             yield text[i:], False, None, None, None, False
             break
@@ -131,6 +238,7 @@ def split_rules(text):
         in_regex = False  # inside a /.../ regex literal
         in_line_comment = False
         in_block_comment = False
+        section_markers = []
         while j < n:
             c = text[j]
             nx = text[j + 1] if j + 1 < n else ""
@@ -154,6 +262,11 @@ def split_rules(text):
                 elif c == "/":
                     in_regex = False
             else:
+                section_m = None
+                if j == brace + 1 or not (text[j - 1].isalnum() or text[j - 1] in "_$"):
+                    section_m = SECTION_MARKER_RE.match(text, j)
+                if section_m:
+                    section_markers.append((section_m.group(1), j, section_m.end()))
                 if c == "/" and nx == "/":
                     in_line_comment = True
                     j += 1
@@ -175,9 +288,28 @@ def split_rules(text):
                         break
             j += 1
         body = text[i:j]
-        tags_m = re.search(r'tags = "([^"]*)"', body)
-        lic_m = re.search(r'license_url = "([^"]*)"', body)
-        tags = tags_m.group(1) if tags_m else ""
+        metadata = ""
+        for marker_index, (section, _start, content_start) in enumerate(
+            section_markers
+        ):
+            if section != "meta":
+                continue
+            content_end = (
+                section_markers[marker_index + 1][1]
+                if marker_index + 1 < len(section_markers)
+                else j
+            )
+            metadata = without_comments(text[content_start:content_end])
+            break
+        tags_m = re.search(r'(?<![$\w])tags[ \t]*=[ \t]*"([^"]*)"', metadata)
+        lic_m = re.search(r'(?<![$\w])license_url[ \t]*=[ \t]*"([^"]*)"', metadata)
+        tag_header = header.partition(":")[2]
+        header_tags = re.findall(r"[A-Za-z_][\w]*", tag_header)
+        metadata_tags = tags_m.group(1) if tags_m else ""
+        tag_values = list(header_tags)
+        if metadata_tags:
+            tag_values.append(metadata_tags)
+        tags = ",".join(tag_values)
         lic = lic_m.group(1) if lic_m else ""
         # `private`/`global` keywords sit in rm.group(0) before `rule`.
         is_private = "private" in rm.group(0)
@@ -222,7 +354,8 @@ def main():
     if len(sys.argv) != 3:
         sys.exit("usage: filter-rules.py IN.yar OUT.yar")
     src_path, out_path = sys.argv[1], sys.argv[2]
-    text = open(src_path, encoding="utf-8", errors="replace").read()
+    with open(src_path, encoding="utf-8", errors="replace") as source:
+        text = source.read()
 
     kept_chunks = []
     reasons = Counter()
@@ -245,12 +378,15 @@ def main():
             kept_chunks.append(chunk)
 
     out = "".join(kept_chunks)
-    open(out_path, "w", encoding="utf-8").write(out)
+    with open(out_path, "w", encoding="utf-8") as destination:
+        destination.write(out)
 
     kept = reasons["keep"] + reasons["keep:private"]
     dropped = n_rules - kept
-    print(f"filter-rules: {n_rules} rules in → {kept} kept "
-          f"({reasons['keep:private']} private) → {dropped} dropped")
+    print(
+        f"filter-rules: {n_rules} rules in → {kept} kept "
+        f"({reasons['keep:private']} private) → {dropped} dropped"
+    )
     for r, c in reasons.most_common():
         if not r.startswith("keep"):
             print(f"  drop {r}: {c}")

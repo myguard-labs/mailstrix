@@ -247,7 +247,7 @@ local function extract_pw_candidates(task)
   return rspamd_util.encode_base64(table.concat(out, "\n"), 0)
 end
 
-local function post(task, buf, what, fname, effort, cb)
+local function post(task, buf, what, fname, effort, pwcand, cb)
   local function http_cb(err, code, body)
     if err then
       rspamd_logger.errx(task, "strixd request failed (%s): %s", what, err)
@@ -295,7 +295,6 @@ local function post(task, buf, what, fname, effort, cb)
   -- Candidate passwords scraped from the subject/body for strixd's opt-in
   -- encrypted-archive decrypt. base64 (control-byte safety); already capped
   -- count/length. nil when disabled or none found → no header.
-  local pwcand = extract_pw_candidates(task)
   if pwcand then
     headers["X-MAILSTRIX-PWCandidates"] = pwcand
   end
@@ -472,9 +471,12 @@ local function check_cb(task)
   -- Effort tier is a per-message (sender) property: compute once, send on every
   -- per-part /scan for this message.
   local effort = compute_effort(task)
+  -- Candidate passwords are also a per-message property. Scrape the subject and
+  -- text body once, then reuse the immutable encoded header for every job.
+  local pwcand = extract_pw_candidates(task)
 
   for _, job in ipairs(jobs) do
-    post(task, job.buf, job.what, job.fname, effort, function(matches, degraded)
+    post(task, job.buf, job.what, job.fname, effort, pwcand, function(matches, degraded)
       if degraded and not degraded_reason then degraded_reason = degraded end
       for _, m in ipairs(matches) do
         if m.rule then
