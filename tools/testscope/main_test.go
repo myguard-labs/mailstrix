@@ -37,6 +37,33 @@ func TestRarFixtureSelectsPublicCIConsumer(t *testing.T) {
 	}
 }
 
+func TestArchiveDecoderFixtureSelectsCIWrapper(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m/ci", Dir: "/r/ci"})
+	for _, file := range []string{
+		"ci/archive_decoder_incomplete_test.go",
+		"ci/testdata/archive_decoder_incomplete_test.go",
+		"ci/testdata/archive_decoder_http_test.go",
+	} {
+		got, err := selectChangedPackages([]string{file}, graph, "/r")
+		if err != nil || !reflect.DeepEqual(got, []string{"example.com/m/ci"}) {
+			t.Fatalf("%s: got %v, %v; want only CI wrapper package", file, got, err)
+		}
+	}
+}
+
+func TestICAPIdentityFixtureSelectsCIWrapper(t *testing.T) {
+	graph := append(testGraph(), pkg{ImportPath: "example.com/m/ci", Dir: "/r/ci"})
+	for _, file := range []string{
+		"ci/icap_identity_test.go",
+		"ci/testdata/icap_identity_test.go",
+	} {
+		got, err := selectChangedPackages([]string{file}, graph, "/r")
+		if err != nil || !reflect.DeepEqual(got, []string{"example.com/m/ci"}) {
+			t.Fatalf("%s: got %v, %v; want only CI wrapper package", file, got, err)
+		}
+	}
+}
+
 func sel(files ...string) string {
 	return strings.Join(selectPackages(files, testGraph(), "/r"), " ")
 }
@@ -154,7 +181,10 @@ func TestChangedScopeExplicitMappings(t *testing.T) {
 }
 
 func TestChangedExternalInputs(t *testing.T) {
-	graph := append(testGraph(), pkg{ImportPath: "example.com/m/internal/cape", Dir: "/r/internal/cape"})
+	graph := append(testGraph(),
+		pkg{ImportPath: "example.com/m/internal/cape", Dir: "/r/internal/cape"},
+		pkg{ImportPath: "example.com/m/ci", Dir: "/r/ci"},
+	)
 	for _, tc := range []struct{ file, want string }{
 		{"internal/mailstrix/CAPE.md", "example.com/m/internal/mailstrix"},
 		{"internal/cape/STORE.md", "example.com/m/internal/cape"},
@@ -163,7 +193,7 @@ func TestChangedExternalInputs(t *testing.T) {
 		{"docker/local-rules/deleted.yara", "example.com/m/internal/extract example.com/m/internal/mailstrix"},
 		{"contrib/clamd/test_clients.py", "example.com/m/internal/mailstrix"},
 		{"internal/extract/testdata/deleted.eml", "example.com/m/internal/extract example.com/m/internal/mailstrix"},
-		{"third_party/oleparse/oleparse.go", "example.com/m/cmd/strixd example.com/m/internal/extract example.com/m/internal/mailstrix"},
+		{"third_party/oleparse/oleparse.go", "example.com/m/ci example.com/m/cmd/strixd example.com/m/internal/extract example.com/m/internal/mailstrix"},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			got, err := selectChangedPackages([]string{tc.file}, graph, "/r")

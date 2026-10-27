@@ -29,6 +29,7 @@ class ImpactTests(unittest.TestCase):
             ("ci/ci_xlm_rule_locator_test.py", "scope"),
             ("ci/spamassassin_child_status.t", "spamassassin"),
             ("ci/verdict_envelope_test.go", "go"),
+            ("ci/local_scan_partial_test.go", "go"),
         ]:
             with self.subTest(path=path):
                 selected = impact.plan([path])
@@ -499,6 +500,63 @@ class ImpactTests(unittest.TestCase):
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
 
+    def test_ole_debug_native_go_consumer(self):
+        path = "ci/ole_debug_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/unmapped_test.go", "ci/ole_debug_test.py"]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+        without_path = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_path),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+
+    def test_archive_decoder_fixtures_have_exact_go_consumers(self):
+        for path in [
+            "ci/archive_decoder_incomplete_test.go",
+            "ci/testdata/archive_decoder_incomplete_test.go",
+            "ci/testdata/archive_decoder_http_test.go",
+        ]:
+            with self.subTest(path=path):
+                result = impact.plan([path])
+                self.assertEqual(
+                    {key for key, value in result.items() if value is True},
+                    {"go", "docker"},
+                )
+                self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in [
+            "ci/archive_decoder_incomplete_test.py",
+            "ci/testdata/archive_decoder_unmapped.txt",
+        ]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
+    def test_icap_identity_fixtures_have_exact_go_consumers(self):
+        for path in [
+            "ci/icap_identity_test.go",
+            "ci/testdata/icap_identity_test.go",
+        ]:
+            with self.subTest(path=path):
+                result = impact.plan([path])
+                self.assertEqual(
+                    {key for key, value in result.items() if value is True},
+                    {"go", "docker"},
+                )
+                self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in [
+            "ci/icap_identity_test.py",
+            "ci/testdata/icap_identity_unmapped.txt",
+        ]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
     def test_icap_admission_fixture_has_exact_go_consumers(self):
         for path in [
             "ci/icap_admission_ordering_test.go",
@@ -773,6 +831,28 @@ class ImpactTests(unittest.TestCase):
             impact.plan([path])
         self.assertEqual(impact.plan([path]), result)
 
+    def test_http_lifecycle_native_go_consumer(self):
+        path = "ci/http_lifecycle_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in ["ci/http_lifecycle_test.py", "ci/http_lifecycle.go"]:
+            with (
+                self.subTest(path=unrelated),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([unrelated])
+        without_path = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_path),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+        self.assertEqual(impact.plan([path]), result)
+
     def test_startup_memory_go_consumer(self):
         path = "ci/startup_memory_test.go"
         result = impact.plan([path])
@@ -843,6 +923,28 @@ class ImpactTests(unittest.TestCase):
         for unrelated in ["ci/unmapped_test.go", "ci/mbazaar_lifecycle_test.py"]:
             with self.subTest(path=unrelated), self.assertRaises(ValueError):
                 impact.plan([unrelated])
+
+    def test_scanner_constructor_lifecycle_native_go_consumer(self):
+        path = "ci/scanner_constructor_lifecycle_test.go"
+        result = impact.plan([path])
+        self.assertEqual(
+            {key for key, value in result.items() if value is True},
+            {"go", "docker"},
+        )
+        self.assertEqual(result["changed_files"], "--changed -- " + path)
+        for unrelated in [
+            "ci/scanner_constructor_lifecycle_test.py",
+            "ci/unmapped_test.go",
+        ]:
+            with self.subTest(path=unrelated), self.assertRaises(ValueError):
+                impact.plan([unrelated])
+
+        without_path = [name for name in impact.GO_INPUTS if name != path]
+        with (
+            mock.patch.object(impact, "GO_INPUTS", without_path),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
 
     def test_threatfox_urlhaus_lifecycle_native_go_consumers(self):
         for name in ["threatfox", "urlhaus"]:

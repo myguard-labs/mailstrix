@@ -1,7 +1,7 @@
 # Build input pins
 
 Dockerfiles pin external images by multi-platform index digest. The selected
-Debian bookworm-slim, Go 1.26.10-bookworm, distroless base-debian12:nonroot and
+Debian bookworm-slim, Go 1.26.10-bookworm, distroless base-debian13:nonroot and
 Dockerfile frontend indexes include both linux/amd64 and linux/arm64.
 Tags remain readable version labels; the digest selects the actual content.
 Update both together when changing Go versions.
@@ -13,11 +13,11 @@ builds leave that proof argument unset, retaining normal ccache behavior;
 `CCACHE_DISABLE=0` is not a valid false default for ccache's environment flags.
 
 The input sources checked on 2026-09-05 (Go 1.26.10 index checked
-2026-10-24) were:
+2026-10-24; distroless runtime index checked 2026-10-26) were:
 
 - Debian and Go: the official `library/debian:bookworm-slim` and
   `library/golang:1.26.10-bookworm` manifests on Docker Hub.
-- Runtime: `gcr.io/distroless/base-debian12:nonroot` from the
+- Runtime: `gcr.io/distroless/base-debian13:nonroot` from the
   [distroless project](https://github.com/GoogleContainerTools/distroless).
 - Build frontend: the official `docker/dockerfile:1` manifest on Docker Hub.
 - Nested setup-go action: the upstream

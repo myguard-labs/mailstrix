@@ -604,6 +604,7 @@ func NewScanner(cfg *Config, logf func(string, ...any)) (*Scanner, error) {
 		logf("ThreatFox IOC lookup enabled (refresh=%s, max_urls/msg=%d)", cfg.ThreatFoxRefresh, cfg.ThreatFoxMaxURLs)
 	}
 	if err := s.ReloadAll(); err != nil {
+		s.Close()
 		return nil, err
 	}
 	return s, nil
@@ -1321,14 +1322,26 @@ func validatedRuleFiles(dir string, logf func(string, ...any)) ([]string, error)
 	return valid, nil
 }
 
+type ruleCompiler interface {
+	AddFile(*os.File, string) error
+	DefineVariable(string, interface{}) error
+	Destroy()
+	GetRules() (*yara.Rules, error)
+}
+
+var newRuleCompiler = func() (ruleCompiler, error) { return yara.NewCompiler() }
+var destroyTemporaryRules = (*yara.Rules).Destroy
+
 // Kept replaceable alongside validateRuleFile for production reload call-count tests.
 var compileRuleFiles = func(dir string, files []string, logf func(string, ...any)) (*yara.Rules, error) {
-	c, err := yara.NewCompiler()
+	c, err := newRuleCompiler()
 	if err != nil {
 		return nil, fmt.Errorf("new compiler: %w", err)
 	}
+	// GetRules returns an independent native object. The compiler remains local
+	// to this call; only the successfully returned rules transfer to the caller.
+	defer c.Destroy()
 	if err := defineExternals(c); err != nil {
-		c.Destroy()
 		return nil, err
 	}
 	added, skipped := 0, 0
@@ -1354,6 +1367,9 @@ var compileRuleFiles = func(dir string, files []string, logf func(string, ...any
 	}
 	rules, err := c.GetRules()
 	if err != nil {
+		if rules != nil {
+			destroyTemporaryRules(rules)
+		}
 		return nil, fmt.Errorf("get rules: %w", err)
 	}
 	return rules, nil
@@ -1477,7 +1493,7 @@ var validateRuleFile = fileCompiles
 // compiler the rest of the set is built in. Compiler-setup failures are returned
 // as *ruleSetupError so they are not mistaken for a bad file.
 func fileCompiles(path string) error {
-	c, err := yara.NewCompiler()
+	c, err := newRuleCompiler()
 	if err != nil {
 		return &ruleSetupError{err: err}
 	}
@@ -1493,8 +1509,17 @@ func fileCompiles(path string) error {
 	if err := c.AddFile(fh, filepath.Base(path)); err != nil {
 		return err
 	}
-	_, err = c.GetRules()
-	return err
+	rules, err := c.GetRules()
+	if err != nil {
+		if rules != nil {
+			destroyTemporaryRules(rules)
+		}
+		return err
+	}
+	if rules != nil {
+		destroyTemporaryRules(rules)
+	}
+	return nil
 }
 
 // defineExternals declares the external variables that common public rulesets
@@ -1517,7 +1542,9 @@ func fileCompiles(path string) error {
 // A failed declaration (libyara: out of memory, or a duplicate/invalid external)
 // is returned so compilation fails with the real cause instead of every rule
 // file later being skipped for an "undefined identifier".
-func defineExternals(c *yara.Compiler) error {
+func defineExternals(c interface {
+	DefineVariable(string, interface{}) error
+}) error {
 	return declareExternals(c.DefineVariable)
 }
 
@@ -2435,6 +2462,9 @@ func (s *Scanner) publishDenylist(deny *map[string]struct{}) {
 // graceful shutdown. Both Close calls are nil-safe (no-op when the feed is
 // disabled) and idempotent. Call after the HTTP server has drained.
 func (s *Scanner) Close() {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.generationMu.Lock()
 	root := s.generation

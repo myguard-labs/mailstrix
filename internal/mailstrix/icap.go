@@ -366,7 +366,14 @@ func (s *Server) handleICAPRequest(w io.Writer, br *bufio.Reader) error {
 		// valid one the body framing is unknown, so the body would never be
 		// read (a 204 clean for unscanned content) and its bytes would then be
 		// parsed as the next request. Answer 400 and drop the connection.
-		sections, encErr := parseICAPEncapsulated(hdr.Get("Encapsulated"))
+		encValues := hdr.Values("Encapsulated")
+		var sections []icapSection
+		var encErr error
+		if len(encValues) != 1 {
+			encErr = errICAPEncapsulated
+		} else {
+			sections, encErr = parseICAPEncapsulated(encValues[0])
+		}
 		if encErr != nil {
 			s.logBadEncapsulatedICAP(method, encErr)
 			_ = s.icapWriteStatus(w, 400, "Bad Request", "")
@@ -573,7 +580,10 @@ func (s *Server) handleICAPMod(w io.Writer, br *bufio.Reader, method string, hdr
 	// path does; autoEnvDefault needs the admission slot held above.
 	icapMeta := ScanMeta{RawKey: streamDedupKey(buf),
 		Effort: ResolveEffortLevel(0, false, s.autoEnvDefault(true), s.cfg.EffortMax)}
-	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap", buf, icapMeta)
+	// Resolved effort can change with load. Cache entries and in-flight scans
+	// must therefore share the same metadata as well as the same body.
+	// A NUL-delimited namespace cannot alias an HTTP filename's metadata key.
+	matches, cacheStatus, fp := s.lookupOrScan(ctx, "icap\x00"+icapMeta.cacheKey(), buf, icapMeta)
 	if cacheStatus == "canceled" {
 		// A follower that stopped waiting on its leader has no verdict: answer
 		// 503 so the client retries or applies its own policy, never 204 clean.
@@ -709,6 +719,8 @@ var errICAPEncapsulated = errors.New("ICAP Encapsulated header missing or malfor
 
 var errICAPBodyTooLarge = errors.New("ICAP body exceeds MaxBody limit")
 
+var errICAPChunkExtension = errors.New("malformed ICAP chunk extension")
+
 var errICAPLineTooLong = errors.New("ICAP line exceeds length cap")
 
 // Line caps bound every CRLF-terminated read so a missing '\n' cannot grow the
@@ -739,15 +751,21 @@ func isHTTPToken(s string) bool {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
-		default:
+		if !isHTTPTokenByte(s[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func isHTTPTokenByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		return true
+	}
+	return false
 }
 
 // readBoundedMIMEHeader reads a CRLF-terminated MIME header block with a cap on
@@ -851,6 +869,101 @@ func readICAPChunkHeaderLine(r *bufio.Reader) (string, error) {
 	return readBoundedLine(r, maxICAPChunkHeaderLine)
 }
 
+// parseICAPChunkExtensions parses an RFC-style chunk-extension list and
+// recognizes only a complete, valueless "ieof" extension name
+// (case-insensitively). Malformed extension syntax rejects the chunk; quoted
+// values are consumed so an embedded ";ieof" cannot be mistaken for a separate
+// extension.
+func parseICAPChunkExtensions(exts string) (bool, error) {
+	i := 0
+	hasIEOF := false
+	skipWhitespace := func() {
+		for i < len(exts) && (exts[i] == ' ' || exts[i] == '\t') {
+			i++
+		}
+	}
+
+	for {
+		skipWhitespace()
+		if i == len(exts) {
+			return hasIEOF, nil
+		}
+		if exts[i] != ';' {
+			return false, errICAPChunkExtension
+		}
+		i++
+		skipWhitespace()
+
+		nameStart := i
+		for i < len(exts) && isHTTPTokenByte(exts[i]) {
+			i++
+		}
+		if nameStart == i {
+			return false, errICAPChunkExtension
+		}
+		name := exts[nameStart:i]
+		skipWhitespace()
+
+		hasValue := false
+		if i < len(exts) && exts[i] == '=' {
+			hasValue = true
+			i++
+			skipWhitespace()
+			if i == len(exts) {
+				return false, errICAPChunkExtension
+			}
+			if exts[i] == '"' {
+				i++
+				closed := false
+				for i < len(exts) {
+					c := exts[i]
+					switch c {
+					case '"':
+						i++
+						closed = true
+					case '\\':
+						i++
+						if i == len(exts) || (exts[i] != '\t' && (exts[i] < 0x20 || exts[i] == 0x7f)) {
+							return false, errICAPChunkExtension
+						}
+						i++
+					default:
+						if c == '\r' || c == '\n' || c == 0x7f || (c < 0x20 && c != '\t') {
+							return false, errICAPChunkExtension
+						}
+						i++
+					}
+					if closed {
+						break
+					}
+				}
+				if !closed {
+					return false, errICAPChunkExtension
+				}
+			} else {
+				valueStart := i
+				for i < len(exts) && isHTTPTokenByte(exts[i]) {
+					i++
+				}
+				if valueStart == i {
+					return false, errICAPChunkExtension
+				}
+			}
+			skipWhitespace()
+		}
+
+		if !hasValue && strings.EqualFold(name, "ieof") {
+			hasIEOF = true
+		}
+		if i == len(exts) {
+			return hasIEOF, nil
+		}
+		if exts[i] != ';' {
+			return false, errICAPChunkExtension
+		}
+	}
+}
+
 // readICAPChunkedBody reads an ICAP chunked body (RFC 3507 §4.5) up to maxBytes.
 // Each chunk: "<hex-size>[; ieof]\r\n<data>\r\n". Terminal chunk: "0\r\n\r\n".
 //
@@ -879,13 +992,16 @@ func readICAPChunkedAppend(r *bufio.Reader, out []byte, maxBytes int64) ([]byte,
 		if err != nil {
 			return nil, false, err
 		}
-		// Detect and strip ICAP "ieof" extension: "3c; ieof" or "0 ; ieof"
+		// Parse and strip ICAP chunk extensions, recognizing only an exact,
+		// valueless "ieof" token.
 		hasIEOF := false
 		ext := raw
 		if i := strings.IndexByte(raw, ';'); i >= 0 {
 			ext = strings.TrimSpace(raw[:i])
-			trailer := strings.ToLower(strings.TrimSpace(raw[i+1:]))
-			hasIEOF = strings.Contains(trailer, "ieof")
+			hasIEOF, err = parseICAPChunkExtensions(raw[i:])
+			if err != nil {
+				return nil, false, err
+			}
 		}
 		size, err := strconv.ParseInt(strings.TrimSpace(ext), 16, 64)
 		if err != nil {
@@ -905,7 +1021,11 @@ func readICAPChunkedAppend(r *bufio.Reader, out []byte, maxBytes int64) ([]byte,
 			}
 			return out, hasIEOF, nil
 		}
-		if int64(len(out))+size > maxBytes {
+		// Compare against the remaining allowance instead of adding attacker-
+		// controlled size to the existing preview length: that sum can overflow
+		// int64 and bypass the limit before allocation or payload consumption.
+		used := int64(len(out))
+		if used > maxBytes || size > maxBytes-used {
 			return nil, false, errICAPBodyTooLarge
 		}
 		sizeInt := int(size)

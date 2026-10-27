@@ -37,6 +37,8 @@ ci/testdata/**
 !ci/testdata/rc4md5-biff.xls
 # Private overlay fixture consumed by ci/icap_admission_ordering_test.go.
 !ci/testdata/icap_admission_ordering_test.go
+# Private overlay fixture consumed by ci/icap_identity_test.go.
+!ci/testdata/icap_identity_test.go
 # Private overlay fixture consumed by ci/clamd_admission_ordering_test.go.
 !ci/testdata/clamd_admission_ordering_test.go
 !ci/marker_runtime_fixture.py
