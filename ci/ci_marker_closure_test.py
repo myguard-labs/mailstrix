@@ -225,9 +225,19 @@ class ClosureScalingTests(unittest.TestCase):
                 )
         self.assertLess(
             docker.index("--native-ci"),
-            docker.index("go test -race"),
+            docker.index("go test -count=1 -race"),
             "genuine count gate must precede expensive race traversal",
         )
+
+    def test_docker_test_stage_disables_go_test_result_cache(self):
+        repo = Path(__file__).resolve().parents[1]
+        docker = (repo / "docker/Dockerfile").read_text()
+        stage = docker.split("FROM build AS test\n", 1)[1].split("\nFROM ", 1)[0]
+        commands = re.findall(r"\bgo test (?=-)[^;\n]*", stage.replace("\\\n", " "))
+        self.assertEqual(len(commands), 3, commands)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertRegex(command, r"(?:^|\s)-count=1(?:\s|$)")
 
     def test_missing_malformed_and_wrong_mode_profiles(self):
         for profile in (
