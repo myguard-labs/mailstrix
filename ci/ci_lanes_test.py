@@ -23,6 +23,7 @@ DIRECT_NEEDS = [
     "parity-isolation",
     "lint",
     "scanners",
+    "publisher-concurrency",
     "rspamd",
     "spamassassin",
     "compiler-inputs",
@@ -93,6 +94,8 @@ class FourLaneContract(unittest.TestCase):
         return {
             "CHANGES_RESULT": "success",
             "SCANNERS_RESULT": "success",
+            "PUBLISHER_CONCURRENCY_SELECTED": "false",
+            "PUBLISHER_CONCURRENCY_RESULT": "skipped",
             "DOCKER_RESULT": "success",
             "GO_SELECTED": "false",
             "SCOPE_SELECTED": "false",
@@ -122,7 +125,7 @@ class FourLaneContract(unittest.TestCase):
         self.assertIs(lane_manifest["speed_claim"], False)
         self.assertEqual([lane["id"] for lane in lane_manifest["lanes"]], list(GROUPS))
         jobs = [job for lane in lane_manifest["lanes"] for job in lane["jobs"]]
-        self.assertEqual(len(jobs), 35)
+        self.assertEqual(len(jobs), 36)
         self.assertEqual(len(jobs), len(set(jobs)))
         self.assertTrue(all(lane["mode"] for lane in lane_manifest["lanes"]))
         self.assertEqual(
@@ -154,6 +157,13 @@ class FourLaneContract(unittest.TestCase):
     def test_selected_failure_cancel_timeout_and_unexpected_skip_fail(self):
         cases = (
             ("SCANNERS_RESULT", {}),
+            (
+                "PUBLISHER_CONCURRENCY_RESULT",
+                {
+                    "PUBLISHER_CONCURRENCY_SELECTED": "true",
+                    "PUBLISHER_CONCURRENCY_RESULT": "success",
+                },
+            ),
             ("DOCKER_RESULT", {}),
             ("LINT_RESULT", {"GO_SELECTED": "true", "LINT_RESULT": "success"}),
             (
@@ -205,6 +215,7 @@ class FourLaneContract(unittest.TestCase):
     def test_unselected_jobs_accept_only_explicit_skip(self):
         for result_name in (
             "LINT_RESULT",
+            "PUBLISHER_CONCURRENCY_RESULT",
             "NATIVE_RESULT",
             "PR_BINARIES_RESULT",
             "PR_MARKER_IMAGE_RESULT",

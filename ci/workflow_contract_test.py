@@ -826,6 +826,8 @@ def verdict(
     changes="success",
     docker="success",
     scanners="success",
+    publisher_selected="false",
+    publisher_result="skipped",
     native_selected="false",
     native_result="skipped",
     event_name="workflow_call",
@@ -838,6 +840,8 @@ def verdict(
         CHANGES_RESULT=changes,
         DOCKER_RESULT=docker,
         SCANNERS_RESULT=scanners,
+        PUBLISHER_CONCURRENCY_SELECTED=publisher_selected,
+        PUBLISHER_CONCURRENCY_RESULT=publisher_result,
         NATIVE_SELECTED=native_selected,
         NATIVE_RESULT=native_result,
         EVENT_NAME=event_name,
@@ -1024,6 +1028,7 @@ class RequiredCheck(unittest.TestCase):
                 "parity-isolation",
                 "lint",
                 "scanners",
+                "publisher-concurrency",
                 "rspamd",
                 "spamassassin",
                 "compiler-inputs",
@@ -1037,6 +1042,7 @@ class RequiredCheck(unittest.TestCase):
             "parity-isolation",
             "lint",
             "scanners",
+            "publisher-concurrency",
             "rspamd",
             "spamassassin",
             "compiler-inputs",
@@ -1080,6 +1086,25 @@ class RequiredCheck(unittest.TestCase):
                     actual = list(good)
                     actual[index] = state
                     self.assertFalse(verdict(bits, actual), (index, state))
+
+    def test_publisher_concurrency_selected_never_passes_unless_success(self):
+        skipped = ("false",) * 5
+        results = ("skipped",) * 4
+        self.assertTrue(
+            verdict(skipped, results, publisher_selected="true", publisher_result="success")
+        )
+        self.assertTrue(verdict(skipped, results))
+        for state in ("failure", "cancelled", "timed_out", "skipped", "unknown", ""):
+            with self.subTest(selected="true", state=state):
+                self.assertFalse(
+                    verdict(skipped, results, publisher_selected="true", publisher_result=state)
+                )
+        for state in ("success", "failure", "cancelled", "unknown", ""):
+            with self.subTest(selected="false", state=state):
+                self.assertFalse(verdict(skipped, results, publisher_result=state))
+        self.assertFalse(
+            verdict(skipped, results, publisher_selected="", publisher_result="success")
+        )
 
     def test_planner_and_required_gate_fail_closed(self):
         skipped = ("false",) * 5
@@ -1157,9 +1182,9 @@ class RequiredCheck(unittest.TestCase):
         baseline_check_count = len(check_owners) + sum(
             len(alias["baseline"]) - 1 for alias in aliases
         )
-        self.assertEqual(len(job_owners), 35)
-        self.assertEqual(len(check_owners), 155)
-        self.assertEqual(baseline_check_count, 156)
+        self.assertEqual(len(job_owners), 36)
+        self.assertEqual(len(check_owners), 157)
+        self.assertEqual(baseline_check_count, 158)
         observed_overrides = {
             f"{identity.rsplit('#', 1)[0]}#{identity.rsplit(':', 1)[1]}"
             for identity in check_owners
