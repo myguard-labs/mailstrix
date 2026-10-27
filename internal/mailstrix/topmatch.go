@@ -56,7 +56,7 @@ func (c *matchCounter) add(rules []string, epoch *uint64) {
 	for _, r := range rules {
 		c.counts[r]++
 	}
-	if len(c.counts) > c.max {
+	for len(c.counts) > c.max {
 		c.evict()
 	}
 }

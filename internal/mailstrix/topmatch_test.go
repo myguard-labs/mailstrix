@@ -52,6 +52,65 @@ func TestMatchCounterEviction(t *testing.T) {
 	}
 }
 
+func uniqueMatchRules(prefix string, n int) []string {
+	rules := make([]string, n)
+	for i := range rules {
+		rules[i] = fmt.Sprintf("%s_%04d", prefix, i)
+	}
+	return rules
+}
+
+func TestMatchCounterBatchCapBoundaries(t *testing.T) {
+	for _, total := range []int{matchCounterCap - 1, matchCounterCap, matchCounterCap + 2} {
+		t.Run(fmt.Sprintf("total_%d", total), func(t *testing.T) {
+			c := newMatchCounter(matchCounterCap)
+			c.Add(uniqueMatchRules("RULE", total))
+			want := total
+			if want > matchCounterCap {
+				want = matchCounterCap
+			}
+			if got := len(c.TopN(total)); got != want {
+				t.Fatalf("batch of %d unique rules retained %d entries, want %d", total, got, want)
+			}
+		})
+	}
+}
+
+func TestMatchCounterBatchTrimsMultipleCapOverflow(t *testing.T) {
+	c := newMatchCounter(matchCounterCap)
+	c.Add(uniqueMatchRules("RULE", 3*matchCounterCap+17))
+	if got := len(c.TopN(4 * matchCounterCap)); got != matchCounterCap {
+		t.Fatalf("multi-cap batch retained %d entries, want %d", got, matchCounterCap)
+	}
+}
+
+func TestMatchCounterNearlyFullBatchPreservesRepeatedCountsAndOrder(t *testing.T) {
+	c := newMatchCounter(matchCounterCap)
+	c.Add(uniqueMatchRules("EXISTING", matchCounterCap-1))
+	c.Add([]string{"HOT", "NEW_0", "HOT", "NEW_1", "HOT", "NEW_2"})
+
+	top := c.TopN(matchCounterCap + 10)
+	if len(top) != matchCounterCap {
+		t.Fatalf("nearly-full batch retained %d entries, want %d", len(top), matchCounterCap)
+	}
+	if top[0].Rule != "HOT" || top[0].Count != 3 {
+		t.Fatalf("repeated rule count/order changed: first entry = %+v, want HOT:3", top[0])
+	}
+}
+
+func TestMatchCounterStaleOverflowBatchIsDropped(t *testing.T) {
+	c := newMatchCounter(matchCounterCap)
+	stale := c.Epoch()
+	c.Reset()
+	c.Add([]string{"CURRENT", "CURRENT"})
+	c.AddAt(stale, uniqueMatchRules("STALE", 2*matchCounterCap+1))
+
+	top := c.TopN(matchCounterCap + 1)
+	if len(top) != 1 || top[0].Rule != "CURRENT" || top[0].Count != 2 {
+		t.Fatalf("stale overflow batch changed current epoch: %v", top)
+	}
+}
+
 func TestMatchCounterReset(t *testing.T) {
 	c := newMatchCounter(matchCounterCap)
 	c.Add([]string{"RULE_A", "RULE_B"})
