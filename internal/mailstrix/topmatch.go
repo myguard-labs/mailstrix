@@ -82,16 +82,12 @@ type MatchCount struct {
 // TopN returns up to n rules with the highest hit counts, sorted descending.
 func (c *matchCounter) TopN(n int) []MatchCount {
 	c.mu.Lock()
-	snap := make(map[string]uint64, len(c.counts))
+	all := make([]MatchCount, 0, len(c.counts))
 	for k, v := range c.counts {
-		snap[k] = v
+		all = append(all, MatchCount{Rule: k, Count: v})
 	}
 	c.mu.Unlock()
 
-	all := make([]MatchCount, 0, len(snap))
-	for k, v := range snap {
-		all = append(all, MatchCount{Rule: k, Count: v})
-	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Count > all[j].Count })
 	if n > len(all) {
 		n = len(all)
