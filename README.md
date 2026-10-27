@@ -221,16 +221,26 @@ The daemon package installs a hardened systemd unit (unprivileged `strixd` user,
 
 ## Quick start
 
-The image includes a compiled seed bundle, so a token is all you need:
+The image includes a compiled seed bundle. Generate a unique token into a local
+file first; the private directory protects the read-only bind-mounted token on
+the host, and the separate curl header file keeps the token out of process
+arguments and command output:
 
 ```sh
+install -d -m 700 .mailstrix-secrets
+openssl rand -hex 32 > .mailstrix-secrets/token
+chmod 0444 .mailstrix-secrets/token
+(umask 077; printf 'X-MAILSTRIX-Token: ' > .mailstrix-secrets/curl-header
+ cat .mailstrix-secrets/token >> .mailstrix-secrets/curl-header)
+
 docker run -d --name strixd \
-    -e MAILSTRIX_TOKEN=changeme \
-    -p 8079:8079 \
+    -v "$PWD/.mailstrix-secrets/token:/run/secrets/token:ro" \
+    -e MAILSTRIX_TOKEN_FILE=/run/secrets/token \
+    -p 127.0.0.1:8079:8079 \
     eilandert/mailstrix
 
 # ask it something:
-printf 'hello' | curl -s -H 'X-MAILSTRIX-Token: changeme' \
+printf 'hello' | curl -s --header @.mailstrix-secrets/curl-header \
     --data-binary @- http://127.0.0.1:8079/scan
 # -> {"matches":[]}
 ```
@@ -239,11 +249,12 @@ To use your own rules instead of the baked bundle:
 
 ```sh
 docker run -d --name strixd \
-    -e MAILSTRIX_TOKEN=changeme \
+    -v "$PWD/.mailstrix-secrets/token:/run/secrets/token:ro" \
+    -e MAILSTRIX_TOKEN_FILE=/run/secrets/token \
     -e MAILSTRIX_RULES= \
     -e MAILSTRIX_RULES_DIR=/rules \
     -v "$PWD/myrules:/rules:ro" \
-    -p 8079:8079 \
+    -p 127.0.0.1:8079:8079 \
     eilandert/mailstrix
 ```
 
@@ -254,7 +265,7 @@ detection works end to end, send the harmless
 
 ```sh
 printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' |
-    curl -s -H 'X-MAILSTRIX-Token: changeme' \
+    curl -s --header @.mailstrix-secrets/curl-header \
     -H "X-MAILSTRIX-Filename: $(printf 'eicar.com' | base64)" \
     --data-binary @- http://127.0.0.1:8079/scan
 # -> {"matches":[{"rule":"SUSP_Just_EICAR",…},{"rule":"TRELLIX_ARC_Malw_Eicar",…}]}

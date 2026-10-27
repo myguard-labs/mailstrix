@@ -22,10 +22,10 @@ replicaCount: 1
 nameOverride: ""
 fullnameOverride: ""
 
-# --- Auth token (required for /scan) ----------------------------------------
-# strixd refuses every /scan with 503 until a token is set. The rspamd plugin
-# must present the same value. The chart still renders without a token, but
-# /scan will return 503 — see NOTES.txt.
+# --- Auth token (optional in core; recommended for shared clusters) ---------
+# With no token, /scan is intentionally OPEN and can return HTTP 200 without
+# credentials; strixd logs a startup warning. With a token, missing or wrong
+# credentials return HTTP 401. Prefer an existing Secret for deployments.
 token:
   # Inline value — the chart creates a Secret holding it (mounted as a file,
   # wired to MAILSTRIX_TOKEN_FILE). Leave "" to skip.

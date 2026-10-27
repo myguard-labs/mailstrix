@@ -14,14 +14,16 @@ ClusterIP by design. Point your rspamd mailstrix.lua plugin at:
 {{- if not (or .Values.token.value .Values.token.existingSecret) }}
 
 2. !! NO TOKEN SET !!
-   strixd will return HTTP 503 on every /scan until you set a shared token.
-   Set one of:
-     --set token.value=YOUR_SECRET
+   Authentication is optional in strixd, so /scan is OPEN and a valid request
+   can return HTTP 200 without credentials. Use this only on a trusted private
+   cluster network. To enable authentication, create a high-entropy token as a
+   Kubernetes Secret and set:
      --set token.existingSecret=my-secret --set token.secretKey=token
-   The rspamd plugin MUST present the same value.
+   The rspamd plugin must present the same value.
 {{- else }}
 
-2. Token is configured (strixd will accept /scan from clients presenting it).
+2. Token authentication is configured. Missing or incorrect credentials return
+   HTTP 401; clients presenting the configured token can submit /scan requests.
 {{- end }}
 
 {{- if gt (int .Values.replicaCount) 1 }}
