@@ -955,8 +955,7 @@ func fromEncoded(buf []byte, res *Result, opts *Options) {
 			break
 		}
 		if states[i].maxLayer >= deepDecodeLayer {
-			stream := []byte("MSD-DEEPDECODE depth=" + strconv.Itoa(states[i].maxLayer))
-			if res.appendStream(&stream) {
+			if res.appendMarker(trustedMarker("MSD-DEEPDECODE depth=" + strconv.Itoa(states[i].maxLayer))) {
 				total++
 			}
 		}
@@ -1111,8 +1110,7 @@ func decodeSourceTree(src []byte, res *Result, opts *Options) int {
 	// bypasses dedup/re-enqueue) but still honours maxStreams, and is counted in
 	// the returned blob total so the caller's DecodedStreams metric stays exact.
 	if maxLayer >= deepDecodeLayer && len(res.Streams) < maxStreams {
-		stream := []byte("MSD-DEEPDECODE depth=" + strconv.Itoa(maxLayer))
-		if res.appendStream(&stream) {
+		if res.appendMarker(trustedMarker("MSD-DEEPDECODE depth=" + strconv.Itoa(maxLayer))) {
 			blobs++
 		}
 	}

@@ -243,8 +243,7 @@ func fromRTF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	// \objupdate detection — Word auto-fetches the remote OLE link on open
 	// (CVE-2017-0199 vector). Emit a marker so YARA can match.
 	if bytes.Contains(buf, []byte("\\objupdate")) {
-		marker := []byte("RTF-OBJUPDATE")
-		res.appendStream(&marker)
+		res.appendMarker(trustedMarker("RTF-OBJUPDATE"))
 	}
 
 	var total, objs, groups int

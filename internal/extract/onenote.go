@@ -92,7 +92,7 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 	var total int
 	var emitted int // THIS section's embedded-file count, not global len(res.Streams)
 	rest := buf
-	for len(res.Streams) < maxStreams && emitted < maxONEFiles && total < maxTotalONE && !expired(deadline) {
+	for !expired(deadline) {
 		i := bytes.Index(rest, oneFDSOHeaderGUID)
 		if i < 0 {
 			break
@@ -113,6 +113,9 @@ func fromOneNote(buf []byte, res *Result, bud *archiveBudget, depth int, deadlin
 			n = uint64(len(data))
 		}
 		if n > 0 {
+			if formatCapReached(res, emitted, maxONEFiles, total, maxTotalONE, "onenote-files") {
+				break
+			}
 			b := append([]byte(nil), data[:n]...)
 			admitted := res.appendStream(&b)
 			total += len(b)

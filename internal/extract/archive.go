@@ -279,8 +279,7 @@ func markEncryptedArchive(res *Result) {
 		return
 	}
 	res.EncryptedArchive = true
-	marker := []byte("ARCHIVE-ENCRYPTED")
-	res.appendStream(&marker)
+	res.appendMarker(trustedMarker("ARCHIVE-ENCRYPTED"))
 }
 
 // isArchive reports whether buf starts with a supported archive magic. zip is

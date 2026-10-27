@@ -95,7 +95,6 @@ func fromPolyglot(buf []byte, res *Result) {
 	zip := hasZIP(buf)
 	if pe && zip {
 		res.Polyglot = true
-		marker := []byte("POLYGLOT-PE-ZIP")
-		res.appendStream(&marker)
+		res.appendMarker(trustedMarker("POLYGLOT-PE-ZIP"))
 	}
 }

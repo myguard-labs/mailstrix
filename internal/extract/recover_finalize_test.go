@@ -28,7 +28,8 @@ func TestPanicKeepsEmittedPureMarkers(t *testing.T) {
 	marker := []byte(pureMarkerPrefixes[0] + " injected")
 	content := []byte("plain member content before the panic")
 	withAfterFormatHook(t, func(r *Result) {
-		r.Streams = append(r.Streams, content, marker)
+		r.Streams = append(r.Streams, content)
+		r.appendMarker(trustedMarker(marker))
 		panic("injected extractor panic")
 	})
 	res := ExtractWithOptions([]byte("hello"), FullOptions(time.Time{}))
@@ -70,7 +71,7 @@ func TestPanicDuringFinalizeIsContained(t *testing.T) {
 // path changes nothing; markers still split as before.
 func TestNoPanicNormalExitUnchanged(t *testing.T) {
 	marker := []byte(pureMarkerPrefixes[0] + " normal")
-	withAfterFormatHook(t, func(r *Result) { r.Streams = append(r.Streams, marker) })
+	withAfterFormatHook(t, func(r *Result) { r.appendMarker(trustedMarker(marker)) })
 	res := ExtractWithOptions([]byte("hello"), FullOptions(time.Time{}))
 	if res.Panicked || !hasStream(res.Markers, marker) || hasStream(res.Streams, marker) {
 		t.Fatalf("normal exit changed: panicked=%v streams=%q markers=%q", res.Panicked, res.Streams, res.Markers)

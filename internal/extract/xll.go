@@ -50,6 +50,5 @@ func fromXLL(buf []byte, res *Result) {
 		return
 	}
 	res.IsXLL = true
-	marker := []byte("XLL-ADDIN")
-	res.appendStream(&marker)
+	res.appendMarker(trustedMarker("XLL-ADDIN"))
 }

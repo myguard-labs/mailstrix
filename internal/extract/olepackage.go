@@ -77,7 +77,10 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 			continue
 		}
 		found = true
-		if emitted >= maxPackageObjects || len(res.Streams) >= maxStreams || total >= maxTotalPackage || expired(deadline) || bud.spent() {
+		if formatCapReached(res, emitted, maxPackageObjects, total, maxTotalPackage, "ole-package-objects") {
+			break
+		}
+		if expired(deadline) || bud.spent() {
 			break
 		}
 		b := ole.GetStreamView(d.Index)
@@ -86,6 +89,7 @@ func fromOLEPackage(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, dept
 			continue
 		}
 		if len(data) > maxBytesPerPackage {
+			res.capHit("ole-package-objects")
 			data = data[:maxBytesPerPackage]
 		}
 		payload := append([]byte(nil), data...)

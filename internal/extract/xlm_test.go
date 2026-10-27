@@ -83,10 +83,10 @@ func TestXLMOOXML_VeryHidden(t *testing.T) {
 	if !res.IsDoc {
 		t.Fatal("OOXML xlsm not flagged IsDoc")
 	}
-	joined := bytes.Join(res.Streams, []byte("\n"))
+	joined := bytes.Join(res.Markers, []byte("\n"))
 	if !bytes.Contains(joined, []byte("XLM-HIDDEN-MACROSHEET veryHidden Macro1")) {
-		t.Fatalf("expected XLM-HIDDEN-MACROSHEET veryHidden Macro1; streams=%d joined=%q",
-			len(res.Streams), joined)
+		t.Fatalf("expected trusted XLM-HIDDEN-MACROSHEET veryHidden Macro1; markers=%d joined=%q",
+			len(res.Markers), joined)
 	}
 }
 
@@ -95,7 +95,7 @@ func TestXLMOOXML_Hidden(t *testing.T) {
 	buf := makeOOXMLWithXLM(t, "HidSheet", "hidden")
 	res := Extract(buf, time.Time{})
 
-	joined := bytes.Join(res.Streams, []byte("\n"))
+	joined := bytes.Join(res.Markers, []byte("\n"))
 	if !bytes.Contains(joined, []byte("XLM-HIDDEN-MACROSHEET hidden HidSheet")) {
 		t.Fatalf("expected XLM-HIDDEN-MACROSHEET hidden HidSheet; got %q", joined)
 	}
@@ -253,8 +253,9 @@ func TestXLMBIFF_FormulaFoldsInMacrosheet(t *testing.T) {
 	if !bytes.Contains(joined, []byte("calc.exe payload")) {
 		t.Fatalf("macrosheet FORMULA not folded; streams=%d joined=%q", len(res.Streams), joined)
 	}
-	if !bytes.Contains(joined, []byte("XLM-DANGEROUS-FUNC EXEC")) {
-		t.Fatalf("expected XLM-DANGEROUS-FUNC EXEC; got %q", joined)
+	markers := bytes.Join(res.Markers, []byte("\n"))
+	if !bytes.Contains(markers, []byte("XLM-DANGEROUS-FUNC EXEC")) {
+		t.Fatalf("expected trusted XLM-DANGEROUS-FUNC EXEC; got %q", markers)
 	}
 }
 
@@ -300,8 +301,9 @@ func TestXLMBIFF_FormulaContinueReassembly(t *testing.T) {
 	buf := buildBIFFFormulaContinueWorkbook(t, rgce, split)
 	res := Extract(buf, time.Time{})
 	joined := bytes.Join(res.Streams, []byte("\n"))
-	if !bytes.Contains(joined, []byte("XLM-DANGEROUS-FUNC EXEC")) {
-		t.Fatalf("CONTINUE not reassembled — EXEC lost; got %q", joined)
+	markers := bytes.Join(res.Markers, []byte("\n"))
+	if !bytes.Contains(markers, []byte("XLM-DANGEROUS-FUNC EXEC")) {
+		t.Fatalf("CONTINUE not reassembled — EXEC lost; markers=%q", markers)
 	}
 	if !bytes.Contains(joined, []byte("calc.exe payload")) {
 		t.Fatalf("CONTINUE not reassembled — literal truncated; got %q", joined)
@@ -552,7 +554,7 @@ func TestXLMDupWorkbookFirstWins(t *testing.T) {
 	res := Extract(b.Bytes(), time.Time{})
 
 	found := false
-	for _, s := range res.Streams {
+	for _, s := range res.Markers {
 		if bytes.HasPrefix(s, []byte("XLM-HIDDEN-MACROSHEET veryHidden RealMacro")) {
 			found = true
 		}
@@ -561,9 +563,9 @@ func TestXLMDupWorkbookFirstWins(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected XLM-HIDDEN-MACROSHEET veryHidden RealMacro from FIRST workbook; streams: %v", func() []string {
-			ss := make([]string, len(res.Streams))
-			for i, s := range res.Streams {
+		t.Errorf("expected XLM-HIDDEN-MACROSHEET veryHidden RealMacro from FIRST workbook; markers: %v", func() []string {
+			ss := make([]string, len(res.Markers))
+			for i, s := range res.Markers {
 				ss[i] = string(s)
 			}
 			return ss

@@ -152,7 +152,11 @@ func TestJoinXLMStackerMarkers_Colocates(t *testing.T) {
 		[]byte("XLM-DANGEROUS-FUNC EXEC"),
 		[]byte("XLM-EMUL-DEPTH branched"),
 	}
-	buf := joinXLMStackerMarkers(streams)
+	trusted := []trustedMarker{
+		trustedMarker(streams[1]), trustedMarker(streams[2]),
+		trustedMarker(streams[3]), trustedMarker(streams[4]),
+	}
+	buf := joinXLMStackerMarkers(streams, trusted)
 	if buf == nil {
 		t.Fatal("expected combined buffer for >=2 stacker markers, got nil")
 	}
@@ -165,6 +169,25 @@ func TestJoinXLMStackerMarkers_Colocates(t *testing.T) {
 	for _, want := range []string{"XLM-AUTO-OPEN", "XLM-HIDDEN-MACROSHEET hidden", "XLM-DANGEROUS-FUNC EXEC", "XLM-EMUL-DEPTH branched"} {
 		if !bytes.Contains(buf, []byte(want)) {
 			t.Fatalf("combined buffer missing co-located marker %q: %q", want, buf)
+		}
+	}
+}
+
+func TestGenuineXLMEmitterMarkersStayTrustedForStacker(t *testing.T) {
+	res := &Result{}
+	var streams [][]byte
+	if !res.appendMarkerOut(&streams, trustedMarker("XLM-AUTO-OPEN"), false) {
+		t.Fatal("failed to append genuine XLM auto-open marker")
+	}
+	emitDangerousMarkers("=EXEC(A1)", &streams, res)
+
+	buf := joinXLMStackerMarkers(streams, res.trustedMarkers)
+	if buf == nil {
+		t.Fatalf("genuine XLM emitters did not produce a stack: streams=%q", streams)
+	}
+	for _, want := range [][]byte{[]byte("XLM-AUTO-OPEN"), []byte("XLM-DANGEROUS-FUNC EXEC")} {
+		if !bytes.Contains(buf, want) {
+			t.Fatalf("stack missing genuine marker %q: %q", want, buf)
 		}
 	}
 }
@@ -183,7 +206,11 @@ func TestJoinBehaviorScore_AggregatesAndRoutes(t *testing.T) {
 		[]byte("OLE-DOC-SECURITY-1"), // value-carrying, collapses to its class
 		[]byte("OLEID-VBA-PRESENT"),  // duplicate class — counted once
 	}
-	buf := joinBehaviorScore(streams)
+	trusted := []trustedMarker{
+		trustedMarker(streams[1]), trustedMarker(streams[2]), trustedMarker(streams[3]),
+		trustedMarker(streams[4]), trustedMarker(streams[5]),
+	}
+	buf := joinBehaviorScore(streams, trusted)
 	if buf == nil {
 		t.Fatal("expected aggregate buffer for >=3 distinct weak markers, got nil")
 	}
@@ -207,12 +234,12 @@ func TestJoinBehaviorScore_AggregatesAndRoutes(t *testing.T) {
 // TestJoinBehaviorScore_BelowThreshold: fewer than behaviorScoreMin distinct
 // classes -> nil (no aggregate signal; the individual marker rules still fire).
 func TestJoinBehaviorScore_BelowThreshold(t *testing.T) {
-	if buf := joinBehaviorScore([][]byte{
-		[]byte("OLEID-VBA-PRESENT"), []byte("DIGITAL-SIGNATURE"), []byte("plain content"),
-	}); buf != nil {
+	streams := [][]byte{[]byte("OLEID-VBA-PRESENT"), []byte("DIGITAL-SIGNATURE"), []byte("plain content")}
+	trusted := []trustedMarker{trustedMarker(streams[0]), trustedMarker(streams[1])}
+	if buf := joinBehaviorScore(streams, trusted); buf != nil {
 		t.Fatalf("2 distinct weak markers: want nil, got %q", buf)
 	}
-	if buf := joinBehaviorScore([][]byte{[]byte("no markers here")}); buf != nil {
+	if buf := joinBehaviorScore([][]byte{[]byte("no markers here")}, nil); buf != nil {
 		t.Fatalf("no weak markers: want nil, got %q", buf)
 	}
 }
@@ -229,10 +256,11 @@ func TestItoa(t *testing.T) {
 // TestJoinXLMStackerMarkers_SingleNil: a single stacker marker can never satisfy
 // a conjunction, so no buffer is built (nil).
 func TestJoinXLMStackerMarkers_SingleNil(t *testing.T) {
-	if buf := joinXLMStackerMarkers([][]byte{[]byte("XLM-AUTO-OPEN"), []byte("plain content")}); buf != nil {
+	streams := [][]byte{[]byte("XLM-AUTO-OPEN"), []byte("plain content")}
+	if buf := joinXLMStackerMarkers(streams, []trustedMarker{trustedMarker(streams[0])}); buf != nil {
 		t.Fatalf("single stacker marker: want nil, got %q", buf)
 	}
-	if buf := joinXLMStackerMarkers([][]byte{[]byte("no markers here")}); buf != nil {
+	if buf := joinXLMStackerMarkers([][]byte{[]byte("no markers here")}, nil); buf != nil {
 		t.Fatalf("no stacker markers: want nil, got %q", buf)
 	}
 }
