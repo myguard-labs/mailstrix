@@ -22,6 +22,34 @@ HELM_IMAGE = (
     "aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9"
 )
 
+CURL_RECORDER = (
+    "import json,os,sys\n"
+    "name=os.path.basename(sys.argv[1])\n"
+    "args=sys.argv[2:]\n"
+    'header=sys.stdin.read() if name=="curl" and "@-" in args else ""\n'
+    'with open(os.environ["CAPTURE"],"a") as f:\n'
+    ' f.write(json.dumps({"command":name,"argv":args,"header":header})+"\\n")\n'
+    'if name=="date": print("fixture")\n'
+    'if name=="mkdir": os.makedirs(args[-1],exist_ok=True)\n'
+    'if name=="curl":\n'
+    ' mode=os.environ["CURL_MODE"]\n'
+    ' bounded="--connect-timeout" in args and "--max-time" in args\n'
+    ' if mode=="require-deadlines" and not bounded: sys.exit(97)\n'
+    ' out=args[args.index("-o")+1]\n'
+    ' if mode in {"body-stall","partial"}: open(out,"wb").write(b"partial")\n'
+    ' if mode in {"connect-stall","header-stall","body-stall"}: sys.exit(28)\n'
+    ' if mode=="partial": sys.exit(18)\n'
+    ' if mode=="http-error": sys.exit(22)\n'
+    ' open(out,"wb").write(b"profile")\n'
+    "sys.exit(0)\n"
+)
+
+
+def captured_outputs(output_dir):
+    if not output_dir.exists():
+        return {}
+    return {path.name: path.read_bytes() for path in output_dir.iterdir()}
+
 
 def render_chart(*set_values):
     """Render the real chart with a pinned Helm image and no network."""
@@ -161,43 +189,32 @@ def assert_postfix_scanner_example(readme):
 
 
 class ProfileTokenTest(unittest.TestCase):
-    def capture(self, token, fail=False):
+    def capture(self, token, duration="2", curl_mode="success", script=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            recorder = (
-                "import json,os,sys\n"
-                "name=os.path.basename(sys.argv[1])\n"
-                "args=sys.argv[2:]\n"
-                'header=sys.stdin.read() if name=="curl" and "@-" in args else ""\n'
-                'with open(os.environ["CAPTURE"],"a") as f:\n'
-                ' f.write(json.dumps({"command":name,"argv":args,"header":header})+"\\n")\n'
-                'if name=="date": print("fixture")\n'
-                'if name=="mkdir": os.makedirs(args[-1],exist_ok=True)\n'
-                'sys.exit(int(os.environ["CURL_EXIT"]) if name=="curl" else 0)\n'
-            )
             # Keep all children hermetic, including optional pprof and timestamp.
             for name in ["curl", "date", "go", "mkdir"]:
                 path = root / name
                 # A quoted shell launcher also supports interpreter paths with spaces.
                 path.write_text(
                     f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
-                    f'-c {shlex.quote(recorder)} "$0" "$@"\n'
+                    f'-c {shlex.quote(CURL_RECORDER)} "$0" "$@"\n'
                 )
                 path.chmod(0o755)
             capture = root / "calls"
             env = dict(
                 os.environ,
-                PATH=tmp,
+                PATH=os.pathsep.join([tmp, os.defpath]),
                 CAPTURE=str(capture),
-                CURL_EXIT="22" if fail else "0",
+                CURL_MODE=curl_mode,
                 MAILSTRIX_TOKEN=token,
             )
             result = subprocess.run(
                 [
                     "/bin/sh",
-                    str(ROOT / "docker/pprof-capture.sh"),
+                    str(script or ROOT / "docker/pprof-capture.sh"),
                     "http://fixture.invalid:8079",
-                    "2",
+                    duration,
                     str(root / "out"),
                 ],
                 env=env,
@@ -218,7 +235,11 @@ class ProfileTokenTest(unittest.TestCase):
                         all(token not in arg for arg in call["argv"]),
                         "profiling credential leaked into child argv",
                     )
-            return result, [call for call in calls if call["command"] == "curl"]
+            return (
+                result,
+                [call for call in calls if call["command"] == "curl"],
+                captured_outputs(root / "out"),
+            )
 
     def test_header_and_all_profiles(self):
         for token in [
@@ -227,9 +248,13 @@ class ProfileTokenTest(unittest.TestCase):
             'synthetic "quote" \\ slash; $value',
         ]:
             with self.subTest(token_shape="empty" if not token else "nonempty"):
-                result, calls = self.capture(token)
+                result, calls, outputs = self.capture(token)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(len(calls), 4)
+                self.assertEqual(
+                    {name for name in outputs if name.endswith(".pb.gz")},
+                    {"cpu.pb.gz", "heap.pb.gz", "allocs.pb.gz", "goroutine.pb.gz"},
+                )
                 for call, profile in zip(
                     calls,
                     ["profile?seconds=2", "heap", "allocs", "goroutine"],
@@ -244,17 +269,89 @@ class ProfileTokenTest(unittest.TestCase):
                         "Authorization: Bearer " + token + "\n" if token else "",
                     )
                     self.assertEqual("@-" in call["argv"], bool(token))
+                    self.assertEqual(
+                        call["argv"][call["argv"].index("--connect-timeout") + 1],
+                        "5",
+                    )
 
-    def test_curl_failure_stops_capture(self):
-        result, calls = self.capture("synthetic-failure-fixture", fail=True)
+    def test_http_error_stops_capture(self):
+        result, calls, outputs = self.capture(
+            "synthetic-failure-fixture", curl_mode="http-error"
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(calls), 1)
+        self.assertEqual(outputs, {})
 
     def test_reject_header_line_breaks(self):
         for token in ["synthetic\nInjected: value", "synthetic\rInjected: value"]:
-            result, calls = self.capture(token)
+            result, calls, outputs = self.capture(token)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(calls, [])
+            self.assertEqual(outputs, {})
+
+    def test_duration_boundary_and_malformed_inputs(self):
+        result, calls, _outputs = self.capture("", duration="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("profile?seconds=1", calls[0]["argv"][-3])
+        self.assertEqual(
+            calls[0]["argv"][calls[0]["argv"].index("--max-time") + 1], "16"
+        )
+
+        result, calls, _outputs = self.capture("", duration="0002")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("profile?seconds=0002", calls[0]["argv"][-3])
+        self.assertEqual(
+            calls[0]["argv"][calls[0]["argv"].index("--max-time") + 1], "17"
+        )
+
+        result, calls, _outputs = self.capture("", duration="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("profile?seconds=30", calls[0]["argv"][-3])
+
+        for duration in ["0", "-1", "1.5", "value", "999999985"]:
+            with self.subTest(duration=duration):
+                result, calls, outputs = self.capture("", duration=duration)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+                self.assertEqual(outputs, {})
+
+    def test_connection_header_and_body_stalls_fail_without_profiles(self):
+        for mode in ["connect-stall", "header-stall", "body-stall", "partial"]:
+            with self.subTest(mode=mode):
+                result, calls, outputs = self.capture("", curl_mode=mode)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(outputs, {})
+                self.assertIn("--connect-timeout", calls[0]["argv"])
+                self.assertIn("--max-time", calls[0]["argv"])
+
+    def test_cpu_profile_allows_requested_duration_plus_grace(self):
+        result, calls, _outputs = self.capture("", duration="61")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            [call["argv"][call["argv"].index("--max-time") + 1] for call in calls],
+            ["76", "15", "15", "15"],
+        )
+
+    def test_removed_deadlines_negative_control(self):
+        source = (ROOT / "docker/pprof-capture.sh").read_text(encoding="utf-8")
+        removed = re.sub(
+            r' --connect-timeout "\$CONNECT_TIMEOUT" --max-time "\$3"', "", source
+        )
+        self.assertNotEqual(removed, source)
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "pprof-capture.sh"
+            script.write_text(removed, encoding="utf-8")
+            script.chmod(0o755)
+            result, calls, _outputs = self.capture(
+                "", curl_mode="require-deadlines", script=script
+            )
+        self.assertEqual(result.returncode, 97)
+        self.assertEqual(len(calls), 1)
+
+        result, calls, _outputs = self.capture("", curl_mode="require-deadlines")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 4)
 
     def test_helpers_use_selected_python(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,7 +368,7 @@ class ProfileTokenTest(unittest.TestCase):
                 mock.patch.object(sys, "executable", str(interpreter)),
                 mock.patch.dict(os.environ, PROFILE_INTERPRETER_TRACE=str(trace)),
             ):
-                result, calls = self.capture("synthetic-interpreter-fixture")
+                result, calls, _outputs = self.capture("synthetic-interpreter-fixture")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(calls), 4)
             self.assertTrue(
