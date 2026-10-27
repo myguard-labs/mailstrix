@@ -493,6 +493,9 @@ class ImpactTests(unittest.TestCase):
     def test_apt_install_test_and_subject_select_the_planner_job(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("-m unittest discover -s ci -p 'ci_*_test.py'", workflow)
+        self.assertIn('--target "$planner_deps"', workflow)
+        self.assertIn("pycryptodomex==3.23.0", workflow)
+        self.assertIn("pyzipper==0.4.0", workflow)
         test = impact.plan(["ci/ci_apt_install_test.py"])
         self.assertEqual(
             {key for key, value in test.items() if value is True}, {"scope"}

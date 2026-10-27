@@ -184,6 +184,36 @@ class FilterRulesRegexTests(unittest.TestCase):
         )
         self.assertEqual(self.filtered(dropped + kept), "\n\n\n" + kept)
 
+    def test_regex_literals_do_not_supply_metadata(self):
+        source = (
+            "rule RegexPolicyText : neutral {\n"
+            "  strings:\n"
+            '    $tag = /tags="MEMORY"/\n'
+            "    $license = "
+            r'/license_url="https:\/\/creativecommons\.org\/licenses\/by-nc\/4\.0\/"/'
+            "\n"
+            "  condition: any of them\n"
+            "}\n"
+        )
+        self.assertEqual(self.filtered(source), source)
+
+    def test_section_markers_accept_comments_and_newlines_before_colon(self):
+        source = (
+            "rule CommentBeforeColon : neutral {\n"
+            "  meta /* comment */ :\n"
+            '    license_url = "https://creativecommons.org/licenses/by-nc/4.0/"\n'
+            "  condition: true\n"
+            "}\n"
+            "rule NewlineBeforeColon : neutral {\n"
+            "  meta\n"
+            "  :\n"
+            '    tags = "MEMORY"\n'
+            "  condition: true\n"
+            "}\n"
+            "rule Keep { condition: true }\n"
+        )
+        self.assertEqual(self.filtered(source), "\n\nrule Keep { condition: true }\n")
+
     def test_license_gate_still_precedes_combined_tags(self):
         source = (
             "rule Vendor_Maldoc : neutral MEMORY {\n"

@@ -42,7 +42,9 @@ def run_extractor(root, output, source=None, *, use_real_pyzipper=False):
             "from zipfile import ZipFile\nAESZipFile = ZipFile\n"
         )
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(root)
+    env["PYTHONPATH"] = os.pathsep.join(
+        path for path in (str(root), env.get("PYTHONPATH")) if path
+    )
     return subprocess.run(
         [sys.executable, str(extractor), str(output)],
         cwd=root,
