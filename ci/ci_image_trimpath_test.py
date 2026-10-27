@@ -35,6 +35,14 @@ def chart_repo(values: str) -> str:
     return match.group(1)
 
 
+def readme_run_images(readme: str) -> list[str]:
+    """Return the image (last token) of every `docker run` command."""
+    commands = re.findall(r"^docker run\b(?:.*\\\n)*.*$", readme, re.MULTILINE)
+    if not commands:
+        raise AssertionError("no docker run command in README")
+    return [command.split()[-1] for command in commands]
+
+
 def compose_repo(compose: str) -> str:
     match = re.search(r"^\s*image:\s*([^\s:]+)", compose, re.MULTILINE)
     if not match:
@@ -72,12 +80,29 @@ class ImageRepoTest(unittest.TestCase):
         repo = chart_repo(VALUES.read_text())
         self.assertEqual(repo, "eilandert/mailstrix")
         self.assertEqual(repo, compose_repo(COMPOSE.read_text()))
-        self.assertRegex(README.read_text(), re.escape(f"\n    {repo}\n"))
+        images = readme_run_images(README.read_text())
+        self.assertEqual(len(images), 3)
+        self.assertEqual(set(images), {repo})
         self.assertIn(f"hub.docker.com/r/{repo}", README.read_text())
 
     def test_negative_control_migrated_repo_detected(self) -> None:
         mutated = VALUES.read_text().replace("eilandert/", "myguard-labs/", 1)
         self.assertNotEqual(chart_repo(mutated), compose_repo(COMPOSE.read_text()))
+
+    def test_negative_control_one_stale_readme_run_detected(self) -> None:
+        text = README.read_text()
+        needle = "    eilandert/mailstrix\n"
+        last = text.rindex(needle)
+        mutated = text[:last] + "    myguard-labs/mailstrix\n" + text[last + len(needle) :]
+        self.assertNotEqual(mutated, text)
+        self.assertEqual(
+            set(readme_run_images(mutated)),
+            {"eilandert/mailstrix", "myguard-labs/mailstrix"},
+        )
+
+    def test_malformed_readme(self) -> None:
+        with self.assertRaises(AssertionError):
+            readme_run_images("no commands here\n")
 
     def test_malformed_values(self) -> None:
         with self.assertRaises(AssertionError):
