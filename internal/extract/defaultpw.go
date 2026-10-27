@@ -655,12 +655,17 @@ var (
 	agileBlkKeyEncryptedKeyValue = []byte{0x14, 0x6E, 0x0B, 0xE7, 0xAB, 0xAC, 0xD0, 0xD6}
 )
 
-// agileVerifyPW returns true if the password matches the agile EncryptionInfo verifier.
-func agileVerifyPW(password string, info agileInfo) bool {
+func agilePasswordHash(password string, info agileInfo) []byte {
 	if info.passwordKeyBits <= 0 || info.passwordKeyBits > 512 {
+		return nil
+	}
+	return agileHashIter(password, info.passwordSalt, info.spinCount)
+}
+
+func agileVerifyHash(h []byte, info agileInfo) bool {
+	if h == nil || info.passwordKeyBits <= 0 || info.passwordKeyBits > 512 {
 		return false
 	}
-	h := agileHashIter(password, info.passwordSalt, info.spinCount)
 	key1 := agileHashFinal(h, agileBlkKeyVerifierHashInput, info.passwordKeyBits)
 	key2 := agileHashFinal(h, agileBlkKeyVerifierHashValue, info.passwordKeyBits)
 
@@ -682,12 +687,17 @@ func agileVerifyPW(password string, info agileInfo) bool {
 	return string(actualHash[:n]) == string(expectedHash[:n])
 }
 
-// agileExtractKey decrypts and returns the document secret key from the agile info.
-func agileExtractKey(password string, info agileInfo) []byte {
-	if info.passwordKeyBits <= 0 || info.passwordKeyBits > 512 {
+// agileVerifyPW returns true if the password matches the agile EncryptionInfo verifier.
+func agileVerifyPW(password string, info agileInfo) bool {
+	return agileVerifyHash(agilePasswordHash(password, info), info)
+}
+
+// agileExtractKeyFromHash decrypts and returns the document secret key from an
+// already-derived Agile password hash.
+func agileExtractKeyFromHash(h []byte, info agileInfo) []byte {
+	if h == nil || info.passwordKeyBits <= 0 || info.passwordKeyBits > 512 {
 		return nil
 	}
-	h := agileHashIter(password, info.passwordSalt, info.spinCount)
 	key3 := agileHashFinal(h, agileBlkKeyEncryptedKeyValue, info.passwordKeyBits)
 	skey := aesCBCDecrypt(info.encKeyValue, key3, info.passwordSalt)
 	if skey == nil {
@@ -698,6 +708,11 @@ func agileExtractKey(password string, info agileInfo) []byte {
 		n = len(skey)
 	}
 	return skey[:n]
+}
+
+// agileExtractKey decrypts and returns the document secret key from the agile info.
+func agileExtractKey(password string, info agileInfo) []byte {
+	return agileExtractKeyFromHash(agilePasswordHash(password, info), info)
 }
 
 // agileDecrypt decrypts the EncryptedPackage stream using the extracted secret key.
@@ -855,10 +870,9 @@ func standardMakeKey(password string, info standardInfo) []byte {
 	return x3[:n]
 }
 
-// standardVerifyPW returns true if the key (derived from password) decrypts the
-// verifier to produce the expected SHA-1 hash. Uses AES-ECB mode.
-func standardVerifyPW(password string, info standardInfo) bool {
-	key := standardMakeKey(password, info)
+// standardVerifyKey returns true if key decrypts the verifier to produce the
+// expected SHA-1 hash. Uses AES-ECB mode.
+func standardVerifyKey(key []byte, info standardInfo) bool {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return false
@@ -877,9 +891,15 @@ func standardVerifyPW(password string, info standardInfo) bool {
 	return string(expectedHash[:16]) == string(verifierHash[:16])
 }
 
-// standardDecrypt decrypts the EncryptedPackage stream using AES-ECB.
+// standardVerifyPW derives the password key and verifies it against the
+// encrypted verifier.
+func standardVerifyPW(password string, info standardInfo) bool {
+	return standardVerifyKey(standardMakeKey(password, info), info)
+}
+
+// standardDecryptKey decrypts the EncryptedPackage stream using AES-ECB.
 // Layout: totalSize uint32 LE at [0:4], reserved at [4:8], ciphertext at [8:].
-func standardDecrypt(password string, info standardInfo, encPkg []byte) []byte {
+func standardDecryptKey(key []byte, info standardInfo, encPkg []byte) []byte {
 	if len(encPkg) < 8 {
 		return nil
 	}
@@ -891,7 +911,6 @@ func standardDecrypt(password string, info standardInfo, encPkg []byte) []byte {
 	if len(ciphertext) == 0 {
 		return nil
 	}
-	key := standardMakeKey(password, info)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil
@@ -911,6 +930,11 @@ func standardDecrypt(password string, info standardInfo, encPkg []byte) []byte {
 		totalSize = len(plain)
 	}
 	return plain[:totalSize]
+}
+
+// standardDecrypt derives the password key and decrypts the EncryptedPackage.
+func standardDecrypt(password string, info standardInfo, encPkg []byte) []byte {
+	return standardDecryptKey(standardMakeKey(password, info), info, encPkg)
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,10 +1110,11 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 			if expired(deadline) {
 				return
 			}
-			if !agileVerifyPW(pw, info) {
+			h := agilePasswordHash(pw, info)
+			if !agileVerifyHash(h, info) {
 				continue
 			}
-			key := agileExtractKey(pw, info)
+			key := agileExtractKeyFromHash(h, info)
 			if key == nil {
 				return
 			}
@@ -1112,10 +1137,11 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 			if expired(deadline) {
 				return
 			}
-			if !standardVerifyPW(pw, info) {
+			key := standardMakeKey(pw, info)
+			if !standardVerifyKey(key, info) {
 				continue
 			}
-			plain := standardDecrypt(pw, info, encPkgData)
+			plain := standardDecryptKey(key, info, encPkgData)
 			if len(plain) == 0 {
 				return
 			}
