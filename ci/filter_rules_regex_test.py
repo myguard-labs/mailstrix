@@ -146,7 +146,7 @@ class FilterRulesRegexTests(unittest.TestCase):
                 self.assertEqual(self.filtered(source, valid=False), source)
 
     def test_incomplete_rule_headers_stay_rejected(self):
-        for source in ("rule Keep", "rule "):
+        for source in ("rule Keep", "rule ", "rule Keep : MEMORY /* unterminated {"):
             with self.subTest(source=source):
                 self.assertEqual(self.filtered(source, valid=False), source)
 
@@ -160,6 +160,46 @@ class FilterRulesRegexTests(unittest.TestCase):
             "rule Keep { condition: true }\n"
         )
         self.assertEqual(self.filtered(source), "\n\n\nrule Keep { condition: true }\n")
+
+    def test_header_and_metadata_tags_drive_mail_profile(self):
+        dropped = (
+            "rule HeaderMemory : neutral MEMORY second { condition: true }\n"
+            'rule MetadataLog { meta: tags = "neutral, LOG, second" '
+            "condition: true }\n"
+            'rule Combined : neutral { meta: tags = "MEMORY" condition: true }\n'
+        )
+        kept = (
+            'rule Neutral : neutral second { meta: tags = "mail, document" '
+            "condition: true }\n"
+            "rule Comments : neutral /* MEMORY { */ second {\n"
+            '  meta: // tags = "LOG"\n'
+            '    note = "https://example.test/MEMORY"\n'
+            '    /* tags = "MEMORY" */\n'
+            "  condition: true\n"
+            "}\n"
+            'private rule PrivateMemory : MEMORY { meta: tags = "LOG" '
+            "condition: true }\n"
+            'rule StringNamedTags : neutral { strings: $tags = "MEMORY" '
+            "condition: $tags }\n"
+        )
+        self.assertEqual(self.filtered(dropped + kept), "\n\n\n" + kept)
+
+    def test_license_gate_still_precedes_combined_tags(self):
+        source = (
+            "rule Vendor_Maldoc : neutral MEMORY {\n"
+            "  meta:\n"
+            '    tags = "document"\n'
+            '    license_url = "https://creativecommons.org/licenses/by-nc/4.0/"\n'
+            "  condition: true\n"
+            "}\n"
+            "rule CommentedLicense : neutral {\n"
+            '  meta: note = "redistributable"\n'
+            '    /* license_url = "https://example.test/by-nc" */\n'
+            "  condition: true\n"
+            "}\n"
+        )
+        expected = "\n" + source[source.index("rule CommentedLicense") :]
+        self.assertEqual(self.filtered(source), expected)
 
     def test_cli_usage_still_fails(self):
         with (

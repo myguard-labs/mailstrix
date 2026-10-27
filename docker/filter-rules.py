@@ -91,6 +91,61 @@ KEEP_SUBSTR = tuple(s.upper() for s in (
 ))
 
 
+def without_comments(text):
+    """Mask YARA comments while preserving offsets and quoted strings."""
+    masked = list(text)
+    in_string = False
+    i = 0
+    while i < len(text):
+        if in_string:
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == '"':
+                in_string = False
+            i += 1
+            continue
+        if text[i] == '"':
+            in_string = True
+            i += 1
+            continue
+        if text.startswith("//", i):
+            end = text.find("\n", i + 2)
+            if end == -1:
+                end = len(text)
+            masked[i:end] = " " * (end - i)
+            i = end
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = len(text) if end == -1 else end + 2
+            for pos in range(i, end):
+                if masked[pos] != "\n":
+                    masked[pos] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(masked)
+
+
+def rule_header(text, start):
+    """Return the first uncommented opening brace and the masked header."""
+    i = start
+    while i < len(text):
+        if text.startswith("//", i):
+            end = text.find("\n", i + 2)
+            i = len(text) if end == -1 else end + 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end == -1 else end + 2
+            continue
+        if text[i] == "{":
+            return i, without_comments(text[start:i])
+        i += 1
+    return -1, ""
+
+
 def split_rules(text):
     """Yield (preamble_or_rule_text, is_rule, name, tags, license_url) chunks.
 
@@ -121,7 +176,7 @@ def split_rules(text):
             i = rm.start()
         name = rm.group(1)
         # find opening brace of the rule body
-        brace = text.find("{", rm.end())
+        brace, header = rule_header(text, rm.end())
         if brace == -1:
             yield text[i:], False, None, None, None, False
             break
@@ -175,9 +230,20 @@ def split_rules(text):
                         break
             j += 1
         body = text[i:j]
-        tags_m = re.search(r'tags = "([^"]*)"', body)
-        lic_m = re.search(r'license_url = "([^"]*)"', body)
-        tags = tags_m.group(1) if tags_m else ""
+        searchable_body = without_comments(body)
+        tags_m = re.search(
+            r'(?<![$\w])tags[ \t]*=[ \t]*"([^"]*)"', searchable_body
+        )
+        lic_m = re.search(
+            r'(?<![$\w])license_url[ \t]*=[ \t]*"([^"]*)"', searchable_body
+        )
+        tag_header = header.partition(":")[2]
+        header_tags = re.findall(r"[A-Za-z_][\w]*", tag_header)
+        metadata_tags = tags_m.group(1) if tags_m else ""
+        tag_values = list(header_tags)
+        if metadata_tags:
+            tag_values.append(metadata_tags)
+        tags = ",".join(tag_values)
         lic = lic_m.group(1) if lic_m else ""
         # `private`/`global` keywords sit in rm.group(0) before `rule`.
         is_private = "private" in rm.group(0)
