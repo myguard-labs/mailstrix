@@ -22,17 +22,28 @@ trap 'rm -rf "$SAMPLES"' EXIT
 
 echo "→ extracting live samples (pyzipper, pw=infected) → $SAMPLES" >&2
 python3 - "$SAMPLES" <<'PY'
-import sys, os, glob
+import glob
+import os
+import stat
+import sys
+
 import pyzipper
+
 out = sys.argv[1]
 n = 0
-for zp in sorted(glob.glob("testdata/live-samples/*.zip")):
-    base = os.path.basename(zp).rsplit(".zip", 1)[0]
+for archive_index, zp in enumerate(sorted(glob.glob("testdata/live-samples/*.zip"))):
     with pyzipper.AESZipFile(zp) as z:
         z.pwd = b"infected"
-        for info in z.infolist():
-            with open(os.path.join(out, base), "wb") as f:
-                f.write(z.read(info.filename))
+        for member_index, info in enumerate(z.infolist()):
+            mode = info.external_attr >> 16
+            member_type = stat.S_IFMT(mode)
+            if info.is_dir() or member_type not in (0, stat.S_IFREG):
+                continue
+            filename = f"archive-{archive_index:04d}-member-{member_index:04d}.sample"
+            contents = z.read(info)
+            with open(os.path.join(out, filename), "xb") as f:
+                if f.write(contents) != len(contents):
+                    raise OSError(f"short write while extracting {filename}")
             n += 1
 print(f"extracted {n} samples", file=sys.stderr)
 PY
