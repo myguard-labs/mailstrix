@@ -283,6 +283,7 @@ GO_INPUTS = [
     "ci/cache_distribution/*.go",
     "ci/cache_byte_bound_test.go",
     "ci/defaultpw_derivation_test.go",
+    "ci/f5_f6_pipeline_test.go",
     "ci/local_scan_partial_test.go",
     "ci/feed_set_bytes_test.go",
     "ci/http_lifecycle_test.go",
