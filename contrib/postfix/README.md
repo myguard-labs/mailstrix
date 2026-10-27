@@ -41,10 +41,21 @@ box use [Sieve](../sieve/). They compose.
 
 ## Setup
 
-1. **Run the scanner** somewhere central (see the [main README](../../README.md)):
+1. **Run the scanner** somewhere central (see the
+   [main Docker quick start and prerequisites](../../README.md#quick-start)).
+   Provision the token file on the Docker host before starting the container;
+   mode `0444` lets the image's unprivileged user read it while the private
+   parent directory limits host access:
 
    ```sh
-   docker run -d --name strixd -e MAILSTRIX_TOKEN_FILE=/run/secrets/mailstrix_token \
+   install -d -m 700 .mailstrix-secrets
+   rm -f .mailstrix-secrets/token
+   (umask 077; openssl rand -hex 32 > .mailstrix-secrets/token)
+   chmod 0444 .mailstrix-secrets/token
+
+   docker run -d --name strixd \
+       -v "$PWD/.mailstrix-secrets/token:/run/secrets/mailstrix_token:ro" \
+       -e MAILSTRIX_TOKEN_FILE=/run/secrets/mailstrix_token \
        -p 8079:8079 myguard-labs/mailstrix
    ```
 

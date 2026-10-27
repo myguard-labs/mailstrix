@@ -34,7 +34,11 @@ ClusterIP by design. Point your rspamd mailstrix.lua plugin at:
    verdict cache, so the same message can be re-scanned per replica. Set
    redis.url (e.g. redis://valkey:6379/6) for a shared cache.
 {{- else }}
+{{- if contains "@" .Values.redis.url }}
+   Shared verdict cache is configured (credentials redacted).
+{{- else }}
    Shared verdict cache via {{ .Values.redis.url }}.
+{{- end }}
 {{- end }}
 {{- end }}
 
