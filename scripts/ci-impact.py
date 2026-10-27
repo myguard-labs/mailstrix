@@ -232,6 +232,9 @@ RULES = {
         "README.md",
         "packaging/deb/contrib_links_test.sh",
         "ci/ci_contrib_links_test.py",
+        "ci/ci_image_trimpath_test.py",
+        "contrib/deploy/helm/*",
+        "docker/Dockerfile",
     ],
     "smoke": [
         "scripts/smoke.sh",

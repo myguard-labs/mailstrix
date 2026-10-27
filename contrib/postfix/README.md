@@ -56,7 +56,7 @@ box use [Sieve](../sieve/). They compose.
    docker run -d --name strixd \
        -v "$PWD/.mailstrix-secrets/token:/run/secrets/mailstrix_token:ro" \
        -e MAILSTRIX_TOKEN_FILE=/run/secrets/mailstrix_token \
-       -p 8079:8079 myguard-labs/mailstrix
+       -p 8079:8079 eilandert/mailstrix
    ```
 
 2. **Install the milter** on the MTA host — the `.deb` ships a hardened systemd
