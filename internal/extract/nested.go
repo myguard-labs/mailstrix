@@ -98,6 +98,20 @@ func extractChild(data []byte, res *Result, b *archiveBudget, depth int, deadlin
 		// Excel-2003 XML spreadsheet child: DDE command formulas (COR-09).
 		fromSpreadsheetML(data, res, deadline)
 	default:
+		// A complete RFC 5322 message carried inside an archive, .msg, TNEF or
+		// another extractor gets the same transfer decoding and attachment walk
+		// as a top-level .eml. Classify here so binary carriers take their cheap
+		// magic path without paying for the bounded header scan.
+		switch classifyMIMEMessage(data) {
+		case mimeHeaderComplete:
+			fromMIME(data, res, b, depth, deadline)
+			return
+		case mimeHeaderIncomplete:
+			// Preserve the top-level fail-closed treatment when the bounded header
+			// probe proves a MIME prefix but cannot reach the header terminator.
+			res.stopHit(mimeHeaderCapHitKind)
+			return
+		}
 		// Not a recognised container — it may still be an MS Script Encoder block
 		// (#@~^…^#~@) carried as a child (.vbe/.jse inside an archive/.msg). Decode
 		// it so the keyword rules match; a no-op for ordinary bytes.
@@ -174,5 +188,6 @@ func depthDefaultContent(data []byte, res *Result, depth int, deadline time.Time
 func isDepthCarrier(data []byte) bool {
 	return len(data) >= minMemberBytes && (bytes.HasPrefix(data, zipMagic) || isArchive(data) ||
 		bytes.HasPrefix(data, oleMagic) || isPDF(data) || isRTF(data) || isLNK(data) ||
-		isOneNote(data) || isTNEF(data) || isSLK(data) || isSpreadsheetML(data))
+		isOneNote(data) || isTNEF(data) || isSLK(data) || isSpreadsheetML(data) ||
+		classifyMIMEMessage(data) != mimeHeaderOrdinary)
 }

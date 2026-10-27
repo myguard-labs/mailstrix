@@ -385,6 +385,7 @@ class ImpactTests(unittest.TestCase):
             ),
             ("ci/go_coverage_test.py", ["go"], ["image", "parity", "postfix"]),
             ("ci/go_coverage.sh", ["go", "shell"], ["image", "parity", "postfix"]),
+            ("ci/f5_f6_pipeline_test.go", ["go"], ["image", "parity", "postfix"]),
             ("ci/streamdedupkey_test.go", ["go"], ["image", "parity", "postfix"]),
             ("ci/status_log_test.go", ["go"], ["image", "parity", "postfix"]),
             (

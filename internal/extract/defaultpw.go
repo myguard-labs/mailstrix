@@ -1075,9 +1075,10 @@ func fromDefaultPWRC4(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 // fromDefaultPWOOXML tries default passwords against an ECMA-376 encrypted
 // OOXML document. It reads EncryptionInfo to detect agile vs standard
 // encryption, tries each password, and if one succeeds decrypts the
-// EncryptedPackage stream, then routes the plaintext ZIP through fromOOXML.
+// EncryptedPackage stream, then routes the plaintext through the shared Office
+// ZIP pipeline, including bounded sibling-carrier dispatch.
 // Called BEFORE the encrypted-early-return block in fromOLE.
-func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
+func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, b *archiveBudget, depth int, deadline time.Time) {
 	if ole == nil || expired(deadline) || hasDecryptedMarker(res) {
 		return
 	}
@@ -1123,7 +1124,7 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 				return
 			}
 			emitDefaultPWMarker(res)
-			fromOOXML(plain, res, deadline, nil)
+			fromZip(plain, res, b, depth, deadline, res.childOpts, true)
 			return
 		}
 	} else if (vMajor == 2 || vMajor == 3 || vMajor == 4) && vMinor == 2 {
@@ -1146,7 +1147,7 @@ func fromDefaultPWOOXML(ole *oleparse.OLEFile, res *Result, deadline time.Time) 
 				return
 			}
 			emitDefaultPWMarker(res)
-			fromOOXML(plain, res, deadline, nil)
+			fromZip(plain, res, b, depth, deadline, res.childOpts, true)
 			return
 		}
 	}

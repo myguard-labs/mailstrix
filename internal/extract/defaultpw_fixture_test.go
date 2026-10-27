@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"www.velocidex.com/golang/oleparse"
 )
 
 // These fixed, public test keys were computed independently with Python hashlib,
@@ -156,10 +158,16 @@ func fixtureStandard(t *testing.T, plain []byte) (infoData, packageData []byte) 
 
 func TestExtractEncryptedOOXMLFixture(t *testing.T) {
 	const title = "Encrypted quarterly report fixture"
+	const pdfDeepMarker = "PDF-OPENACTION-JS"
+	var pdf bytes.Buffer
+	pdf.WriteString("%PDF-1.7\n1 0 obj\n<< /Length 1 >>\nstream\n")
+	pdf.Write(zlibDeflate([]byte("decrypted-office-sibling-pdf")))
+	pdf.WriteString("\nendstream\nendobj\n/OpenAction /JS\n%%EOF\n")
 	plain := buildZip(t, map[string][]byte{
 		"[Content_Types].xml": []byte(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>`),
 		"word/document.xml":   []byte(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>`),
 		"docProps/core.xml":   []byte(`<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>` + title + `</dc:title></cp:coreProperties>`),
+		"dropper.pdf":         pdf.Bytes(),
 	})
 	// A ZIP comment keeps the valid plaintext ZIP above one Agile segment while
 	// leaving the final AES block partial. The property remains inside the ZIP.
@@ -198,16 +206,75 @@ func TestExtractEncryptedOOXMLFixture(t *testing.T) {
 			if !bytes.Equal(decrypted, plain) {
 				t.Fatal("Office decrypted ZIP differs from known plaintext")
 			}
-			res := Extract(fixtureCFB(t, []cfbEntry{
+			encrypted := fixtureCFB(t, []cfbEntry{
 				{name: "EncryptionInfo", mse: 2, data: infoData},
 				{name: "EncryptedPackage", mse: 2, data: packageData},
-			}), time.Time{})
+			})
+			res := Extract(encrypted, time.Time{})
 			requireFixtureStream(t, res.Streams, title)
-			if !res.IsDoc || !res.Encrypted || res.Failed || res.Panicked || !res.HasDocProps {
-				t.Fatalf("Office fixture flags: IsDoc=%t Encrypted=%t Failed=%t Panicked=%t HasDocProps=%t", res.IsDoc, res.Encrypted, res.Failed, res.Panicked, res.HasDocProps)
+			if !res.IsDoc || !res.Encrypted || res.Failed || res.Panicked || !res.HasDocProps || !res.IsPDF {
+				t.Fatalf("Office fixture flags: IsDoc=%t Encrypted=%t Failed=%t Panicked=%t HasDocProps=%t IsPDF=%t", res.IsDoc, res.Encrypted, res.Failed, res.Panicked, res.HasDocProps, res.IsPDF)
 			}
 			requireFixtureStream(t, res.Markers, "DEFAULTPW-DECRYPTED")
 			requireFixtureMarker(t, res, "DOCPROPS-STRINGS", title)
+			if !streamsContain(res, pdfDeepMarker) {
+				t.Fatalf("decrypted Office sibling PDF omitted %q", pdfDeepMarker)
+			}
+
+			shallowOpts := *FullOptions(time.Time{})
+			shallowOpts.PDFDeepen = false
+			shallow := ExtractWithOptions(encrypted, &shallowOpts)
+			if !shallow.IsPDF || streamsContain(shallow, pdfDeepMarker) {
+				t.Fatalf("decrypted Office did not preserve PDF effort cap: IsPDF=%t streams=%d", shallow.IsPDF, len(shallow.Streams))
+			}
 		})
 	}
+}
+
+func TestDecryptedOfficeSiblingPreservesDepthAndArchiveBudget(t *testing.T) {
+	var pdf bytes.Buffer
+	pdf.WriteString("%PDF-1.7\n/OpenAction /JS\n%%EOF\n")
+	plain := buildZip(t, map[string][]byte{
+		"[Content_Types].xml": []byte(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`),
+		"word/document.xml":   []byte(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>`),
+		"dropper.pdf":         pdf.Bytes(),
+	})
+	infoData, packageData := fixtureAgile(t, plain)
+	oleData := fixtureCFB(t, []cfbEntry{
+		{name: "EncryptionInfo", mse: 2, data: infoData},
+		{name: "EncryptedPackage", mse: 2, data: packageData},
+	})
+	ole, err := oleparse.NewOLEFile(oleData)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("depth", func(t *testing.T) {
+		res := &Result{childOpts: FullOptions(time.Time{})}
+		fromDefaultPWOOXML(ole, res, &archiveBudget{}, maxNestDepth, time.Time{})
+		if !hasCapHit(*res, "depth") || res.IsPDF {
+			t.Fatalf("decrypted Office depth guard failed: caps=%v IsPDF=%t", res.CapHits, res.IsPDF)
+		}
+	})
+
+	t.Run("archive-budget", func(t *testing.T) {
+		res := &Result{childOpts: FullOptions(time.Time{})}
+		budget := &archiveBudget{members: maxArchiveMembers - 1}
+		fromDefaultPWOOXML(ole, res, budget, 0, time.Time{})
+		if !hasCapHit(*res, "archive-budget") || res.IsPDF || budget.members != maxArchiveMembers {
+			t.Fatalf("decrypted Office archive budget failed: caps=%v IsPDF=%t members=%d", res.CapHits, res.IsPDF, budget.members)
+		}
+	})
+}
+
+func TestDecryptedOfficeMalformedZIPRemainsFailed(t *testing.T) {
+	infoData, packageData := fixtureAgile(t, []byte("PK\x03\x04not-a-valid-office-zip"))
+	res := Extract(fixtureCFB(t, []cfbEntry{
+		{name: "EncryptionInfo", mse: 2, data: infoData},
+		{name: "EncryptedPackage", mse: 2, data: packageData},
+	}), time.Time{})
+	if !res.Encrypted || !res.Failed || res.Panicked {
+		t.Fatalf("malformed decrypted ZIP flags: Encrypted=%t Failed=%t Panicked=%t", res.Encrypted, res.Failed, res.Panicked)
+	}
+	requireFixtureStream(t, res.Markers, "DEFAULTPW-DECRYPTED")
 }

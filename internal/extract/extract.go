@@ -743,7 +743,7 @@ func fromOLE(buf []byte, res *Result, bud *archiveBudget, depth int, deadline ti
 	// it as opaque, try default passwords (VelvetSweatshop etc.) via ECMA-376
 	// Agile/Standard decryption — many malware samples use well-known passwords.
 	if ole.FindStreamByName("EncryptedPackage") != nil || ole.FindStreamByName("EncryptionInfo") != nil {
-		fromDefaultPWOOXML(ole, res, deadline)
+		fromDefaultPWOOXML(ole, res, bud, depth, deadline)
 		res.Encrypted = true
 		fromOLEEncInfo(ole, res) // ENCRYPTION-AES type marker
 		return

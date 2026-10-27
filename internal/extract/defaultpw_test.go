@@ -555,7 +555,7 @@ func TestFromDefaultPWRC4_DeadlineExpired(t *testing.T) {
 
 func TestFromDefaultPWOOXML_NilOLENoPanic(t *testing.T) {
 	res := &Result{}
-	fromDefaultPWOOXML(nil, res, time.Time{})
+	fromDefaultPWOOXML(nil, res, &archiveBudget{}, 0, time.Time{})
 	if len(res.Streams) != 0 {
 		t.Fatal("nil OLE must emit no streams")
 	}
