@@ -422,25 +422,47 @@ func TestBuildMarkerBundle_Fallback(t *testing.T) {
 // known marker rule and scanning a body that produces an extract.Result.Markers
 // entry (via the extMismatch path, which calls scanExtracted with markerChannel=true).
 func TestMarkerChannelScansCounter(t *testing.T) {
-	// extMismatch emits a marker when a .jpg file is really an OLE doc. We can't
-	// easily fake that here, so we verify the counter is wired structurally by
-	// checking it increments when scanExtracted is invoked via the EXT-MISMATCH
-	// path. The extMismatch path is exercised in extmismatch_test.go; here we
-	// confirm markerChannelScans is accessible and starts at zero on a fresh scanner.
-	s := newScannerBudget(t, writeRules(t, eicarRule), loadInsensitiveScanTimeout)
-	before := s.MarkerChannelScans()
-	if before != 0 {
-		t.Errorf("fresh scanner: MarkerChannelScans = %d, want 0", before)
-	}
-	// Scan a body that is just EICAR — no extraction, no markers. Counter stays 0.
-	if _, err := scanT(s, eicar(), ScanMeta{}); err != nil {
+	const src = `
+rule Renamed_Container : marker
+{
+    strings:
+        $m = "EXT-MISMATCH rtf:jpg"
+    condition:
+        $m
+}
+
+rule Ordinary_Content
+{
+    strings:
+        $o = "ordinary-marker-control"
+    condition:
+        $o
+}
+`
+	s := newScannerBudget(t, writeRules(t, src), loadInsensitiveScanTimeout)
+	body := []byte("{\\rtf1 ordinary-marker-control}")
+
+	ordinary, err := scanT(s, body, ScanMeta{Filename: "ordinary.rtf", Extension: ".rtf"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	// No marker channel scans for a plain EICAR body (no extracted markers).
-	if got := s.MarkerChannelScans(); got != before {
-		// Not a fatal: the extMismatch path may fire if the test environment
-		// sets a filename. Just log it.
-		t.Logf("MarkerChannelScans after EICAR scan = %d (may be non-zero if extMismatch fired)", got)
+	if got := ruleNames(ordinary); got != "[Ordinary_Content]" {
+		t.Fatalf("ordinary content matches = %s, want [Ordinary_Content]", got)
+	}
+	before := s.MarkerChannelScans()
+
+	renamed, err := scanT(s, body, ScanMeta{Filename: "ordinary.jpg", Extension: ".jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ruleNames(renamed); got != "[Ordinary_Content, Renamed_Container]" {
+		t.Fatalf("renamed content matches = %s, want [Ordinary_Content, Renamed_Container]", got)
+	}
+	if got := ruleNames(filterMarkerChannel(renamed, false)); got != ruleNames(ordinary) {
+		t.Fatalf("ordinary content changed after marker scan: got %s, want %s", got, ruleNames(ordinary))
+	}
+	if got := s.MarkerChannelScans() - before; got != 1 {
+		t.Fatalf("marker-channel scans = %d, want exactly 1", got)
 	}
 }
 
