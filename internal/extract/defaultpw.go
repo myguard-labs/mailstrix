@@ -316,8 +316,7 @@ func emitDecrypted(res *Result, plaintext []byte, deadline time.Time) {
 }
 
 func emitDefaultPWMarker(res *Result) {
-	marker := []byte("DEFAULTPW-DECRYPTED")
-	res.appendStream(&marker)
+	res.appendMarker(trustedMarker("DEFAULTPW-DECRYPTED"))
 }
 
 // ---------------------------------------------------------------------------

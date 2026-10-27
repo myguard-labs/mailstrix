@@ -56,7 +56,6 @@ func carveEmbeddedPEs(res *Result, start int) {
 		carved++
 	}
 	if carved > 0 && len(res.Streams) < maxStreams {
-		marker := []byte(b64PECarveMarker)
-		res.appendStream(&marker)
+		res.appendMarker(trustedMarker(b64PECarveMarker))
 	}
 }

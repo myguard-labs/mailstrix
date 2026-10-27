@@ -59,6 +59,7 @@ func fromPPTVBA(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		return
 	}
 	if len(data) > maxTotalBin {
+		res.capHit("ppt-vba")
 		data = data[:maxTotalBin]
 	}
 
@@ -66,7 +67,8 @@ func fromPPTVBA(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 	blobsProcessed := 0
 	off := 0
 
-	for r := 0; r < maxPPTRecords; r++ {
+	recordsProcessed := 0
+	for ; recordsProcessed < maxPPTRecords; recordsProcessed++ {
 		if expired(deadline) {
 			break
 		}
@@ -92,10 +94,8 @@ func fromPPTVBA(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			break
 		}
 
-		if rt == pptRecTypeExternalObjectStorage && blobsProcessed < maxPPTVBABlobs {
-			body := data[bodyOff:bodyEnd]
-			pptExtractEOS(body, inst, res, deadline)
-			blobsProcessed++
+		if rt == pptRecTypeExternalObjectStorage {
+			pptExtractEOSBounded(data[bodyOff:bodyEnd], inst, res, deadline, &blobsProcessed)
 		}
 
 		if ver == 0x0F {
@@ -108,18 +108,29 @@ func fromPPTVBA(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 			off = bodyEnd
 		}
 	}
+	if recordsProcessed == maxPPTRecords && off+8 <= len(data) {
+		res.capHit("ppt-vba")
+	}
 
 	// Emit the marker exactly once, only when at least one extraction produced
 	// new VBA streams.
 	emitPPTVBAMarkerIfProduced(res, streamsBefore)
 }
 
+func pptExtractEOSBounded(body []byte, inst uint16, res *Result, deadline time.Time, processed *int) {
+	if *processed >= maxPPTVBABlobs {
+		res.capHit("ppt-vba")
+		return
+	}
+	pptExtractEOS(body, inst, res, deadline)
+	*processed++
+}
+
 func emitPPTVBAMarkerIfProduced(res *Result, streamsBefore int) {
 	if len(res.Streams) <= streamsBefore {
 		return
 	}
-	marker := []byte("PPT-VBA-EXTRACTED")
-	res.appendStream(&marker)
+	res.appendMarker(trustedMarker("PPT-VBA-EXTRACTED"))
 }
 
 // pptExtractEOS decompresses (if needed) one ExternalObjectStorage body and

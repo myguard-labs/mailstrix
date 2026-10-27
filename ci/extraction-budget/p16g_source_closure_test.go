@@ -196,7 +196,7 @@ func p16gSourceClosure(t *testing.T) ([]p16gSink, map[string]int, []p16gInventor
 						case sel.Sel.Name == "recordRetained" && len(n.Args) == 1:
 							key := strings.Join([]string{rel, fn.Name.Name, p16gNodeString(fset, n.Args[0])}, ":")
 							registrations[key]++
-						case sel.Sel.Name == "admitStream" && len(n.Args) == 2 && fn.Name.Name != "appendOut":
+						case sel.Sel.Name == "admitStream" && len(n.Args) == 2 && fn.Name.Name != "appendOut" && fn.Name.Name != "appendMarkerOut":
 							// appendOut appends to a caller-chosen local slice, not a retained field.
 							// P17b whole-entry admission: admitStream(&x, own) debits x,
 							// and the helper form admitStream(p, own) debits *p.
@@ -268,7 +268,7 @@ func TestP16gSourceClosure(t *testing.T) {
 			debits[key]++
 		}
 	}
-	wantCounts := map[string]int{"debit": 6, "attachment": 1, "alias": 1, "transfer": 5}
+	wantCounts := map[string]int{"debit": 7, "attachment": 1, "alias": 1, "transfer": 5}
 	if fmt.Sprint(counts) != fmt.Sprint(wantCounts) {
 		t.Errorf("source sink inventory counts=%v want=%v", counts, wantCounts)
 	}
@@ -286,8 +286,8 @@ func TestP16gSourceClosure(t *testing.T) {
 	if len(mismatches) != 0 {
 		t.Fatalf("retained source closure mismatch:\n%s", strings.Join(mismatches, "\n"))
 	}
-	if len(inventory) != 203 {
-		t.Fatalf("complete AST inventory sites=%d want=203", len(inventory))
+	if len(inventory) != 211 {
+		t.Fatalf("complete AST inventory sites=%d want=211", len(inventory))
 	}
 	inventoryCounts := make(map[string]int)
 	for _, site := range inventory {
@@ -298,9 +298,9 @@ func TestP16gSourceClosure(t *testing.T) {
 	}
 	wantInventoryCounts := map[string]int{
 		"alias": 1, "alias-call": 1, "attachment": 1, "attachment-call": 1,
-		"debit": 6, "emission-call": 6,
+		"debit": 7, "emission-call": 7,
 		"promotion-transfer-call": 2, "temporary-batch-literal": 2,
-		"temporary-or-bookkeeping": 178, "transfer": 5,
+		"temporary-or-bookkeeping": 184, "transfer": 5,
 	}
 	if !maps.Equal(inventoryCounts, wantInventoryCounts) {
 		t.Fatalf("AST disposition counts=%v want=%v", inventoryCounts, wantInventoryCounts)

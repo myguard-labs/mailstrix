@@ -227,7 +227,7 @@ func emitDangerousMarkers(folded string, out *[][]byte, results ...*Result) {
 		}
 		if strings.Contains(upper, "="+fn+"(") {
 			marker := []byte("XLM-DANGEROUS-FUNC " + fn)
-			res.appendOut(out, &marker, false)
+			res.appendMarkerOut(out, trustedMarker(marker), false)
 		}
 	}
 }

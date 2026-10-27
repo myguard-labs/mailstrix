@@ -431,19 +431,16 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 	// reHTMLDownloadAttr is now (?i) so it runs against the original head.
 	hasDownload := reHTMLDownloadAttr.Match(head) || bytes.Contains(head, []byte(".click("))
 	if hasBlobAPI && hasDownload && len(res.Streams) < maxStreams {
-		stream := []byte("HTML-SMUGGLING-BLOB")
-		res.appendStream(&stream)
+		res.appendMarker(trustedMarker("HTML-SMUGGLING-BLOB"))
 	}
 
 	// Signal 4: javascript:/vbscript: URI in a navigational attribute.
 	plainURI, obfURI := scanScriptURIAttr(head, deadline)
 	if plainURI && len(res.Streams) < maxStreams {
-		stream := []byte("HTML-SCRIPT-URI")
-		res.appendStream(&stream)
+		res.appendMarker(trustedMarker("HTML-SCRIPT-URI"))
 	}
 	if obfURI && len(res.Streams) < maxStreams {
-		stream := []byte("HTML-SCRIPT-URI-OBFUSCATED")
-		res.appendStream(&stream)
+		res.appendMarker(trustedMarker("HTML-SCRIPT-URI-OBFUSCATED"))
 	}
 
 	// Signal 3: scripted SVG. Only when an <svg> root is present AND it carries
@@ -454,8 +451,7 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 			asciiContainsFold(head, []byte("onload=")) ||
 			asciiContainsFold(head, []byte("<foreignobject")) {
 			if len(res.Streams) < maxStreams {
-				stream := []byte("SVG-SCRIPT")
-				res.appendStream(&stream)
+				res.appendMarker(trustedMarker("SVG-SCRIPT"))
 			}
 		}
 		// SVG-deepen: carve base64 payloads embedded in <image href|xlink:href=
@@ -476,8 +472,7 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 				continue
 			}
 			if svgCarved == 0 && len(res.Streams) < maxStreams {
-				stream := []byte("SVG-EMBEDDED-PAYLOAD")
-				res.appendStream(&stream)
+				res.appendMarker(trustedMarker("SVG-EMBEDDED-PAYLOAD"))
 			}
 			svgCarved++
 			// Admit the decoded blob before recursing so a refused blob is never
@@ -530,8 +525,7 @@ func fromHTMLSmuggling(buf []byte, res *Result, b *archiveBudget, depth int, dea
 			continue
 		}
 		if carved == 0 && len(res.Streams) < maxStreams {
-			stream := []byte(dataURIMarker)
-			res.appendStream(&stream)
+			res.appendMarker(trustedMarker(dataURIMarker))
 		}
 		carved++
 		// If the decoded bytes carry a container magic, route them through the

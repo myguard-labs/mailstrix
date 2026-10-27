@@ -76,8 +76,7 @@ func markDecryptedArchive(res *Result) {
 		return
 	}
 	res.DecryptedArchive = true
-	marker := []byte("ARCHIVE-DECRYPTED")
-	res.appendStream(&marker)
+	res.appendMarker(trustedMarker("ARCHIVE-DECRYPTED"))
 }
 
 // pwCandidates returns the effective candidate list for this request, or nil when

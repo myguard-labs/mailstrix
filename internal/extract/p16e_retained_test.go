@@ -112,9 +112,12 @@ func TestP16eFinalizerJoinedMarkerClosure(t *testing.T) {
 			content := []byte("complete retained payload")
 			seeds := [][]byte{content, []byte("XLM-AUTO-OPEN"), []byte("XLM-DANGEROUS-FUNC EXEC"), []byte("OLEID-OBJECTPOOL"), []byte("OLEID-FLASH"), []byte("DIGITAL-SIGNATURE")}
 			withAfterFormatHook(t, func(r *Result) {
-				for _, s := range seeds {
+				for i, s := range seeds {
 					r.recordRetained(s)
 					r.Streams = append(r.Streams, s)
+					if i > 0 {
+						r.trustedMarkers = append(r.trustedMarkers, trustedMarker(s))
+					}
 				}
 				r.capHit("p16e-fixture")
 				if panicExit {
@@ -123,9 +126,9 @@ func TestP16eFinalizerJoinedMarkerClosure(t *testing.T) {
 			})
 			r := ExtractWithOptions([]byte("plain"), FullOptions(time.Time{}))
 			assertP16eClosure(t, &r, r.childOpts.retained)
-			wantContent := 2 // dangerous-function payload remains content; cap is outside normal pre-decode snapshot
+			wantContent := 1 // cap is outside the normal pre-decode snapshot
 			if panicExit {
-				wantContent = 3
+				wantContent = 2
 			} // panic fallback includes the existing cap marker
 			if r.Panicked != panicExit || r.Failed != panicExit || r.ContentStreams != wantContent || r.DecodedStreams != 0 || !hasStream(r.Streams, content) {
 				t.Fatalf("finalizer metadata changed: %+v", r)

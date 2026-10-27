@@ -61,13 +61,22 @@ func fromTNEF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline t
 
 	var total int
 	emit := func(b []byte, recurse bool) {
-		if len(b) == 0 ||
-			len(res.Streams) >= maxStreams ||
-			total >= maxTotalTNEF ||
-			expired(deadline) {
+		if len(b) == 0 {
+			return
+		}
+		if total >= maxTotalTNEF {
+			res.capHit("tnef-parts")
+			return
+		}
+		if len(res.Streams) >= maxStreams {
+			res.capHit("streams")
+			return
+		}
+		if expired(deadline) {
 			return
 		}
 		if len(b) > maxBytesPerTNEFPart {
+			res.capHit("tnef-parts")
 			b = b[:maxBytesPerTNEFPart]
 		}
 		s := append([]byte(nil), b...)
@@ -88,7 +97,11 @@ func fromTNEF(buf []byte, res *Result, bud *archiveBudget, depth int, deadline t
 
 	parts := 0
 	for _, a := range data.Attachments {
-		if a == nil || parts >= maxTNEFParts {
+		if a == nil {
+			break
+		}
+		if parts >= maxTNEFParts {
+			res.capHit("tnef-parts")
 			break
 		}
 		emit(a.Data, true)

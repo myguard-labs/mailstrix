@@ -212,8 +212,7 @@ func fromOOXMLDocProps(zr *zip.Reader, out *[][]byte, deadline time.Time, result
 		res.appendOut(out, &s, true)
 	}
 	if len(*out) < maxStreams {
-		marker := joinMarkerPayload(docPropsMarker, carved)
-		res.appendOut(out, &marker, false)
+		res.appendMarkerOut(out, trustedMarker(joinMarkerPayload(docPropsMarker, carved)), false)
 	}
 }
 
@@ -259,8 +258,7 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		if name == "\x05SummaryInformation" {
 			if v, ok := docSecurityFlags(data); ok {
 				if len(res.Streams) < maxStreams {
-					marker := []byte(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v))
-					res.appendStream(&marker)
+					res.appendMarker(trustedMarker(fmt.Sprintf("%s%d", oleDocSecMarkerPrefix, v)))
 				}
 			}
 			metaMarkers = append(metaMarkers, oleSummaryMetaMarkers(data)...)
@@ -275,14 +273,13 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 
 	// Combined OLE-META marker buffer (typed maldoc-metadata signals). Emitted
 	// independently of carved strings so it still routes when SummaryInformation
-	// carries no printable runs. PURE-prefixed → splitPureMarkers → Markers channel.
+	// carries no printable runs. Typed marker emission routes it to Markers.
 	if len(metaMarkers) > 0 && len(res.Streams) < maxStreams {
 		bufs := make([][]byte, len(metaMarkers))
 		for i, m := range metaMarkers {
 			bufs[i] = []byte(m)
 		}
-		marker := joinMarkerPayload(oleMetaTag, bufs)
-		res.appendStream(&marker)
+		res.appendMarker(trustedMarker(joinMarkerPayload(oleMetaTag, bufs)))
 		res.HasDocProps = true
 	}
 
@@ -301,8 +298,7 @@ func fromOLEDocProps(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		res.appendStreamOwned(&s)
 	}
 	if len(res.Streams) < maxStreams {
-		marker := joinMarkerPayload(docPropsMarker, carved)
-		res.appendStream(&marker)
+		res.appendMarker(trustedMarker(joinMarkerPayload(docPropsMarker, carved)))
 	}
 }
 
@@ -382,8 +378,8 @@ func docSecurityFlags(data []byte) (uint32, bool) {
 
 // oleMetaTag is the PURE-marker tag for the combined typed-metadata buffer
 // ("OLE-META\n<marker>\n<marker>…"). Registered as a pureMarkerPrefix
-// ("OLE-META\n") so splitPureMarkers routes it to the out-of-band Markers
-// channel. The marker-tagged rules in ole_meta.yara key on the sub-literals.
+// ("OLE-META\n"); typed emission routes it to the out-of-band Markers channel.
+// The marker-tagged rules in ole_meta.yara key on the sub-literals.
 const oleMetaTag = "OLE-META"
 
 // Typed maldoc-metadata markers carved from the SummaryInformation property set.

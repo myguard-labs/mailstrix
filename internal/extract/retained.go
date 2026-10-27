@@ -167,6 +167,32 @@ func (r *Result) appendStream(p *[]byte) bool {
 	return true
 }
 
+// appendMarker admits a yarad-generated marker while retaining its typed
+// provenance through finalization.
+func (r *Result) appendMarker(marker trustedMarker) bool {
+	p := []byte(marker)
+	if _, ok := r.admitStream(&p, false); !ok {
+		return false
+	}
+	r.Streams = append(r.Streams, p)
+	r.trustedMarkers = append(r.trustedMarkers, marker)
+	return true
+}
+
+// appendMarkerOut is appendMarker for a local output slice that will later be
+// assigned to Streams.
+func (r *Result) appendMarkerOut(out *[][]byte, marker trustedMarker, own bool) bool {
+	p := []byte(marker)
+	if _, ok := r.admitStream(&p, own); !ok {
+		return false
+	}
+	*out = append(*out, p)
+	if r != nil {
+		r.trustedMarkers = append(r.trustedMarkers, trustedMarker(p))
+	}
+	return true
+}
+
 // appendStreamOwned is appendStream with a copied, tight accepted array.
 func (r *Result) appendStreamOwned(p *[]byte) bool {
 	if _, ok := r.admitStream(p, true); !ok {

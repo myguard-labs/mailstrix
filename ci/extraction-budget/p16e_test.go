@@ -81,7 +81,7 @@ func TestP16eStructuralAccountingClosure(t *testing.T) {
 
 func TestP16eCompleteResultParity(t *testing.T) {
 	// Baseline digests are generated independently before the recording-only candidate.
-	want := map[string]string{"encrypted_archive": "c6efeec4d5deea4bbcaadabab6503c5fe293a5a784d9c7e0265821f132aaa895", "decrypted_archive": "d69a65cad01ea11168fe5a9357fadf85e2677ad34cb50224884e5dff2cb0fa1e", "elf": "0acf8d8b491a9ecdc11f6f4b3560cb3001e2d0588bebd9368fe855e3e4112c86", "joined_xlm": "80fb69adb5f7a19046e576c22194e7cdccf690d55aaff451f35d9014e7108ce6", "xll": "74a97d959541157be30a1b085bdea97df46d10ac9f111e99a3b0e580c5f400aa", "polyglot": "185c615b69807b9e1bd88bae1f3269c59e564502336334907065342196d810d3"}
+	want := map[string]string{"encrypted_archive": "c6efeec4d5deea4bbcaadabab6503c5fe293a5a784d9c7e0265821f132aaa895", "decrypted_archive": "d69a65cad01ea11168fe5a9357fadf85e2677ad34cb50224884e5dff2cb0fa1e", "elf": "0acf8d8b491a9ecdc11f6f4b3560cb3001e2d0588bebd9368fe855e3e4112c86", "joined_xlm": "28e1d740ac9f8e3c952bb5fd4f54a8378f2cf9a526565f28438c8badeafd7c4a", "xll": "74a97d959541157be30a1b085bdea97df46d10ac9f111e99a3b0e580c5f400aa", "polyglot": "185c615b69807b9e1bd88bae1f3269c59e564502336334907065342196d810d3"}
 	for name, input := range p16eInputs(t) {
 		t.Run(name, func(t *testing.T) {
 			got := p16dResultDigest(t, p16eExtract(name, input))

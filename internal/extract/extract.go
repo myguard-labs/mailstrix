@@ -259,14 +259,15 @@ type Result struct {
 	// Streams holds the decompressed VBA macro source, one cleartext blob per
 	// module. The caller scans each in addition to the raw bytes.
 	Streams [][]byte
-	// Markers holds yarad's synthetic PURE marker entries (no attacker-controlled
-	// data) split out of Streams at the end of extraction — the out-of-band
+	// Markers holds yarad's explicitly emitted marker entries split out of Streams
+	// at the end of extraction — the out-of-band
 	// "marker channel" (PLAN-marker-channel Phase 1). The scanner scans these
 	// against the full ruleset exactly like Streams, so Phase 1 changes nothing
 	// observable beyond the separation; the split is the prerequisite for the
 	// Phase 2 collision filter and Phase 3 compiled markers.yac partition.
-	// COMBINED markers (marker tag + a real attacker IOC in one string) stay in
-	// Streams. Populated by splitPureMarkers (see markers.go).
+	// COMBINED markers (marker tag + a real attacker IOC in one string) may also
+	// be trusted when their extractor emits them explicitly. Populated by
+	// splitTrustedMarkers (see markers.go); content bytes alone confer no trust.
 	Markers [][]byte
 	// IsDoc is true when buf was a recognised OLE2/OOXML container (magic hit),
 	// whether or not any macro was found.
@@ -404,6 +405,9 @@ type Result struct {
 	// probe marks depthDefaultContent's scratch Result: extractChild returns at
 	// once so a depth probe never walks carved children.
 	probe bool
+	// trustedMarkers retains typed marker provenance across the format and
+	// decode phases until finalizeStreams publishes the marker channel.
+	trustedMarkers []trustedMarker
 }
 
 // Extract is the back-compat full-depth entry point: it runs every extractor at
@@ -650,10 +654,11 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// multi-marker stacker rules can satisfy their conjunctions (markers are
 	// emitted as separate Streams entries, each scanned independently — the same
 	// cross-entry dead-rule class fixed for DocProps/UserForm in Phase 2b). The
-	// buffer is XLM-STACK-prefixed so splitPureMarkers routes it to the Markers
-	// channel; the individual entries stay in Streams for the self-contained rules.
-	if xb := joinXLMStackerMarkers(res.Streams); xb != nil {
-		res.appendStream(&xb)
+	// buffer is emitted with trusted marker provenance so finalization routes it
+	// to the Markers channel; the individual entries stay in Streams for the
+	// self-contained rules.
+	if xb := joinXLMStackerMarkers(res.Streams, res.trustedMarkers); xb != nil {
+		res.appendMarker(trustedMarker(xb))
 	}
 
 	// olevba-style "weight of evidence": when several independent LOW-confidence
@@ -661,8 +666,8 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// so a novel maldoc that trips multiple weak signals (with no single strong
 	// rule) still scores. Source markers stay in Streams — this only adds a
 	// stacking verdict. Built AFTER the XLM stacker so XLM presence can count.
-	if bs := joinBehaviorScore(res.Streams); bs != nil {
-		res.appendStream(&bs)
+	if bs := joinBehaviorScore(res.Streams, res.trustedMarkers); bs != nil {
+		res.appendMarker(trustedMarker(bs))
 	}
 
 	// Other cap markers need normal admission; the retained-bytes marker is
@@ -673,18 +678,23 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 			continue
 		}
 		marker := []byte(capHitMarkerPrefix + kind)
-		res.appendStream(&marker)
+		if isPureMarker(marker) {
+			res.appendMarker(trustedMarker(marker))
+		} else {
+			res.appendStream(&marker)
+		}
 	}
 	res.noteRetainedTruncation()
 	if res.RetainedTruncated && res.childOpts.retained.admitReserve() {
 		res.Streams = append(res.Streams, []byte(capHitMarkerPrefix+retainedBytesKind))
+		res.trustedMarkers = append(res.trustedMarkers, trustedMarker(res.Streams[len(res.Streams)-1]))
 	}
 
 	if preDecodeLen < 0 || preDecodeLen > len(res.Streams) {
 		preDecodeLen = len(res.Streams)
 	}
 	for _, s := range res.Streams[:preDecodeLen] {
-		if !isPureMarker(s) {
+		if !isTrustedMarker(s, res.trustedMarkers) {
 			res.ContentStreams++
 		}
 	}
@@ -694,10 +704,11 @@ func finalizeStreams(res *Result, preDecodeLen int) {
 	// has*Marker / countXLMMarker helpers have run against Streams. decodeMoved
 	// keeps DecodedStreams exact: an MSD-DEEPDECODE marker counted into that total
 	// is no longer in Streams, so subtract it.
-	content, markers, decodeMoved := splitPureMarkers(res.Streams)
+	content, markers, decodeMoved := splitTrustedMarkers(res.Streams, res.trustedMarkers)
 	res.Streams = content
 	res.Markers = markers
 	res.DecodedStreams -= decodeMoved
+	res.trustedMarkers = nil
 }
 
 // expired reports whether the extraction deadline has passed. A zero deadline
@@ -913,6 +924,7 @@ func fromMSI(ole *oleparse.OLEFile, res *Result, deadline time.Time) bool {
 	}
 	res.IsMSI = true
 	var total int
+	var emitted int
 	for _, d := range ole.Directory {
 		if d == nil {
 			continue
@@ -921,7 +933,10 @@ func fromMSI(ole *oleparse.OLEFile, res *Result, deadline time.Time) bool {
 		if d.Header.Mse != 2 || d.Header.Size == 0 {
 			continue
 		}
-		if len(res.Streams) >= maxMSIStreams || total >= maxTotalMSI || expired(deadline) {
+		if formatCapReached(res, emitted, maxMSIStreams, total, maxTotalMSI, "msi-streams") {
+			break
+		}
+		if expired(deadline) {
 			break
 		}
 		b := ole.GetStreamView(d.Index)
@@ -929,10 +944,12 @@ func fromMSI(ole *oleparse.OLEFile, res *Result, deadline time.Time) bool {
 			continue
 		}
 		if len(b) > maxBytesPerMSIStream {
+			res.capHit("msi-streams")
 			b = b[:maxBytesPerMSIStream]
 		}
 		res.appendStreamOwned(&b)
 		total += len(b)
+		emitted++
 	}
 	return true
 }
@@ -1018,7 +1035,10 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 		if n != msgAttachData1 && n != msgAttachData2 {
 			continue
 		}
-		if emitted >= maxMSGAttachments || len(res.Streams) >= maxStreams || total >= maxTotalMSG || expired(deadline) || bud.spent() {
+		if formatCapReached(res, emitted, maxMSGAttachments, total, maxTotalMSG, "msg-attachments") {
+			break
+		}
+		if expired(deadline) || bud.spent() {
 			break
 		}
 		b := ole.GetStreamView(d.Index)
@@ -1026,6 +1046,7 @@ func fromMSG(ole *oleparse.OLEFile, res *Result, bud *archiveBudget, depth int, 
 			continue
 		}
 		if len(b) > maxBytesPerMSGAttach {
+			res.capHit("msg-attachments")
 			b = b[:maxBytesPerMSGAttach]
 		}
 		admitted := res.appendStreamOwned(&b)
@@ -1228,13 +1249,13 @@ func appendOLEIDMarker(res *Result, out [][]byte, marker string, cond bool) [][]
 	if !cond {
 		return out
 	}
-	mb := []byte(marker)
+	mb := trustedMarker(marker)
 	for _, s := range out {
-		if bytes.Equal(s, mb) {
+		if bytes.Equal(s, []byte(mb)) {
 			return out
 		}
 	}
-	res.appendOut(&out, &mb, false)
+	res.appendMarkerOut(&out, mb, false)
 	return out
 }
 
@@ -1630,6 +1651,21 @@ func streamBytes(streams [][]byte) int {
 		total += len(b)
 	}
 	return total
+}
+
+// formatCapReached reports only caps that make otherwise eligible format
+// content incomplete. Counters are local to one extractor invocation; the
+// global stream ceiling remains a separate cross-format bound.
+func formatCapReached(res *Result, emitted, maxEmitted, total, maxTotal int, kind string) bool {
+	if emitted >= maxEmitted || total >= maxTotal {
+		res.capHit(kind)
+		return true
+	}
+	if len(res.Streams) >= maxStreams {
+		res.capHit("streams")
+		return true
+	}
+	return false
 }
 
 // codes appends the non-empty decompressed source of each VBA module to out.

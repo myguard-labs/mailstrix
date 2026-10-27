@@ -238,7 +238,7 @@ func fromUserForms(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 
 	// Emit each carved string individually so generic content rules see them
 	// (URL/keyword rules etc.). Then emit ONE combined "USERFORM-STRINGS\n<carved>"
-	// buffer — splitPureMarkers routes it to the Markers channel, where the
+	// buffer — typed marker emission routes it to the Markers channel, where the
 	// marker-tagged Maldoc_UserForm_Payload rule needs the marker AND a carved IOC
 	// co-located (Phase 2b; previously dead — separate entries never matched).
 	for _, s := range carved {
@@ -248,8 +248,7 @@ func fromUserForms(ole *oleparse.OLEFile, res *Result, deadline time.Time) {
 		res.appendStreamOwned(&s)
 	}
 	if len(res.Streams) < maxStreams {
-		marker := joinMarkerPayload(userFormMarker, carved)
-		res.appendStream(&marker)
+		res.appendMarker(trustedMarker(joinMarkerPayload(userFormMarker, carved)))
 	}
 }
 

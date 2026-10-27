@@ -2,13 +2,30 @@ package extract
 
 import "bytes"
 
+// trustedMarker is yarad-generated marker data. A value can enter the marker
+// channel only when an extractor constructs this type at the emission site;
+// matching bytes in decoded or extracted attacker content carry no trust.
+type trustedMarker []byte
+
+func sameEmittedBuffer(stream []byte, marker trustedMarker) bool {
+	return len(stream) == len(marker) && len(stream) != 0 && &stream[0] == &marker[0]
+}
+
+func isTrustedMarker(stream []byte, trusted []trustedMarker) bool {
+	for _, marker := range trusted {
+		if sameEmittedBuffer(stream, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // PLAN-marker-channel Phase 1: yarad emits two kinds of synthetic entries into
 // Result.Streams — PURE markers (a fixed yarad literal, no attacker bytes) and
-// COMBINED markers (a marker tag concatenated with a real attacker IOC). Only
-// PURE markers are safe to route to the out-of-band Markers channel; COMBINED
-// ones carry attacker data a content rule keys on, so they stay in Streams until
-// the Phase 2 per-rule split. Real extracted content (macro source, carved
-// strings, decoded blobs) is never a marker.
+// COMBINED markers (a marker tag concatenated with a real attacker IOC). Both
+// kinds may enter the out-of-band Markers channel only through a typed emission
+// site. Real extracted content (macro source, carved strings, decoded blobs)
+// remains ordinary even when its bytes equal or start with a marker literal.
 
 // pureMarkerLiterals is the exact set of yarad PURE marker strings. Each is an
 // emitted-as-is constant with no variable data. Keep in sync with the emit
@@ -113,9 +130,12 @@ var xlmStackerMarkerPrefixes = []string{
 // fewer than two are found (a single marker can never satisfy a stacker rule's
 // conjunction, so no buffer is needed). The source entries are copied, not
 // moved — they stay in Streams for the self-contained marker rules.
-func joinXLMStackerMarkers(streams [][]byte) []byte {
+func joinXLMStackerMarkers(streams [][]byte, trusted []trustedMarker) []byte {
 	var collected [][]byte
 	for _, s := range streams {
+		if !isTrustedMarker(s, trusted) {
+			continue
+		}
 		for _, p := range xlmStackerMarkerPrefixes {
 			if bytes.HasPrefix(s, []byte(p)) {
 				collected = append(collected, s)
@@ -144,8 +164,9 @@ func joinXLMStackerMarkers(streams [][]byte) []byte {
 // Maldoc_DocProps_Payload: `$marker and any of ($url,...)`) can match. yarad
 // emits the marker and carved strings as separate Streams entries (each scanned
 // independently), so such conjunctions were structurally dead until Phase 2b.
-// The buffer is prefixed by the marker literal so splitPureMarkers routes it to
-// the out-of-band Markers channel, where the (: marker)-tagged rule fires.
+// Its caller emits the buffer with trusted marker provenance so finalization
+// routes it to the out-of-band Markers channel, where the (: marker)-tagged rule
+// fires.
 func joinMarkerPayload(marker string, carved [][]byte) []byte {
 	n := len(marker)
 	for _, c := range carved {
@@ -212,11 +233,14 @@ const behaviorScoreMin = 3
 // source entries are NOT moved — they stay in Streams for their own marker rules,
 // so this only ADDS a stacking verdict, never removes one. Each class is counted
 // at most once even if its marker appears in several streams.
-func joinBehaviorScore(streams [][]byte) []byte {
+func joinBehaviorScore(streams [][]byte, trusted []trustedMarker) []byte {
 	seen := make(map[string]struct{}, len(behaviorWeakMarkers))
 	var present []string // preserve behaviorWeakMarkers order for deterministic output
 	for _, p := range behaviorWeakMarkers {
 		for _, s := range streams {
+			if !isTrustedMarker(s, trusted) {
+				continue
+			}
 			if bytes.HasPrefix(s, []byte(p)) {
 				if _, dup := seen[p]; !dup {
 					seen[p] = struct{}{}
@@ -288,6 +312,22 @@ func splitPureMarkers(streams [][]byte) (content, markers [][]byte, decodeMoved 
 			continue
 		}
 		content = append(content, s)
+	}
+	return content, markers, decodeMoved
+}
+
+// splitTrustedMarkers partitions only entries explicitly typed at their
+// emission site. It deliberately does not inspect ordinary content bytes.
+func splitTrustedMarkers(streams [][]byte, trusted []trustedMarker) (content, markers [][]byte, decodeMoved int) {
+	for _, stream := range streams {
+		if isTrustedMarker(stream, trusted) {
+			markers = append(markers, stream)
+			if bytes.HasPrefix(stream, []byte(msdDeepDecodePrefix)) {
+				decodeMoved++
+			}
+			continue
+		}
+		content = append(content, stream)
 	}
 	return content, markers, decodeMoved
 }
