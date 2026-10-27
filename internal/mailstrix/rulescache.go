@@ -123,13 +123,9 @@ func cleanupRollbackDirs(cacheDir string, logf func(string, ...any)) {
 	}
 }
 
-// staleFetchTempAge is how old a fetch temporary must be before startup
-// cleanup removes it. .marker-stage-* directories and .compiled-dl-*.tmp files
-// are created BEFORE .rules.lock is taken, so a concurrently running
-// fetch-rules may legitimately own a fresh one. A fetch is bounded by its
-// timeout (default 5m, operator-tunable) and by the 1 GiB / 2 GiB size caps, so
-// no realistic run keeps one of these for hours; 6h is far above that while
-// still reclaiming the space of a crashed or OOM-killed run on the next start.
+// staleFetchTempAge is how old an unowned fetch temporary must be before
+// startup cleanup removes it. Active owners are protected by an inode lease,
+// including when a forward clock step makes their paths appear old.
 const staleFetchTempAge = 6 * time.Hour
 
 // cleanupStaleFetchTemps removes .marker-stage-* directories and
@@ -176,9 +172,9 @@ func cleanupStaleFetchTempsAt(cacheDir string, cutoff time.Time, logf func(strin
 		case mode&os.ModeSymlink != 0:
 			err = os.Remove(path) // the link itself, never its target
 		case isStage && mode.IsDir():
-			err = os.RemoveAll(path)
+			err = cleanupLeasedFetchTemp(path, true)
 		case isDownload && mode.IsRegular():
-			err = os.Remove(path)
+			err = cleanupLeasedFetchTemp(path, false)
 		default:
 			continue // wrong type for its name: not ours
 		}

@@ -138,26 +138,26 @@ func markerABIMatches(m *rulesMarker) bool {
 // sha256 against the signed field, extracts it into a fresh staging directory
 // in cacheDir, and proves it with loadMarkerArtifact against the verified
 // bundle before it can be swapped in. The caller removes the returned stage.
-func stageMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, m *rulesMarker) (string, error) {
+func stageMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, m *rulesMarker) (*fetchTempLease, error) {
 	archive, err := downloadToTemp(ctx, hc, base+"/"+m.Asset, cacheDir, m.Size)
 	if err != nil {
-		return "", fmt.Errorf("download marker tree: %w", markerDownloadError{err: err})
+		return nil, fmt.Errorf("download marker tree: %w", markerDownloadError{err: err})
 	}
-	defer func() { _ = os.Remove(archive) }()
-	if err := verifyBundle(archive, RulesManifest{Size: m.Size, Checksum: "sha256:" + m.SHA256}); err != nil {
-		return "", fmt.Errorf("verify marker tree: %w", err)
+	defer discardFetchTemp(archive, false)
+	if err := verifyBundle(archive.path, RulesManifest{Size: m.Size, Checksum: "sha256:" + m.SHA256}); err != nil {
+		return nil, fmt.Errorf("verify marker tree: %w", err)
 	}
-	stage, err := os.MkdirTemp(cacheDir, ".marker-stage-")
+	stage, err := newFetchTempDir(ctx, cacheDir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if err := extractMarkerTree(ctx, archive, stage); err != nil {
-		_ = os.RemoveAll(stage)
-		return "", fmt.Errorf("extract marker tree: %w", err)
+	if err := extractMarkerTree(ctx, archive.path, stage.path); err != nil {
+		discardFetchTemp(stage, true)
+		return nil, fmt.Errorf("extract marker tree: %w", err)
 	}
-	if err := verifyStagedMarkerTree(stage, bundle); err != nil {
-		_ = os.RemoveAll(stage)
-		return "", fmt.Errorf("marker tree does not load: %w", err)
+	if err := verifyStagedMarkerTree(stage.path, bundle); err != nil {
+		discardFetchTemp(stage, true)
+		return nil, fmt.Errorf("marker tree does not load: %w", err)
 	}
 	return stage, nil
 }

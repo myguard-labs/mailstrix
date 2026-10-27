@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -27,15 +28,24 @@ type markerRetryState struct {
 
 const markerRetryMaxAttempts = 7 // exponent saturation: delays stay at one hour
 
-// A retry snapshot moves from absent to leased while .rules.lock is held.
-// Its directory inode is the lease: no separate lease file can be missing,
-// replaced or inherited from another generation. The owner holds the flock
-// through staging, verification and removal, including after .rules.lock is
-// released. Process exit releases it automatically. Startup cleanup holds
-// .rules.lock, acquires the same lease nonblocking, and removes only stale,
-// unleased directories. Age alone never authorizes deleting an active snapshot.
-func lockMarkerRetrySnapshot(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- operator-cache MkdirTemp/ReadDir directory; O_DIRECTORY|O_NOFOLLOW rejects files/symlinks.
+// A fetch temporary moves from absent to leased while .rules.lock is held. Its
+// own inode is the lease: no separate lease file can be missing, replaced or
+// inherited from another generation. The owner holds the flock through network
+// work, verification and publication/removal after .rules.lock is released.
+// Process exit releases it automatically. Startup cleanup holds .rules.lock,
+// acquires the same lease nonblocking and removes only the same stale inode.
+// Age alone never authorizes deleting an active temporary.
+type fetchTempLease struct {
+	path string
+	file *os.File
+}
+
+func lockFetchTemp(path string, directory bool) (*os.File, error) {
+	flags := os.O_RDONLY | syscall.O_NOFOLLOW
+	if directory {
+		flags |= syscall.O_DIRECTORY
+	}
+	f, err := os.OpenFile(path, flags, 0) // #nosec G304,G703 -- operator-cache temporary; O_NOFOLLOW rejects symlinks and O_DIRECTORY constrains directories.
 	if err != nil {
 		return nil, err
 	}
@@ -44,6 +54,95 @@ func lockMarkerRetrySnapshot(path string) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+func lockMarkerRetrySnapshot(path string) (*os.File, error) {
+	return lockFetchTemp(path, true)
+}
+
+func newFetchTempFile(ctx context.Context, dir string) (*fetchTempLease, error) {
+	unlock, err := lockRules(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	f, err := os.CreateTemp(dir, ".compiled-dl-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, err
+	}
+	return &fetchTempLease{path: f.Name(), file: f}, nil
+}
+
+func newFetchTempDir(ctx context.Context, dir string) (*fetchTempLease, error) {
+	unlock, err := lockRules(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	path, err := os.MkdirTemp(dir, ".marker-stage-")
+	if err != nil {
+		return nil, err
+	}
+	f, err := lockFetchTemp(path, true)
+	if err != nil {
+		_ = os.RemoveAll(path)
+		return nil, err
+	}
+	return &fetchTempLease{path: path, file: f}, nil
+}
+
+func (l *fetchTempLease) remove(directory bool) error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	defer func() {
+		_ = l.file.Close()
+		l.file = nil
+	}()
+	opened, err := l.file.Stat()
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(l.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(opened, current) {
+		return fmt.Errorf("fetch temporary changed before removal: %s", l.path)
+	}
+	if directory {
+		return os.RemoveAll(l.path)
+	}
+	return os.Remove(l.path)
+}
+
+func (l *fetchTempLease) release() {
+	if l != nil && l.file != nil {
+		_ = l.file.Close()
+		l.file = nil
+	}
+}
+
+func discardFetchTemp(l *fetchTempLease, directory bool) {
+	if err := l.remove(directory); err != nil {
+		log.Printf("[mailstrix] WARNING: remove fetch temporary %s: %v", l.path, err)
+	}
+}
+
+func cleanupLeasedFetchTemp(path string, directory bool) error {
+	lease, err := lockFetchTemp(path, directory)
+	if err != nil {
+		return err
+	}
+	return (&fetchTempLease{path: path, file: lease}).remove(directory)
 }
 
 // Cooperating writers replace the live bundle atomically under .rules.lock,
@@ -62,23 +161,7 @@ func snapshotMarkerRetryBundle(src, dst string, link func(string, string) error)
 }
 
 func cleanupMarkerRetrySnapshot(path string) error {
-	lease, err := lockMarkerRetrySnapshot(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = lease.Close() }()
-	opened, err := lease.Stat()
-	if err != nil {
-		return err
-	}
-	current, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(opened, current) {
-		return fmt.Errorf("retry snapshot changed during cleanup: %s", path)
-	}
-	return os.RemoveAll(path)
+	return cleanupLeasedFetchTemp(path, true)
 }
 
 type rulesHTTPStatusError int
@@ -169,9 +252,9 @@ func retryRemoteMarker(ctx context.Context, hc *http.Client, base, cacheDir stri
 		return res, err
 	}
 	unlock()
-	stage, status, stageErr := prepareRemoteMarkerTree(ctx, hc, base, cacheDir, bundle, remote, opts)
-	if stage != "" {
-		defer func() { _ = os.RemoveAll(stage) }()
+	stage, status, stageErr := prepareRemoteMarkerTreeLease(ctx, hc, base, cacheDir, bundle, remote, opts)
+	if stage != nil {
+		defer discardFetchTemp(stage, true)
 	}
 	unlock, err = lockRules(ctx, cacheDir)
 	if err != nil {
@@ -184,7 +267,7 @@ func retryRemoteMarker(ctx context.Context, hc *http.Client, base, cacheDir stri
 		res.Reason = "up to date after concurrent update"
 		return res, nil
 	}
-	if stage == "" {
+	if stage == nil {
 		res.Marker = status
 		// Permanently invalid responses are never polled again for this version.
 		if newMarkerRetry(remote.marker, stageErr, claim.Attempts, now) == nil {
@@ -195,7 +278,7 @@ func retryRemoteMarker(ctx context.Context, hc *http.Client, base, cacheDir stri
 		}
 		return res, nil
 	}
-	if err := installRetriedMarker(ctx, cacheDir, local, stage, opts); err != nil {
+	if err := installRetriedMarker(ctx, cacheDir, local, stage.path, opts); err != nil {
 		return res, err
 	}
 	res.Marker = MarkerStatusInstalled
