@@ -69,6 +69,25 @@
   > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
   > THE SOFTWARE.
 
+- `rar-walk-order-mixed.rar` — RAR5 that interleaves stored plaintext members
+  with the encrypted members of `fixture-encrypted-files.rar` (password `test`),
+  so a password re-walk must still scan plaintext members after the first
+  encrypted one. Not written by any `rar` tool: `buildRarWalkOrderFixture` in
+  `ci/rar_walk_order_test.go` splices it deterministically from
+  `fixture-encrypted-files.rar` (same signature, main header, directory
+  entries, service block and end block) and `TestRarWalkOrderFixtureIsReproducible`
+  fails if the committed bytes drift. Regenerate with
+  `MAILSTRIX_WRITE_RAR_WALK_FIXTURE=1 go test ./ci/ -run TestRarWalkOrderFixtureIsReproducible`.
+
+  - File order: `before.txt`, `exe/test.exe` (encrypted), `middle.txt`,
+    `jpg/test.jpg` (encrypted), `тест.txt` (encrypted), directories,
+    `after.txt`. Each plaintext member is one line of ASCII text naming its
+    position (see `rarWalkOrderPlain`), stored uncompressed with a CRC32 and no
+    timestamp.
+  - Archive SHA-256:
+    `3b7e406eeebbeb67c1fd9899a0bea34472d88067b1a316b93c2e829fad281927`.
+  - The encrypted members keep the upstream MIT notice reproduced above.
+
 - `sevenzip-pw.7z` / `sevenzip-pwhe.7z` — synthetic 7z password fixtures built
   in `archivepw_test.go` (see that file for member layout and passwords), not
   written by any installable 7z tool.

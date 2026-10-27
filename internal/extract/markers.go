@@ -76,6 +76,7 @@ var pureMarkerLiterals = map[string]struct{}{
 	capHitMarkerPrefix + "rtf-objects":    {}, // extract.go finalizeStreams
 	capHitMarkerPrefix + "pdf-streams":    {}, // extract.go finalizeStreams
 	capHitMarkerPrefix + "member-size":    {}, // extract.go finalizeStreams
+	capHitMarkerPrefix + rarSolidKind:     {}, // archive.go unpackRar/emitRarMembers
 	capHitMarkerPrefix + "depth":          {}, // extract.go finalizeStreams
 	capHitMarkerPrefix + "mime-depth":     {}, // extract.go finalizeStreams
 	capHitMarkerPrefix + "mime-parts":     {}, // extract.go finalizeStreams

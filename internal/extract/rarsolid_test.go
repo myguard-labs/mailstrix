@@ -96,6 +96,52 @@ func TestRarSolidArchiveIsNotHandedToDecoder(t *testing.T) {
 	if got := PlainDroppedMembers() - before; got != 1 {
 		t.Fatalf("plainDropped delta = %d; want 1 — the refusal is a real detection loss and must be counted, not silent", got)
 	}
+	// REL-RAR-SOLID-INCOMPLETE: the unscanned members must make the verdict
+	// incomplete, so the refusal is also exactly one rar-solid cap hit.
+	if len(res.CapHits) != 1 || res.CapHits[0] != rarSolidKind {
+		t.Fatalf("solid RAR CapHits = %v; want [%s] so the scan is never a cacheable clean", res.CapHits, rarSolidKind)
+	}
+	if !isPureMarker([]byte(capHitMarkerPrefix + rarSolidKind)) {
+		t.Fatal("rar-solid cap marker is not a PURE literal")
+	}
+	drainPool(t)
+}
+
+// TestRarSolidRefusalsAreCapHits covers the fail-safe refusals (header-encrypted,
+// truncated) that share the solid guard, and the non-solid control.
+func TestRarSolidRefusalsAreCapHits(t *testing.T) {
+	drainPool(t)
+	clean, err := os.ReadFile("testdata/payload.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := os.ReadFile("testdata/fixture-encrypted.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		buf  []byte
+		want bool
+	}{
+		"header-encrypted": {hidden, true},
+		"truncated-header": {clean[:12], true},
+		"non-solid":        {clean, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := &Result{}
+			unpackRar(tc.buf, res, &archiveBudget{}, 0, time.Now().Add(5*time.Second))
+			got := false
+			for _, k := range res.CapHits {
+				got = got || k == rarSolidKind
+			}
+			if got != tc.want {
+				t.Fatalf("rar-solid cap hit = %v, want %v (CapHits=%v)", got, tc.want, res.CapHits)
+			}
+			if !tc.want && len(res.Streams) == 0 {
+				t.Fatal("non-solid control extracted nothing")
+			}
+		})
+	}
 	drainPool(t)
 }
 
