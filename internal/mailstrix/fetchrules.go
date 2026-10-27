@@ -305,24 +305,24 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	}
 	// Every return before the install rename removes the staged download; after a
 	// successful rename this harmlessly observes os.ErrNotExist.
-	defer func() { _ = os.Remove(tmp) }()
+	defer discardFetchTemp(tmp, false)
 
-	if err := verifyBundle(tmp, remote); err != nil {
+	if err := verifyBundle(tmp.path, remote); err != nil {
 		return res, fmt.Errorf("verify bundle: %w", err)
 	}
 	// Size+sha prove integrity of the bytes, not that they LOAD: a bundle compiled
 	// against a different libyara (or subtly corrupt at the source) can match its
 	// own checksum yet fail yara.LoadRules. Load-validate the temp bundle BEFORE the
-	// swap so a bad download never replaces the working cache — the deferred
-	// os.Remove(tmp) discards it and the old cache (+ .bak) stays live.
-	newCount, err := rulesBundleCount(tmp)
+	// swap so a bad download never replaces the working cache — the deferred lease
+	// cleanup discards it and the old cache (+ .bak) stays live.
+	newCount, err := rulesBundleCount(tmp.path)
 	if err != nil {
 		return res, fmt.Errorf("downloaded bundle does not load (keeping current cache): %w", err)
 	}
-	markerStage, markerStatus, markerErr := prepareRemoteMarkerTree(ctx, hc, base, cacheDir, tmp, remote, opts)
+	markerStage, markerStatus, markerErr := prepareRemoteMarkerTreeLease(ctx, hc, base, cacheDir, tmp.path, remote, opts)
 	remote.markerRetry = newMarkerRetry(remote.marker, markerErr, 0, markerRetryNow(opts))
-	if markerStage != "" {
-		defer func() { _ = os.RemoveAll(markerStage) }()
+	if markerStage != nil {
+		defer discardFetchTemp(markerStage, true)
 	}
 
 	unlock, err = lockRules(ctx, cacheDir)
@@ -334,8 +334,8 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	res.LocalVersion, res.NewVersion = local.Version, local.Version
 	if remote.Version <= local.Version {
 		res.Reason = "up to date after concurrent update"
-		if markerStage != "" && markerRetryMatches(local, remote, opts) {
-			if err := installRetriedMarker(ctx, cacheDir, local, markerStage, opts); err != nil {
+		if markerStage != nil && markerRetryMatches(local, remote, opts) {
+			if err := installRetriedMarker(ctx, cacheDir, local, markerStage.path, opts); err != nil {
 				return res, err
 			}
 			res.Marker = MarkerStatusInstalled
@@ -410,12 +410,12 @@ func fetchRules(ctx context.Context, baseURL, cacheDir, ourLibyara string, hc *h
 	if err := tree.retire(); err != nil {
 		return res, rollback(fmt.Errorf("retire marker tree: %w", err))
 	}
-	if markerStage != "" {
-		if err := tree.install(markerStage); err != nil {
+	if markerStage != nil {
+		if err := tree.install(markerStage.path); err != nil {
 			return res, rollback(fmt.Errorf("install marker tree: %w", err))
 		}
 	}
-	if err := os.Rename(tmp, cachePath); err != nil {
+	if err := os.Rename(tmp.path, cachePath); err != nil {
 		return res, rollback(fmt.Errorf("install bundle: %w", err))
 	}
 	if err := writeLocalManifest(localManifestPath, remote); err != nil {
@@ -623,76 +623,89 @@ func markerTreeContext(parent context.Context) (context.Context, context.CancelF
 // prepareRemoteMarkerTree decides and, when warranted, stages the marker tree
 // for remote. It never fails the update: every problem is logged, reported in
 // the returned status, and leaves the full-ruleset fallback in place.
-func prepareRemoteMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, remote RulesManifest, opts fetchOptions) (string, string, error) {
+func prepareRemoteMarkerTreeLease(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, remote RulesManifest, opts fetchOptions) (*fetchTempLease, string, error) {
 	logf := opts.logf
 	if logf == nil {
 		logf = func(format string, args ...any) { log.Printf("[mailstrix] "+format, args...) }
 	}
 	switch {
 	case opts.markersOff:
-		return "", MarkerStatusDisabled, nil
+		return nil, MarkerStatusDisabled, nil
 	case remote.markerErr != nil:
 		logf("ERROR: rules manifest v%d marker field ignored (compiled.yac installs; full ruleset fallback): %v", remote.Version, remote.markerErr)
-		return "", MarkerStatusRejected + ": " + remote.markerErr.Error(), nil
+		return nil, MarkerStatusRejected + ": " + remote.markerErr.Error(), nil
 	case remote.marker == nil:
-		return "", MarkerStatusAbsent, nil
+		return nil, MarkerStatusAbsent, nil
 	case !markerABIMatches(remote.marker):
 		logf("PERF-18: rules manifest v%d marker tree targets another libyara/compiler build; full ruleset fallback", remote.Version)
-		return "", MarkerStatusSkipped + ": linked libyara/compiler identity differs", nil
+		return nil, MarkerStatusSkipped + ": linked libyara/compiler identity differs", nil
 	}
 	mctx, cancel, ok := markerTreeContext(ctx)
 	defer cancel()
 	if !ok {
 		logf("ERROR: rules manifest v%d marker tree skipped: remaining fetch budget is below the reserve kept for installing compiled.yac (full ruleset fallback)", remote.Version)
-		return "", MarkerStatusSkipped + ": fetch budget below the reserve kept for the compiled.yac install", context.DeadlineExceeded
+		return nil, MarkerStatusSkipped + ": fetch budget below the reserve kept for the compiled.yac install", context.DeadlineExceeded
 	}
 	stage, err := stageMarkerTree(mctx, hc, base, cacheDir, bundle, remote.marker)
 	if err != nil {
 		logf("ERROR: rules manifest v%d marker tree refused (compiled.yac installs; full ruleset fallback): %v", remote.Version, err)
-		return "", MarkerStatusRejected + ": " + err.Error(), err
+		return nil, MarkerStatusRejected + ": " + err.Error(), err
 	}
 	return stage, MarkerStatusInstalled, nil
 }
 
-// downloadToTemp streams url into a new temp file in dir, returning its path.
-func downloadToTemp(ctx context.Context, hc *http.Client, url, dir string, size int64) (string, error) {
+// prepareRemoteMarkerTree retains the raw-path helper used by the focused
+// marker validation tests. Fetch publication uses prepareRemoteMarkerTreeLease
+// so the stage remains owned until its rename or removal.
+func prepareRemoteMarkerTree(ctx context.Context, hc *http.Client, base, cacheDir, bundle string, remote RulesManifest, opts fetchOptions) (string, string, error) {
+	stage, status, err := prepareRemoteMarkerTreeLease(ctx, hc, base, cacheDir, bundle, remote, opts)
+	if stage == nil {
+		return "", status, err
+	}
+	stage.release()
+	return stage.path, status, err
+}
+
+// downloadToTemp leases a new temp file under .rules.lock, then streams url
+// without holding that shared lock. The caller owns the lease until the file is
+// published or removed.
+func downloadToTemp(ctx context.Context, hc *http.Client, url, dir string, size int64) (*fetchTempLease, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	tmp, err := newFetchTempFile(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			discardFetchTemp(tmp, false)
+		}
+	}()
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", rulesHTTPStatusError(resp.StatusCode)
-	}
-	f, err := os.CreateTemp(dir, ".compiled-dl-*.tmp")
-	if err != nil {
-		return "", err
+		return nil, rulesHTTPStatusError(resp.StatusCode)
 	}
 	// The validated manifest bounds disk usage; read one extra byte so a
 	// matching prefix cannot hide an oversized response.
-	n, err := io.Copy(f, io.LimitReader(resp.Body, size+1))
+	n, err := io.Copy(tmp.file, io.LimitReader(resp.Body, size+1))
 	if err == nil && n != size {
 		err = fmt.Errorf("downloaded size %d != manifest %d", n, size)
 	}
 	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", err
+		return nil, err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", err
+	if err := tmp.file.Sync(); err != nil {
+		return nil, err
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), nil
+	ok = true
+	return tmp, nil
 }
 
 // verifyBundle checks the downloaded file's size and sha256 against the manifest.

@@ -385,6 +385,11 @@ class ImpactTests(unittest.TestCase):
             ),
             ("ci/rules_polling_config_test.go", ["go"], ["image", "parity"]),
             ("ci/rules_update_run_test.go", ["go"], ["image", "parity"]),
+            (
+                "ci/rules_fetch_temp_ownership_test.go",
+                ["go"],
+                ["image", "parity"],
+            ),
             ("ci/config_auto_derive_test.go", ["go"], ["image", "parity"]),
             ("ci/clamd_cache_test.go", ["go"], ["image", "parity", "postfix"]),
             ("ci/cache_distribution/main.go", ["go"], ["image", "parity", "postfix"]),
