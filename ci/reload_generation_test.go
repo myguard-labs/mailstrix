@@ -144,14 +144,14 @@ func TestReloadGenerationFailureAndDenyPolicy(t *testing.T) {
 		t.Fatal("failed main reload changed generation")
 	}
 	check("Second")
-	// Preserve the previous failure policy: post-filter changes still apply;
-	// previously pre-disabled native rules cannot be re-enabled by a failed load.
+	// Post-filter changes still apply to the retained native generation after a
+	// failed load; rules remain enabled so a deny-policy change can expose First.
 	reloadWrite(t, denyPath, "second\n")
 	// Main rules are still malformed: ReloadAll fails, but the deny update applies.
 	if err := s.ReloadAll(); err == nil {
 		t.Fatal("ReloadAll with malformed main rules succeeded")
 	}
-	check("")
+	check("First")
 	failedFP := s.Fingerprint()
 	if failedFP == oldFP {
 		t.Fatal("effective deny update kept old cache identity")

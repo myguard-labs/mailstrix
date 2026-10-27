@@ -36,7 +36,7 @@ rule Content { strings: $a="harmless" condition: $a }`
 		for _, m := range out {
 			names[m.Rule] = true
 		}
-		if !names["PrivateMarker"] || !names["Content"] || names["PublicMarker"] == denied || s.MarkerChannelScans() == 0 {
+		if !names["PrivateMarker"] || !names["Content"] || !names["PublicMarker"] || s.MarkerChannelScans() == 0 {
 			t.Fatalf("source fallback dependency/global/deny detection: denied=%v matches=%v", denied, out)
 		}
 		out, e = s.Scan([]byte("harmless EXT-MISMATCH"), ms.ScanMeta{})

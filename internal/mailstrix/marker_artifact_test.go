@@ -149,8 +149,8 @@ func TestP12MatchedArtifactSelection(t *testing.T) {
 		if deny == nil && !strings.Contains(names, "MarkerPublic") {
 			t.Fatalf("public dependency/external marker lost: %v", got)
 		}
-		if deny != nil && (strings.Contains(names, "MarkerPublic") || strings.Contains(names, "MarkerFilename")) {
-			t.Fatalf("public deny dependency or post-match filtering lost: %v", got)
+		if deny != nil && (!strings.Contains(names, "MarkerPublic") || strings.Contains(names, "MarkerFilename")) {
+			t.Fatalf("retained public dependency or denied-match filtering lost: %v", got)
 		}
 		s.Close()
 	}

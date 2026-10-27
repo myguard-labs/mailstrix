@@ -140,6 +140,12 @@ rule Control_Content : maldoc
     condition:
         $c
 }
+
+rule Marker_DependsOnContent : marker
+{
+    condition:
+        Control_Content
+}
 `
 
 // scanOneRules is a test helper that runs a single libyara scan against rules
@@ -156,7 +162,7 @@ func scanOneRules(t *testing.T, rules *yara.Rules, buf []byte) []Match {
 
 func TestP13MarkerBundleLogArguments(t *testing.T) {
 	dir := writeRules(t, perf18Rules)
-	wantFormat := "PERF-18: marker bundle built: %d total rules in separate compiled object; %d non-marker rules disabled, %d marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): %d"
+	wantFormat := "PERF-18: marker bundle built: %d total rules in separate compiled object; %d dependency rules retained, %d marker-tagged rules retained; safely pre-disabled denied rules: %d"
 	for _, tc := range []struct {
 		name, wantArgs, wantLog string
 		deny                    map[string]struct{}
@@ -164,14 +170,14 @@ func TestP13MarkerBundleLogArguments(t *testing.T) {
 		{
 			name:     "marker-only",
 			deny:     map[string]struct{}{"marker_deepdecode": {}},
-			wantArgs: "[3 1 2 1]",
-			wantLog:  "PERF-18: marker bundle built: 3 total rules in separate compiled object; 1 non-marker rules disabled, 2 marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): 1",
+			wantArgs: "[4 1 3 0]",
+			wantLog:  "PERF-18: marker bundle built: 4 total rules in separate compiled object; 1 dependency rules retained, 3 marker-tagged rules retained; safely pre-disabled denied rules: 0",
 		},
 		{
 			name:     "marker-and-already-disabled-plain",
 			deny:     map[string]struct{}{"marker_deepdecode": {}, "control_content": {}},
-			wantArgs: "[3 1 2 2]",
-			wantLog:  "PERF-18: marker bundle built: 3 total rules in separate compiled object; 1 non-marker rules disabled, 2 marker-tagged rules retained; denylisted non-global/private rules (may overlap non-marker count): 2",
+			wantArgs: "[4 1 3 0]",
+			wantLog:  "PERF-18: marker bundle built: 4 total rules in separate compiled object; 1 dependency rules retained, 3 marker-tagged rules retained; safely pre-disabled denied rules: 0",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -200,9 +206,9 @@ func TestP13MarkerBundleLogArguments(t *testing.T) {
 	}
 }
 
-// TestBuildMarkerBundle_DisablesNonMarker verifies that buildMarkerBundle
-// disables all non-marker-tagged rules while keeping marker-tagged ones active.
-func TestBuildMarkerBundle_DisablesNonMarker(t *testing.T) {
+// TestBuildMarkerBundle_PreservesDependenciesAndFiltersOutput verifies that the
+// source fallback evaluates untagged dependencies but exposes only marker hits.
+func TestBuildMarkerBundle_PreservesDependenciesAndFiltersOutput(t *testing.T) {
 	dir := writeRules(t, perf18Rules)
 	logf := func(string, ...any) {}
 
@@ -216,17 +222,20 @@ func TestBuildMarkerBundle_DisablesNonMarker(t *testing.T) {
 
 	// Scan a buffer containing all three rule strings.
 	buf := []byte("OLEID-OBJECTPOOL MSD-DEEPDECODE depth=3 BENIGN-CONTENT-LITERAL")
-	m := scanOneRules(t, bundle, buf)
+	m := filterMarkerChannel(scanOneRules(t, bundle, buf), true)
 	names := matchRuleNames(m)
 
-	// Marker rules must fire; content rule must be silent (disabled).
-	sawMarker1, sawMarker2, sawContent := false, false, false
+	// Marker rules and their dependent must fire; the non-marker dependency is
+	// evaluated but cannot cross the marker-channel output boundary.
+	sawMarker1, sawMarker2, sawDependent, sawContent := false, false, false, false
 	for _, n := range names {
 		switch n {
 		case "Marker_ObjectPool":
 			sawMarker1 = true
 		case "Marker_DeepDecode":
 			sawMarker2 = true
+		case "Marker_DependsOnContent":
+			sawDependent = true
 		case "Control_Content":
 			sawContent = true
 		}
@@ -237,8 +246,11 @@ func TestBuildMarkerBundle_DisablesNonMarker(t *testing.T) {
 	if !sawMarker2 {
 		t.Error("Marker_DeepDecode (pureMarkerPrefix) did not fire in marker bundle")
 	}
+	if !sawDependent {
+		t.Error("marker rule depending on a non-marker rule did not fire")
+	}
 	if sawContent {
-		t.Error("Control_Content (non-marker) fired in marker bundle — should be disabled")
+		t.Error("Control_Content (non-marker) crossed the marker-channel filter")
 	}
 }
 

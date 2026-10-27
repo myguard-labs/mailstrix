@@ -94,11 +94,11 @@ func (x *extractScan) scan(stream []byte, h [16]byte, markerChannel bool) (stop 
 			x.s.logf("WARNING: oversized extracted stream (%dB) but no big-file ruleset loaded; using full set (may time out)", len(stream))
 		}
 	}
-	// PERF-18: for the out-of-band Markers channel, use the marker-only bundle
-	// (full ruleset with non-marker rules disabled) so the scan runs against a
-	// tiny subset instead of the full ~12k-rule set. Falls back to the full
-	// ruleset when the bundle is not available. filterMarkerChannel remains as
-	// belt-and-suspenders regardless of which ruleset is used.
+	// PERF-18: for the out-of-band Markers channel, use the prepared marker
+	// artifact when available. It contains marker rules plus their dependency
+	// closure. Source fallback bundles retain all rules because go-yara exposes
+	// no dependency graph; the shared deadline and scan timeout still bound that
+	// fallback. filterMarkerChannel is the output boundary on either path.
 	if markerChannel {
 		if mb := x.generation.markerRules; mb != nil {
 			streamRules = mb
