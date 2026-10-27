@@ -77,6 +77,98 @@ func TestSignProducesVerifiableDetachedSignature(t *testing.T) {
 	}
 }
 
+func TestVerifySignatureUsesExactBytesAndExplicitKeys(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, ok := private.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("generated private key did not expose an ed25519 public key")
+	}
+	body := []byte(`{"version":42}`)
+	signature := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(private, body)) + "\n")
+	if err := verifySignature(body, signature, []ed25519.PublicKey{public}); err != nil {
+		t.Fatalf("valid exact-byte signature rejected: %v", err)
+	}
+	for name, candidate := range map[string][]byte{
+		"empty":        nil,
+		"not base64":   []byte("not-base64"),
+		"short":        []byte(base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize-1))),
+		"changed body": signature,
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateBody := body
+			if name == "changed body" {
+				candidateBody = append(append([]byte(nil), body...), '\n')
+			}
+			if err := verifySignature(candidateBody, candidate, []ed25519.PublicKey{public}); err == nil {
+				t.Fatal("invalid signature accepted")
+			}
+		})
+	}
+	if err := verifySignature(body, signature, nil); err == nil {
+		t.Fatal("signature accepted without a trusted key")
+	}
+	other, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySignature(body, signature, []ed25519.PublicKey{other}); err == nil {
+		t.Fatal("signature accepted under an untrusted key")
+	}
+}
+
+func TestVerifyEmbeddedSignatureFilesBoundsAndMode(t *testing.T) {
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.json")
+	signature := filepath.Join(dir, "manifest.json.sig")
+	if err := verifyEmbeddedSignatureFiles(filepath.Join(dir, "missing"), signature); err == nil || !strings.Contains(err.Error(), "cannot read the manifest") {
+		t.Fatalf("missing manifest error = %v", err)
+	}
+	if _, err := readBoundedFile(dir, maxVerifiedManifestBytes, "manifest"); err == nil || !strings.Contains(err.Error(), "cannot read the manifest") {
+		t.Fatalf("directory read error = %v", err)
+	}
+	if err := os.WriteFile(manifest, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBoundedFile(manifest, maxVerifiedManifestBytes, "manifest"); err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("empty manifest error = %v", err)
+	}
+	if err := os.WriteFile(manifest, bytes.Repeat([]byte("x"), maxVerifiedManifestBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(signature, []byte("signature"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyEmbeddedSignatureFiles(manifest, signature); err == nil || !strings.Contains(err.Error(), "manifest file exceeds") {
+		t.Fatalf("oversized manifest error = %v", err)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(signature, bytes.Repeat([]byte("x"), maxVerifiedSignatureBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyEmbeddedSignatureFiles(manifest, signature); err == nil || !strings.Contains(err.Error(), "signature file exceeds") {
+		t.Fatalf("oversized signature error = %v", err)
+	}
+	if err := os.WriteFile(signature, []byte(base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyEmbeddedSignatureFiles(manifest, signature); err == nil || !strings.Contains(err.Error(), "embedded trusted key") {
+		t.Fatalf("untrusted signature error = %v", err)
+	}
+
+	t.Setenv(signingKeyEnv, "")
+	if err := run([]string{"-manifest", manifest, "-verify-signature", signature}, os.Stdout); err == nil || strings.Contains(err.Error(), signingKeyEnv) {
+		t.Fatalf("verification unexpectedly used the signing key: %v", err)
+	}
+	if err := run([]string{"-manifest", manifest, "-verify-signature", signature, "-out", filepath.Join(dir, "out")}, os.Stdout); err == nil {
+		t.Fatal("verification accepted a signing output flag")
+	}
+}
+
 // TestPrintPublicMatchesKey lets a publisher confirm the key matches the pin
 // compiled into the client.
 func TestPrintPublicMatchesKey(t *testing.T) {

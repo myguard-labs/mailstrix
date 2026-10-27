@@ -6,6 +6,10 @@
 # govulncheck enforces.
 name: ci
 on:
+  # Deliberately no `push` trigger: publisher coordination writes only
+  # refs/heads/mailstrix-publisher-leases/*, and those mutex updates must never
+  # enqueue product CI. The publisher authenticates that separate branch write
+  # with its contents:write token; this workflow retains contents:read.
   # CI runs on PRs into main/master ONLY — not on push to main. A merge already
   # passed this gate on the PR, so re-running it on the resulting push to main is
   # wasted compute. release.yml still invokes this same gate via workflow_call
@@ -597,6 +601,20 @@ jobs:
           MAILSTRIX_RELEASE_MARKER_RUN="pr-${RUN_ID}-${RUN_ATTEMPT}-${ARCH}" \
             bash ci/release_marker_image_test.sh "${ARCH}" out
 
+  # Publisher lease/ordering concurrency suite (~5 min on a quiet host). Kept out
+  # of `scanners` so it cannot starve that job's 10 minute budget; it is joined
+  # into ci-ok's static-analysis group and required whenever `generate` is
+  # selected.
+  publisher-concurrency:
+    needs: changes
+    if: needs.changes.outputs.generate == 'true'
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+      - name: publisher concurrency and lease-ordering suite
+        run: bash ci/generate_rules_concurrency_test.sh
+
   # Stable required check across four logical groups. The component jobs still
   # execute once; mixed-mode Docker status contributes to each owning group.
   ci-ok:
@@ -607,6 +625,7 @@ jobs:
       - parity-isolation
       - lint
       - scanners
+      - publisher-concurrency
       - rspamd
       - spamassassin
       - compiler-inputs
@@ -620,6 +639,8 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DOCKER_RESULT: ${{ needs.docker.result }}
           SCANNERS_RESULT: ${{ needs.scanners.result }}
+          PUBLISHER_CONCURRENCY_RESULT: ${{ needs.publisher-concurrency.result }}
+          PUBLISHER_CONCURRENCY_SELECTED: ${{ needs.changes.outputs.generate }}
           NATIVE_SELECTED: ${{ needs.changes.outputs.native }}
           NATIVE_RESULT: ${{ needs.compiler-inputs.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -650,6 +671,7 @@ jobs:
           join_static_analysis() {
             test "$SCANNERS_RESULT" = success || fail "group=static-analysis dependency=scanners result=$SCANNERS_RESULT"
             test "$DOCKER_RESULT" = success || fail "group=static-analysis dependency=docker result=$DOCKER_RESULT"
+            require_selected "$PUBLISHER_CONCURRENCY_SELECTED" "$PUBLISHER_CONCURRENCY_RESULT" static-analysis publisher-concurrency
           }
           join_go_correctness() {
             test "$DOCKER_RESULT" = success || fail "group=go-correctness dependency=docker result=$DOCKER_RESULT"

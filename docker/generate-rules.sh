@@ -34,7 +34,7 @@
 #   refuses an unsigned, malformed or untrusted manifest, so publication without
 #   a signature produces a bundle no client will install.
 #
-# Requirements: docker (buildx), gh (authenticated), jq, sha256sum, go.
+# Requirements: docker (buildx), gh (authenticated), git, jq, sha256sum, go.
 # Required secret: MAILSTRIX_RULES_SIGNING_KEY — the ed25519 PKCS#8 PEM signing
 #   key, supplied through the ENVIRONMENT only (never argv). It must stay out of
 #   any pull_request-triggered CI job.
@@ -52,6 +52,8 @@
 # Env overrides: REPO (owner/name), TAG (default rules-current),
 #   MARKER_RELEASE_TAG (release whose marker toolchain compiles the bundle;
 #   default: the latest published release; "off" disables the marker tree).
+#   PUBLISH_LEASE_RECOVER_OID removes exactly that expired publisher mutex and
+#   continues only after an operator has independently proved its holder ended.
 #   Every documented rule-source build-arg is passed through to the Dockerfile
 #   when set in the environment: YARAFORGE_SET, YARAFORGE_URL, SIGBASE_REF,
 #   ANYRUN(/_REF), DIDIER(/_REF), BARTBLAZE(/_REF), INQUEST(/_REF),
@@ -183,8 +185,30 @@ failure_notice() {  # failure_notice <exit-code>
 # publish, and verify failures remain fatal. A receipt-emission fault cannot
 # mask the original failure after its stage-specific alert is sent.
 SERVER_PID=""
+PUBLISH_LEASE_HELD=0
+PUBLISH_LEASE_HEARTBEAT_PID=""
+PUBLISH_LEASE_STOP_FD=""
+PUBLISH_LEASE_ACTIVE_LOCK_FD=""
 cleanup() {
     [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
+    # EXIT traps run before Bash closes descriptors owned by an interrupted
+    # function. Release a foreground local-lock descriptor first, otherwise the
+    # heartbeat wait and exact-OID release below can block behind our own flock.
+    if [ -n "$PUBLISH_LEASE_ACTIVE_LOCK_FD" ]; then
+        flock -u "$PUBLISH_LEASE_ACTIVE_LOCK_FD" 2>/dev/null || true
+        exec {PUBLISH_LEASE_ACTIVE_LOCK_FD}>&- || true
+        PUBLISH_LEASE_ACTIVE_LOCK_FD=""
+    fi
+    if [ -n "$PUBLISH_LEASE_HEARTBEAT_PID" ]; then
+        [ -z "$PUBLISH_LEASE_STOP_FD" ] || printf 'stop\n' >&"$PUBLISH_LEASE_STOP_FD" || true
+        wait "$PUBLISH_LEASE_HEARTBEAT_PID" 2>/dev/null || true
+        PUBLISH_LEASE_HEARTBEAT_PID=""
+    fi
+    if [ -n "$PUBLISH_LEASE_STOP_FD" ]; then
+        exec {PUBLISH_LEASE_STOP_FD}>&-
+        PUBLISH_LEASE_STOP_FD=""
+    fi
+    [ "$PUBLISH_LEASE_HELD" -eq 0 ] || publisher_lease_release || true
     [ -z "$WORK" ] || rm -rf "${WORK:?}"
 }
 trap cleanup EXIT
@@ -383,17 +407,925 @@ fi
 
 WORK="$(mktemp -d)"
 
-for bin in docker gh jq sha256sum python3; do
+for bin in date docker flock gh git jq mkfifo sha256sum python3 timeout tr; do
     command -v "$bin" >/dev/null 2>&1 || die "missing required tool: $bin"
 done
+
+# The rolling release is one shared mutable object. Its publisher protocol is:
+# absent -> held (one compare-and-swap push); held -> renewed (CAS); held ->
+# released (CAS delete); any ownership mismatch -> lost (terminal).
+# The authoritative state is a GitHub-hosted ref scoped by REPO/TAG, not a
+# host-local lock. Owner and expiry move together as the ref's commit target.
+# A stale actor may never read prior version state or mutate release assets: it
+# must still own the exact ref target before those operations. Expiry is
+# diagnostic only. Release-asset uploads cannot carry this ref's fencing token,
+# so automatically replacing an expired holder would let an already-started
+# stale upload complete after a replacement publisher. A crashed holder is
+# removed only after an operator proves quiescence and supplies its exact
+# current OID through PUBLISH_LEASE_RECOVER_OID; deletion is an exact-OID CAS.
+#
+# The dedicated temporary bare repository keeps lease objects and refs out of
+# the publisher checkout/index. Git's --force-with-lease is the atomic compare-
+# and-swap: competing hosts cannot both acquire or renew the same REPO/TAG.
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+    || die "REPO must be an owner/name pair before publisher coordination can start"
+# GitHub repository owner/name identity is ASCII case-insensitive. Canonicalize
+# it for the mutex scope so spelling variants cannot partition one release's
+# coordination ref. Tags remain byte-exact because Git ref names are case-sensitive.
+PUBLISH_LEASE_REPO_IDENTITY="$(printf '%s' "$REPO" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+PUBLISH_LEASE_SCOPE="$(printf '%s\0%s' "$PUBLISH_LEASE_REPO_IDENTITY" "$TAG" | sha256sum | awk '{print $1}')"
+# GitHub exposes atomic compare-and-swap through ordinary branch-ref pushes.
+# Keep the mutex under refs/heads so the same GH_TOKEN contents:write grant used
+# for release assets can update it through GIT_ASKPASS; CI has no push trigger,
+# so these private coordination refs do not enqueue product workflows.
+PUBLISH_LEASE_REF="refs/heads/mailstrix-publisher-leases/${PUBLISH_LEASE_SCOPE}"
+PUBLISH_LEASE_REMOTE="${PUBLISH_LEASE_REMOTE:-https://github.com/${REPO}.git}"
+PUBLISH_LEASE_TTL_SECONDS="${PUBLISH_LEASE_TTL_SECONDS:-3600}"
+PUBLISH_LEASE_HEARTBEAT_SECONDS="${PUBLISH_LEASE_HEARTBEAT_SECONDS:-60}"
+PUBLISH_LEASE_POLL_SECONDS="${PUBLISH_LEASE_POLL_SECONDS:-5}"
+PUBLISH_LEASE_WAIT_SECONDS="${PUBLISH_LEASE_WAIT_SECONDS:-14400}"
+PUBLISH_LEASE_RECOVER_OID="${PUBLISH_LEASE_RECOVER_OID:-}"
+for lease_number in "$PUBLISH_LEASE_TTL_SECONDS" "$PUBLISH_LEASE_HEARTBEAT_SECONDS" "$PUBLISH_LEASE_POLL_SECONDS" "$PUBLISH_LEASE_WAIT_SECONDS"; do
+    case "$lease_number" in
+        ''|*[!0-9]*|0[0-9]*|??????*)
+            die "publisher lease timing values must be canonical decimal integers of at most five digits"
+            ;;
+    esac
+done
+if [ "$PUBLISH_LEASE_TTL_SECONDS" -lt 300 ] \
+    || [ "$PUBLISH_LEASE_TTL_SECONDS" -gt 86400 ] \
+    || [ "$PUBLISH_LEASE_HEARTBEAT_SECONDS" -lt 10 ] \
+    || [ "$PUBLISH_LEASE_HEARTBEAT_SECONDS" -ge "$PUBLISH_LEASE_TTL_SECONDS" ] \
+    || [ "$PUBLISH_LEASE_POLL_SECONDS" -lt 1 ] \
+    || [ "$PUBLISH_LEASE_POLL_SECONDS" -gt 60 ] \
+    || [ "$PUBLISH_LEASE_WAIT_SECONDS" -gt 86400 ]; then
+    die "publisher lease timing values are outside their safe bounds"
+fi
+PUBLISH_LEASE_REPO="${WORK}/publisher-lease.git"
+PUBLISH_LEASE_STATE="${WORK}/publisher-lease.oid"
+PUBLISH_LEASE_LOCAL_LOCK="${WORK}/publisher-lease-state.lock"
+PUBLISH_LEASE_LOST="${WORK}/publisher-lease.lost"
+PUBLISH_LEASE_UNCERTAIN="${WORK}/publisher-lease.uncertain"
+PUBLISH_LEASE_STOP="${WORK}/publisher-lease.stop"
+PUBLISH_LEASE_ASKPASS="${WORK}/publisher-lease-askpass"
+PUBLISH_LEASE_RETRY_LIMIT=3
+PUBLISH_LEASE_RETRY_MARGIN_SECONDS=60
+PUBLISH_LEASE_GIT_TIMEOUT_SECONDS=45
+PUBLISH_LEASE_CLOCK_TIMEOUT_SECONDS=30
+PUBLISH_LEASE_LOCAL_LOCK_MARGIN_SECONDS=30
+# Refresh can consume four Git budgets (read, local commit, CAS push, ambiguous
+# push reread) plus one authoritative-clock budget. A waiter must outlive that
+# complete critical section with an explicit scheduling margin.
+PUBLISH_LEASE_LOCAL_LOCK_WAIT_SECONDS=$((
+    4 * PUBLISH_LEASE_GIT_TIMEOUT_SECONDS
+    + PUBLISH_LEASE_CLOCK_TIMEOUT_SECONDS
+    + PUBLISH_LEASE_LOCAL_LOCK_MARGIN_SECONDS
+))
+PUBLISH_LEASE_OWNER="$(printf '%s\0%s\0%s\0%s' "$PUBLISH_LEASE_SCOPE" "$$" "$WORK" "$(date +%s%N)" | sha256sum | awk '{print $1}')"
+cat >"$PUBLISH_LEASE_ASKPASS" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+    *Username*) printf '%s\n' x-access-token ;;
+    *Password*) printf '%s\n' "${GH_TOKEN:?}" ;;
+    *) exit 1 ;;
+esac
+SH
+chmod 700 "$PUBLISH_LEASE_ASKPASS"
+git init --bare --quiet --object-format=sha1 "$PUBLISH_LEASE_REPO" \
+    || die "cannot initialize isolated publisher lease state; nothing was published"
+mkfifo "$PUBLISH_LEASE_STOP" \
+    || die "cannot initialize publisher lease heartbeat; nothing was published"
+exec {PUBLISH_LEASE_STOP_FD}<>"$PUBLISH_LEASE_STOP" \
+    || die "cannot open publisher lease heartbeat control; nothing was published"
+PUBLISH_LEASE_TREE="$(git -C "$PUBLISH_LEASE_REPO" mktree </dev/null)" \
+    || die "cannot initialize publisher lease object; nothing was published"
+
+publisher_lease_git() {
+    GIT_ASKPASS="$PUBLISH_LEASE_ASKPASS" GIT_TERMINAL_PROMPT=0 \
+        timeout --kill-after=5s "${PUBLISH_LEASE_GIT_TIMEOUT_SECONDS}s" \
+        git -C "$PUBLISH_LEASE_REPO" "$@"
+}
+
+publisher_lease_now() {
+    local http server_date headers="${WORK}/publisher-lease-clock.${BASHPID}.headers"
+    : >"$headers"
+    http="$(curl -fsS --connect-timeout 10 --max-time "$PUBLISH_LEASE_CLOCK_TIMEOUT_SECONDS" \
+        -D "$headers" -o /dev/null -w '%{http_code}' \
+        -H @- -H 'Accept: application/vnd.github+json' \
+        "https://api.github.com/repos/${REPO}" \
+        <<<"Authorization: Bearer ${GH_TOKEN}")" || return 1
+    [ "$http" = 200 ] || return 1
+    server_date="$(sed -n 's/^[Dd]ate:[[:space:]]*//p' "$headers" | tail -n1 | tr -d '\r')"
+    [ -n "$server_date" ] || return 1
+    date -u -d "$server_date" +%s
+}
+
+publisher_lease_remote_oid() {
+    local listing oid ref extra
+    listing="$(publisher_lease_git ls-remote --refs "$PUBLISH_LEASE_REMOTE" "$PUBLISH_LEASE_REF")" \
+        || return 1
+    [ -n "$listing" ] || return 0
+    read -r oid ref extra <<<"$listing"
+    [ -z "${extra:-}" ] && [ "$ref" = "$PUBLISH_LEASE_REF" ] \
+        && [[ "$oid" =~ ^[0-9a-f]{40}$ ]] || return 1
+    printf '%s\n' "$oid"
+}
+
+publisher_lease_commit() {  # publisher_lease_commit <expires>
+    local expires="$1"
+    printf 'schema=mailstrix-publisher-lease-v1\nowner=%s\nscope=%s\nexpires=%s\n' \
+        "$PUBLISH_LEASE_OWNER" "$PUBLISH_LEASE_SCOPE" "$expires" \
+        | GIT_AUTHOR_NAME=mailstrix-publisher GIT_AUTHOR_EMAIL=noreply@invalid \
+            GIT_COMMITTER_NAME=mailstrix-publisher GIT_COMMITTER_EMAIL=noreply@invalid \
+            publisher_lease_git commit-tree "$PUBLISH_LEASE_TREE"
+}
+
+publisher_lease_details() {  # publisher_lease_details <oid>; prints owner expiry
+    local oid="$1" size message schema owner scope expires extra
+    publisher_lease_git fetch --quiet --no-write-fetch-head "$PUBLISH_LEASE_REMOTE" "$oid" \
+        || return 1
+    size="$(publisher_lease_git cat-file -s "$oid")" || return 1
+    case "$size" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$size" -le 4096 ] || return 1
+    message="$(publisher_lease_git cat-file commit "$oid" | sed -n '1,/^$/d; p')" \
+        || return 1
+    IFS= read -r schema <<<"$message"
+    IFS= read -r owner <<<"$(printf '%s\n' "$message" | sed -n '2p')"
+    IFS= read -r scope <<<"$(printf '%s\n' "$message" | sed -n '3p')"
+    IFS= read -r expires <<<"$(printf '%s\n' "$message" | sed -n '4p')"
+    extra="$(printf '%s\n' "$message" | sed -n '5p')"
+    [ "$schema" = schema=mailstrix-publisher-lease-v1 ] \
+        && [[ "$owner" =~ ^owner=[0-9a-f]{64}$ ]] \
+        && [ "$scope" = "scope=${PUBLISH_LEASE_SCOPE}" ] \
+        && [[ "$expires" =~ ^expires=[0-9]{10}$ ]] \
+        && [ -z "$extra" ] || return 1
+    printf '%s %s\n' "${owner#owner=}" "${expires#expires=}"
+}
+
+publisher_lease_write_state() {  # publisher_lease_write_state <oid> <expires> <observed-now>
+    local oid="$1" expires="$2" observed_now="$3" deadline
+    deadline="$(python3 - "$expires" "$observed_now" <<'PY'
+import sys
+import time
+
+expires = int(sys.argv[1])
+observed_now = int(sys.argv[2])
+if expires <= observed_now:
+    raise SystemExit(2)
+print(time.monotonic_ns() + (expires - observed_now) * 1_000_000_000)
+PY
+)" || return 1
+    printf '%s %s %s\n' "$oid" "$expires" "$deadline" >"${PUBLISH_LEASE_STATE}.new" || return 1
+    mv "${PUBLISH_LEASE_STATE}.new" "$PUBLISH_LEASE_STATE"
+}
+
+publisher_lease_read_state() {
+    local oid expires deadline extra
+    read -r oid expires deadline extra <"$PUBLISH_LEASE_STATE" || return 1
+    [[ "$oid" =~ ^[0-9a-f]{40}$ ]] \
+        && [[ "$expires" =~ ^[0-9]{10}$ ]] \
+        && [[ "$deadline" =~ ^[0-9]+$ ]] \
+        && [ -z "${extra:-}" ] || return 1
+    printf '%s %s %s\n' "$oid" "$expires" "$deadline"
+}
+
+publisher_lease_retry_safe() {
+    local oid expires deadline extra
+    read -r oid expires deadline extra <<<"$(publisher_lease_read_state)" || return 1
+    [ -n "$oid" ] && [ -z "${extra:-}" ] || return 1
+    python3 - "$deadline" "$PUBLISH_LEASE_RETRY_MARGIN_SECONDS" "$PUBLISH_LEASE_POLL_SECONDS" <<'PY'
+import sys
+import time
+
+deadline = int(sys.argv[1])
+required = (int(sys.argv[2]) + int(sys.argv[3])) * 1_000_000_000
+raise SystemExit(0 if deadline - time.monotonic_ns() > required else 1)
+PY
+}
+
+publisher_lease_sleep() {
+    python3 - "$PUBLISH_LEASE_POLL_SECONDS" <<'PY'
+import sys
+import time
+time.sleep(int(sys.argv[1]))
+PY
+}
+
+publisher_lease_process_start() {  # publisher_lease_process_start <pid>
+    python3 - "$1" <<'PY'
+import pathlib
+import sys
+
+pid = sys.argv[1]
+if not pid.isdecimal() or pid == "0":
+    raise SystemExit(1)
+try:
+    stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+# comm is parenthesized and may contain spaces or ')'; fields after its final
+# ')' start at field 3, making starttime (field 22) tail index 19.
+closing = stat.rfind(")")
+tail = stat[closing + 2:].split() if closing >= 0 else []
+if len(tail) <= 19 or not tail[19].isdecimal():
+    raise SystemExit(1)
+print(tail[19])
+PY
+}
+
+PUBLISH_LEASE_FOREGROUND_PID="$$"
+PUBLISH_LEASE_FOREGROUND_START="$(publisher_lease_process_start "$PUBLISH_LEASE_FOREGROUND_PID")" \
+    || die "cannot capture foreground publisher identity; nothing was published"
+
+publisher_lease_foreground_alive() {
+    local observed
+    observed="$(publisher_lease_process_start "$PUBLISH_LEASE_FOREGROUND_PID" 2>/dev/null)" \
+        || return 1
+    [ "$observed" = "$PUBLISH_LEASE_FOREGROUND_START" ]
+}
+
+publisher_lease_with_local_lock() {  # publisher_lease_with_local_lock <operation> <lock-failure-status>
+    local operation="$1" lock_failure="$2" lock_fd status foreground_lock=0
+    exec {lock_fd}>"$PUBLISH_LEASE_LOCAL_LOCK" || return "$lock_failure"
+    if [ "$BASHPID" = "$PUBLISH_LEASE_FOREGROUND_PID" ]; then
+        PUBLISH_LEASE_ACTIVE_LOCK_FD="$lock_fd"
+        foreground_lock=1
+    fi
+    if ! flock -w "$PUBLISH_LEASE_LOCAL_LOCK_WAIT_SECONDS" "$lock_fd"; then
+        exec {lock_fd}>&-
+        [ "$foreground_lock" -eq 0 ] || PUBLISH_LEASE_ACTIVE_LOCK_FD=""
+        return "$lock_failure"
+    fi
+    if "$operation"; then
+        status=0
+    else
+        status=$?
+    fi
+    flock -u "$lock_fd" || status="$lock_failure"
+    exec {lock_fd}>&-
+    [ "$foreground_lock" -eq 0 ] || PUBLISH_LEASE_ACTIVE_LOCK_FD=""
+    return "$status"
+}
+
+# The heartbeat and foreground publisher share PUBLISH_LEASE_STATE. Renewal's
+# remote CAS and local state replacement are one observable transition: an
+# ownership assertion must see the old OID in both places or the new OID in
+# both places. The process-local lock serializes that transition and is held
+# across bounded Git I/O. A fresh descriptor per call is required because the
+# heartbeat is a forked subshell; inherited descriptors share one flock owner.
+publisher_lease_refresh_locked() {
+    local now old state_extra expires new remote
+    [ ! -e "$PUBLISH_LEASE_LOST" ] && [ ! -e "$PUBLISH_LEASE_UNCERTAIN" ] || return 3
+    read -r old _ _ state_extra <<<"$(publisher_lease_read_state)" || return 1
+    [ -n "$old" ] && [ -z "${state_extra:-}" ] || return 1
+    remote="$(publisher_lease_remote_oid)" || return 2
+    [ "$remote" = "$old" ] || return 3
+    now="$(publisher_lease_now)" || return 2
+    expires=$((now + PUBLISH_LEASE_TTL_SECONDS))
+    new="$(publisher_lease_commit "$expires")" || return 1
+    if publisher_lease_git push --quiet --force-with-lease="${PUBLISH_LEASE_REF}:${old}" \
+            "$PUBLISH_LEASE_REMOTE" "${new}:${PUBLISH_LEASE_REF}"; then
+        publisher_lease_write_state "$new" "$expires" "$now"
+        return
+    fi
+    # A lost response may hide a successful CAS. Re-read before deciding: our
+    # new OID proves renewal, the old OID permits a bounded retry, and any other
+    # value (including absence) proves ownership loss.
+    remote="$(publisher_lease_remote_oid)" || return 2
+    if [ "$remote" = "$new" ]; then
+        publisher_lease_write_state "$new" "$expires" "$now"
+    elif [ "$remote" = "$old" ]; then
+        return 2
+    else
+        return 3
+    fi
+}
+
+publisher_lease_refresh() {
+    publisher_lease_with_local_lock publisher_lease_refresh_locked 2
+}
+
+publisher_lease_assert_owned_locked() {
+    local expected state_extra remote owner expires extra
+    [ "$PUBLISH_LEASE_HELD" -eq 1 ] \
+        && [ ! -e "$PUBLISH_LEASE_LOST" ] \
+        && [ ! -e "$PUBLISH_LEASE_UNCERTAIN" ] || return 1
+    read -r expected _ _ state_extra <<<"$(publisher_lease_read_state)" || return 1
+    [ -n "$expected" ] && [ -z "${state_extra:-}" ] || return 1
+    remote="$(publisher_lease_remote_oid)" || return 1
+    [ "$remote" = "$expected" ] || return 1
+    read -r owner expires extra <<<"$(publisher_lease_details "$remote")" || return 1
+    [ "$owner" = "$PUBLISH_LEASE_OWNER" ] && [ -z "${extra:-}" ] || return 1
+}
+
+publisher_lease_assert_owned() {
+    publisher_lease_with_local_lock publisher_lease_assert_owned_locked 1
+}
+
+publisher_lease_release_locked() {
+    local expected remote
+    [ "$PUBLISH_LEASE_HELD" -eq 1 ] || return 0
+    PUBLISH_LEASE_HELD=0
+    read -r expected _ <<<"$(publisher_lease_read_state 2>/dev/null || true)"
+    [ -n "$expected" ] || return 1
+    remote="$(publisher_lease_remote_oid)" || return 1
+    [ "$remote" = "$expected" ] || return 1
+    publisher_lease_git push --quiet --force-with-lease="${PUBLISH_LEASE_REF}:${expected}" \
+        "$PUBLISH_LEASE_REMOTE" ":${PUBLISH_LEASE_REF}"
+}
+
+publisher_lease_release() {
+    publisher_lease_with_local_lock publisher_lease_release_locked 1
+}
+
+publisher_lease_acquire() {
+    local started now current owner expires detail_extra new
+    started="$(publisher_lease_now)" || return 1
+    while :; do
+        now="$(publisher_lease_now)" || return 1
+        [ "$((now - started))" -le "$PUBLISH_LEASE_WAIT_SECONDS" ] || return 1
+        current="$(publisher_lease_remote_oid)" || return 1
+        if [ -n "$current" ]; then
+            read -r owner expires detail_extra <<<"$(publisher_lease_details "$current")" || return 1
+            [ -n "$owner" ] && [ -z "${detail_extra:-}" ] || return 1
+            if [ "$expires" -le "$now" ]; then
+                note "publisher mutex ${current} is expired but remains authoritative; after proving the holder quiescent, rerun with PUBLISH_LEASE_RECOVER_OID=${current}"
+                return 1
+            fi
+            publisher_lease_sleep
+            continue
+        fi
+        expires=$((now + PUBLISH_LEASE_TTL_SECONDS))
+        new="$(publisher_lease_commit "$expires")" || return 1
+        if publisher_lease_git push --quiet \
+            --force-with-lease="${PUBLISH_LEASE_REF}:" \
+            "$PUBLISH_LEASE_REMOTE" "${new}:${PUBLISH_LEASE_REF}"; then
+            publisher_lease_write_state "$new" "$expires" "$now" || return 1
+            PUBLISH_LEASE_HELD=1
+            return 0
+        fi
+        # A lost response may hide our successful create. Exact equality with
+        # the locally created OID proves ownership, just as it does for renewal.
+        # A competing CAS normally leaves a different ref to observe. A rejection
+        # while the ref remains absent is an unavailable/denied write, not
+        # contention: fail closed instead of spinning at network speed.
+        current="$(publisher_lease_remote_oid)" || return 1
+        if [ "$current" = "$new" ]; then
+            publisher_lease_write_state "$new" "$expires" "$now" || return 1
+            PUBLISH_LEASE_HELD=1
+            return 0
+        fi
+        if [ -z "$current" ]; then
+            note "publisher mutex acquire push was rejected while the remote ref stayed absent"
+            return 1
+        fi
+        publisher_lease_sleep
+    done
+}
+
+publisher_lease_recover_stale() {
+    local current owner expires extra now
+    [ -n "$PUBLISH_LEASE_RECOVER_OID" ] || return 0
+    [[ "$PUBLISH_LEASE_RECOVER_OID" =~ ^[0-9a-f]{40}$ ]] \
+        || die "PUBLISH_LEASE_RECOVER_OID must be the exact 40-hex current mutex OID"
+    current="$(publisher_lease_remote_oid)" \
+        || die "cannot read publisher mutex for explicit recovery"
+    [ "$current" = "$PUBLISH_LEASE_RECOVER_OID" ] \
+        || die "publisher mutex recovery OID is stale or wrong; nothing was changed"
+    read -r owner expires extra <<<"$(publisher_lease_details "$current")" \
+        || die "publisher mutex recovery target is malformed; nothing was changed"
+    if [ -z "$owner" ] || [ -n "${extra:-}" ]; then
+        die "publisher mutex recovery target is malformed; nothing was changed"
+    fi
+    now="$(publisher_lease_now)" \
+        || die "cannot read authoritative time for publisher mutex recovery"
+    [ "$expires" -le "$now" ] \
+        || die "publisher mutex recovery target has not expired; nothing was changed"
+    publisher_lease_git push --quiet \
+        --force-with-lease="${PUBLISH_LEASE_REF}:${current}" \
+        "$PUBLISH_LEASE_REMOTE" ":${PUBLISH_LEASE_REF}" \
+        || die "publisher mutex changed during explicit recovery; nothing was changed"
+    note "removed expired publisher mutex ${current} by explicit exact-OID recovery"
+}
+
+publisher_lease_recover_stale
+publisher_lease_acquire \
+    || die "authoritative publisher coordination is unavailable or timed out; nothing was published"
+(
+    # Reopen the FIFO read-only, then discard the inherited read/write anchor.
+    # The foreground publisher is the sole writer identity: normal cleanup
+    # writes a stop line, while SIGKILL closes its descriptor and produces EOF.
+    # Unlike PID polling this cannot mistake a reused PID for the publisher.
+    exec {heartbeat_stop_fd}<"$PUBLISH_LEASE_STOP" || exit 1
+    exec {PUBLISH_LEASE_STOP_FD}>&-
+    while :; do
+        if IFS= read -r -t "$PUBLISH_LEASE_HEARTBEAT_SECONDS" -u "$heartbeat_stop_fd" _; then
+            break
+        else
+            heartbeat_read_status=$?
+        fi
+        # Bash read returns >128 for a timeout. EOF/error means the foreground
+        # writer is gone, so leave the durable ref unrenewed for exact-OID
+        # operator recovery after expiry.
+        [ "$heartbeat_read_status" -gt 128 ] || break
+        publisher_lease_foreground_alive || break
+        transient_attempts=0
+        while :; do
+            publisher_lease_foreground_alive || exit 0
+            if publisher_lease_refresh; then
+                break
+            else
+                refresh_status=$?
+            fi
+            case "$refresh_status" in
+                2)
+                    transient_attempts=$((transient_attempts + 1))
+                    if [ "$transient_attempts" -le "$PUBLISH_LEASE_RETRY_LIMIT" ] \
+                        && publisher_lease_retry_safe; then
+                        note "publisher mutex refresh had a transient coordination error; retrying while the prior lease retains its safety margin"
+                        publisher_lease_sleep
+                        continue
+                    fi
+                    note "publisher mutex refresh could not be confirmed within its bounded safety margin"
+                    : >"$PUBLISH_LEASE_UNCERTAIN"
+                    exit 1
+                    ;;
+                3)
+                    note "publisher mutex ownership changed; stopping the publisher"
+                    : >"$PUBLISH_LEASE_LOST"
+                    exit 1
+                    ;;
+                *)
+                    note "publisher mutex local state became invalid; stopping the publisher"
+                    : >"$PUBLISH_LEASE_UNCERTAIN"
+                    exit 1
+                    ;;
+            esac
+        done
+    done
+    exec {heartbeat_stop_fd}<&-
+) &
+PUBLISH_LEASE_HEARTBEAT_PID=$!
 
 # Build the exact helper once, then make it prove both key usability and client
 # trust before the expensive rules images are built. This is a real signing
 # operation rather than `-print-public`: that mode intentionally exits before
 # -require-trusted is enforced. The throwaway bytes never leave WORK.
 RULESIGN_BIN="${WORK}/rulessign"
-( cd "$HERE" && GOTOOLCHAIN=local "$RULESIGN_GO" build -o "$RULESIGN_BIN" ./cmd/rulessign ) \
+( cd "$HERE" && GOTOOLCHAIN=local "$RULESIGN_GO" build -buildvcs=false -o "$RULESIGN_BIN" ./cmd/rulessign ) \
     || die "building the manifest signer failed; refusing to start the rules build"
+
+# With the shared mutex held, authenticate the complete previous state before
+# any rules build or signing operation. Release-asset write authority alone
+# must never choose a value that the independent signing key later blesses.
+publisher_lease_assert_owned \
+    || die "publisher lease was lost before reading prior version state; nothing was published"
+NIGHTLY_STAGE=publish
+RELEASE_HTTP="$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
+    -H @- \
+    -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" \
+    <<<"Authorization: Bearer ${GH_TOKEN}" || echo 000)"
+case "$RELEASE_HTTP" in
+    200|404) : ;;
+    *) die "cannot determine whether release ${TAG} exists (HTTP ${RELEASE_HTTP}); refusing to guess the version — check the GITHUB_ORG_LAB_TOKEN and network" ;;
+esac
+
+CURRENT_STATE_DIR="${WORK}/published-state"
+RECOVERY_STATE_DIR="${WORK}/recovery-state"
+RESTORE_STATE_DIR="${WORK}/restore-state"
+RECOVERY_BUNDLE=compiled.yac.recovery
+RECOVERY_MANIFEST=compiled.yac.manifest.json.recovery
+RECOVERY_SIGNATURE=compiled.yac.manifest.json.recovery.sig
+VERSION_HIGH_WATER_ASSET=compiled.yac.version-high-water.json
+VERSION_HIGH_WATER_RECOVERY_ASSET=compiled.yac.version-high-water.recovery.json
+VERSION_HIGH_WATER_DIR="${WORK}/version-high-water"
+VERSION_HIGH_WATER_CANDIDATE_DIR="${WORK}/next-version-high-water"
+VERSION_HIGH_WATER_CANDIDATE="${VERSION_HIGH_WATER_CANDIDATE_DIR}/${VERSION_HIGH_WATER_ASSET}"
+VERSION_HIGH_WATER_RECOVERY_CANDIDATE="${VERSION_HIGH_WATER_CANDIDATE_DIR}/${VERSION_HIGH_WATER_RECOVERY_ASSET}"
+VERSION_HIGH_WATER=""
+RELEASE_ASSETS=""
+
+release_has_asset() {  # <asset>
+    grep -Fxq -- "$1" <<<"$RELEASE_ASSETS"
+}
+
+download_release_state() {  # <dir> <bundle> <manifest> <signature> [marker]
+    local destination="$1"
+    shift
+    rm -rf "${destination:?}"
+    mkdir -p "$destination"
+    gh release download "$TAG" --repo "$REPO" \
+        --pattern "$1" --pattern "$2" --pattern "$3" \
+        --dir "$destination" --clobber || return 1
+    # Marker metadata is inside the authenticated manifest. Absence is allowed
+    # only when that manifest has no marker field; validate_release_state makes
+    # the final decision after signature verification.
+    if [ -n "${4:-}" ] && release_has_asset "$4"; then
+        gh release download "$TAG" --repo "$REPO" \
+            --pattern "$4" --dir "$destination" --clobber >/dev/null 2>&1 || return 1
+    fi
+}
+
+validate_release_state() {  # <manifest> <signature> <bundle> [marker]; prints previous next
+    local manifest="$1" signature="$2" bundle="$3" marker="${4:-}"
+    "$RULESIGN_BIN" -manifest "$manifest" -verify-signature "$signature" \
+        || return 1
+    python3 - "$manifest" "$bundle" "$marker" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+maximum = (1 << 63) - 1
+maximum_bundle = 512 << 20
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+try:
+    manifest_path = Path(sys.argv[1])
+    bundle_path = Path(sys.argv[2])
+    marker_path = Path(sys.argv[3]) if sys.argv[3] else None
+    with manifest_path.open("rb") as stream:
+        manifest = json.load(stream, object_pairs_hook=unique_object)
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest root is not an object")
+    previous = manifest.get("version")
+    size = manifest.get("size")
+    checksum = manifest.get("checksum")
+    if isinstance(previous, bool) or not isinstance(previous, int):
+        raise ValueError("version is not an integer")
+    if previous < 1 or previous > maximum:
+        raise ValueError("version is outside the authenticated client range")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 1 or size > maximum_bundle:
+        raise ValueError("bundle size is outside the accepted range")
+    if not isinstance(checksum, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", checksum) is None:
+        raise ValueError("bundle checksum is malformed")
+    if bundle_path.is_symlink() or not bundle_path.is_file() or bundle_path.stat().st_size != size:
+        raise ValueError("bundle file does not match the signed size")
+    digest = hashlib.sha256()
+    with bundle_path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    if checksum != "sha256:" + digest.hexdigest():
+        raise ValueError("bundle file does not match the signed checksum")
+    marker = manifest.get("marker")
+    if marker is not None:
+        if not isinstance(marker, dict) or marker.get("asset") != "marker-tree.tar.gz":
+            raise ValueError("marker metadata is malformed")
+        marker_size = marker.get("size")
+        marker_checksum = marker.get("sha256")
+        if (isinstance(marker_size, bool) or not isinstance(marker_size, int)
+                or marker_size < 1 or marker_size > (1 << 30)):
+            raise ValueError("marker size is outside the accepted range")
+        if not isinstance(marker_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", marker_checksum) is None:
+            raise ValueError("marker checksum is malformed")
+        if (marker_path is None or marker_path.is_symlink() or not marker_path.is_file()
+                or marker_path.stat().st_size != marker_size):
+            raise ValueError("marker file does not match the signed size")
+        marker_digest = hashlib.sha256()
+        with marker_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                marker_digest.update(chunk)
+        if marker_checksum != marker_digest.hexdigest():
+            raise ValueError("marker file does not match the signed checksum")
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+print(previous, previous + 1, 1 if marker is not None else 0)
+PY
+}
+
+read_version_high_water() {  # <fixed asset name>
+    local asset="$1"
+    local envelope="${VERSION_HIGH_WATER_DIR}/${asset}"
+    local record="${VERSION_HIGH_WATER_DIR}/record.json"
+    local signature="${VERSION_HIGH_WATER_DIR}/record.sig"
+    rm -rf "${VERSION_HIGH_WATER_DIR:?}"
+    mkdir -p "$VERSION_HIGH_WATER_DIR"
+    gh release download "$TAG" --repo "$REPO" \
+        --pattern "$asset" --dir "$VERSION_HIGH_WATER_DIR" --clobber \
+        || return 1
+    python3 - "$envelope" "$record" "$signature" <<'PY' || return 1
+import base64
+import json
+from pathlib import Path
+import sys
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+try:
+    envelope_path = Path(sys.argv[1])
+    if envelope_path.is_symlink() or not envelope_path.is_file() or envelope_path.stat().st_size > (128 << 10):
+        raise ValueError("high-water envelope is not a bounded regular file")
+    with envelope_path.open("rb") as stream:
+        envelope = json.load(stream, object_pairs_hook=unique_object)
+    if (not isinstance(envelope, dict)
+            or set(envelope) != {"schema", "record", "signature"}
+            or envelope.get("schema") != "mailstrix-version-high-water-envelope-v1"
+            or not isinstance(envelope.get("record"), str)
+            or not isinstance(envelope.get("signature"), str)):
+        raise ValueError("high-water envelope is malformed")
+    record = base64.b64decode(envelope["record"], validate=True)
+    signature = base64.b64decode(envelope["signature"], validate=True)
+    if not record or len(record) > (64 << 10) or not signature or len(signature) > (1 << 10):
+        raise ValueError("high-water envelope members are outside their bounds")
+    Path(sys.argv[2]).write_bytes(record)
+    Path(sys.argv[3]).write_bytes(signature)
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+PY
+    "$RULESIGN_BIN" -manifest "$record" -verify-signature "$signature" || return 1
+    python3 - "$record" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+maximum = (1 << 63) - 1
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+try:
+    with Path(sys.argv[1]).open("rb") as stream:
+        record = json.load(stream, object_pairs_hook=unique_object)
+    version_text = record.get("version") if isinstance(record, dict) else None
+    if (not isinstance(record, dict)
+            or set(record) != {"schema", "version"}
+            or record.get("schema") != "mailstrix-version-high-water-v1"
+            or not isinstance(version_text, str)
+            or re.fullmatch(r"[1-9][0-9]{0,18}", version_text) is None):
+        raise ValueError("high-water record is malformed")
+    version = int(version_text)
+    if version > maximum:
+        raise ValueError("high-water version exceeds the client range")
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+print(version)
+PY
+}
+
+merge_version_high_water() {  # <validated value or empty> <validated value or empty>
+    python3 - "$1" "$2" <<'PY'
+import sys
+
+values = [int(value) for value in sys.argv[1:] if value]
+if not values:
+    raise SystemExit(2)
+print(max(values))
+PY
+}
+
+derive_next_version() {  # <authenticated-current>; prints unused next version
+    python3 - "$1" "$VERSION_HIGH_WATER" <<'PY'
+import sys
+
+maximum = (1 << 63) - 1
+try:
+    current = int(sys.argv[1])
+    high_water = int(sys.argv[2]) if sys.argv[2] else current
+except ValueError:
+    raise SystemExit(2)
+if current < 1 or current > maximum or high_water < current or high_water >= maximum:
+    raise SystemExit(2)
+print(high_water + 1)
+PY
+}
+
+prepare_version_high_water() {  # [exact version; defaults to candidate]
+    local version="${1:-$VERSION}" record signature
+    rm -rf "${VERSION_HIGH_WATER_CANDIDATE_DIR:?}"
+    mkdir -p "$VERSION_HIGH_WATER_CANDIDATE_DIR"
+    record="${VERSION_HIGH_WATER_CANDIDATE_DIR}/record.json"
+    signature="${VERSION_HIGH_WATER_CANDIDATE_DIR}/record.sig"
+    # Keep the 64-bit version as a canonical decimal string. jq 1.6 stores JSON
+    # numbers as IEEE-754 doubles and cannot preserve MaxInt exactly.
+    jq -cn --arg version "$version" \
+        '{schema:"mailstrix-version-high-water-v1",version:$version}' >"$record" \
+        || return 1
+    "$RULESIGN_BIN" -require-trusted -manifest "$record" -out "$signature" \
+        || return 1
+    python3 - "$record" "$signature" "$VERSION_HIGH_WATER_CANDIDATE" <<'PY'
+import base64
+import json
+from pathlib import Path
+import sys
+
+record = Path(sys.argv[1]).read_bytes()
+signature = Path(sys.argv[2]).read_bytes()
+envelope = {
+    "schema": "mailstrix-version-high-water-envelope-v1",
+    "record": base64.b64encode(record).decode("ascii"),
+    "signature": base64.b64encode(signature).decode("ascii"),
+}
+Path(sys.argv[3]).write_text(json.dumps(envelope, separators=(",", ":")) + "\n", encoding="ascii")
+PY
+    cp "$VERSION_HIGH_WATER_CANDIDATE" "$VERSION_HIGH_WATER_RECOVERY_CANDIDATE"
+}
+
+reconcile_version_high_water() {
+    # Before advancing, make both bounded slots carry the authenticated maximum.
+    # Only a missing/lower slot is clobbered, so the other slot preserves that
+    # maximum through a delete-before-upload failure or ambiguous response.
+    prepare_version_high_water "$VERSION_HIGH_WATER" || return 1
+    PUBLISH_STATE=uncertain
+    if [ "$primary_high_water" != "$VERSION_HIGH_WATER" ]; then
+        publisher_lease_assert_owned || return 1
+        gh release upload "$TAG" --repo "$REPO" --clobber "$VERSION_HIGH_WATER_CANDIDATE" \
+            || return 1
+        primary_high_water="$VERSION_HIGH_WATER"
+    fi
+    if [ "$recovery_high_water" != "$VERSION_HIGH_WATER" ]; then
+        publisher_lease_assert_owned || return 1
+        gh release upload "$TAG" --repo "$REPO" --clobber "$VERSION_HIGH_WATER_RECOVERY_CANDIDATE" \
+            || return 1
+        recovery_high_water="$VERSION_HIGH_WATER"
+    fi
+    PUBLISH_STATE=not-started
+}
+
+restore_recovery_journal() {
+    local journal_pair journal_previous journal_next journal_marker journal_extra
+    download_release_state "$RECOVERY_STATE_DIR" \
+        "$RECOVERY_BUNDLE" "$RECOVERY_MANIFEST" "$RECOVERY_SIGNATURE" \
+        marker-tree.tar.gz.recovery \
+        || return 1
+    journal_pair="$(validate_release_state \
+        "${RECOVERY_STATE_DIR}/${RECOVERY_MANIFEST}" \
+        "${RECOVERY_STATE_DIR}/${RECOVERY_SIGNATURE}" \
+        "${RECOVERY_STATE_DIR}/${RECOVERY_BUNDLE}" \
+        "${RECOVERY_STATE_DIR}/marker-tree.tar.gz.recovery")" || return 1
+    read -r journal_previous journal_next journal_marker journal_extra <<<"$journal_pair"
+    [ -n "$journal_previous" ] && [ -n "$journal_next" ] \
+        && { [ "$journal_marker" = 0 ] || [ "$journal_marker" = 1 ]; } \
+        && [ -z "${journal_extra:-}" ] || return 1
+    PREV="$journal_previous"
+    PREVIOUS_MARKER="$journal_marker"
+    rm -rf "${RESTORE_STATE_DIR:?}"
+    mkdir -p "$RESTORE_STATE_DIR"
+    cp "${RECOVERY_STATE_DIR}/${RECOVERY_BUNDLE}" "${RESTORE_STATE_DIR}/compiled.yac"
+    cp "${RECOVERY_STATE_DIR}/${RECOVERY_SIGNATURE}" "${RESTORE_STATE_DIR}/compiled.yac.manifest.json.sig"
+    cp "${RECOVERY_STATE_DIR}/${RECOVERY_MANIFEST}" "${RESTORE_STATE_DIR}/compiled.yac.manifest.json"
+    if [ "$journal_marker" -eq 1 ]; then
+        cp "${RECOVERY_STATE_DIR}/marker-tree.tar.gz.recovery" "${RESTORE_STATE_DIR}/marker-tree.tar.gz"
+    fi
+    PUBLISH_STATE=uncertain
+    publisher_lease_assert_owned || return 1
+    gh release upload "$TAG" --repo "$REPO" --clobber "${RESTORE_STATE_DIR}/compiled.yac" || return 1
+    if [ -f "${RESTORE_STATE_DIR}/marker-tree.tar.gz" ]; then
+        publisher_lease_assert_owned || return 1
+        gh release upload "$TAG" --repo "$REPO" --clobber "${RESTORE_STATE_DIR}/marker-tree.tar.gz" || return 1
+    fi
+    publisher_lease_assert_owned || return 1
+    gh release upload "$TAG" --repo "$REPO" --clobber "${RESTORE_STATE_DIR}/compiled.yac.manifest.json.sig" || return 1
+    publisher_lease_assert_owned || return 1
+    gh release upload "$TAG" --repo "$REPO" --clobber "${RESTORE_STATE_DIR}/compiled.yac.manifest.json" || return 1
+    rm -rf "${CURRENT_STATE_DIR:?}"
+    cp -a "$RESTORE_STATE_DIR" "$CURRENT_STATE_DIR"
+    PUBLISH_STATE=not-started
+    note "restored the exact authenticated prior release state from the recovery journal"
+}
+
+write_recovery_journal() {
+    local journal="${WORK}/next-recovery-journal"
+    rm -rf "${journal:?}"
+    mkdir -p "$journal"
+    cp "${CURRENT_STATE_DIR}/compiled.yac" "${journal}/${RECOVERY_BUNDLE}"
+    cp "${CURRENT_STATE_DIR}/compiled.yac.manifest.json.sig" "${journal}/${RECOVERY_SIGNATURE}"
+    cp "${CURRENT_STATE_DIR}/compiled.yac.manifest.json" "${journal}/${RECOVERY_MANIFEST}"
+    if [ "$PREVIOUS_MARKER" -eq 1 ]; then
+        cp "${CURRENT_STATE_DIR}/marker-tree.tar.gz" "${journal}/marker-tree.tar.gz.recovery"
+    fi
+    # The recovery manifest is the activation record. If preparing this journal
+    # is interrupted, canonical assets are untouched and the next run rebuilds
+    # the journal from them before any canonical mutation.
+    publisher_lease_assert_owned || return 1
+    gh release upload "$TAG" --repo "$REPO" --clobber "${journal}/${RECOVERY_BUNDLE}" || return 1
+    if [ -f "${journal}/marker-tree.tar.gz.recovery" ]; then
+        publisher_lease_assert_owned || return 1
+        gh release upload "$TAG" --repo "$REPO" --clobber "${journal}/marker-tree.tar.gz.recovery" || return 1
+    fi
+    publisher_lease_assert_owned || return 1
+    gh release upload "$TAG" --repo "$REPO" --clobber "${journal}/${RECOVERY_SIGNATURE}" || return 1
+    publisher_lease_assert_owned || return 1
+    gh release upload "$TAG" --repo "$REPO" --clobber "${journal}/${RECOVERY_MANIFEST}"
+}
+
+if [ "$RELEASE_HTTP" = 200 ]; then
+    RELEASE_ASSETS="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')" \
+        || die "cannot inspect release asset inventory; refusing to classify canonical damage"
+    primary_high_water=""
+    recovery_high_water=""
+    if release_has_asset "$VERSION_HIGH_WATER_ASSET"; then
+        primary_high_water="$(read_version_high_water "$VERSION_HIGH_WATER_ASSET")" \
+            || die "version high-water asset exists but cannot be downloaded and authenticated; refusing recovery"
+    fi
+    if release_has_asset "$VERSION_HIGH_WATER_RECOVERY_ASSET"; then
+        recovery_high_water="$(read_version_high_water "$VERSION_HIGH_WATER_RECOVERY_ASSET")" \
+            || die "recovery version high-water asset exists but cannot be downloaded and authenticated; refusing recovery"
+    fi
+    if [ -n "$primary_high_water" ] || [ -n "$recovery_high_water" ]; then
+        VERSION_HIGH_WATER="$(merge_version_high_water "$primary_high_water" "$recovery_high_water")" \
+            || die "authenticated version high-water assets are inconsistent"
+    fi
+
+    recovery_journal_present=0
+    for journal_asset in "$RECOVERY_BUNDLE" "$RECOVERY_MANIFEST" "$RECOVERY_SIGNATURE" marker-tree.tar.gz.recovery; do
+        release_has_asset "$journal_asset" && recovery_journal_present=1
+    done
+
+    # A create response can be lost, and a first publication can stop after one
+    # or both version reservations but before manifest activation. With no
+    # canonical manifest and no recovery-journal evidence there is no prior
+    # client-visible state to restore: start at one if the release is empty, or
+    # advance past the authenticated reservation. Any journal evidence routes to
+    # normal exact recovery below and must be complete.
+    if ! release_has_asset compiled.yac.manifest.json \
+            && [ "$recovery_journal_present" -eq 0 ]; then
+        PREV=0
+        PREVIOUS_MARKER=0
+        if [ -n "$VERSION_HIGH_WATER" ]; then
+            VERSION="$(derive_next_version "$VERSION_HIGH_WATER")" \
+                || die "unactivated initial publication exhausted its authenticated version reservation"
+            reconcile_version_high_water \
+                || die "could not preserve the interrupted initial publication's version reservation"
+            note "initial publication was interrupted before manifest activation; advancing past reserved version ${VERSION_HIGH_WATER}"
+        else
+            [ -z "$RELEASE_ASSETS" ] \
+                || die "release has unauthenticated assets but no canonical manifest, recovery journal, or version reservation"
+            VERSION=1
+            note "existing ${TAG} release is empty — first publish, starting at version 1"
+        fi
+    else
+
+        canonical_inventory_complete=1
+        for required_asset in compiled.yac compiled.yac.manifest.json compiled.yac.manifest.json.sig; do
+            release_has_asset "$required_asset" || canonical_inventory_complete=0
+        done
+        canonical_downloaded=0
+        if [ "$canonical_inventory_complete" -eq 1 ]; then
+            download_release_state "$CURRENT_STATE_DIR" \
+                compiled.yac compiled.yac.manifest.json compiled.yac.manifest.json.sig marker-tree.tar.gz \
+                || die "complete canonical assets are listed but could not be downloaded; treating this as transient and refusing recovery"
+            canonical_downloaded=1
+        fi
+        if [ "$canonical_downloaded" -eq 1 ] \
+            && version_pair="$(validate_release_state \
+                "${CURRENT_STATE_DIR}/compiled.yac.manifest.json" \
+                "${CURRENT_STATE_DIR}/compiled.yac.manifest.json.sig" \
+                "${CURRENT_STATE_DIR}/compiled.yac" \
+                "${CURRENT_STATE_DIR}/marker-tree.tar.gz")"; then
+            read -r PREV ignored_next PREVIOUS_MARKER version_extra <<<"$version_pair"
+            if [ -z "$PREV" ] || [ -z "$ignored_next" ] \
+                || { [ "$PREVIOUS_MARKER" != 0 ] && [ "$PREVIOUS_MARKER" != 1 ]; } \
+                || [ -n "${version_extra:-}" ]; then
+                die "published manifest version parser returned malformed state; refusing to bump"
+            fi
+        else
+            [ -n "$VERSION_HIGH_WATER" ] \
+                || die "canonical release state is damaged without an authenticated version high-water mark; refusing rollback recovery"
+            note "canonical release state is incomplete or unauthenticated; attempting exact recovery"
+            restore_recovery_journal \
+                || die "canonical release state is invalid and no complete authenticated recovery journal could restore it without version reuse"
+        fi
+        VERSION="$(derive_next_version "$PREV")" \
+            || die "authenticated version state is exhausted or inconsistent with its high-water mark; prior canonical state was restored when recovery was required"
+        [ -n "$VERSION_HIGH_WATER" ] || VERSION_HIGH_WATER="$PREV"
+        reconcile_version_high_water \
+            || die "could not preserve the authenticated version maximum in both reservation slots; canonical assets were not changed"
+        write_recovery_journal \
+            || die "could not preserve the complete authenticated prior release state; canonical assets were not changed"
+    fi
+else
+    note "no existing ${TAG} release — first publish, starting at version 1"
+    PREV=0
+    VERSION=1
+    PREVIOUS_MARKER=0
+fi
+
+# The prior-state gate is publication coordination; the preflight and every
+# later local candidate-construction failure retain their build-stage identity.
+NIGHTLY_STAGE=build
 PREFLIGHT_MANIFEST="${WORK}/signing-preflight.json"
 PREFLIGHT_SIG="${PREFLIGHT_MANIFEST}.sig"
 printf '%s\n' '{"schema":"mailstrix-rules-signing-preflight-v1"}' >"$PREFLIGHT_MANIFEST"
@@ -594,51 +1526,6 @@ if [ "$RULES" -eq 0 ]; then
     die "native rule verifier loaded 0 rules; refusing to publish an empty bundle"
 fi
 
-# 2) Determine the new monotonic version: previous (from the published manifest)
-#    + 1. Never reuse or decrement.
-#
-#    CRITICAL: only treat version as 0 (first publish) when the release GENUINELY
-#    does not exist. A release that EXISTS but whose manifest we failed to fetch
-#    (transient gh/network error) must ABORT — silently resetting to 1 would
-#    republish a LOWER version than the live one, breaking monotonicity and making
-#    strixd skip every future update ("version 1 <= local"). So: no release ⇒ start
-#    at 1; release present but manifest unreadable ⇒ die.
-#    The existence probe must NOT rely on `gh release view`'s exit status: with an
-#    invalid credential gh has been observed printing "401 Unauthorized" while
-#    STILL exiting 0, so the old `if gh release view` took the else-branch and
-#    reset the version to 1 while live was 34 (2026-07-30). Probe the REST API and
-#    branch on the HTTP STATUS instead: 200 => exists, 404 => genuinely absent,
-#    anything else (401/403/5xx) => credential/network fault, so abort rather than
-#    guess. The probe is bounded (--connect-timeout/--max-time): a hung API
-#    socket ends in curl exit 28 with no 200/404, which dies below instead of
-#    stalling the publisher forever. This is what actually enforces the monotonicity rule described above.
-NIGHTLY_STAGE=publish
-RELEASE_HTTP="$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' \
-    -H @- \
-    -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" \
-    <<<"Authorization: Bearer ${GH_TOKEN}" || echo 000)"
-case "$RELEASE_HTTP" in
-    200|404) : ;;
-    *) die "cannot determine whether release ${TAG} exists (HTTP ${RELEASE_HTTP}); refusing to guess the version — check the GITHUB_ORG_LAB_TOKEN and network" ;;
-esac
-
-if [ "$RELEASE_HTTP" = 200 ]; then
-    gh release download "$TAG" --repo "$REPO" \
-        --pattern 'compiled.yac.manifest.json' --dir "$WORK" --clobber \
-        || die "release ${TAG} exists but its manifest could not be fetched; refusing to reset the version (re-run when gh/network recovers)"
-    PREV="$(jq -e -r '.version' "${WORK}/compiled.yac.manifest.json")" \
-        || die "published manifest has no readable .version; refusing to guess"
-    case "$PREV" in (''|*[!0-9]*) die "published version '${PREV}' is not an integer; refusing to bump" ;; esac
-else
-    note "no existing ${TAG} release — first publish, starting at version 1"
-    PREV=0
-fi
-VERSION=$((PREV + 1))
-
-# The release probe is publish-stage, but local manifest preparation cannot
-# change the release and must retain build-stage attribution.
-NIGHTLY_STAGE=build
 # 3) Compute the checksum + sanity fields, write the manifest.
 SUM="$(sha256sum "$YAC" | awk '{print $1}')"
 SIZE="$(stat -c '%s' "$YAC")"
@@ -729,6 +1616,8 @@ fi
 # MAILSTRIX_RULES_SIGNING_KEY_B64 build-env fallback) and died if it could not,
 # so this refusal is defence in depth: it keeps the invariant local to the step
 # that depends on it rather than trusting a distant block.
+prepare_version_high_water "$VERSION" \
+    || die "could not prepare the authenticated version high-water mark; nothing was published"
 MANIFEST_SIG="${MANIFEST}.sig"
 [ -n "${MAILSTRIX_RULES_SIGNING_KEY:-}" ] \
     || die "MAILSTRIX_RULES_SIGNING_KEY is not set; refusing to publish an unsigned manifest that no client would install"
@@ -806,24 +1695,45 @@ NIGHTLY_STAGE=publish
 # so uncertainty starts before the first remote release mutation.
 PUBLISH_STATE=uncertain
 if [ "$RELEASE_HTTP" != 200 ]; then
+    publisher_lease_assert_owned \
+        || die "publisher lease was lost before release creation; nothing was published"
     note "creating rolling release ${TAG}"
     gh release create "$TAG" --repo "$REPO" \
         --title "Compiled rules (rolling)" \
         --notes "Rolling compiled YARA bundle for \`strixd --fetch-rules\`. Assets are clobbered on each rule regeneration; see compiled.yac.manifest.json for the current version." \
         --latest=false
 fi
+# Reserve the candidate version durably before the first canonical mutation.
+# Startup reconciled both bounded slots to the previous authenticated maximum.
+# The recovery copy lands first while canonical preserves that maximum; canonical
+# then lands while recovery preserves the candidate. A failed/ambiguous run is
+# repaired back to two equal slots before any later version may advance.
+publisher_lease_assert_owned \
+    || die "publisher lease was lost before version reservation; nothing was published"
+gh release upload "$TAG" --repo "$REPO" --clobber "$VERSION_HIGH_WATER_RECOVERY_CANDIDATE"
+publisher_lease_assert_owned \
+    || die "publisher lease was lost before canonical version reservation; nothing was published"
+gh release upload "$TAG" --repo "$REPO" --clobber "$VERSION_HIGH_WATER_CANDIDATE"
 # Publish the manifest last. During the rolling asset replacement window an
 # older manifest can describe the new bytes; consumers reject and retry later.
+publisher_lease_assert_owned \
+    || die "publisher lease was lost before bundle upload; nothing was published"
 gh release upload "$TAG" --repo "$REPO" --clobber "$YAC"
 # The marker tree goes up BEFORE the signature and manifest that reference it, so
 # no client ever sees a signed manifest naming a missing or older tree asset.
 if [ "$MARKER_PUBLISH" -eq 1 ]; then
+    publisher_lease_assert_owned \
+        || die "publisher lease was lost before marker upload"
     gh release upload "$TAG" --repo "$REPO" --clobber "$MARKER_FILE"
 fi
 # The signature goes up BEFORE the manifest it covers: during the rolling
 # replacement window a client must never see a new manifest paired with the
 # previous signature, which it would (correctly) refuse.
+publisher_lease_assert_owned \
+    || die "publisher lease was lost before manifest signature upload"
 gh release upload "$TAG" --repo "$REPO" --clobber "$MANIFEST_SIG"
+publisher_lease_assert_owned \
+    || die "publisher lease was lost before manifest activation"
 gh release upload "$TAG" --repo "$REPO" --clobber "$MANIFEST"
 PUBLISH_STATE=published
 

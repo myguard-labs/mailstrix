@@ -3,7 +3,7 @@
 # and verifier error propagation with all external commands stubbed.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-for bin in awk date dd dirname jq mktemp python3 tr wc; do
+for bin in awk date dd dirname flock git jq mktemp python3 timeout tr wc; do
     command -v "$bin" >/dev/null 2>&1 || {
         printf 'FAIL: required test tool unavailable: %s\n' "$bin" >&2
         exit 2
@@ -19,11 +19,14 @@ test_root="$(mktemp -d)"
 trap 'rm -rf "$test_root"' EXIT
 mkdir -p "$test_root/sandbox/project/docker" "$test_root/bin" "$test_root/tools"
 cp "$here/generate-rules.sh" "$here/pack-marker-tree.py" "$test_root/sandbox/project/docker/"
+git init --bare --quiet "$test_root/publisher-lease.git"
 # HEAD's libyara pin, read by the marker skew guard; cases rewrite it.
 printf 'ARG YARA_VERSION=4.5.2\n' > "$test_root/sandbox/project/docker/Dockerfile"
 export EVENTS="$test_root/events"
 export PATH="$test_root/bin:$PATH"
 export GH_TOKEN=fixture-not-a-credential
+export PUBLISH_LEASE_REMOTE="$test_root/publisher-lease.git"
+export PUBLISH_LEASE_HEARTBEAT_SECONDS=10
 # Throwaway non-credential: the `go` stub only checks that the publisher passes
 # the key through the ENVIRONMENT and never on a command line.
 export MAILSTRIX_RULES_SIGNING_KEY=fixture-not-a-signing-key
@@ -298,6 +301,15 @@ cat >"$test_root/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 cat >/dev/null
 printf 'curl %s\n' "$*" >> "$EVENTS"
+previous=""
+for arg in "$@"; do
+    if [ "$previous" = -D ]; then
+        printf 'HTTP/2 200\r\ndate: Mon, 26 Oct 2026 12:00:00 GMT\r\n\r\n' >"$arg"
+        printf '200'
+        exit 0
+    fi
+    previous="$arg"
+done
 if [ "${CURL_TIMEOUT:-0}" -eq 1 ]; then
     # Model a hung API socket: curl -s -w prints 000 and exits 28, but only a
     # bounded call ever gets there; an unbounded one would hang forever.
@@ -336,7 +348,7 @@ STUB
 
 cat >"$test_root/bin/date" <<'STUB'
 #!/usr/bin/env bash
-if [ "${FAIL_MANIFEST_DATE:-0}" -eq 1 ] && [ "${1:-}" = -u ]; then
+if [ "${FAIL_MANIFEST_DATE:-0}" -eq 1 ] && [ "$*" = '-u +%Y-%m-%dT%H:%M:%SZ' ]; then
     exit 48
 fi
 exec "$REAL_DATE" "$@"
@@ -508,17 +520,19 @@ assert_success_event_order() {  # assert_success_event_order <case> <verify-coun
             upload\ *|verify\ *|notify\ *) lifecycle+=("$event") ;;
         esac
     done <"$EVENTS"
-    [ "${lifecycle[0]:-}" = 'upload compiled.yac' ] || assert_event "$name: compiled.yac was not uploaded first"
+    [ "${lifecycle[0]:-}" = 'upload compiled.yac.version-high-water.recovery.json' ] || assert_event "$name: recovery version high-water was not reserved first"
+    [ "${lifecycle[1]:-}" = 'upload compiled.yac.version-high-water.json' ] || assert_event "$name: canonical version high-water did not follow its recovery copy"
+    [ "${lifecycle[2]:-}" = 'upload compiled.yac' ] || assert_event "$name: compiled.yac did not follow version reservation"
     # The detached signature must land BEFORE the manifest it covers: during the
     # rolling replacement window a client must never fetch a new manifest paired
     # with the previous signature, which it would correctly refuse.
-    [ "${lifecycle[1]:-}" = 'upload compiled.yac.manifest.json.sig' ] || assert_event "$name: manifest signature was not uploaded before the manifest"
-    [ "${lifecycle[2]:-}" = 'upload compiled.yac.manifest.json' ] || assert_event "$name: manifest was not uploaded after its signature"
+    [ "${lifecycle[3]:-}" = 'upload compiled.yac.manifest.json.sig' ] || assert_event "$name: manifest signature was not uploaded before the manifest"
+    [ "${lifecycle[4]:-}" = 'upload compiled.yac.manifest.json' ] || assert_event "$name: manifest was not uploaded after its signature"
     for ((index = 0; index < verify_count; index++)); do
-        [[ "${lifecycle[index + 3]:-}" == verify\ * ]] || assert_event "$name: verifier ran before every upload"
+        [[ "${lifecycle[index + 5]:-}" == verify\ * ]] || assert_event "$name: verifier ran before every upload"
     done
-    [ "${lifecycle[verify_count + 3]:-}" = 'notify strixd rules: rules-current v1 published' ] || assert_event "$name: success notification did not follow verification"
-    [ "${#lifecycle[@]}" -eq "$((verify_count + 4))" ] || assert_event "$name: unexpected lifecycle event count"
+    [ "${lifecycle[verify_count + 5]:-}" = 'notify strixd rules: rules-current v1 published' ] || assert_event "$name: success notification did not follow verification"
+    [ "${#lifecycle[@]}" -eq "$((verify_count + 6))" ] || assert_event "$name: unexpected lifecycle event count"
 }
 
 run_script_with_output() {  # run_script_with_output <stdout> <stderr> <env-assignment>...; assigns caller-local actual
@@ -604,7 +618,7 @@ assert_success_receipt_failure_is_receipt_stage() {
     grep -Fx 'notify strixd rules: receipt FAILED' "$EVENTS" >/dev/null || assert_event 'receipt-stage notification'
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'receipt-stage body'
     ! grep -F 'notify-body generate-rules.sh exited' "$EVENTS" || assert_event 'receipt-stage stale failure body'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'receipt-stage upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event 'receipt-stage upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'receipt-stage verifier count'
 }
 
@@ -616,7 +630,7 @@ assert_stdout_failure_is_receipt_stage() {
     assert_notification stdout-full receipt failed
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'stdout-full receipt-stage body'
     grep -F 'ERROR: failed to emit nightly receipt' "$test_root/log" >/dev/null || assert_event 'stdout-full fallback failure not diagnosed'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'stdout-full upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event 'stdout-full upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'stdout-full verifier count'
 }
 
@@ -702,7 +716,7 @@ assert_post_verify_preparation_is_receipt_stage() {
     assert_receipt receipt failed
     assert_notification post-verify-preparation receipt failed
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'post-verify preparation body'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'post-verify preparation upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event 'post-verify preparation upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'post-verify preparation verifier count'
 }
 
@@ -724,7 +738,7 @@ assert_success_receipt_signal_is_receipt_failure() {
     assert_receipt receipt failed
     assert_notification success-receipt-signal receipt failed
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'success receipt signal emitted conflicting receipts'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'success receipt signal upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event 'success receipt signal upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'success receipt signal verifier count'
 }
 
@@ -737,7 +751,7 @@ assert_receipt_stage_transition_defers_signal() {
     assert_notification receipt-boundary-signal receipt failed
     grep -F 'notify-body terminal receipt preparation or emission failed after rules-current was published and native-verified.' "$EVENTS" >/dev/null || assert_event 'receipt boundary reported completed verification as interrupted'
     [ "$(grep -c 'mailstrix-rules-nightly-v1' "$test_root/log" || true)" -eq 1 ] || assert_event 'receipt boundary signal duplicated terminal receipt'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'receipt boundary signal upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event 'receipt boundary signal upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'receipt boundary signal verifier count'
 }
 
@@ -766,7 +780,7 @@ assert_verify_signal_reports_interruption() {
     assert_receipt verify failed
     assert_notification verify-signal verify failed
     grep -Fx 'notify-body rules-current v1 was published, but native verification was interrupted; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$EVENTS" >/dev/null || assert_event 'verify signal interruption wording'
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event 'verify signal upload count'
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event 'verify signal upload count'
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event 'verify signal verifier count'
 }
 
@@ -817,14 +831,14 @@ run_case() {  # run_case <name> <exit> <stage> <status> <verify-count> <uploads>
 # Positive, retry-boundary, and stage-error receipts. The last row proves the
 # documented publisher-only exception: a notification failure cannot mask a
 # successful publish or its receipt.
-run_case success 0 verify success 1 3 0 0 0 0
-run_case verify-retry 0 verify success 3 3 0 0 2 0
+run_case success 0 verify success 1 5 0 0 0 0
+run_case verify-retry 0 verify success 3 5 0 0 2 0
 run_case build-failure 41 build failed 0 0 1 0 0 0
 run_case publish-failure 42 publish failed 0 1 0 1 0 0
 grep -F 'notify-body generate-rules.sh exited 42 — rules-current may be partially updated.' "$EVENTS" >/dev/null || assert_event 'publish failure state wording'
-run_case verify-failure 1 verify failed 5 3 0 0 5 0
+run_case verify-failure 1 verify failed 5 5 0 0 5 0
 grep -Fx 'notify-body rules-current v1 was published, but native verification failed; clients may encounter an unverified bundle. Inspect and repair the release. Check /opt/myguard/packages/log/yarad-generate-rules.log' "$EVENTS" >/dev/null || assert_event 'verify failure risk wording'
-run_case notify-failure-is-best-effort 0 verify success 1 3 0 0 0 1
+run_case notify-failure-is-best-effort 0 verify success 1 5 0 0 0 1
 assert_receipt_failure_preserves_stage_failure
 assert_release_probe_failure_is_publish
 assert_release_probe_is_time_bounded
@@ -901,7 +915,7 @@ grep -F 'signing-key preflight failed' "$test_root/log" >/dev/null \
 assert_unsigned_publication_is_refused final-signing-failure FAIL_FINAL_SIGN=1
 grep -F 'signing the manifest failed; refusing to publish an unsigned manifest' "$test_root/log" >/dev/null \
     || assert_event 'final manifest signing failure was not diagnosed'
-[ "$(grep -c '^rulessign ' "$EVENTS")" -eq 2 ] \
+[ "$(grep -c '^rulessign ' "$EVENTS")" -eq 3 ] \
     || assert_event 'final signing failure did not follow a successful preflight'
 grep -E '^rulessign -require-trusted -manifest .*/compiled\.yac\.manifest\.json -out .*/compiled\.yac\.manifest\.json\.sig$' "$EVENTS" >/dev/null \
     || assert_event 'final signing failure did not exercise the exact manifest argv'
@@ -919,27 +933,29 @@ assert_signer_reuse_contract() {
     mapfile -t invocations <<<"$(sed -n '/^rulessign /p' "$EVENTS")"
     [ "$(grep -c '^go-build ' "$EVENTS")" -eq 1 ] \
         || assert_event 'the publisher did not build exactly one signing helper'
-    built="$(sed -n 's/^go-build build -o \([^ ]*\) \.\/cmd\/rulessign$/\1/p' "$EVENTS")"
+    built="$(sed -n 's/^go-build build -buildvcs=false -o \([^ ]*\) \.\/cmd\/rulessign$/\1/p' "$EVENTS")"
     [ -n "$built" ] || assert_event 'the publisher signer build argv changed'
-    if [ "${#binaries[@]}" -ne 2 ] \
+    if [ "${#binaries[@]}" -ne 3 ] \
         || [ "${binaries[0]:-}" != "rulessign-bin ${built}" ] \
-        || [ "${binaries[1]:-}" != "rulessign-bin ${built}" ]; then
+        || [ "${binaries[1]:-}" != "rulessign-bin ${built}" ] \
+        || [ "${binaries[2]:-}" != "rulessign-bin ${built}" ]; then
         assert_event 'the publisher did not reuse its built signing helper'
     fi
-    [ "${#invocations[@]}" -eq 2 ] || assert_event 'the publisher signer invocation count changed'
+    [ "${#invocations[@]}" -eq 3 ] || assert_event 'the publisher signer invocation count changed'
     [[ "${invocations[0]}" == "rulessign -require-trusted -manifest ${built%/rulessign}/signing-preflight.json -out ${built%/rulessign}/signing-preflight.json.sig" ]] \
         || assert_event 'the trusted signing preflight argv or order changed'
-    [[ "${invocations[1]}" == "rulessign -require-trusted -manifest ${built%/rulessign}/compiled.yac.manifest.json -out ${built%/rulessign}/compiled.yac.manifest.json.sig" ]] \
+    [[ "${invocations[1]}" == "rulessign -require-trusted -manifest ${built%/rulessign}/next-version-high-water/record.json -out ${built%/rulessign}/next-version-high-water/record.sig" ]] \
+        || assert_event 'the version high-water signing argv or order changed'
+    [[ "${invocations[2]}" == "rulessign -require-trusted -manifest ${built%/rulessign}/compiled.yac.manifest.json -out ${built%/rulessign}/compiled.yac.manifest.json.sig" ]] \
         || assert_event 'the final exact-manifest signing argv or order changed'
 }
 assert_signer_reuse_contract
 
-# AUD-06c-f2: the rolling release has no atomic activation (assets are clobbered
-# one by one), so an interrupted publication cannot leave the previously
-# published pair verifiable: the first clobbered asset already breaks it. This
-# pins the real behaviour: the run fails closed as publish/uncertain, the
-# verifier never runs, and the remote state at the interruption is exactly the
-# documented signature-first window (never a new manifest with an old signature).
+# AUD-06c-f2: assets are still clobbered one by one. This first-publication
+# fixture has no authenticated prior release and therefore no recovery journal;
+# it pins fail-closed publish/uncertain receipts and the signature-first window
+# (never a new manifest with an old signature). Existing-release recovery is
+# covered by ci/generate_rules_concurrency_test.sh.
 assert_interrupted_publication() {  # assert_interrupted_publication <fail-at> <uploads> <sig-new:0|1> <manifest-new:0|1>
     local at="$1" uploads="$2" sig_new="$3" man_new="$4" actual remote="${EVENTS}.remote"
     rm -rf "${remote:?}"
@@ -965,12 +981,13 @@ assert_interrupted_publication() {  # assert_interrupted_publication <fail-at> <
     fi
     rm -rf "${remote:?}"
 }
-# Failure at the 2nd (signature) upload: only the bundle was replaced.
-assert_interrupted_publication 2 2 0 0
-# Failure at the 3rd (manifest) upload: new signature over the old manifest, so
-# the pair does not verify and a consumer refuses (fail closed); the previous
-# pair is NOT recoverable from the remote.
-assert_interrupted_publication 3 3 1 0
+# Failure at the 4th (signature) upload: both version reservations and bundle
+# landed, while the canonical signature/manifest pair stayed old.
+assert_interrupted_publication 4 4 0 0
+# Failure at the 5th (manifest) upload: new signature over the old manifest, so
+# the pair does not verify and a consumer refuses (fail closed); this deliberately
+# journal-free first-publication fixture has no prior state to restore.
+assert_interrupted_publication 5 5 1 0
 
 # AUD-06c-f4: the 00:00Z cron run has no MAILSTRIX_RULES_SIGNING_KEY in its
 # environment (the key exists only as a GitHub Actions secret), so the publisher
@@ -1018,7 +1035,7 @@ assert_build_env_key_publishes() {  # assert_build_env_key_publishes <case> <lin
     grep -Fx 'go-key pem 3' "$EVENTS" >/dev/null \
         || assert_event "${name}: the signer did not receive the decoded multi-line PEM"
     assert_receipt verify success
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event "${name}: upload count"
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event "${name}: upload count"
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event "${name}: verifier count"
     assert_verifier_contract "$name" 1
     assert_notification "$name" verify success
@@ -1229,11 +1246,13 @@ assert_marker_published() {
         esac
     done <"$EVENTS"
     [ "${order[0]%% *}" = stage-verify ] || assert_event "${name}: staged verification did not run first"
-    [ "${order[1]}" = 'upload compiled.yac' ] || assert_event "${name}: compiled.yac not uploaded right after verification"
-    [ "${order[2]}" = 'upload marker-tree.tar.gz' ] || assert_event "${name}: marker tree not uploaded before sig/manifest"
-    [ "${order[3]}" = 'upload compiled.yac.manifest.json.sig' ] || assert_event "${name}: signature not uploaded after the tree"
-    [ "${order[4]}" = 'upload compiled.yac.manifest.json' ] || assert_event "${name}: manifest not uploaded last"
-    [ "${order[5]%% *}" = verify ] || assert_event "${name}: post-publish verification missing"
+    [ "${order[1]}" = 'upload compiled.yac.version-high-water.recovery.json' ] || assert_event "${name}: recovery version was not reserved before canonical mutation"
+    [ "${order[2]}" = 'upload compiled.yac.version-high-water.json' ] || assert_event "${name}: canonical reservation did not follow its recovery copy"
+    [ "${order[3]}" = 'upload compiled.yac' ] || assert_event "${name}: compiled.yac did not follow version reservation"
+    [ "${order[4]}" = 'upload marker-tree.tar.gz' ] || assert_event "${name}: marker tree not uploaded before sig/manifest"
+    [ "${order[5]}" = 'upload compiled.yac.manifest.json.sig' ] || assert_event "${name}: signature not uploaded after the tree"
+    [ "${order[6]}" = 'upload compiled.yac.manifest.json' ] || assert_event "${name}: manifest not uploaded last"
+    [ "${order[7]%% *}" = verify ] || assert_event "${name}: post-publish verification missing"
     grep -Fx 'stage-fetch ok' "$EVENTS" >/dev/null || assert_event "${name}: the staged candidate was not served intact"
     grep -E '^stage-verify .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: staged verification lacks -require-marker"
     grep -E '^stage-verify .*sha256:markerverifier' "$EVENTS" >/dev/null || assert_event "${name}: staged verification did not use the release strixd image"
@@ -1302,7 +1321,7 @@ assert_marker_skipped() {  # assert_marker_skipped <case> <env-assignment>...
     assert_receipt verify success
     ! manifest_has_marker || assert_event "${name}: manifest carries a marker field"
     [ ! -e "${EVENTS}.tree" ] || assert_event "${name}: a marker tree was uploaded"
-    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 3 ] || assert_event "${name}: upload count"
+    [ "$(grep -c '^upload ' "$EVENTS" || true)" -eq 5 ] || assert_event "${name}: upload count"
     [ "$(grep -c '^stage-verify ' "$EVENTS" || true)" -eq 0 ] || assert_event "${name}: staged verification ran without a marker"
     [ "$(grep -c '^verify ' "$EVENTS" || true)" -eq 1 ] || assert_event "${name}: verifier count"
     ! grep -E '^verify .*-require-marker' "$EVENTS" >/dev/null || assert_event "${name}: unmarked publish gated on a marker"
