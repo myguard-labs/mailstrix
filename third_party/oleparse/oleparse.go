@@ -11,7 +11,6 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/unicode"
 )
 
@@ -1765,25 +1764,11 @@ func ParseBufferBlobsLimited(data []byte, maxModuleBytes, maxTotalBytes int) ([]
 	return macros, nil
 }
 
-func decodeUnicode(data []byte, codepage uint16) string {
-	// First decode from UTF16-LE
-	unicode_data, err := unicode.UTF16(
+func decodeUnicode(data []byte, _ uint16) string {
+	unicodeData, err := unicode.UTF16(
 		unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder().Bytes(data)
 	if err != nil {
 		return string(data)
 	}
-
-	// Now apply the relevant code page.
-	decoder := charmap.Windows1252.NewDecoder()
-
-	switch codepage {
-	case 1252:
-		decoder = charmap.Windows1252.NewDecoder()
-	}
-
-	res, err := decoder.Bytes(unicode_data)
-	if err != nil {
-		return string(unicode_data)
-	}
-	return string(res)
+	return string(unicodeData)
 }

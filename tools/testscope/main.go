@@ -113,7 +113,7 @@ func externalInputs(f string) []string {
 	case strings.HasPrefix(f, "docker/local-rules/"):
 		return []string{"internal/extract/input_test.go", "internal/mailstrix/input_test.go"}
 	case strings.HasPrefix(f, "third_party/oleparse/") && !strings.HasSuffix(f, ".md"):
-		return []string{"internal/extract/input.go"}
+		return []string{"internal/extract/input.go", "ci/ole_debug_test.go"}
 	}
 	return nil
 }

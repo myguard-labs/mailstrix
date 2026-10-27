@@ -4,25 +4,29 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 )
 
 var (
-	OLE_DEBUG *bool
+	OLE_DEBUG    *bool
+	oleDebugOnce sync.Once
 )
 
 func DebugEnabled() bool {
-	if OLE_DEBUG == nil {
-		value := false
-		OLE_DEBUG = &value
+	oleDebugOnce.Do(func() {
+		if OLE_DEBUG != nil {
+			return
+		}
 
+		value := false
 		for _, x := range os.Environ() {
 			if strings.HasPrefix(x, "OLE_DEBUG=1") {
 				value = true
 				break
 			}
 		}
-
-	}
+		OLE_DEBUG = &value
+	})
 	return *OLE_DEBUG
 }
 
