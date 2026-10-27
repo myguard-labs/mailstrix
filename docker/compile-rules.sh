@@ -23,7 +23,8 @@ set -eu
 
 SRC="${1:-/rules/src}"
 OUT="${2:-/rules/compiled.yac}"
-EXT="-d filepath= -d filename= -d extension= -d filetype= -d file_type= -d owner= -d VBA=0"
+COMPILER="${MX_CAPTURE_YARAC:-yarac}"
+set -- -d filepath= -d filename= -d extension= -d filetype= -d file_type= -d owner= -d VBA=0
 
 HELPER="$(dirname "$0")/capture-compiler-inputs.py"
 retained="$(python3 "$HELPER" begin "$OUT" "$SRC")"
@@ -37,8 +38,7 @@ done
 # yarac per file). The helper preserves per-file invocation order and writes
 # the accepted namespace:path roots to $good.
 status=0
-# shellcheck disable=SC2086
-python3 "$HELPER" validate "$retained" "$good" "$list" yarac $EXT || status=$?
+python3 "$HELPER" validate "$retained" "$good" "$list" "$COMPILER" "$@" || status=$?
 if [ "$status" -ne 0 ]; then
 	echo "compile-rules: input retention failed ($retained)" >&2
 	exit 125
@@ -54,8 +54,7 @@ rm -f "$list"
 }
 
 # one bundle from every good (namespaced) file
-# shellcheck disable=SC2046,SC2086
-python3 "$HELPER" run "$retained" final "" "" yarac $EXT $(cat "$good") "$OUT"
+python3 "$HELPER" final "$retained" "$good" "$OUT" "$COMPILER" "$@"
 python3 "$HELPER" finish "$retained"
 rm -f "$good"
 echo "compile-rules: bundled $n files ($skip skipped) -> $OUT"

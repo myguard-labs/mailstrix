@@ -86,10 +86,12 @@ for(int mode=0;mode<4;mode++){
   const char *fixtures[]={"","needle","enabled","other","needle enabled","\xff\x01"};
   for(int j=0;j<6;j++){expected_hits=((mode&1)||j==1||j==4)+!!(mode&2);e=check(a,b,(const uint8_t*)fixtures[j],strlen(fixtures[j]));if(e)return e;count++;}
 }
+/* Disable an output rule with no dependents. Disabling wildA would leave its
+ * referencing wildcard bytecode unbalanced in assertion-enabled libyara. */
 YR_RULE *denied;
-yr_rules_foreach(a,denied){if(!(denied->flags&(RULE_FLAGS_PRIVATE|RULE_FLAGS_GLOBAL))&&!strcmp(denied->identifier,"wildA"))yr_rule_disable(denied);}
-yr_rules_foreach(b,denied){if(!(denied->flags&(RULE_FLAGS_PRIVATE|RULE_FLAGS_GLOBAL))&&!strcmp(denied->identifier,"wildA"))yr_rule_disable(denied);}
-expected_hits=2;e=check(a,b,(const uint8_t*)"needle",6);if(e)return e;count++;
+yr_rules_foreach(a,denied){if(!(denied->flags&(RULE_FLAGS_PRIVATE|RULE_FLAGS_GLOBAL))&&!strcmp(denied->identifier,"Marker")&&!strcmp(denied->ns->name,"a.yar"))yr_rule_disable(denied);}
+yr_rules_foreach(b,denied){if(!(denied->flags&(RULE_FLAGS_PRIVATE|RULE_FLAGS_GLOBAL))&&!strcmp(denied->identifier,"Marker")&&!strcmp(denied->ns->name,"a.yar"))yr_rule_disable(denied);}
+expected_hits=1;e=check(a,b,(const uint8_t*)"needle",6);if(e)return e;count++;
 expected_hits=1;e=check(a,b,(const uint8_t*)"",0);if(e)return e;count++;expected_hits=-1;
 uint8_t*all=malloc(1000000);size_t len=0;YR_RULE*r;YR_STRING*s;yr_rules_foreach(a,r){if(!marker(r))continue;yr_rule_strings_foreach(r,s){if(s->length>0){e=check(a,b,s->string,s->length);if(e)return e;count++;if(len+s->length+1>1000000)return 3;memcpy(all+len,s->string,s->length);len+=s->length;all[len++]='\n';}}}e=check(a,b,all,len);if(e)return e;count++;for(size_t i=0;i<4096;i++)all[i]=(uint8_t)((i*73+11)%256);for(size_t i=0;i<=4096;i=i?i*2:1){e=check(a,b,all,i);if(e)return e;count++;}printf("{\"native_detection_cases\":%d,\"full_set_filtered_equivalent\":true}\n",count);free(all);yr_rules_destroy(a);yr_rules_destroy(b);yr_finalize();return 0;}
 """
@@ -110,6 +112,121 @@ class MarkerArtifact(unittest.TestCase):
         for name, data in before.items():
             self.assertEqual((source / name).read_bytes(), data)
         return source, metadata
+
+    def test_closure_once_per_namespace_removal_mutation_and_cross_namespace(self):
+        inventory = [
+            {
+                "native_index": 0,
+                "namespace": "a",
+                "identifier": "Marker",
+                "flags": 0,
+                "tags": ["marker"],
+            },
+            {
+                "native_index": 1,
+                "namespace": "a",
+                "identifier": "Public",
+                "flags": 0,
+                "tags": [],
+            },
+            {
+                "native_index": 2,
+                "namespace": "a",
+                "identifier": "Global",
+                "flags": 2,
+                "tags": [],
+            },
+            {
+                "native_index": 3,
+                "namespace": "a",
+                "identifier": "Private",
+                "flags": 1,
+                "tags": [],
+            },
+            {
+                "native_index": 4,
+                "namespace": "b",
+                "identifier": "Foreign",
+                "flags": 0,
+                "tags": [],
+            },
+            {
+                "native_index": 5,
+                "namespace": "b",
+                "identifier": "Global",
+                "flags": 2,
+                "tags": [],
+            },
+            {
+                "native_index": 6,
+                "namespace": "b",
+                "identifier": "Private",
+                "flags": 1,
+                "tags": [],
+            },
+            {
+                "native_index": 7,
+                "namespace": "unused",
+                "identifier": "Global",
+                "flags": 2,
+                "tags": [],
+            },
+        ]
+        references = [
+            [0, 1],
+            [0, 4],  # Explicit cross-namespace reachability brings b globals.
+            [0, 1],  # Raw repeated native references are each visited.
+            [1, 2],
+            [2, 3],
+            [4, 6],
+            [5, 6],
+            [7, 3],  # An edge of an unretained rule is never visited.
+        ]
+        operations = {}
+        proof = marker.closure(
+            {"inventory": inventory, "references": references},
+            operations=operations,
+        )
+        self.assertEqual(proof, {"markers": [0], "retained": list(range(7))})
+        self.assertEqual(
+            marker.closure({"inventory": inventory, "references": references}),
+            proof,
+        )
+        self.assertEqual(
+            operations,
+            {
+                "rule_visits": 7,
+                "explicit_edge_visits": 7,
+                "namespace_expansions": 2,
+                "namespace_global_visits": 2,
+            },
+        )
+        self.assertLessEqual(operations["rule_visits"], len(inventory))
+        self.assertLessEqual(operations["explicit_edge_visits"], len(references))
+
+        no_marker_operations = {}
+        self.assertEqual(
+            marker.closure(
+                {
+                    "inventory": [
+                        {**inventory[0], "tags": []},
+                        *inventory[1:],
+                    ],
+                    "references": references,
+                },
+                operations=no_marker_operations,
+            ),
+            {"markers": [], "retained": []},
+        )
+        self.assertEqual(
+            no_marker_operations,
+            {
+                "rule_visits": 0,
+                "explicit_edge_visits": 0,
+                "namespace_expansions": 0,
+                "namespace_global_visits": 0,
+            },
+        )
 
     def test_complete_native_namespace_closure_companions_and_descriptors(self):
         source, metadata = self.build()

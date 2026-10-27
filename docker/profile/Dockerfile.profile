@@ -20,6 +20,7 @@ ARG YARA_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential automake libtool make gcc pkg-config \
         libssl-dev libjansson-dev libmagic-dev curl ca-certificates unzip git \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
         -o /tmp/yara.tar.gz \
@@ -28,15 +29,25 @@ RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VER
     && rm /tmp/yara.tar.gz
 WORKDIR /tmp/yara-${YARA_VERSION}
 RUN ./bootstrap.sh \
-    && ./configure --enable-profiling --with-crypto \
+    && ./configure --disable-shared --enable-static --enable-profiling --with-crypto \
+    && make -j"$(nproc)" && make install && ldconfig
+# compile-rules.sh requires the same compiler-input observation points as the
+# production YARA stage. Profiling remains enabled across this rebuild.
+COPY docker/compiler-input-capture.h docker/patch-compiler-input-capture.py /tmp/capture/
+RUN python3 /tmp/capture/patch-compiler-input-capture.py . \
     && make -j"$(nproc)" && make install && ldconfig
 
 # the EXACT prod rule pipeline (single source of truth; context = repo root)
-COPY docker/fetch-rules.sh docker/compile-rules.sh /usr/local/bin/
+COPY docker/fetch-rules.sh docker/filter-rules.py /usr/local/bin/
+COPY docker/compile-rules.sh docker/capture-compiler-inputs.py /usr/local/bin/
 COPY docker/local-rules/ /usr/local/share/mailstrix-local-rules/
-RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/compile-rules.sh
+RUN chmod +x /usr/local/bin/fetch-rules.sh /usr/local/bin/filter-rules.py \
+        /usr/local/bin/compile-rules.sh
 ARG CACHEBUST=unset
-RUN /usr/local/bin/fetch-rules.sh /rules/src \
+ARG LOCAL_ONLY=0
+ARG MAILSTRIX_PROFILE=mail
+RUN LOCAL_ONLY="${LOCAL_ONLY}" MAILSTRIX_PROFILE="${MAILSTRIX_PROFILE}" \
+        /usr/local/bin/fetch-rules.sh /rules/src \
     && cp /usr/local/share/mailstrix-local-rules/*.yara /rules/src/ \
     && /usr/local/bin/compile-rules.sh /rules/src /rules/compiled.yac
 
@@ -44,8 +55,9 @@ COPY docker/profile/profile.c /tmp/profile.c
 # pkg-config output is intentionally unquoted so it word-splits into flags (the
 # SC2046 "warning" is the desired behaviour). CI hadolint only gates the prod
 # docker/Dockerfile, not this rig.
+# hadolint ignore=SC2046
 RUN gcc -O2 /tmp/profile.c -o /usr/local/bin/profile \
-      $(pkg-config --cflags --libs yara) -lyara -lssl -lcrypto -ljansson -lmagic -lm
+      $(pkg-config --cflags --static --libs yara) -lyara -lssl -lcrypto -ljansson -lmagic -lm
 
 # samples are mounted at run time (not baked — they're malware, gitignored):
 #   docker run --rm -v /path/to/samples:/samples strixd-profile
