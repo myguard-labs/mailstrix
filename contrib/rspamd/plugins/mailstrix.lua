@@ -105,7 +105,7 @@ local settings = {
   score_weight_max = 1.5,
   -- Cap on /scan requests per message (whole-message job + part jobs). A mail
   -- with dozens of parts can't fan out unbounded into strixd. Identical parts
-  -- (same attachment twice) are also deduped by their digest before this cap.
+  -- (same body and filename metadata) are also deduped before this cap.
   max_jobs = 32,
   -- Per-request effort tier (EFFORT-3). When enabled, the plugin sets the
   -- X-MAILSTRIX-Effort header from this message's signals so strixd spends deeper
@@ -409,15 +409,31 @@ local function check_cb(task)
       if #jobs >= settings.max_jobs then break end -- bound fan-out per message
       local content = part:get_content()
       if content and #content >= settings.min_part_size and #content <= settings.max_size then
-        -- Dedup identical parts (same attachment included twice) by the digest
-        -- rspamd already computed — saves a redundant /scan round-trip with no
-        -- coverage loss. Parts without a digest are kept (never dropped).
+        -- Dedup identical attachment jobs by the body digest rspamd already
+        -- computed plus the filename metadata sent to strixd. Filename and
+        -- extension are YARA external variables, so equal bodies with different
+        -- names can produce different verdicts and must remain separate jobs.
+        -- Parts without a digest are kept (never dropped).
         local dg = part:get_digest()
-        if not (dg and seen_parts[dg]) then
-          if dg then seen_parts[dg] = true end
+        local fname = part:get_filename()
+        local duplicate = false
+        if dg then
+          local fname_key = fname and fname ~= "" and fname or false
+          local seen_names = seen_parts[dg]
+          if seen_names and seen_names[fname_key] then
+            duplicate = true
+          else
+            if not seen_names then
+              seen_names = {}
+              seen_parts[dg] = seen_names
+            end
+            seen_names[fname_key] = true
+          end
+        end
+        if not duplicate then
           -- Pass the attachment filename so strixd sets the YARA filename/extension
           -- external vars (nil for an unnamed part — strixd then leaves them empty).
-          jobs[#jobs + 1] = { buf = content, what = "part", fname = part:get_filename() }
+          jobs[#jobs + 1] = { buf = content, what = "part", fname = fname }
         end
       end
     end

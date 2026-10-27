@@ -18,9 +18,20 @@ const (
 	// maxMIMEParts bounds the leaf parts walked across one message, so a
 	// message stuffed with thousands of tiny parts cannot spend the scan.
 	maxMIMEParts = 256
-	// mimeSniffLen bounds how far into the input the header block is looked
-	// for when deciding whether the input is an RFC 5322 message at all.
-	mimeSniffLen = 16 << 10
+	// maxMIMEHeaderBytes bounds top-level message classification. Real-world
+	// trace headers can exceed the former 16 KiB sniff window, while an
+	// unbounded search would let an unterminated header consume the full input.
+	// A terminator whose final byte is exactly at this limit is accepted.
+	maxMIMEHeaderBytes   = 256 << 10
+	mimeHeaderCapHitKind = "mime-header"
+)
+
+type mimeHeaderClassification uint8
+
+const (
+	mimeHeaderOrdinary mimeHeaderClassification = iota
+	mimeHeaderComplete
+	mimeHeaderIncomplete
 )
 
 // isMIMEMessage reports whether buf starts with an RFC 5322 header block that
@@ -28,19 +39,43 @@ const (
 // one other message header, all before the first blank line, so ordinary
 // text that happens to contain "Content-Type:" is not taken for a message.
 func isMIMEMessage(buf []byte) bool {
+	return classifyMIMEMessage(buf) == mimeHeaderComplete
+}
+
+// classifyMIMEMessage incrementally validates header lines within the fixed
+// top-level header budget. A syntactically plausible message that exhausts the
+// budget or input before its blank-line terminator is incomplete, not ordinary
+// text, so callers can keep a clean verdict out of the cache.
+func classifyMIMEMessage(buf []byte) mimeHeaderClassification {
 	head := buf
-	if len(head) > mimeSniffLen {
-		head = head[:mimeSniffLen]
+	truncated := len(head) > maxMIMEHeaderBytes
+	if truncated {
+		head = head[:maxMIMEHeaderBytes]
 	}
-	end := bytes.Index(head, []byte("\n\r\n"))
-	if e := bytes.Index(head, []byte("\n\n")); e >= 0 && (end < 0 || e < end) {
-		end = e
+	headerEnd := -1
+	if end := bytes.Index(head, []byte("\n\r\n")); end >= 0 {
+		headerEnd = end + 1
 	}
-	if end < 0 {
-		return false
+	if end := bytes.Index(head, []byte("\n\n")); end >= 0 && (headerEnd < 0 || end+1 < headerEnd) {
+		headerEnd = end + 1
+	}
+	terminated := headerEnd >= 0
+	if terminated {
+		head = head[:headerEnd]
+		truncated = false
 	}
 	var hasType, hasOther bool
-	for _, line := range bytes.Split(head[:end+1], []byte("\n")) {
+	for len(head) > 0 {
+		line := head
+		if end := bytes.IndexByte(head, '\n'); end >= 0 {
+			line = head[:end]
+			head = head[end+1:]
+		} else {
+			head = nil
+			if truncated {
+				break // the cap may have split an otherwise valid header line
+			}
+		}
 		line = bytes.TrimRight(line, "\r")
 		if len(line) == 0 {
 			continue
@@ -50,7 +85,7 @@ func isMIMEMessage(buf []byte) bool {
 		}
 		colon := bytes.IndexByte(line, ':')
 		if colon <= 0 || bytes.ContainsAny(line[:colon], " \t") {
-			return false // not a header line: not a header block
+			return mimeHeaderOrdinary // not a header line: not a header block
 		}
 		switch strings.ToLower(string(line[:colon])) {
 		case "content-type":
@@ -59,7 +94,22 @@ func isMIMEMessage(buf []byte) bool {
 			hasOther = true
 		}
 	}
-	return hasType && hasOther
+	if terminated {
+		if hasType && hasOther {
+			return mimeHeaderComplete
+		}
+		return mimeHeaderOrdinary
+	}
+	if truncated && hasOther {
+		// Content-Type may be the first complete field beyond the bounded
+		// prefix. A valid message-header prefix cannot safely fall through as
+		// ordinary text merely because that field lies past the cap.
+		return mimeHeaderIncomplete
+	}
+	if hasType && hasOther {
+		return mimeHeaderIncomplete
+	}
+	return mimeHeaderOrdinary
 }
 
 // fromMIME walks an RFC 5322 message (COR-01): multipart bodies are split,
@@ -81,6 +131,7 @@ func fromMIME(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 func walkMIMEMessage(buf []byte, res *Result, b *archiveBudget, depth int, deadline time.Time, parts *int, completeAncestor bool) {
 	msg, err := mail.ReadMessage(bytes.NewReader(buf))
 	if err != nil {
+		res.stopHit(mimeHeaderCapHitKind)
 		return
 	}
 	if depth > maxNestDepth {
