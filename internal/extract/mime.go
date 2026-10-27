@@ -34,6 +34,20 @@ const (
 	mimeHeaderIncomplete
 )
 
+func isMIMEContextHeader(field string) bool {
+	if strings.HasPrefix(field, "x-") || strings.HasPrefix(field, "arc-") {
+		return true
+	}
+	switch field {
+	case "mime-version", "from", "to", "cc", "bcc", "subject", "date", "received",
+		"message-id", "return-path", "reply-to", "sender", "delivered-to",
+		"dkim-signature", "authentication-results":
+		return true
+	default:
+		return false
+	}
+}
+
 // isMIMEMessage reports whether buf starts with an RFC 5322 header block that
 // declares a MIME Content-Type (COR-01). It needs a Content-Type header plus
 // one other message header, all before the first blank line, so ordinary
@@ -64,17 +78,16 @@ func classifyMIMEMessage(buf []byte) mimeHeaderClassification {
 		head = head[:headerEnd]
 		truncated = false
 	}
-	var hasType, hasOther bool
+	var hasType, hasOther, hasContext bool
 	for len(head) > 0 {
 		line := head
+		completeLine := true
 		if end := bytes.IndexByte(head, '\n'); end >= 0 {
 			line = head[:end]
 			head = head[end+1:]
 		} else {
 			head = nil
-			if truncated {
-				break // the cap may have split an otherwise valid header line
-			}
+			completeLine = !truncated
 		}
 		line = bytes.TrimRight(line, "\r")
 		if len(line) == 0 {
@@ -85,13 +98,38 @@ func classifyMIMEMessage(buf []byte) mimeHeaderClassification {
 		}
 		colon := bytes.IndexByte(line, ':')
 		if colon <= 0 || bytes.ContainsAny(line[:colon], " \t") {
+			if !completeLine {
+				break // the cap split ordinary text rather than a header field
+			}
 			return mimeHeaderOrdinary // not a header line: not a header block
 		}
-		switch strings.ToLower(string(line[:colon])) {
-		case "content-type":
+		field := strings.ToLower(string(line[:colon]))
+		if field == "content-type" {
+			if !completeLine {
+				// The field value may be cut off, but a syntactically valid
+				// media type prefix is enough to prove a MIME-like prefix.
+				mediaType := bytes.TrimSpace(bytes.SplitN(line[colon+1:], []byte(";"), 2)[0])
+				if slash := bytes.IndexByte(mediaType, '/'); slash > 0 {
+					probe := string(mediaType)
+					if slash == len(mediaType)-1 {
+						probe += "x"
+					}
+					if _, _, err := mime.ParseMediaType(probe); err == nil {
+						return mimeHeaderIncomplete
+					}
+				}
+				if hasOther {
+					return mimeHeaderIncomplete
+				}
+				return mimeHeaderOrdinary
+			}
 			hasType = true
-		case "mime-version", "from", "to", "subject", "date", "received", "message-id", "return-path":
+		} else {
 			hasOther = true
+			hasContext = hasContext || isMIMEContextHeader(field)
+		}
+		if !completeLine {
+			break
 		}
 	}
 	if terminated {
@@ -100,7 +138,7 @@ func classifyMIMEMessage(buf []byte) mimeHeaderClassification {
 		}
 		return mimeHeaderOrdinary
 	}
-	if truncated && hasOther {
+	if truncated && (hasContext || hasType && hasOther) {
 		// Content-Type may be the first complete field beyond the bounded
 		// prefix. A valid message-header prefix cannot safely fall through as
 		// ordinary text merely because that field lies past the cap.

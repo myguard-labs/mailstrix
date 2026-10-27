@@ -158,11 +158,29 @@ func TestMIMEHeaderClassificationBounds(t *testing.T) {
 	lateContentType := []byte("From: a@x\r\n" +
 		strings.Repeat("X-Padding: x\r\n", maxMIMEHeaderBytes/4) +
 		"Content-Type: text/plain\r\n\r\nbody")
+	splitCustomHeader := []byte("Content-Type: text/plain\r\nX-Padding: " +
+		strings.Repeat("x", maxMIMEHeaderBytes))
+	splitContentType := []byte("Content-Type: text/plain; boundary=" +
+		strings.Repeat("x", maxMIMEHeaderBytes))
+	splitInvalidPrefix := "From: a@x\r\nX-Padding: "
+	splitInvalidType := "\r\nContent-Type: application/"
+	splitInvalidContentType := []byte(splitInvalidPrefix +
+		strings.Repeat("x", maxMIMEHeaderBytes-len(splitInvalidPrefix)-len(splitInvalidType)) +
+		splitInvalidType + "zip\r\n\r\nbody")
+	if got := string(splitInvalidContentType[maxMIMEHeaderBytes:]); got != "zip\r\n\r\nbody" {
+		t.Fatalf("split invalid Content-Type suffix = %q, want exact cap boundary", got)
+	}
+	customHeadersBeforeType := []byte(strings.Repeat("X-Padding: x\r\n", maxMIMEHeaderBytes/4) +
+		"Content-Type: text/plain\r\n\r\nbody")
 	for name, input := range map[string][]byte{
 		"unterminated": []byte("From: a@x\r\nContent-Type: text/plain\r\nSubject: open"),
 		"over-cap": append([]byte("From: a@x\r\nContent-Type: text/plain\r\n"),
 			[]byte(strings.Repeat("X-Padding: x\r\n", maxMIMEHeaderBytes/4))...),
 		"over-cap-late-content-type": lateContentType,
+		"over-cap-custom-prefix":     customHeadersBeforeType,
+		"split-custom-header":        splitCustomHeader,
+		"split-content-type":         splitContentType,
+		"split-invalid-content-type": splitInvalidContentType,
 	} {
 		if got := classifyMIMEMessage(input); got != mimeHeaderIncomplete {
 			t.Errorf("%s classification = %v, want incomplete", name, got)
@@ -179,6 +197,22 @@ func TestMIMEHeaderClassificationBounds(t *testing.T) {
 	}
 	if res := Extract(ordinary, time.Time{}); res.TopType != "" || hasCapHit(res, mimeHeaderCapHitKind) {
 		t.Fatalf("ordinary Content-Type text result TopType=%q CapHits=%v", res.TopType, res.CapHits)
+	}
+	ordinarySplit := []byte("Content-Type: ordinary words " + strings.Repeat("x", maxMIMEHeaderBytes))
+	if got := classifyMIMEMessage(ordinarySplit); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary split Content-Type classification = %v, want ordinary", got)
+	}
+	ordinaryToken := []byte("Content-Type: attachment" + strings.Repeat("x", maxMIMEHeaderBytes))
+	if got := classifyMIMEMessage(ordinaryToken); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary token Content-Type classification = %v, want ordinary", got)
+	}
+	ordinaryLog := []byte(strings.Repeat("2026-10-27T10:00:01 INFO ordinary\n", maxMIMEHeaderBytes/16))
+	if got := classifyMIMEMessage(ordinaryLog); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary timestamp log classification = %v, want ordinary", got)
+	}
+	ordinaryKeys := []byte(strings.Repeat("Note: ordinary value\n", maxMIMEHeaderBytes/8))
+	if got := classifyMIMEMessage(ordinaryKeys); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary key/value classification = %v, want ordinary", got)
 	}
 	finiteNonMIME := []byte("From: a@x\r\nSubject: ordinary\r\n\r\nplain body")
 	if got := classifyMIMEMessage(finiteNonMIME); got != mimeHeaderOrdinary {
