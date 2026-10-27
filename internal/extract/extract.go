@@ -381,7 +381,7 @@ type Result struct {
 	// CapHits names each extraction cap that stopped the walk while input was
 	// left (COR-07b): "streams", "archive-budget", "zip-entries", "rtf-objects",
 	// "pdf-streams", "member-size", "lzma-dict", "decoder-unavailable", "depth",
-	// "mime-depth" or "mime-parts", each
+	// "mime-depth", "mime-parts" or "mime-header", each
 	// at most once, in first-hit order. finalizeStreams
 	// emits one EXTRACT-CAP-HIT marker per kind, and the scanner treats any
 	// hit as an incomplete scan, so a capped walk is never cached as clean.
@@ -464,6 +464,15 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 	// preDecodeLen is the Streams length before the static-decode pass; -1 until
 	// that pass starts (then every stream so far is format-extractor content).
 	preDecodeLen := -1
+	mimeClass := mimeHeaderOrdinary
+	mimeClassified := false
+	classifyMIME := func() mimeHeaderClassification {
+		if !mimeClassified {
+			mimeClass = classifyMIMEMessage(buf)
+			mimeClassified = true
+		}
+		return mimeClass
+	}
 	defer func() {
 		if recover() != nil {
 			res.Failed = true
@@ -559,36 +568,21 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 		// Surface CSV-DDE markers for the DDE command form.
 		res.TopType = TopTypeSpreadsheetML
 		fromSpreadsheetML(buf, &res, deadline)
-	case isMIMEMessage(buf):
+	case classifyMIME() == mimeHeaderComplete:
 		// A whole mail message (milter, strix-scan .eml): split the MIME parts
 		// and decode base64/quoted-printable, so each attachment is unpacked
 		// like the same file submitted on its own (COR-01).
 		res.TopType = TopTypeMIME
 		fromMIME(buf, &res, b, 0, deadline)
+	case classifyMIME() == mimeHeaderIncomplete:
+		// Enough valid message headers were seen to distinguish this from
+		// ordinary text, but the bounded header probe could not reach its
+		// terminator. Keep the result explicitly incomplete and non-cacheable.
+		res.TopType = TopTypeMIME
+		res.stopHit(mimeHeaderCapHitKind)
+		fromUnstructuredText(buf, &res, b, deadline)
 	default:
-		// Not a container. The buffer may still hide an MS Script Encoder block
-		// (#@~^...^#~@) — an encoded VBScript/JScript that raw-byte rules can't see
-		// because the script source is substituted. Found in .vbe/.jse files and
-		// embedded in .wsf/.hta/.html/.sct. Decode every block to cleartext so the
-		// keyword rules match. Best-effort; non-script input yields nothing.
-		fromEncodedScript(buf, &res, deadline)
-		// The buffer may also be a plain CSV/TSV whose cells carry the DDE
-		// command-injection form (=cmd|'/c calc'!A1) — a macro-less, container-
-		// less command-execution carrier. Self-gating: emits a CSV-DDE marker only
-		// on a real DDE-form cell, so it's safe to run on arbitrary text.
-		fromCSVDDE(buf, &res, deadline)
-		// The buffer may be an HTML/SVG part smuggling a payload (atob→Blob→
-		// download, or a force-downloaded base64 data: URI). Self-gating: emits a
-		// marker only on the dangerous combo and carves a force-downloaded data:
-		// URI back through extractChild. Safe on arbitrary text.
-		fromHTMLSmuggling(buf, &res, b, 0, deadline)
-		// The buffer may be a Windows .bat echo-redirect dropper hiding a VBS/JS/PS1
-		// payload. Self-gating (cheap prefilter bails on non-batch text), bounded by
-		// the shared archive budget.
-		fromBatchDropper(buf, &res, b, 0, deadline)
-		// Launcher text adds field context without replacing the other text
-		// extractors: a section name inside a script must not suppress decoding.
-		fromLauncherFields(buf, &res, deadline)
+		fromUnstructuredText(buf, &res, b, deadline)
 	}
 
 	// Polyglot / file-type confusion: the dispatch above routes on the FIRST magic
@@ -631,6 +625,18 @@ func ExtractWithOptions(buf []byte, opts *Options) (res Result) {
 
 	finalizeStreams(&res, preDecodeLen)
 	return res
+}
+
+// fromUnstructuredText runs the self-gating extractors used for input that did
+// not match a complete container. Incomplete MIME still takes this path: the
+// cap hit prevents a clean cached verdict, while these extractors preserve
+// detection of encoded content in the bytes already available.
+func fromUnstructuredText(buf []byte, res *Result, b *archiveBudget, deadline time.Time) {
+	fromEncodedScript(buf, res, deadline)
+	fromCSVDDE(buf, res, deadline)
+	fromHTMLSmuggling(buf, res, b, 0, deadline)
+	fromBatchDropper(buf, res, b, 0, deadline)
+	fromLauncherFields(buf, res, deadline)
 }
 
 // afterFormatHook, when set by a test, runs between format extraction and the

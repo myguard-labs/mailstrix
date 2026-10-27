@@ -139,6 +139,120 @@ func TestIsMIMEMessage(t *testing.T) {
 	}
 }
 
+func TestMIMEHeaderClassificationBounds(t *testing.T) {
+	short := []byte("From: a@x\r\nContent-Type: text/plain\r\n\r\nhi")
+	if got := classifyMIMEMessage(short); got != mimeHeaderComplete {
+		t.Fatalf("short message classification = %v, want complete", got)
+	}
+
+	prefix := "From: a@x\r\nContent-Type: text/plain\r\nX-Padding: "
+	suffix := "\r\n\r\n"
+	atCap := []byte(prefix + strings.Repeat("x", maxMIMEHeaderBytes-len(prefix)-len(suffix)) + suffix)
+	if len(atCap) != maxMIMEHeaderBytes {
+		t.Fatalf("boundary fixture length = %d, want %d", len(atCap), maxMIMEHeaderBytes)
+	}
+	if got := classifyMIMEMessage(atCap); got != mimeHeaderComplete {
+		t.Fatalf("terminator-at-cap classification = %v, want complete", got)
+	}
+
+	lateContentType := []byte("From: a@x\r\n" +
+		strings.Repeat("X-Padding: x\r\n", maxMIMEHeaderBytes/4) +
+		"Content-Type: text/plain\r\n\r\nbody")
+	splitCustomHeader := []byte("Content-Type: text/plain\r\nX-Padding: " +
+		strings.Repeat("x", maxMIMEHeaderBytes))
+	splitContentType := []byte("Content-Type: text/plain; boundary=" +
+		strings.Repeat("x", maxMIMEHeaderBytes))
+	splitInvalidPrefix := "From: a@x\r\nX-Padding: "
+	splitInvalidType := "\r\nContent-Type: application/"
+	splitInvalidContentType := []byte(splitInvalidPrefix +
+		strings.Repeat("x", maxMIMEHeaderBytes-len(splitInvalidPrefix)-len(splitInvalidType)) +
+		splitInvalidType + "zip\r\n\r\nbody")
+	if got := string(splitInvalidContentType[maxMIMEHeaderBytes:]); got != "zip\r\n\r\nbody" {
+		t.Fatalf("split invalid Content-Type suffix = %q, want exact cap boundary", got)
+	}
+	customHeadersBeforeType := []byte(strings.Repeat("X-Padding: x\r\n", maxMIMEHeaderBytes/4) +
+		"Content-Type: text/plain\r\n\r\nbody")
+	for name, input := range map[string][]byte{
+		"unterminated": []byte("From: a@x\r\nContent-Type: text/plain\r\nSubject: open"),
+		"over-cap": append([]byte("From: a@x\r\nContent-Type: text/plain\r\n"),
+			[]byte(strings.Repeat("X-Padding: x\r\n", maxMIMEHeaderBytes/4))...),
+		"over-cap-late-content-type": lateContentType,
+		"over-cap-custom-prefix":     customHeadersBeforeType,
+		"split-custom-header":        splitCustomHeader,
+		"split-content-type":         splitContentType,
+		"split-invalid-content-type": splitInvalidContentType,
+	} {
+		if got := classifyMIMEMessage(input); got != mimeHeaderIncomplete {
+			t.Errorf("%s classification = %v, want incomplete", name, got)
+		}
+		res := Extract(input, time.Time{})
+		if res.TopType != TopTypeMIME || !hasCapHit(res, mimeHeaderCapHitKind) {
+			t.Errorf("%s result TopType=%q CapHits=%v", name, res.TopType, res.CapHits)
+		}
+	}
+
+	ordinary := []byte("Content-Type: text/plain\r\n" + strings.Repeat("ordinary words ", maxMIMEHeaderBytes/8))
+	if got := classifyMIMEMessage(ordinary); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary Content-Type text classification = %v", got)
+	}
+	if res := Extract(ordinary, time.Time{}); res.TopType != "" || hasCapHit(res, mimeHeaderCapHitKind) {
+		t.Fatalf("ordinary Content-Type text result TopType=%q CapHits=%v", res.TopType, res.CapHits)
+	}
+	ordinarySplit := []byte("Content-Type: ordinary words " + strings.Repeat("x", maxMIMEHeaderBytes))
+	if got := classifyMIMEMessage(ordinarySplit); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary split Content-Type classification = %v, want ordinary", got)
+	}
+	ordinaryToken := []byte("Content-Type: attachment" + strings.Repeat("x", maxMIMEHeaderBytes))
+	if got := classifyMIMEMessage(ordinaryToken); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary token Content-Type classification = %v, want ordinary", got)
+	}
+	ordinaryLog := []byte(strings.Repeat("2026-10-27T10:00:01 INFO ordinary\n", maxMIMEHeaderBytes/16))
+	if got := classifyMIMEMessage(ordinaryLog); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary timestamp log classification = %v, want ordinary", got)
+	}
+	ordinaryKeys := []byte(strings.Repeat("Note: ordinary value\n", maxMIMEHeaderBytes/8))
+	if got := classifyMIMEMessage(ordinaryKeys); got != mimeHeaderOrdinary {
+		t.Fatalf("ordinary key/value classification = %v, want ordinary", got)
+	}
+	finiteNonMIME := []byte("From: a@x\r\nSubject: ordinary\r\n\r\nplain body")
+	if got := classifyMIMEMessage(finiteNonMIME); got != mimeHeaderOrdinary {
+		t.Fatalf("finite non-MIME classification = %v", got)
+	}
+	if res := Extract(finiteNonMIME, time.Time{}); res.TopType != "" || hasCapHit(res, mimeHeaderCapHitKind) {
+		t.Fatalf("finite non-MIME result TopType=%q CapHits=%v", res.TopType, res.CapHits)
+	}
+}
+
+func TestMIMEIncompletePreservesUnstructuredExtraction(t *testing.T) {
+	input := append([]byte("From: a@x\r\nContent-Type: text/plain\r\nX-Encoded: "), encodedVBEBlock...)
+	res := Extract(input, time.Time{})
+	if res.TopType != TopTypeMIME || !hasCapHit(res, mimeHeaderCapHitKind) {
+		t.Fatalf("incomplete MIME result TopType=%q CapHits=%v", res.TopType, res.CapHits)
+	}
+	if !res.EncodedScript || !streamsContain(res, `MsgBox "Hello"`) {
+		t.Fatalf("incomplete MIME lost encoded-script extraction: EncodedScript=%v streams=%d", res.EncodedScript, len(res.Streams))
+	}
+}
+
+func TestMIMELongHeaderDecodesCompressedAttachment(t *testing.T) {
+	zip := zipOfMembers(t, []string{"sentinel.txt"}, [][]byte{[]byte(mimeNeedle + "-LONG-HEADER")})
+	header := "From: a@example.com\r\nMIME-Version: 1.0\r\nX-Padding: " +
+		strings.Repeat("x", (16<<10)+1024) + "\r\n" +
+		"Content-Type: application/zip; name=sentinel.zip\r\n" +
+		"Content-Disposition: attachment; filename=sentinel.zip\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n"
+	if end := strings.Index(header, "\r\n\r\n"); end <= 16<<10 {
+		t.Fatalf("fixture header ends at %d, want beyond 16 KiB", end)
+	}
+	res := Extract([]byte(header+b64Lines(zip)), time.Time{})
+	if !res.IsMIME || res.TopType != TopTypeMIME || !res.IsArchive || !streamsContain(res, mimeNeedle+"-LONG-HEADER") {
+		t.Fatalf("long-header attachment not decoded: IsMIME=%v TopType=%q IsArchive=%v streams=%d", res.IsMIME, res.TopType, res.IsArchive, len(res.Streams))
+	}
+	if hasCapHit(res, mimeHeaderCapHitKind) {
+		t.Fatalf("valid long header reported incomplete: %v", res.CapHits)
+	}
+}
+
 // TestMIMENegativeControl: a raw zip still takes the zip path, and plain
 // text is not treated as a message.
 func TestMIMENegativeControl(t *testing.T) {
