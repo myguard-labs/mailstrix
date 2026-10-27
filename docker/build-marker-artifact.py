@@ -87,26 +87,57 @@ def identity(rule):
     return [rule["namespace"], rule["identifier"]]
 
 
-def closure(graph):
+def closure_index(graph):
     rows = graph["inventory"]
-    edges = {i: set() for i in range(len(rows))}
+    edges = [[] for _ in rows]
     globals_by_ns = {}
+    markers = []
     for row in rows:
         if row["flags"] & 2:
-            globals_by_ns.setdefault(row["namespace"], set()).add(row["native_index"])
+            globals_by_ns.setdefault(row["namespace"], []).append(row["native_index"])
+        if "marker" in row["tags"]:
+            markers.append(row["native_index"])
     for source, target in graph["references"]:
-        edges[source].add(target)
-    markers = [row["native_index"] for row in rows if "marker" in row["tags"]]
+        # The native graph deliberately retains repeated references. Keep them
+        # here too: every explicit edge of a retained rule must be visited.
+        edges[source].append(target)
+    return rows, edges, globals_by_ns, markers
+
+
+def closure(graph, *, operations=None):
+    rows, edges, globals_by_ns, markers = closure_index(graph)
     retained = set(markers)
     todo = list(markers)
-    while todo:
-        current = todo.pop()
-        for dep in edges[current] | globals_by_ns.get(
-            rows[current]["namespace"], set()
-        ):
-            if dep not in retained:
-                retained.add(dep)
-                todo.append(dep)
+    expanded_namespaces = set()
+    counts = {
+        "rule_visits": 0,
+        "explicit_edge_visits": 0,
+        "namespace_expansions": 0,
+        "namespace_global_visits": 0,
+    }
+
+    def enqueue(dep):
+        if dep not in retained:
+            retained.add(dep)
+            todo.append(dep)
+
+    for current in todo:
+        counts["rule_visits"] += 1
+        for dep in edges[current]:
+            counts["explicit_edge_visits"] += 1
+            enqueue(dep)
+        namespace = rows[current]["namespace"]
+        if namespace not in expanded_namespaces:
+            # Removing this add must trip the named operation-bound mutation:
+            # globals are expanded once per reachable namespace, not per rule.
+            expanded_namespaces.add(namespace)
+            counts["namespace_expansions"] += 1
+            for dep in globals_by_ns.get(namespace, ()):
+                counts["namespace_global_visits"] += 1
+                enqueue(dep)
+    if operations is not None:
+        operations.clear()
+        operations.update(counts)
     return {"markers": markers, "retained": sorted(retained)}
 
 

@@ -514,6 +514,27 @@ def validate_files(root, good, filelist, prefix):
     return 0
 
 
+def run_final(root, good, output, prefix):
+    """Run the final compiler with each accepted record as one argument."""
+    serialized = Path(good).read_bytes()
+    if not serialized.endswith(b"\n"):
+        raise RetentionError("malformed accepted-root records")
+    records = serialized[:-1].split(b"\n")
+    if any(
+        not namespace or not separator or not path
+        for record in records
+        for namespace, separator, path in (record.partition(b":"),)
+    ):
+        raise RetentionError("malformed accepted-root records")
+    return run(
+        root,
+        "final",
+        "",
+        "",
+        prefix + [os.fsdecode(record) for record in records] + [output],
+    )
+
+
 def final_inputs(state):
     final = state["final"]
     if final is None or final["exit"] != 0:
@@ -721,6 +742,10 @@ def main(argv):
         # validate ROOT GOOD FILELIST COMPILER-ARGV...: FILELIST holds one
         # source path per line; COMPILER-ARGV excludes the root and output.
         return validate_files(Path(argv[1]), argv[2], argv[3], argv[4:])
+    elif command == "final":
+        # final ROOT GOOD OUTPUT COMPILER-ARGV...: GOOD holds one complete
+        # namespace:path compiler argument per newline-terminated record.
+        return run_final(Path(argv[1]), argv[2], argv[3], argv[4:])
     elif command == "finish":
         finish(Path(argv[1]))
     elif command == "verify":

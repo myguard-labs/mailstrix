@@ -39,6 +39,51 @@ capture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capture)
 
 
+class TestCompilerArgumentAssembly(unittest.TestCase):
+    def test_final_argv_preserves_records_verbatim_and_in_order(self):
+        with tempfile.TemporaryDirectory(prefix="compiler-argv-") as temporary:
+            root = Path(temporary)
+            good = root / "accepted"
+            records = [
+                "first rule.yar:/rules/first rule.yar",
+                "second.yara:/rules/[literal]*;$dollar\tsecond.yara",
+            ]
+            good.write_bytes(
+                b"\n".join(os.fsencode(record) for record in records) + b"\n"
+            )
+            prefix = ["yarac", "-d", "filepath="]
+            output = str(root / "compiled output.yac")
+            with mock.patch.object(capture, "run", return_value=17) as run:
+                self.assertEqual(capture.run_final(root, good, output, prefix), 17)
+            run.assert_called_once_with(
+                root, "final", "", "", prefix + records + [output]
+            )
+
+    def test_final_argv_rejects_malformed_records_without_running_compiler(self):
+        malformed = {
+            "empty": b"",
+            "unterminated": b"one.yar:/rules/one.yar",
+            "blank": b"one.yar:/rules/one.yar\n\n",
+            "no namespace": b":/rules/one.yar\n",
+            "no separator": b"one.yar-/rules/one.yar\n",
+            "no path": b"one.yar:\n",
+        }
+        with tempfile.TemporaryDirectory(prefix="compiler-argv-") as temporary:
+            root = Path(temporary)
+            good = root / "accepted"
+            for name, content in malformed.items():
+                with self.subTest(name=name):
+                    good.write_bytes(content)
+                    with (
+                        mock.patch.object(capture, "run") as run,
+                        self.assertRaisesRegex(
+                            capture.RetentionError, "malformed accepted-root records"
+                        ),
+                    ):
+                        capture.run_final(root, good, "compiled.yac", ["yarac"])
+                    run.assert_not_called()
+
+
 class CompilerInputRetention(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -169,6 +214,46 @@ class CompilerInputRetention(unittest.TestCase):
             0,
         )
         self.assertEqual(self.out.read_bytes(), oracle.read_bytes())
+
+    def test_compile_rules_preserves_literal_accepted_root_argv_order(self):
+        first = self.src / "z first rule.yar"
+        second = self.src / "a [literal]*;$dollar.yara"
+        first.write_text("rule First { condition: true }\n")
+        second.write_text("rule Second { condition: true }\n")
+        result = self.compile_bundle()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, state = self.state()
+        expected = [f"{path.name}:{path}" for path in (first, second)]
+        roots = state["final"]["argv"][1 + 2 * len(capture.EXTERNALS) : -1]
+        self.assertEqual(roots, expected)
+        self.assertEqual(
+            [validation["candidate"]["path"] for validation in state["validations"]],
+            [str(first), str(second)],
+        )
+
+    def test_compile_rules_honors_capture_compiler_override(self):
+        candidate = self.src / "override.yar"
+        candidate.write_text("rule Override { condition: true }\n")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        decoy = bin_dir / "yarac"
+        decoy.write_text("#!/bin/sh\nexit 125\n")
+        decoy.chmod(0o755)
+        env = dict(
+            self.env,
+            PATH=str(bin_dir) + os.pathsep + self.env["PATH"],
+            MX_CAPTURE_YARAC=str(COMPILER),
+        )
+        result = self.execute(
+            ["sh", REPO / "docker/compile-rules.sh", self.src, self.out], env=env
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, state = self.state()
+        self.assertEqual(state["final"]["argv"][0], str(COMPILER))
+        self.assertEqual(
+            state["final"]["argv"][1 + 2 * len(capture.EXTERNALS) : -1],
+            [f"{candidate.name}:{candidate}"],
+        )
 
     def test_relative_output_verifies_and_restores_from_another_cwd(self):
         (self.src / "a.yar").write_text("rule Good { condition: true }\n")
@@ -1491,18 +1576,17 @@ int main(void) {
             ),
             0,
         )
+        accepted = self.root / "dispatch-accepted"
+        accepted.write_text("dispatch.yar:" + str(candidate) + "\n")
         self.assertEqual(
             capture.main(
                 [
-                    "run",
-                    str(root),
                     "final",
-                    "",
-                    "",
+                    str(root),
+                    str(accepted),
+                    str(output),
                     str(COMPILER),
                     *ext,
-                    "dispatch.yar:" + str(candidate),
-                    str(output),
                 ]
             ),
             0,
@@ -2101,6 +2185,7 @@ int main(void) {
         fake.write_text("#!/bin/sh\nexit 125\n")
         fake.chmod(0o755)
         env = dict(self.env, PATH=str(bin_dir) + os.pathsep + self.env["PATH"])
+        env.pop("MX_CAPTURE_YARAC", None)
         result = self.execute(
             ["sh", REPO / "docker/compile-rules.sh", self.src, self.out], env=env
         )
