@@ -24,6 +24,7 @@ DIRECT_NEEDS = [
     "lint",
     "scanners",
     "publisher-concurrency",
+    "publisher-ordering",
     "rspamd",
     "spamassassin",
     "compiler-inputs",
@@ -96,6 +97,8 @@ class FourLaneContract(unittest.TestCase):
             "SCANNERS_RESULT": "success",
             "PUBLISHER_CONCURRENCY_SELECTED": "false",
             "PUBLISHER_CONCURRENCY_RESULT": "skipped",
+            "PUBLISHER_ORDERING_SELECTED": "false",
+            "PUBLISHER_ORDERING_RESULT": "skipped",
             "DOCKER_RESULT": "success",
             "GO_SELECTED": "false",
             "SCOPE_SELECTED": "false",
@@ -125,7 +128,7 @@ class FourLaneContract(unittest.TestCase):
         self.assertIs(lane_manifest["speed_claim"], False)
         self.assertEqual([lane["id"] for lane in lane_manifest["lanes"]], list(GROUPS))
         jobs = [job for lane in lane_manifest["lanes"] for job in lane["jobs"]]
-        self.assertEqual(len(jobs), 36)
+        self.assertEqual(len(jobs), 37)
         self.assertEqual(len(jobs), len(set(jobs)))
         self.assertTrue(all(lane["mode"] for lane in lane_manifest["lanes"]))
         self.assertEqual(
@@ -162,6 +165,13 @@ class FourLaneContract(unittest.TestCase):
                 {
                     "PUBLISHER_CONCURRENCY_SELECTED": "true",
                     "PUBLISHER_CONCURRENCY_RESULT": "success",
+                },
+            ),
+            (
+                "PUBLISHER_ORDERING_RESULT",
+                {
+                    "PUBLISHER_ORDERING_SELECTED": "true",
+                    "PUBLISHER_ORDERING_RESULT": "success",
                 },
             ),
             ("DOCKER_RESULT", {}),
@@ -216,6 +226,7 @@ class FourLaneContract(unittest.TestCase):
         for result_name in (
             "LINT_RESULT",
             "PUBLISHER_CONCURRENCY_RESULT",
+            "PUBLISHER_ORDERING_RESULT",
             "NATIVE_RESULT",
             "PR_BINARIES_RESULT",
             "PR_MARKER_IMAGE_RESULT",

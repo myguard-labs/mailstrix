@@ -126,13 +126,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     marker_library=$(sha256sum /usr/local/lib/libyara.a | cut -d " " -f1) \
     && marker_compiler=$(sha256sum /opt/marker-compiler/yarac | cut -d " " -f1) \
-    && go build -tags yara_static \
+    && go build -trimpath -tags yara_static \
         -ldflags "-s -w -X main.version=${VERSION} -X main.libyaraVersion=${YARA_VERSION} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeLibYaraSHA256=${marker_library} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeCompilerSHA256=${marker_compiler} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeVersion=${YARA_VERSION}" \
         -o /out/strixd ./cmd/strixd \
-    && CGO_ENABLED=0 go build \
+    && CGO_ENABLED=0 go build -trimpath \
         -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/strix-scan ./cmd/strix-scan \
-    && CGO_ENABLED=0 go build \
+    && CGO_ENABLED=0 go build -trimpath \
         -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/strix-milter ./cmd/strix-milter
 

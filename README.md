@@ -723,6 +723,30 @@ which matches the fail-open posture above.
 Keep the listener on loopback or a unix socket: anyone who can reach it can have
 messages scanned.
 
+## Upgrading from v1.2.0
+
+Changes since v1.2.0 that can stop an existing deployment from starting or
+fetching rules:
+
+- **Wildcard ICAP/clamd binds are refused.** A `MAILSTRIX_ICAP_ADDR` or
+  `MAILSTRIX_CLAMD_TCP_ADDR` such as `:1344`, `0.0.0.0:1344` or `[::]:1344`
+  (or a hostname resolving to an unspecified address) makes `strixd` log
+  `wildcard bind requires MAILSTRIX_ALLOW_WILDCARD_BIND=1` and exit with
+  status 2. Bind a specific address (for example `127.0.0.1:1344`), or set
+  `MAILSTRIX_ALLOW_WILDCARD_BIND=1` after confirming the port is firewalled:
+  these listeners do not enforce the `/scan` token.
+- **Plain `http://` rule URLs are refused.** A rules URL must be `https://`;
+  `http://` fails with `rules URL must use https (set
+  MAILSTRIX_RULES_ALLOW_HTTP=1 to permit plain http)`, and any other scheme
+  or a URL without a host is refused outright. Switch the URL to `https://`,
+  or opt in with `MAILSTRIX_RULES_ALLOW_HTTP=1` (`strixd serve
+  -rules-allow-http`, `strixd fetch-rules -allow-http`). An https-to-http
+  redirect stays refused even with the opt-in.
+- **Helm chart image.** The chart's default `image.repository` is
+  `eilandert/mailstrix` (the Docker Hub image); an interim default of
+  `myguard-labs/mailstrix` does not resolve. Charts that pinned the latter
+  must set `image.repository=eilandert/mailstrix`.
+
 ## Configuration
 
 Optional manual attachment detonation has a separate HTTPS listener configured
@@ -1359,7 +1383,7 @@ docker run --rm --name mailstrix-icap \
     -e MAILSTRIX_ICAP_ADDR=:1344 \
     -e MAILSTRIX_ALLOW_WILDCARD_BIND=1 \
     -p 127.0.0.1:1344:1344 \
-    myguard-labs/mailstrix
+    eilandert/mailstrix
 ```
 
 The ICAP listener starts on `:1344` (IANA ICAP port). The HTTP `/scan` server
@@ -1568,7 +1592,7 @@ detector) — CI fails on a bad commit before any image is published:
 docker build --target test -f docker/Dockerfile -t strixd-test .
 
 # the production image (distroless, nonroot, ~100 MB):
-docker build --target final -f docker/Dockerfile -t myguard-labs/mailstrix \
+docker build --target final -f docker/Dockerfile -t eilandert/mailstrix \
     --build-arg CACHEBUST=$(date +%s) .
 ```
 
