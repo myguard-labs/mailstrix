@@ -5,7 +5,7 @@ Go HTTP daemon that scans mail content with YARA rules (plus optional abuse.ch
 threat-intel feeds) as an internal backend for the rspamd `mailstrix.lua` plugin.
 
 It mirrors the security posture and configuration surface of the reference
-[`docker/docker-compose.yml`](../../../docker/docker-compose.yml): distroless
+[`docker/docker-compose.yml`](../../../../docker/docker-compose.yml): distroless
 nonroot user, immutable rootfs, all capabilities dropped, no privilege
 escalation, `RuntimeDefault` seccomp.
 
@@ -93,7 +93,7 @@ Set `serviceMonitor.enabled=true` to have Prometheus Operator scrape `/metrics`.
 
 ## See also
 
-- Project root README: [`../../../README.md`](../../../README.md)
-- Reference docker-compose: [`../../../docker/docker-compose.yml`](../../../docker/docker-compose.yml)
+- Project root README: [`../../../../README.md`](../../../../README.md)
+- Reference docker-compose: [`../../../../docker/docker-compose.yml`](../../../../docker/docker-compose.yml)
 - Prometheus alerts: [`../../prometheus/`](../../prometheus/)
 - Grafana dashboard: [`../../grafana/`](../../grafana/)

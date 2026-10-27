@@ -1,17 +1,23 @@
 #!/bin/sh
-# Verify every relative link target in the contrib/ README files resolves to a
-# real path. Catches the kind of dangling ../README.md left after moving the
-# integrations under contrib/. Only relative (non-http, non-anchor) targets are
-# checked; bare #anchors and external URLs are skipped.
+# Verify every relative link target in tracked contrib/ README files resolves
+# to a real path, including nested deployment documentation. Only relative
+# (non-http, non-anchor) targets are checked; bare #anchors and external URLs
+# are skipped.
 set -eu
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 miss="$(mktemp)"
 stale="$(mktemp)"
-trap 'rm -f "$miss" "$stale"' EXIT
+readmes="$(mktemp)"
+trap 'rm -f "$miss" "$stale" "$readmes"' EXIT
 
-for md in "$root"/contrib/*/README.md; do
-    [ -f "$md" ] || continue
+if ! git -C "$root" ls-files -- 'contrib/**/README.md' > "$readmes"; then
+    echo "FAIL - cannot enumerate tracked contrib README files" >&2
+    exit 1
+fi
+
+while IFS= read -r rel; do
+    md="$root/$rel"
     dir="$(dirname "$md")"
     # ](target) link targets, fragment stripped, URLs/anchors skipped.
     grep -oE '\]\([^)]+\)' "$md" \
@@ -21,7 +27,7 @@ for md in "$root"/contrib/*/README.md; do
             case "$tgt" in http://*|https://*|mailto:*) continue;; esac
             [ -e "$dir/$tgt" ] || echo "$md -> $tgt" >> "$miss"
         done
-done
+done < "$readmes"
 
 if [ -s "$miss" ]; then
     echo "FAIL - dangling contrib/ README links:"
