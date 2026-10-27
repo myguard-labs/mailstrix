@@ -8,7 +8,8 @@
 # silently ship fewer rules), unless MAILSTRIX_RULES_OPTIONAL=1.
 #
 # Sources (override with env to pin a tag/commit):
-#   YARAFORGE_SET  — YARA-Forge package: core (default), extended, or full
+#   YARAFORGE_SET  — YARA-Forge package: full (default), or the smaller optional
+#                    core and extended tiers
 #   YARAFORGE_URL  — explicit YARA-Forge package URL (wins over YARAFORGE_SET)
 #   SIGBASE_REF    — Neo23x0/signature-base git ref (default master)
 #   ANYRUN_REF     — anyrun/YARA git ref (default main); ANYRUN=0 to skip

@@ -8,9 +8,9 @@
     * Maldoc_Suspicious_VBA_Keywords — a COUNT heuristic. olevba flags individual
       suspicious VBA keywords (Shell, CreateObject, Environ, FileSystemObject,
       Chr/StrReverse obfuscation, …); a single keyword is noise, so this rule
-      only fires when a buffer combines many of them at once. The "6 of them"
+      only fires when a buffer combines many of them at once. The "5 of them"
       threshold is what keeps the false-positive rate low — a benign macro rarely
-      reaches for half a dozen exec/persist/network/evasion/obfuscation
+      reaches for five exec/persist/network/evasion/obfuscation
       primitives together. Mid-LOW confidence -> score 25.
 
     * Maldoc_VBA_Shellcode_API — a specific high-signal pattern: a VBA `Declare`

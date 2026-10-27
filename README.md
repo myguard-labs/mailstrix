@@ -977,7 +977,7 @@ authors — strixd only packages their work.** Each set keeps its own license:
 
 | Ruleset | Author / source | License | Notes |
 |---------|-----------------|---------|-------|
-| **YARA-Forge** | [YARAHQ/yara-forge](https://github.com/YARAHQ/yara-forge) | aggregator (each rule keeps its upstream license) | vetted, deduped multi-repo bundle; default tier `core` (`YARAFORGE_SET=extended`/`full`) |
+| **YARA-Forge** | [YARAHQ/yara-forge](https://github.com/YARAHQ/yara-forge) | aggregator (each rule keeps its upstream license) | vetted, deduped multi-repo bundle; default tier `full` (`YARAFORGE_SET=core`/`extended` select smaller optional tiers) |
 | **signature-base** | [Neo23x0/signature-base](https://github.com/Neo23x0/signature-base) | [DRL 1.1](https://github.com/Neo23x0/signature-base/blob/master/LICENSE) | the broad community set behind THOR/Loki |
 | **ANY.RUN** | [anyrun/YARA](https://github.com/anyrun/YARA) | public detection rules | malware-family + phishing (`ANYRUN=0` to skip) |
 | **Didier Stevens Suite** | [DidierStevens/DidierStevensSuite](https://github.com/DidierStevens/DidierStevensSuite) | public domain | OLE/RTF/maldoc + the `vba.yara` macro set (`DIDIER=0` to skip) |
@@ -1015,9 +1015,9 @@ On top of the public sets, strixd bakes its own local heuristics from
   also catches non-Office droppers (HTA/WSF/JS, script carriers) in the raw body.
 - `Maldoc_Suspicious_VBA_Keywords` + `Maldoc_VBA_Shellcode_API`
   (`maldoc_suspicious.yara`) — the olevba *suspicious-keyword* tier the strict
-  rule misses. The first is a **count** heuristic (fires on ≥6 distinct
+  rule misses. The first is a **count** heuristic (fires on ≥5 distinct
   exec/persist/network/evasion/obfuscation keywords in one buffer — one keyword
-  is noise, six together is a macro doing real work; low score, low tier). The
+  is noise, five together is a macro doing real work; low score, low tier). The
   second is the specific **VBA shellcode** shape: a `Declare` of a Win32 API
   combined with a process-injection primitive (`VirtualAlloc`, `RtlMoveMemory`,
   `CreateThread`, a hook installer) — benign macros ~never allocate executable
