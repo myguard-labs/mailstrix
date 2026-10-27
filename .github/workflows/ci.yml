@@ -478,6 +478,7 @@ jobs:
             luarocks-5.4 install luacheck >/dev/null 2>&1
             luacheck contrib/rspamd/
             lua5.4 contrib/rspamd/test/mailstrix_dedup_spec.lua
+            lua5.4 contrib/rspamd/test/mailstrix_pw_header_once_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_effort_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_explain_spec.lua
             lua5.4 contrib/rspamd/test/mailstrix_feed_routing_spec.lua
