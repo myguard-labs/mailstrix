@@ -37,7 +37,7 @@ import (
 // oleparse upgrade that changes output) invalidates cached verdicts the same
 // way a rule-set change does — important for the shared Redis L2 that survives
 // an image rebuild. Bump it whenever the bytes Extract emits could change.
-const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16+mimeidentity+retainedlimit+xxh3key"
+const Version = "ole2+msi+vbe+msg+onenote+archive+olepkg+lnk+pdf+rtf+decode+tmplinj+dde+xlm+stomp+userform+docprops+strfold+rtftricks+xlmfold+strrev+environ+dridex+oleid+bounds+ole2link+pdfdeepen+msd+pdflex+nested+pdfendstr+pdffilter+defang+msdenc+msddeep+xlmbiff+xlsb+slk+xlminterp+oledir+oletimes+enctype+digsig+pdfendstr2+rtfquote+csvdde+effort4+xlmbinop+xlmdde+xlmname+dsf+defaultpw+defaultpwrc4+pptvba+xlmemul+xlmemulbiff+xlmemuldepth+oleid2+ddews+docsec+dcufpayload+xlmstack+oleextra+htmlsmuggle+encarchive+polyglot+xll+htmlnested+encarchivehdr+onenoterec+rtfcfbole+fmtcaplocal+csvquote+nestedooxmlopts+ddeparts+oleidorder+utf16decode+vbastream+officesibling+mhtmlrel+svgpayload+fibenc+pptenc+b64pecarve+tnef+olemeta+htmldatauri+peanalyze+xlmfuncarity+biffcontinue+xlsbdde+vbsvarreplace+shrfmla+cabcarve+batcarve+jarunpack+sibcarriermit+biff12arity+biff12attr+pptzcap+oleparsehard+staticdedup+biff12fmla+oleparsefat+launcherfields+msixfields+launcherutf16+mimeidentity+decoderstatus+retainedlimit+xxh3key"
 
 // DefaultRetainedBytesLimit is the calibrated per-extraction logical-output
 // ceiling, enforced per whole entry: an entry that does not fit the remaining
@@ -380,7 +380,8 @@ type Result struct {
 
 	// CapHits names each extraction cap that stopped the walk while input was
 	// left (COR-07b): "streams", "archive-budget", "zip-entries", "rtf-objects",
-	// "pdf-streams", "member-size", "lzma-dict", "depth", "mime-depth" or "mime-parts", each
+	// "pdf-streams", "member-size", "lzma-dict", "decoder-unavailable", "depth",
+	// "mime-depth" or "mime-parts", each
 	// at most once, in first-hit order. finalizeStreams
 	// emits one EXTRACT-CAP-HIT marker per kind, and the scanner treats any
 	// hit as an incomplete scan, so a capped walk is never cached as clean.
@@ -1690,6 +1691,10 @@ const capHitMarkerPrefix = "EXTRACT-CAP-HIT kind="
 
 // retainedBytesKind is the CapHits kind for a retained-output refusal.
 const retainedBytesKind = "retained-bytes"
+
+// decoderUnavailableKind marks plain archive work lost to decoder containment,
+// rather than an ordinary corrupt/encrypted parse return or request deadline.
+const decoderUnavailableKind = "decoder-unavailable"
 
 // noteRetainedTruncation latches the observable truncation flag and cap hit
 // from the request ledger. It is idempotent, so normal and panic-recover exits
