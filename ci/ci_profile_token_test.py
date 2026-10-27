@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,23 +25,26 @@ HELM_IMAGE = (
 
 def render_chart(*set_values):
     """Render the real chart with a pinned Helm image and no network."""
-    command = [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "-v",
-        f"{ROOT}:/repo:ro",
-        "-w",
-        "/repo",
-        HELM_IMAGE,
-        "template",
-        "strixd",
-        CHART,
-        "--namespace",
-        "mailscreen",
-    ]
+    helm = os.environ.get("MAILSTRIX_HELM")
+    if helm:
+        command = [helm, "template", "strixd", str(ROOT / CHART)]
+    else:
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-v",
+            f"{ROOT}:/repo:ro",
+            "-w",
+            "/repo",
+            HELM_IMAGE,
+            "template",
+            "strixd",
+            CHART,
+        ]
+    command.extend(["--namespace", "mailscreen"])
     for value in set_values:
         command.extend(["--set-string", value])
     result = subprocess.run(
@@ -64,6 +68,96 @@ def object_of_kind(objects, kind):
     if len(found) != 1:
         raise AssertionError(f"expected one {kind}, found {len(found)}")
     return found[0]
+
+
+def render_notes(*set_values, template=None):
+    """Render NOTES through Helm, exposing its special template as test YAML."""
+    source_chart = ROOT / CHART
+    with tempfile.TemporaryDirectory() as tmp:
+        chart = Path(tmp) / "chart"
+        shutil.copytree(source_chart, chart)
+        notes_path = chart / "templates/NOTES.txt"
+        notes = template or notes_path.read_text(encoding="utf-8")
+        notes_path.unlink()
+        (chart / "templates/notes-contract.yaml").write_text(
+            '{{- define "mailstrix.notesContract" -}}\n'
+            + notes
+            + "\n{{- end }}\n"
+            + "apiVersion: v1\nkind: ConfigMap\nmetadata:\n"
+            + "  name: notes-contract\ndata:\n  notes: |-\n"
+            + '{{ include "mailstrix.notesContract" . | nindent 4 }}\n',
+            encoding="utf-8",
+        )
+        helm = os.environ.get("MAILSTRIX_HELM")
+        if helm:
+            command = [helm, "template", "strixd", str(chart)]
+        else:
+            command = [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "-v",
+                f"{chart}:/chart:ro",
+                HELM_IMAGE,
+                "template",
+                "strixd",
+                "/chart",
+            ]
+        command.extend(["--namespace", "mailscreen"])
+        for value in set_values:
+            command.extend(["--set-string", value])
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False, timeout=60
+        )
+        if result.returncode != 0:
+            raise AssertionError(f"Helm NOTES render failed: {result.stderr}")
+        objects = [item for item in yaml.safe_load_all(result.stdout) if item]
+        notes_object = next(
+            item
+            for item in objects
+            if item.get("kind") == "ConfigMap"
+            and item.get("metadata", {}).get("name") == "notes-contract"
+        )
+        return notes_object["data"]["notes"]
+
+
+def credentialed_redis_url(userinfo, target, scheme="redis"):
+    """Build synthetic credential-bearing URLs without storing secret-like URIs."""
+    return f"{scheme}://{userinfo}@{target}"
+
+
+def assert_postfix_scanner_example(readme):
+    """Validate the documented host token file and matching read-only mount."""
+    setup = readme.split("1. **Run the scanner**", 1)[1].split(
+        "2. **Install the milter**", 1
+    )[0]
+    mount = re.search(
+        r'-v\s+"\$PWD/(?P<source>[^:"]+):(?P<destination>[^:"]+):ro"', setup
+    )
+    token_file = re.search(r"MAILSTRIX_TOKEN_FILE=(?P<path>/\S+)", setup)
+    if mount is None or token_file is None:
+        raise AssertionError(
+            "scanner example needs a read-only token bind and file env"
+        )
+    if mount.group("destination") != token_file.group("path"):
+        raise AssertionError("token bind destination must match MAILSTRIX_TOKEN_FILE")
+    source = mount.group("source")
+    if f"openssl rand -hex 32 > {source}" not in setup:
+        raise AssertionError("scanner example must provision the mounted token file")
+    if f"rm -f {source}" not in setup:
+        raise AssertionError("scanner example must support safe token rotation")
+    if f"chmod 0444 {source}" not in setup:
+        raise AssertionError(
+            "mounted token must be readable by the unprivileged container"
+        )
+    if "../../README.md#quick-start" not in setup:
+        raise AssertionError("scanner example must link the maintained prerequisites")
+    if "MAILSTRIX_TOKEN=" in setup or "changeme" in setup.casefold():
+        raise AssertionError("scanner example must not contain an inline token value")
+    if re.search(r"myguard-labs/mailstrix:[^\s]+", setup):
+        raise AssertionError("scanner example must not invent an image version")
 
 
 class ProfileTokenTest(unittest.TestCase):
@@ -293,6 +387,71 @@ class DeploymentAuthContractTest(unittest.TestCase):
         self.assertIn("--header @.mailstrix-secrets/curl-header", readme)
         self.assertNotRegex(readme, r"(?m)^\s*-p\s+8079:8079(?:\s|\\|$)")
         self.assertNotRegex(readme, r"(?m)^\s*-e\s+MAILSTRIX_TOKEN=")
+
+    def test_postfix_scanner_example_mounts_operator_token_read_only(self):
+        readme = (ROOT / "contrib/postfix/README.md").read_text(encoding="utf-8")
+        assert_postfix_scanner_example(readme)
+
+    def test_postfix_scanner_example_removal_controls(self):
+        readme = (ROOT / "contrib/postfix/README.md").read_text(encoding="utf-8")
+        for broken in [
+            readme.replace(
+                ":/run/secrets/mailstrix_token:ro", ":/run/secrets/mailstrix_token"
+            ),
+            readme.replace(
+                "MAILSTRIX_TOKEN_FILE=/run/secrets/mailstrix_token",
+                "MAILSTRIX_TOKEN_FILE=/run/secrets/other-token",
+            ),
+            readme.replace("rm -f .mailstrix-secrets/token\n", ""),
+            readme.replace("chmod 0444 .mailstrix-secrets/token\n", ""),
+        ]:
+            with self.subTest(), self.assertRaises(AssertionError):
+                assert_postfix_scanner_example(broken)
+
+    def test_multi_replica_notes_redact_redis_userinfo(self):
+        credentials = [
+            credentialed_redis_url("user:synthetic-pass", "valkey:6379/6"),
+            credentialed_redis_url(
+                "user%40domain:p%40ss%2Fword", "valkey:6380/0", scheme="rediss"
+            ),
+            credentialed_redis_url("user:p@ss", "valkey:6379/6"),
+            credentialed_redis_url("user:synthetic-pass", "valkey:6379/6", "REDIS"),
+            credentialed_redis_url(
+                "user:synthetic-pass", "sentinel:26379/mymaster", "redis+sentinel"
+            ),
+            credentialed_redis_url(":synthetic-pass", "valkey:6379/6"),
+        ]
+        for redis_url in credentials:
+            with self.subTest(redis_url=redis_url):
+                notes = render_notes("replicaCount=2", f"redis.url={redis_url}")
+                self.assertIn("Shared verdict cache is configured", notes)
+                self.assertIn("credentials redacted", notes)
+                self.assertNotIn(redis_url, notes)
+                self.assertNotIn(redis_url.rsplit("@", 1)[1], notes)
+
+    def test_multi_replica_notes_preserve_safe_and_missing_redis_guidance(self):
+        safe_url = "redis://valkey:6379/6"
+        configured = render_notes("replicaCount=2", f"redis.url={safe_url}")
+        self.assertIn(f"Shared verdict cache via {safe_url}.", configured)
+        missing = render_notes("replicaCount=2")
+        self.assertIn("WARNING: redis.url is NOT set", missing)
+        self.assertNotIn("Shared verdict cache via", missing)
+
+    def test_one_replica_notes_omit_redis_section(self):
+        redis_url = credentialed_redis_url("user:synthetic-pass", "valkey:6379/6")
+        notes = render_notes("replicaCount=1", f"redis.url={redis_url}")
+        self.assertNotIn("Shared verdict cache via", notes)
+        self.assertNotIn("WARNING: redis.url is NOT set", notes)
+        self.assertNotIn(redis_url, notes)
+
+    def test_notes_redaction_removal_control_leaks_fixture(self):
+        path = ROOT / CHART / "templates/NOTES.txt"
+        template = path.read_text(encoding="utf-8")
+        broken = template.replace('contains "@" .Values.redis.url', "false", 1)
+        self.assertNotEqual(broken, template)
+        fixture = credentialed_redis_url("user:synthetic-pass", "valkey:6379/6")
+        leaked = render_notes("replicaCount=2", f"redis.url={fixture}", template=broken)
+        self.assertIn(fixture, leaked)
 
     def test_helm_fresh_install_creates_namespace_before_secret(self):
         readme = (ROOT / CHART / "README.md").read_text(encoding="utf-8")
