@@ -62,6 +62,21 @@ class ImpactTests(unittest.TestCase):
         ):
             impact.plan([path])
 
+    def test_contrib_link_controls_select_their_owning_guard(self):
+        path = "ci/ci_contrib_links_test.py"
+        selected = impact.plan([path])
+        self.assertTrue(selected["links"])
+        self.assertFalse(selected["go"])
+        self.assertFalse(selected["image"])
+        with (
+            mock.patch.dict(
+                impact.RULES,
+                links=[name for name in impact.RULES["links"] if name != path],
+            ),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([path])
+
     def test_parity_batch_runner_selects_both_owning_controls(self):
         selected = impact.plan(["scripts/ci-test-batch.py"])
         self.assertTrue(selected["scope"])

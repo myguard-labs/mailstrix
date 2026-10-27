@@ -223,7 +223,12 @@ RULES = {
         "packaging/deb/stop_timeout_test.sh",
     ],
     "readme": ["README.md", "packaging/deb/readme_install_test.sh"],
-    "links": ["contrib/*", "README.md", "packaging/deb/contrib_links_test.sh"],
+    "links": [
+        "contrib/*",
+        "README.md",
+        "packaging/deb/contrib_links_test.sh",
+        "ci/ci_contrib_links_test.py",
+    ],
     "smoke": [
         "scripts/smoke.sh",
         "ci/rules_polling_test.sh",
