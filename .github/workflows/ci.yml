@@ -388,12 +388,6 @@ jobs:
           python3 -B -m unittest discover -s tools/parity \
             -p '*_test.py'
 
-      - name: rules publication ordering and isolated verifier failure
-        if: needs.changes.outputs.generate == 'true'
-        run: |
-          bash ci/generate_rules_cron_signer_test.sh
-          bash docker/generate-rules_test.sh
-
       - name: Prometheus rule behaviour
         if: needs.changes.outputs.prometheus == 'true'
         run: |
@@ -615,6 +609,22 @@ jobs:
       - name: publisher concurrency and lease-ordering suite
         run: bash ci/generate_rules_concurrency_test.sh
 
+  # Publisher ordering and isolated-verifier suite (~8 min on CI). Kept
+  # out of `scanners` so it cannot starve that job's 10 minute budget; joined
+  # into ci-ok's static-analysis group and required whenever `generate` is
+  # selected.
+  publisher-ordering:
+    needs: changes
+    if: needs.changes.outputs.generate == 'true'
+    runs-on: [self-hosted, builder02, docker]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # zizmor: ignore[artipacked]
+      - name: rules publication ordering and isolated verifier failure
+        run: |
+          bash ci/generate_rules_cron_signer_test.sh
+          bash docker/generate-rules_test.sh
+
   # Stable required check across four logical groups. The component jobs still
   # execute once; mixed-mode Docker status contributes to each owning group.
   ci-ok:
@@ -626,6 +636,7 @@ jobs:
       - lint
       - scanners
       - publisher-concurrency
+      - publisher-ordering
       - rspamd
       - spamassassin
       - compiler-inputs
@@ -641,6 +652,8 @@ jobs:
           SCANNERS_RESULT: ${{ needs.scanners.result }}
           PUBLISHER_CONCURRENCY_RESULT: ${{ needs.publisher-concurrency.result }}
           PUBLISHER_CONCURRENCY_SELECTED: ${{ needs.changes.outputs.generate }}
+          PUBLISHER_ORDERING_RESULT: ${{ needs.publisher-ordering.result }}
+          PUBLISHER_ORDERING_SELECTED: ${{ needs.changes.outputs.generate }}
           NATIVE_SELECTED: ${{ needs.changes.outputs.native }}
           NATIVE_RESULT: ${{ needs.compiler-inputs.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -672,6 +685,7 @@ jobs:
             test "$SCANNERS_RESULT" = success || fail "group=static-analysis dependency=scanners result=$SCANNERS_RESULT"
             test "$DOCKER_RESULT" = success || fail "group=static-analysis dependency=docker result=$DOCKER_RESULT"
             require_selected "$PUBLISHER_CONCURRENCY_SELECTED" "$PUBLISHER_CONCURRENCY_RESULT" static-analysis publisher-concurrency
+            require_selected "$PUBLISHER_ORDERING_SELECTED" "$PUBLISHER_ORDERING_RESULT" static-analysis publisher-ordering
           }
           join_go_correctness() {
             test "$DOCKER_RESULT" = success || fail "group=go-correctness dependency=docker result=$DOCKER_RESULT"
