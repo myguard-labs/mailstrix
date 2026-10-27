@@ -25,11 +25,14 @@ SPEC.loader.exec_module(impact)
 class ImpactTests(unittest.TestCase):
     def test_release_verdict_contracts_select_their_own_lanes(self):
         for path, lane in [
+            ("ci/ci_profile_samples_test.py", "scope"),
+            ("ci/profile_samples_test.py", "scope"),
             ("ci/ci_profile_token_test.py", "scope"),
             ("ci/ci_xlm_rule_locator_test.py", "scope"),
             ("ci/spamassassin_child_status.t", "spamassassin"),
             ("ci/verdict_envelope_test.go", "go"),
             ("ci/local_scan_partial_test.go", "go"),
+            ("ci/defaultpw_derivation_test.go", "go"),
         ]:
             with self.subTest(path=path):
                 selected = impact.plan([path])
@@ -44,6 +47,32 @@ class ImpactTests(unittest.TestCase):
         self.assertFalse(selected["go"])
         self.assertFalse(selected["image"])
         self.assertEqual(selected["changed_files"], "--changed -- ")
+
+    def test_sweep_contract_mappings_fail_closed_when_removed(self):
+        for profile in (
+            "ci/ci_profile_samples_test.py",
+            "ci/profile_samples_test.py",
+        ):
+            with (
+                self.subTest(profile=profile),
+                mock.patch.dict(
+                    impact.RULES,
+                    scope=[name for name in impact.RULES["scope"] if name != profile],
+                ),
+                self.assertRaisesRegex(ValueError, "unmapped changed path"),
+            ):
+                impact.plan([profile])
+
+        derivation = "ci/defaultpw_derivation_test.go"
+        with (
+            mock.patch.object(
+                impact,
+                "GO_INPUTS",
+                [name for name in impact.GO_INPUTS if name != derivation],
+            ),
+            self.assertRaisesRegex(ValueError, "unmapped changed path"),
+        ):
+            impact.plan([derivation])
 
     def test_filter_regex_controls_select_their_owning_shell_suite(self):
         path = "ci/filter_rules_regex_test.py"
@@ -159,7 +188,9 @@ class ImpactTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(json.loads(result.stdout)["release_image"])
             self.assertIn("release_image=true\n", output.read_text())
-            self.assertEqual(git("diff", "--name-only", "HEAD^1").splitlines(), ["NOTICE"])
+            self.assertEqual(
+                git("diff", "--name-only", "HEAD^1").splitlines(), ["NOTICE"]
+            )
 
     def test_every_literal_release_context_copy_selects_pr_image(self):
         instructions = []
