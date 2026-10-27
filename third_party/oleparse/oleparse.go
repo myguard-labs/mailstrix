@@ -10,7 +10,9 @@ import (
 	"os"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 
+	"golang.org/x/text/encoding/htmlindex"
 	"golang.org/x/text/encoding/unicode"
 )
 
@@ -511,6 +513,65 @@ func (self *OLEFile) OpenStreamByName(name string) ([]byte, error) {
 	}
 
 	return self.GetStream(d.Index), nil
+}
+
+func decodeANSIStreamName(data []byte, codePage uint16) (string, error) {
+	if codePage == 65001 {
+		if !utf8.Valid(data) {
+			return "", errors.New("invalid UTF-8 VBA stream name")
+		}
+		return string(data), nil
+	}
+
+	var label string
+	switch {
+	case codePage == 874:
+		label = "windows-874"
+	case codePage == 932:
+		label = "shift_jis"
+	case codePage == 936:
+		label = "gbk"
+	case codePage == 949:
+		label = "euc-kr"
+	case codePage == 950:
+		label = "big5"
+	case codePage >= 1250 && codePage <= 1258:
+		label = fmt.Sprintf("windows-%d", codePage)
+	default:
+		return "", fmt.Errorf("unsupported VBA project code page %d", codePage)
+	}
+
+	encoding, err := htmlindex.Get(label)
+	if err != nil {
+		return "", fmt.Errorf("VBA project code page %d: %w", codePage, err)
+	}
+	decoded, err := encoding.NewDecoder().Bytes(data)
+	if err != nil {
+		return "", fmt.Errorf("decode VBA stream name with code page %d: %w", codePage, err)
+	}
+	return string(decoded), nil
+}
+
+func (ole *OLEFile) findModuleStream(
+	unicodeName []byte,
+	ansiName []byte,
+	codePage uint16,
+) *Directory {
+	// Malformed optional Unicode metadata must not suppress the legacy ANSI
+	// lookup. The previous parser treated ansiName as an exact stream name, so
+	// preserve that best-effort fallback when Unicode or code-page metadata is
+	// unusable rather than aborting every module in the VBA project.
+	if len(unicodeName) != 0 && len(unicodeName)%2 == 0 {
+		if stream := ole.FindStreamByName(decodeUnicode(unicodeName, codePage)); stream != nil {
+			return stream
+		}
+	}
+
+	name, err := decodeANSIStreamName(ansiName, codePage)
+	if err != nil {
+		name = string(ansiName)
+	}
+	return ole.FindStreamByName(name)
 }
 
 // NewOLEFile creates a new OLEFile object from the given data.
@@ -1587,7 +1648,10 @@ loop:
 				projectcodepage_codepage))
 		DebugPrintf("TextOffset = %v", moduleoffset_textoffset)
 
-		code_stream := ofdoc.FindStreamByName(modulestreamname_streamname)
+		code_stream := ofdoc.findModuleStream(
+			modulestreamname_streamname_unicode,
+			[]byte(modulestreamname_streamname),
+			projectcodepage_codepage)
 		// This doc has no code stream
 		if code_stream == nil {
 			continue

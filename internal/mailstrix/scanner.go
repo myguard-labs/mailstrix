@@ -789,7 +789,12 @@ func (s *Scanner) reloadBigBundle(deny map[string]struct{}, dlFP string, bigRule
 	}
 	// PERF-30: pre-disable denied rules before exposing the fresh big-bundle.
 	bigDisabled := disableDeniedRules(big, deny)
-	bigContent = rulesetContentHash(s.bigSrcFile, s.bigSrcDir, "", "") + ":" + dlFP
+	// The threshold changes which effective ruleset scans a given body. Bind it
+	// to the successfully loaded big-file bundle identity so replicas with
+	// different coverage gates cannot share Redis verdicts. A missing or invalid
+	// bundle leaves bigContent unchanged and therefore keeps the same identity as
+	// the existing full-rules fallback; source paths themselves remain excluded.
+	bigContent = rulesetContentHash(s.bigSrcFile, s.bigSrcDir, "", "") + ":" + dlFP + fmt.Sprintf(":threshold=%d", s.bigFileThreshold)
 	s.logf("loaded %d big-file YARA rules from %s (oversized-buffer gate, threshold=%dB, deny-disabled=%d)", len(big.GetRules()), bigSrc, s.bigFileThreshold, bigDisabled)
 	return big, bigContent
 }
