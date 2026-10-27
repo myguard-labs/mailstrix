@@ -6,6 +6,10 @@
 # govulncheck enforces.
 name: ci
 on:
+  # Deliberately no `push` trigger: publisher coordination writes only
+  # refs/heads/mailstrix-publisher-leases/*, and those mutex updates must never
+  # enqueue product CI. The publisher authenticates that separate branch write
+  # with its contents:write token; this workflow retains contents:read.
   # CI runs on PRs into main/master ONLY — not on push to main. A merge already
   # passed this gate on the PR, so re-running it on the resulting push to main is
   # wasted compute. release.yml still invokes this same gate via workflow_call
@@ -388,6 +392,7 @@ jobs:
         if: needs.changes.outputs.generate == 'true'
         run: |
           bash ci/generate_rules_cron_signer_test.sh
+          bash ci/generate_rules_concurrency_test.sh
           bash docker/generate-rules_test.sh
 
       - name: Prometheus rule behaviour

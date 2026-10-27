@@ -34,6 +34,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/myguard-labs/mailstrix/internal/rulespin"
 )
@@ -42,6 +43,11 @@ import (
 // comes from the MAILSTRIX_RULES_SIGNING_KEY repository secret, which must be
 // exposed only to publication jobs and never to a pull_request-triggered job.
 const signingKeyEnv = "MAILSTRIX_RULES_SIGNING_KEY"
+
+const (
+	maxVerifiedManifestBytes  = 64 << 10
+	maxVerifiedSignatureBytes = 1 << 10
+)
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -64,6 +70,7 @@ func run(args []string, stdout *os.File) error {
 	out := fs.String("out", "", "path to write the base64 detached signature to (default: stdout)")
 	printPublic := fs.Bool("print-public", false, "print the base64 public key for the configured private key and exit")
 	requireTrusted := fs.Bool("require-trusted", false, "fail unless the signing key's public half is one of the keys compiled into strixd")
+	verifySignature := fs.String("verify-signature", "", "verify this detached signature over -manifest using only keys compiled into strixd")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fs.SetOutput(stdout)
@@ -75,6 +82,15 @@ func run(args []string, stdout *os.File) error {
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments (%d); the signing key comes from %s, never argv", fs.NArg(), signingKeyEnv)
+	}
+	if *verifySignature != "" {
+		if *manifest == "" {
+			return errors.New("-manifest is required with -verify-signature")
+		}
+		if *out != "" || *printPublic || *requireTrusted {
+			return errors.New("-verify-signature cannot be combined with signing or public-key flags")
+		}
+		return verifyEmbeddedSignatureFiles(*manifest, *verifySignature)
 	}
 
 	key, err := loadSigningKey(os.Getenv(signingKeyEnv))
@@ -139,6 +155,61 @@ func run(args []string, stdout *os.File) error {
 		return fmt.Errorf("cannot write the -out signature file: %s", sanitizeFileError(err))
 	}
 	return nil
+}
+
+// verifyEmbeddedSignatureFiles authenticates prior publisher state without
+// consulting the signing key or operator-supplied trust. The publisher uses
+// this before deriving its next monotonic version, so release-asset write
+// authority cannot be laundered into a newly trusted signed version.
+func verifyEmbeddedSignatureFiles(manifestPath, signaturePath string) error {
+	body, err := readBoundedFile(manifestPath, maxVerifiedManifestBytes, "manifest")
+	if err != nil {
+		return err
+	}
+	signature, err := readBoundedFile(signaturePath, maxVerifiedSignatureBytes, "signature")
+	if err != nil {
+		return err
+	}
+	return verifySignature(body, signature, rulespin.Keys())
+}
+
+func verifySignature(body, signature []byte, keys []ed25519.PublicKey) error {
+	encoded := strings.TrimSpace(string(signature))
+	if encoded == "" {
+		return errors.New("the detached signature is empty")
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return errors.New("the detached signature is not valid base64")
+	}
+	if len(raw) != ed25519.SignatureSize {
+		return fmt.Errorf("the detached signature is %d bytes, want %d", len(raw), ed25519.SignatureSize)
+	}
+	for _, key := range keys {
+		if len(key) == ed25519.PublicKeySize && ed25519.Verify(key, body, raw) {
+			return nil
+		}
+	}
+	return errors.New("the detached signature does not verify under any embedded trusted key")
+}
+
+func readBoundedFile(path string, limit int64, description string) ([]byte, error) {
+	file, err := os.Open(path) // #nosec G304 -- release-tool argument, run by the publisher
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the %s file: %s", description, sanitizeFileError(err))
+	}
+	defer func() { _ = file.Close() }()
+	body, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the %s file: %s", description, sanitizeFileError(err))
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("the %s file is empty", description)
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("the %s file exceeds %d bytes", description, limit)
+	}
+	return body, nil
 }
 
 // checkTrusted verifies the signing key's public half is pinned in the client

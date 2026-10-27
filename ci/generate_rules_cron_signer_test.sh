@@ -24,13 +24,34 @@ cp "$repo/docker/generate-rules.sh" "$base/docker/"
 cp "$repo/go.mod" "$repo/go.sum" "$base/"
 cp -R "$repo/cmd/rulessign" "$base/cmd/"
 cp -R "$repo/internal/rulespin" "$base/internal/"
+git init --bare --quiet "$test_root/publisher-lease.git"
 
 # The publisher runs with this PATH. It deliberately has no `go`; only the
 # script's standard absolute fallback can reach the compiler.
-for tool in bash base64 cp date dirname jq mktemp python3 rm sed sha256sum stat tail tr; do
+for tool in awk bash base64 cat chmod cp date dirname flock git jq mkfifo mktemp mv python3 rm sed sha256sum stat tail timeout tr; do
 	resolved="$(command -v "$tool")"
 	ln -s "$resolved" "$test_root/minimal-bin/$tool"
 done
+
+cat >"$test_root/minimal-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+headers=""
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = -D ]; then
+		headers="${2:?}"
+		break
+	fi
+	shift
+done
+if [ -n "$headers" ]; then
+	printf 'HTTP/2 200\r\ndate: %s\r\n\r\n' "$(date -Ru)" >"$headers"
+	printf 200
+else
+	printf 404
+fi
+EOF
 
 cat >"$test_root/minimal-bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -72,7 +93,7 @@ cp "$work/signing-preflight.json.sig" "$CAPTURE_DIR/"
 stat -c '%Y %s %n' "$work/rulessign" >"$CAPTURE_DIR/rulessign.stat"
 exit 73
 EOF
-chmod +x "$test_root/minimal-bin/gh" "$test_root/minimal-bin/docker"
+chmod +x "$test_root/minimal-bin/curl" "$test_root/minimal-bin/gh" "$test_root/minimal-bin/docker"
 
 cat >"$test_root/keygen.go" <<'EOF'
 package main
@@ -156,6 +177,7 @@ run_publisher() { # run_publisher <key-file>; sets actual
 		export GH_TOKEN=fixture-not-a-credential
 		export MAILSTRIX_RULES_SIGNING_KEY
 		MAILSTRIX_RULES_SIGNING_KEY="$(<"$key_file")"
+		export PUBLISH_LEASE_REMOTE="$test_root/publisher-lease.git"
 		export EVENTS="$events" CAPTURE_DIR="$capture"
 		cd "$case_dir"
 		docker/generate-rules.sh
