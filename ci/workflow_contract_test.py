@@ -21,15 +21,13 @@ ROOT = Path(__file__).resolve().parents[1]
 # self-hosted Docker profile. No arm64 job may fall back to QEMU emulation.
 NATIVE_RUNS_ON = (
     "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || "
-    "fromJSON('[\"self-hosted\",\"builder02\",\"docker\"]') }}"
+    'fromJSON(\'["self-hosted","builder02","docker"]\') }}'
 )
 
 
 # The reusable binary build and the nightly's own marker proof run every arch
 # on GitHub-hosted runners.
-HOSTED_RUNS_ON = (
-    "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
-)
+HOSTED_RUNS_ON = "${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}"
 
 
 def assert_native_arch_job(case, job, runs_on=NATIVE_RUNS_ON):
@@ -68,6 +66,28 @@ class DockerGateTimeoutContract(unittest.TestCase):
                     self.assert_headroom(yaml.safe_dump(workflow))
         workflow = yaml.safe_load(WORKFLOW.read_text())
         del workflow["jobs"]["docker"]["timeout-minutes"]
+        with self.assertRaises(KeyError):
+            self.assert_headroom(yaml.safe_dump(workflow))
+
+
+class ChangesJobTimeoutContract(unittest.TestCase):
+    """The planner and containerized contract fixtures must both reach completion."""
+
+    MINIMUM_MINUTES = 10
+
+    def assert_headroom(self, source):
+        job = yaml.safe_load(source)["jobs"]["changes"]
+        self.assertGreaterEqual(job["timeout-minutes"], self.MINIMUM_MINUTES)
+
+    def test_shipped_changes_timeout_covers_both_required_gates(self):
+        self.assert_headroom(WORKFLOW.read_text())
+
+    def test_old_cap_and_missing_timeout_fail(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        workflow["jobs"]["changes"]["timeout-minutes"] = 5
+        with self.assertRaises(AssertionError):
+            self.assert_headroom(yaml.safe_dump(workflow))
+        del workflow["jobs"]["changes"]["timeout-minutes"]
         with self.assertRaises(KeyError):
             self.assert_headroom(yaml.safe_dump(workflow))
 
@@ -764,9 +784,7 @@ def required_check():
 
 def parsed_lane_manifest():
     planner = (ROOT / "scripts/ci-plan.sh").read_text(encoding="utf-8")
-    fragments = re.findall(
-        r"^lane_manifest(?:\+)?='([^']*)'$", planner, re.MULTILINE
-    )
+    fragments = re.findall(r"^lane_manifest(?:\+)?='([^']*)'$", planner, re.MULTILINE)
     return json.loads("".join(fragments))
 
 
@@ -1133,7 +1151,9 @@ class RequiredCheck(unittest.TestCase):
                 )
             )
             self.assertEqual(len(alias["baseline"]), len(set(alias["baseline"])))
-            self.assertEqual(alias["lane"], job_owners[alias["current"].rsplit("#", 1)[0]])
+            self.assertEqual(
+                alias["lane"], job_owners[alias["current"].rsplit("#", 1)[0]]
+            )
         baseline_check_count = len(check_owners) + sum(
             len(alias["baseline"]) - 1 for alias in aliases
         )
@@ -1143,7 +1163,8 @@ class RequiredCheck(unittest.TestCase):
         observed_overrides = {
             f"{identity.rsplit('#', 1)[0]}#{identity.rsplit(':', 1)[1]}"
             for identity in check_owners
-            if identity.rsplit(':', 1)[1] in {item.rsplit("#", 1)[1] for item in overrides}
+            if identity.rsplit(":", 1)[1]
+            in {item.rsplit("#", 1)[1] for item in overrides}
         }
         self.assertEqual(set(overrides), observed_overrides)
         self.assertEqual(
@@ -1327,7 +1348,11 @@ class NightlyMarkerImageContract(unittest.TestCase):
             d["jobs"]["marker-image"]["strategy"]["matrix"]["arch"] = ["amd64"]
 
         def emulated(d):
-            d["jobs"]["marker-image"]["runs-on"] = ["self-hosted", "builder02", "docker"]
+            d["jobs"]["marker-image"]["runs-on"] = [
+                "self-hosted",
+                "builder02",
+                "docker",
+            ]
 
         def self_hosted_amd64(d):
             d["jobs"]["marker-image"]["runs-on"] = NATIVE_RUNS_ON
@@ -1367,9 +1392,7 @@ class BinaryWorkflowContract(unittest.TestCase):
             ci_jobs["pr-binaries"]["uses"],
             "./.github/workflows/build-binaries.yml",
         )
-        binaries = workflow_document(
-            "BINARY_WORKFLOW_TEST_PATH", "build-binaries.yml"
-        )
+        binaries = workflow_document("BINARY_WORKFLOW_TEST_PATH", "build-binaries.yml")
         build = binaries["jobs"]["binaries"]
         assert_native_arch_job(self, build, HOSTED_RUNS_ON)
         self.assertGreaterEqual(build["timeout-minutes"], 60)
@@ -1391,7 +1414,10 @@ class BinaryWorkflowContract(unittest.TestCase):
         self.assertNotIn("gha-cache", caller["with"])
         self.assertNotIn("actions", caller["permissions"])
         self.assertEqual(jobs["debs"]["needs"], "binaries")
-        self.assertEqual(jobs["release"]["needs"], ["binaries", "debs", "marker-image", "libyara-repro"])
+        self.assertEqual(
+            jobs["release"]["needs"],
+            ["binaries", "debs", "marker-image", "libyara-repro"],
+        )
         marker = jobs["marker-image"]
         self.assertEqual(marker["needs"], "binaries")
         self.assertEqual(marker["permissions"], {"contents": "read"})
@@ -1427,9 +1453,13 @@ class BinaryWorkflowContract(unittest.TestCase):
         )
         assert_native_arch_job(self, build, HOSTED_RUNS_ON)
         steps = build["steps"]
-        runtime = next(s for s in steps if s.get("name") == "expose buildx cache runtime")
+        runtime = next(
+            s for s in steps if s.get("name") == "expose buildx cache runtime"
+        )
         self.assertEqual(runtime["if"], "inputs.gha-cache")
-        compile_step = next(s for s in steps if s.get("name", "").startswith("build binaries"))
+        compile_step = next(
+            s for s in steps if s.get("name", "").startswith("build binaries")
+        )
         self.assertEqual(compile_step["env"]["VERSION"], "${{ inputs.version }}")
         self.assertEqual(compile_step["env"]["ARCH"], "${{ matrix.arch }}")
         self.assertEqual(compile_step["env"]["GHA_CACHE"], "${{ inputs.gha-cache }}")
@@ -1923,7 +1953,10 @@ class NightlyWorkflowContract(unittest.TestCase):
 class LibyaraReproducibilityContract(unittest.TestCase):
     """libyara.a must stay byte-reproducible and be checked twice in CI."""
 
-    FLAGS = ("-frandom-seed=mailstrix-yara", "-ffile-prefix-map=/tmp/yara-${YARA_VERSION}=.")
+    FLAGS = (
+        "-frandom-seed=mailstrix-yara",
+        "-ffile-prefix-map=/tmp/yara-${YARA_VERSION}=.",
+    )
 
     def test_both_dockerfiles_carry_reproducibility_flags(self):
         for name in ("Dockerfile", "Dockerfile.release"):
@@ -2105,7 +2138,10 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         return script
 
     def test_dropping_no_cache_is_detected(self):
-        script = self.mutated_script('buildx build --no-cache --load "${platform_args[@]}" --target', 'buildx build --load "${platform_args[@]}" --target')
+        script = self.mutated_script(
+            'buildx build --no-cache --load "${platform_args[@]}" --target',
+            'buildx build --load "${platform_args[@]}" --target',
+        )
         _, lines = self.run_script(["same", "same"], script=script)
         builds = [l for l in lines if l.startswith("buildx build ")]
         # The mutant still builds twice; only the missing flag must trip the check.
@@ -2125,7 +2161,9 @@ class LibyaraReproducibilityContract(unittest.TestCase):
             self.assert_two_no_cache_builds(lines)
 
     def test_plain_docker_build_is_detected(self):
-        script = self.mutated_script("docker buildx build --no-cache", "docker build --no-cache")
+        script = self.mutated_script(
+            "docker buildx build --no-cache", "docker build --no-cache"
+        )
         _, lines = self.run_script(["same", "same"], script=script)
         self.assertEqual(len([l for l in lines if l.startswith("build ")]), 2, lines)
         with self.assertRaises(AssertionError):
@@ -2134,7 +2172,9 @@ class LibyaraReproducibilityContract(unittest.TestCase):
     def test_dropping_load_is_detected(self):
         script = self.mutated_script("--no-cache --load", "--no-cache")
         _, lines = self.run_script(["same", "same"], script=script)
-        self.assertEqual(len([l for l in lines if l.startswith("buildx build ")]), 2, lines)
+        self.assertEqual(
+            len([l for l in lines if l.startswith("buildx build ")]), 2, lines
+        )
         with self.assertRaises(AssertionError):
             self.assert_two_no_cache_builds(lines)
 
@@ -2162,37 +2202,53 @@ class LibyaraReproducibilityContract(unittest.TestCase):
 
     def test_release_dockerfile_arg_is_passed_to_build(self):
         result, lines = self.run_script(
-            ["same", "same"], args=("docker/Dockerfile.release", "mailstrix-repro-release"))
+            ["same", "same"],
+            args=("docker/Dockerfile.release", "mailstrix-repro-release"),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         builds = [l for l in lines if l.startswith("buildx build ")]
         self.assertEqual(len(builds), 2, lines)
         for b in builds:
             tokens = b.split()
             self.assertIn("-f", tokens, b)
-            self.assertEqual(tokens[tokens.index("-f") + 1], "docker/Dockerfile.release", b)
+            self.assertEqual(
+                tokens[tokens.index("-f") + 1], "docker/Dockerfile.release", b
+            )
 
-    RELEASE_RUN = ('ci/libyara-repro-check.sh docker/Dockerfile.release '
-                   '"mailstrix-repro-release-${RUN_ID}-${ARCH}" "linux/${ARCH}"')
-    MAINT_RUN = ('ci/libyara-repro-check.sh docker/Dockerfile.release '
-                 '"mailstrix-repro-maint-${RUN_ID}-${ARCH}" "linux/${ARCH}"')
+    RELEASE_RUN = (
+        "ci/libyara-repro-check.sh docker/Dockerfile.release "
+        '"mailstrix-repro-release-${RUN_ID}-${ARCH}" "linux/${ARCH}"'
+    )
+    MAINT_RUN = (
+        "ci/libyara-repro-check.sh docker/Dockerfile.release "
+        '"mailstrix-repro-maint-${RUN_ID}-${ARCH}" "linux/${ARCH}"'
+    )
     REPRO_CHECK = "ci/libyara-repro-check.sh"
 
     def repro_step(self, job):
-        return next(s for s in job["steps"] if s.get("run", "").startswith(self.REPRO_CHECK))
+        return next(
+            s for s in job["steps"] if s.get("run", "").startswith(self.REPRO_CHECK)
+        )
 
     def assert_repro_job_covers_both_arches(self, job, expected_run):
         self.assertEqual(sorted(job["strategy"]["matrix"]["arch"]), ["amd64", "arm64"])
         self.assertIs(job["strategy"].get("fail-fast"), False)
         self.assertGreaterEqual(job["timeout-minutes"], 60)
         steps = job["steps"]
-        runs = [s for s in steps if s.get("run", "").startswith("ci/libyara-repro-check.sh")]
+        runs = [
+            s for s in steps if s.get("run", "").startswith("ci/libyara-repro-check.sh")
+        ]
         self.assertEqual(len(runs), 1, steps)
         self.assertEqual(runs[0]["run"], expected_run)
         self.assertEqual(
-            runs[0]["env"], {"ARCH": "${{ matrix.arch }}", "RUN_ID": "${{ github.run_id }}"})
+            runs[0]["env"],
+            {"ARCH": "${{ matrix.arch }}", "RUN_ID": "${{ github.run_id }}"},
+        )
         uses = [s.get("uses", "") for s in steps]
         assert_native_arch_job(self, job)
-        self.assertTrue(any(u.startswith("docker/setup-buildx-action@") for u in uses), uses)
+        self.assertTrue(
+            any(u.startswith("docker/setup-buildx-action@") for u in uses), uses
+        )
 
     def test_maintenance_runs_release_dockerfile_check_for_every_arch(self):
         doc = yaml.safe_load((ROOT / ".github/workflows/maintenance.yml").read_text())
@@ -2203,9 +2259,12 @@ class LibyaraReproducibilityContract(unittest.TestCase):
         def repro_run(path, job):
             doc = yaml.safe_load((ROOT / path).read_text())
             steps = doc["jobs"][job]["steps"]
-            runs = [s["run"] for s in steps if s.get("run", "").startswith(self.REPRO_CHECK)]
+            runs = [
+                s["run"] for s in steps if s.get("run", "").startswith(self.REPRO_CHECK)
+            ]
             self.assertEqual(len(runs), 1, path)
             return runs[0]
+
         release = repro_run(".github/workflows/release.yml", "libyara-repro")
         maint = repro_run(".github/workflows/maintenance.yml", "release-libyara-repro")
         self.assertIn('"mailstrix-repro-release-${RUN_ID}-${ARCH}"', release)
@@ -2233,11 +2292,20 @@ class LibyaraReproducibilityContract(unittest.TestCase):
     def test_release_workflow_runs_release_check_before_publish(self):
         doc = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
         jobs = doc["jobs"]
-        gate = [n for n, j in jobs.items() if any(
-            s.get("run", "").startswith("ci/libyara-repro-check.sh docker/Dockerfile.release")
-            for s in j.get("steps", []))]
+        gate = [
+            n
+            for n, j in jobs.items()
+            if any(
+                s.get("run", "").startswith(
+                    "ci/libyara-repro-check.sh docker/Dockerfile.release"
+                )
+                for s in j.get("steps", [])
+            )
+        ]
         self.assertEqual(gate, ["libyara-repro"], gate)
-        self.assert_repro_job_covers_both_arches(jobs["libyara-repro"], self.RELEASE_RUN)
+        self.assert_repro_job_covers_both_arches(
+            jobs["libyara-repro"], self.RELEASE_RUN
+        )
         self.assertIn("libyara-repro", jobs["release"]["needs"])
 
     def test_release_matrix_without_arm64_is_detected(self):
@@ -2250,7 +2318,12 @@ class LibyaraReproducibilityContract(unittest.TestCase):
     def test_platform_arg_is_passed_to_both_builds_and_creates(self):
         result, lines = self.run_script(
             ["same", "same"],
-            args=("docker/Dockerfile.release", "mailstrix-repro-release-arm64", "linux/arm64"))
+            args=(
+                "docker/Dockerfile.release",
+                "mailstrix-repro-release-arm64",
+                "linux/arm64",
+            ),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_platform_passed(lines)
 
@@ -2275,15 +2348,18 @@ class LibyaraReproducibilityContract(unittest.TestCase):
     def test_dropping_platform_passing_is_detected(self):
         script = self.mutated_script('"${platform_args[@]}" ', "")
         _, lines = self.run_script(
-            ["same", "same"], script=script,
-            args=("docker/Dockerfile.release", "p", "linux/arm64"))
+            ["same", "same"],
+            script=script,
+            args=("docker/Dockerfile.release", "p", "linux/arm64"),
+        )
         with self.assertRaises(AssertionError):
             self.assert_platform_passed(lines)
 
     def test_per_pr_ci_does_not_run_release_check(self):
         self.assertNotIn("Dockerfile.release --", WORKFLOW.read_text())
-        self.assertNotIn("libyara-repro-check.sh docker/Dockerfile.release",
-                         WORKFLOW.read_text())
+        self.assertNotIn(
+            "libyara-repro-check.sh docker/Dockerfile.release", WORKFLOW.read_text()
+        )
 
     def test_differing_archives_fail(self):
         result, _ = self.run_script(["one", "two"])
