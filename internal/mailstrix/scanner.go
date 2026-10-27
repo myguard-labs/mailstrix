@@ -1264,12 +1264,11 @@ func rulesetModUnix(srcFile, srcDir string) int64 {
 }
 
 // ruleFiles lists the *.yar and *.yara entries directly under dir, sorted by
-// name. It reads the directory and matches each entry name with
-// filepath.Match; no glob pattern is built from dir. It returns an error if
-// dir cannot be read or holds no rule files. Unparsable files are dropped
-// later, in validatedRuleFiles.
+// name. It reads the directory and checks each entry name once; no glob pattern
+// is built from dir. It returns an error if dir cannot be read or holds no rule
+// files. Unparsable files are dropped later, in validatedRuleFiles.
 func ruleFiles(dir string) ([]string, error) {
-	// List the directory and match the names, rather than globbing a pattern
+	// List the directory and check the names, rather than globbing a pattern
 	// built from dir: a rules dir containing glob metacharacters ("[", "*", "?")
 	// would make filepath.Glob return ErrBadPattern or match nothing, which the
 	// old code swallowed and reported as "no rule files".
@@ -1278,11 +1277,10 @@ func ruleFiles(dir string) ([]string, error) {
 		return nil, fmt.Errorf("read rules dir %s: %w", dir, err)
 	}
 	var files []string
-	for _, ext := range []string{"*.yar", "*.yara"} {
-		for _, e := range entries {
-			if ok, _ := filepath.Match(ext, e.Name()); ok { // constant patterns: never ErrBadPattern
-				files = append(files, filepath.Join(dir, e.Name()))
-			}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".yar") || strings.HasSuffix(name, ".yara") {
+			files = append(files, filepath.Join(dir, name))
 		}
 	}
 	sort.Strings(files) // deterministic namespace ordering
