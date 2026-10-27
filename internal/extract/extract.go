@@ -381,7 +381,7 @@ type Result struct {
 
 	// CapHits names each extraction cap that stopped the walk while input was
 	// left (COR-07b): "streams", "archive-budget", "zip-entries", "rtf-objects",
-	// "pdf-streams", "member-size", "lzma-dict", "decoder-unavailable", "depth",
+	// "pdf-streams", "member-size", "lzma-dict", "decoder-unavailable", "rar-solid", "depth",
 	// "mime-depth", "mime-parts" or "mime-header", each
 	// at most once, in first-hit order. finalizeStreams
 	// emits one EXTRACT-CAP-HIT marker per kind, and the scanner treats any
@@ -1737,6 +1737,11 @@ const retainedBytesKind = "retained-bytes"
 // decoderUnavailableKind marks plain archive work lost to decoder containment,
 // rather than an ordinary corrupt/encrypted parse return or request deadline.
 const decoderUnavailableKind = "decoder-unavailable"
+
+// rarSolidKind marks a RAR archive or member refused undecoded because it is
+// solid, or because its main header cannot prove it is not (encrypted or
+// unparsable). Its members were never scanned, so the verdict is incomplete.
+const rarSolidKind = "rar-solid"
 
 // noteRetainedTruncation latches the observable truncation flag and cap hit
 // from the request ledger. It is idempotent, so normal and panic-recover exits

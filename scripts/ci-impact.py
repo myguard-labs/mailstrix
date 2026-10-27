@@ -344,6 +344,7 @@ GO_INPUTS = [
     "ci/threatfox_lifecycle_test.go",
     "ci/urlhaus_lifecycle_test.go",
     "ci/rar_password_extract_test.go",
+    "ci/rar_walk_order_test.go",
     "ci/rc4md5_extract_test.go",
     "ci/testdata/rc4md5-biff.xls",
     "ci/urlhaus_shared_host_test.go",

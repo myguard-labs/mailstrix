@@ -1025,10 +1025,14 @@ func unpackRar(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 	// The archive is still MARKED so the signal survives; we simply never extract it.
 	// That detection loss is real, deliberate and counted (plainDropped) — see the long
 	// note above boundedRarMemberFresh for why every alternative containment strategy
-	// for solid RAR is unsound.
+	// for solid RAR is unsound. It is also a cap hit (rarSolidKind), so the members we
+	// never decoded make the verdict incomplete instead of a cacheable clean result
+	// (REL-RAR-SOLID-INCOMPLETE). That includes the fail-safe refusals of an encrypted
+	// or unparsable main header, whose contents are equally unscanned.
 	if rarArchiveIsSolid(buf) {
 		res.IsArchive = true
 		plainDropped.Add(1)
+		res.stopHit(rarSolidKind)
 		return
 	}
 	// A8: same reasoning as unpack7z — the RAR header parse is uncancellable
@@ -1215,6 +1219,17 @@ func readRarMemberFresh(buf []byte, idx int, pw string, declared uint64) (out []
 // password once and re-walks via a fresh password reader (RAR applies one password
 // per archive), decrypting this and the remaining encrypted members.
 func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b *archiveBudget, depth int, deadline time.Time) (emitted bool) {
+	return emitRarMembersFrom(rr, buf, pw, 0, res, b, depth, deadline)
+}
+
+// emitRarMembersFrom is emitRarMembers for a walk that must not re-emit the
+// plaintext members a previous walk already handled. plainDone is the number of
+// leading regular-file ordinals that walk finished: a plaintext member with
+// idx < plainDone is skipped, and every later plaintext member is scanned. The
+// password re-walk passes the ordinal at which the first walk stopped, so each
+// plaintext member is scanned exactly once, including those after the first
+// encrypted member (REL-RAR-WALK-ORDER).
+func emitRarMembersFrom(rr *rardecode.Reader, buf []byte, pw string, plainDone int, res *Result, b *archiveBudget, depth int, deadline time.Time) (emitted bool) {
 	cracked := pw != ""
 	// idx is the walk's regular-file ordinal (dirs excluded), and is what
 	// readRarMemberFresh re-seeks by. It must advance for EVERY non-dir member the walk
@@ -1230,11 +1245,12 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 			if isEncryptedErr(err) {
 				// A header-encrypted RAR can surface its encryption HERE (at Next())
 				// rather than at NewReader. On a non-cracked reader with candidates,
-				// crack and re-walk via a password reader before giving up.
+				// crack and re-walk via a password reader before giving up. Every
+				// ordinal up to idx was already handled by this walk.
 				if pwc := pwCandidates(res); !cracked && len(pwc) > 0 {
 					if cpw := crackRarPassword(buf, pwc, b, deadline); cpw != "" {
 						if dr := openRarReader(buf, cpw); dr != nil {
-							if emitRarMembers(dr, buf, cpw, res, b, depth, deadline) {
+							if emitRarMembersFrom(dr, buf, cpw, idx+1, res, b, depth, deadline) {
 								return true
 							}
 						}
@@ -1261,6 +1277,7 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 		// correct answer.
 		if h.Solid {
 			plainDropped.Add(1) // uncontainable decode refused: real, counted detection loss
+			res.stopHit(rarSolidKind)
 			res.IsArchive = true
 			if h.Encrypted || h.HeaderEncrypted {
 				markEncryptedArchive(res) // keep the hidden-payload tell
@@ -1288,6 +1305,7 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 					// Uncontainable decode — never run it. Keep the encrypted tell so the
 					// hidden-payload signal survives, and count the detection loss.
 					plainDropped.Add(1)
+					res.stopHit(rarSolidKind)
 					markEncryptedArchive(res)
 					continue
 				}
@@ -1313,13 +1331,15 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 				continue
 			}
 			// Non-cracked reader: crack once and re-walk through a password reader so
-			// this and the remaining encrypted members decrypt. If the cracked re-walk
-			// lands NO payload (cap/deadline stopped it before the dropper), keep the
-			// ARCHIVE-ENCRYPTED signal so the hidden-payload tell isn't lost.
+			// this and the remaining encrypted members decrypt. The re-walk skips only
+			// the plaintext members before idx (handled above) and scans every later
+			// one. If the cracked re-walk lands NO payload (cap/deadline stopped it
+			// before the dropper), keep the ARCHIVE-ENCRYPTED signal so the
+			// hidden-payload tell isn't lost.
 			if pwc := pwCandidates(res); len(pwc) > 0 {
 				if cpw := crackRarPassword(buf, pwc, b, deadline); cpw != "" {
 					if dr := openRarReader(buf, cpw); dr != nil {
-						if emitRarMembers(dr, buf, cpw, res, b, depth, deadline) {
+						if emitRarMembersFrom(dr, buf, cpw, idx, res, b, depth, deadline) {
 							return true
 						}
 						markEncryptedArchive(res)
@@ -1330,18 +1350,17 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 			markEncryptedArchive(res)
 			continue
 		}
-		// Plaintext member. On the cracked RE-WALK these were already emitted by the
-		// first (non-cracked) pass, so DON'T re-emit — re-emitting would burn the
-		// member/stream budget before the encrypted dropper is reached.
+		// Plaintext member. The first (non-cracked) walk stops at the first encrypted
+		// member it cracks, so only the plaintext members BEFORE that ordinal were
+		// handled there; re-emitting those would burn the member/stream budget before
+		// the encrypted dropper is reached. Every plaintext member after it is reached
+		// only by this re-walk and must be scanned here, or it would be silently lost.
 		//
 		// Next() advances by BLOCK HEADERS, so a body we never read costs nothing and
 		// leaves the cursor consistent — we never need to read-and-discard. (The old code
 		// did, only to keep the shared cursor positioned for the body reads it did off
-		// rr; bodies now come from fresh per-member readers, so that is gone.) On the
-		// cracked RE-WALK these plaintext members were already emitted by the first pass,
-		// so re-emitting would burn the member/stream budget before the encrypted dropper
-		// is reached.
-		if cracked {
+		// rr; bodies now come from fresh per-member readers, so that is gone.)
+		if idx < plainDone {
 			continue
 		}
 		if h.UnPackedSize > maxBytesPerMember {

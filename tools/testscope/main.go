@@ -105,7 +105,9 @@ func externalInputs(f string) []string {
 	case f == "internal/cape/STORE.md", f == "internal/mailstrix/CAPE-OPERATIONS.md":
 		return []string{"internal/cape/input_test.go"}
 	case f == "internal/extract/testdata/fixture-encrypted-files.rar":
-		return []string{f, "internal/mailstrix/input_test.go", "ci/rar_password_extract_test.go"}
+		return []string{f, "internal/mailstrix/input_test.go", "ci/rar_password_extract_test.go", "ci/rar_walk_order_test.go"}
+	case f == "internal/extract/testdata/rar-walk-order-mixed.rar":
+		return []string{f, "internal/mailstrix/input_test.go", "ci/rar_walk_order_test.go"}
 	case strings.HasPrefix(f, "internal/extract/testdata/"):
 		return []string{f, "internal/mailstrix/input_test.go"}
 	case f == "docker/fetch-rules.sh":
