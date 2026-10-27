@@ -44,7 +44,7 @@ class VetWiringTests(unittest.TestCase):
     def test_extracts_vet_run_after_count_gate(self):
         command = test_stage_command()
         self.assertIn("go vet -tags yara_static", command)
-        self.assertIn("go test -race", command)
+        self.assertIn("go test -count=1 -race", command)
         self.assertNotIn("--native-ci", command)
         self.assertNotIn("--mount=", command)
         self.assertIn("cat .testscope-packages", command)
@@ -185,22 +185,23 @@ exec "$REAL_GO" "$@"
         self.assertEqual(trace.count("run ./tools/testscope"), 1)
         self.assertIn("vet -tags yara_static ./affected\n", trace)
         self.assertIn(
-            "test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace
+            "test -count=1 -race -p 1 -timeout 30m -tags yara_static ./affected\n",
+            trace,
         )
         self.assertNotIn("./unaffected", trace)
         self.assertNotIn("cover", trace)
 
     COVER = (
-        "test -race -p 1 -timeout 30m -tags yara_static "
+        "test -count=1 -race -p 1 -timeout 30m -tags yara_static "
         "-coverpkg=./... -coverprofile=/tmp/cover.out "
     )
-    PLAIN = "test -race -p 1 -timeout 30m -tags yara_static "
+    PLAIN = "test -count=1 -race -p 1 -timeout 30m -tags yara_static "
 
     def test_full_run_reuses_test_run_for_combined_coverage(self):
         result, trace = self.invoke("./affected", full=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.COVER + "example.com/fixture/affected\n", trace)
-        self.assertEqual(trace.count("test -race"), 1)
+        self.assertEqual(trace.count("test -count=1 -race"), 1)
         self.assertEqual(trace.count("vet -tags"), 1)
         self.assertEqual(trace.count("gate /tmp/cover.out\n"), 1)
 
@@ -209,18 +210,18 @@ exec "$REAL_GO" "$@"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.COVER + "example.com/fixture/affected\n", trace)
         self.assertIn(self.PLAIN + "example.com/fixture/ci\n", trace)
-        self.assertEqual(trace.count("test -race"), 2)
+        self.assertEqual(trace.count("test -count=1 -race"), 2)
         self.assertEqual(trace.count("example.com/fixture/ci"), 1)
         self.assertEqual(trace.count("vet -tags yara_static ./affected ./ci\n"), 1)
         self.assertEqual(trace.count("gate /tmp/cover.out\n"), 1)
-        self.assertLess(trace.index("test -race"), trace.index("gate"))
-        self.assertLess(trace.rindex("test -race"), trace.index("gate"))
+        self.assertLess(trace.index("test -count=1 -race"), trace.index("gate"))
+        self.assertLess(trace.rindex("test -count=1 -race"), trace.index("gate"))
 
     def test_full_run_only_ci_skips_coverage_gate(self):
         result, trace = self.invoke("./ci", full=True, ci_pkg=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.PLAIN + "example.com/fixture/ci\n", trace)
-        self.assertEqual(trace.count("test -race"), 1)
+        self.assertEqual(trace.count("test -count=1 -race"), 1)
         self.assertNotIn("cover", trace)
         self.assertNotIn("gate", trace)
 
@@ -230,7 +231,7 @@ exec "$REAL_GO" "$@"
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ci test failure", result.stdout)
-        self.assertEqual(trace.count("test -race"), 2)
+        self.assertEqual(trace.count("test -count=1 -race"), 2)
         self.assertNotIn("gate", trace)
 
     def test_full_run_covered_failure_fails_and_skips_gate(self):
@@ -254,7 +255,7 @@ exec "$REAL_GO" "$@"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(self.PLAIN + "./affected ./ci\n", trace)
-        self.assertEqual(trace.count("test -race"), 1)
+        self.assertEqual(trace.count("test -count=1 -race"), 1)
         self.assertNotIn("cover", trace)
         self.assertNotIn("gate", trace)
 
@@ -268,14 +269,15 @@ exec "$REAL_GO" "$@"
         self.assertNotEqual(result.returncode, 0, "selected test failure must fail")
         self.assertIn("selected test failure", result.stdout)
         self.assertIn(
-            "test -race -p 1 -timeout 30m -tags yara_static ./affected\n", trace
+            "test -count=1 -race -p 1 -timeout 30m -tags yara_static ./affected\n",
+            trace,
         )
 
     def test_affected_vet_violation_is_fatal_before_tests(self):
         result, trace = self.invoke("./affected", violation=True)
         self.assertNotEqual(result.returncode, 0, "affected vet violation must fail")
         self.assertIn("fmt.Printf format %d has arg", result.stderr)
-        self.assertNotIn("test -race", trace)
+        self.assertNotIn("test -count=1 -race", trace)
 
     def test_empty_selection_skips_vet_and_tests(self):
         result, trace = self.invoke("")
@@ -300,7 +302,7 @@ exec "$REAL_GO" "$@"
         self.assertEqual(result.returncode, 42)
         self.assertEqual(trace.count("run ./tools/testscope"), 1)
         self.assertNotIn("vet ", trace)
-        self.assertNotIn("test -race", trace)
+        self.assertNotIn("test -count=1 -race", trace)
 
     def test_workflow_builds_vet_stage_with_affected_selection(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()

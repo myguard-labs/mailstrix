@@ -634,6 +634,28 @@ func looksLikeTar(data []byte) bool {
 	return len(data) >= 262 && bytes.HasPrefix(data[257:], []byte("ustar"))
 }
 
+// runPlainDecoder keeps containment failure local to the request that lost work.
+// The completion box distinguishes a recovered worker panic (the zero box) from
+// an ordinary decoder return such as a corrupt or encrypted member. Only this
+// caller touches res; an abandoned worker retains only fn and its private data.
+// Deadline expiry already has its own scanner completeness signal.
+func runPlainDecoder[T any](res *Result, deadline time.Time, fn func() T) (T, bool) {
+	type completed struct {
+		value T
+		done  bool
+	}
+	result, ran := runBoundedPlain(deadline, func() completed {
+		return completed{value: fn(), done: true}
+	})
+	if !ran || !result.done {
+		if !expired(deadline) {
+			res.stopHit(decoderUnavailableKind)
+		}
+		return result.value, false
+	}
+	return result.value, true
+}
+
 // unpack7z walks a 7-Zip archive and emits each file member. sevenzip is pure-Go.
 //
 // 7z gives NO reliable "this is encrypted" signal: a content-encrypted member
@@ -650,7 +672,7 @@ func unpack7z(buf []byte, res *Result, b *archiveBudget, depth int, deadline tim
 	// crafted to spin here would otherwise pin the scan goroutine before a single
 	// member is touched. A stall/refusal is indistinguishable from "won't open", which
 	// the err path below already handles conservatively.
-	open, ok := runBoundedPlain(deadline, func() sevenzipOpen {
+	open, ok := runPlainDecoder(res, deadline, func() sevenzipOpen {
 		zr, err := sevenzip.NewReader(bytes.NewReader(buf), int64(len(buf)))
 		return sevenzipOpen{r: zr, err: err, done: true}
 	})
@@ -737,7 +759,7 @@ func (w *sevenzipWalk) member(i int, f *sevenzip.File) {
 	// uncancellable decoder as the decrypt path. Pool it. A stall/refusal drops this
 	// member only (counted in plainDropped) and the walk moves on; it must not abort
 	// the archive, or one crafted member would suppress every member after it.
-	plain, ran := boundedPlain7zMember(f, deadline)
+	plain, ran := boundedPlain7zMember(f, res, deadline)
 	if !ran {
 		return
 	}
@@ -758,7 +780,7 @@ func (w *sevenzipWalk) member(i int, f *sevenzip.File) {
 		// other decoder entry point (A8) — calling it bare here would reopen exactly
 		// the hole the bounded read above closes. A stall/refusal just means we could
 		// not classify the member: skip it (the read already failed).
-		if encrypted, ok := runBoundedPlain(deadline, func() bool {
+		if encrypted, ok := runPlainDecoder(res, deadline, func() bool {
 			rc, oerr := f.Open()
 			if rc != nil {
 				_ = rc.Close() // we only want the error; don't leak the reader
@@ -848,15 +870,15 @@ type sevenzipOpen struct {
 //
 // The closure builds nothing shared: sevenzip.File.Open() creates its own reader over
 // the immutable archive buffer, so an abandoned read cannot corrupt the walk.
-func boundedPlain7zMember(f *sevenzip.File, deadline time.Time) (memberRead, bool) {
-	return runBoundedPlain(deadline, func() memberRead {
+func boundedPlain7zMember(f *sevenzip.File, res *Result, deadline time.Time) (memberRead, bool) {
+	return runPlainDecoder(res, deadline, func() memberRead {
 		data, ok, capStop := open7zMemberPlain(f)
 		return memberRead{data: data, ok: ok, capStop: capStop}
 	})
 }
 
 // open7zMemberPlain opens and reads a 7z member with no password, bounded by
-// maxBytesPerMember, under an unconditional recover. Returns (data, true) on a
+// maxBytesPerMember, under the worker pool's recover. Returns (data, true) on a
 // clean read (data may be empty for a legitimately empty member) and (nil, false)
 // on any failure (encrypted member, corrupt stream) — the caller treats !ok as
 // "try a password crack if candidates exist".
@@ -864,11 +886,6 @@ func boundedPlain7zMember(f *sevenzip.File, deadline time.Time) (memberRead, boo
 // Call it through boundedPlain7zMember, never directly: the LZMA decode runs on
 // hostile input and cannot be cancelled, so it belongs on a pooled worker (A8).
 func open7zMemberPlain(f *sevenzip.File) (out []byte, ok, capStop bool) {
-	defer func() {
-		if recover() != nil {
-			out, ok, capStop = nil, false, false
-		}
-	}()
 	rc, err := f.Open()
 	if err != nil {
 		// AUD-17: a refused LZMA dictionary is a cap stop, not corruption.
@@ -1017,7 +1034,7 @@ func unpackRar(buf []byte, res *Result, b *archiveBudget, depth int, deadline ti
 	}
 	// A8: same reasoning as unpack7z — the RAR header parse is uncancellable
 	// third-party code over attacker-authored bytes, so it runs on a pooled worker.
-	open, ok := runBoundedPlain(deadline, func() rarOpen {
+	open, ok := runPlainDecoder(res, deadline, func() rarOpen {
 		rr, err := rardecode.NewReader(bytes.NewReader(buf))
 		return rarOpen{r: rr, err: err, done: true}
 	})
@@ -1133,12 +1150,12 @@ type rarOpen struct {
 // pw is "" for a plain archive, or the cracked archive password. ran is false when the
 // decoder stalled or the pool was full: the member is left unextracted, counted as
 // detection loss, and the caller keeps walking.
-func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, deadline time.Time) (out []byte, truncated, ran bool) {
+func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, res *Result, deadline time.Time) (out []byte, truncated, ran bool) {
 	type rarRead struct {
 		data      []byte
 		truncated bool
 	}
-	r, ok := runBoundedPlain(deadline, func() rarRead {
+	r, ok := runPlainDecoder(res, deadline, func() rarRead {
 		d, t := readRarMemberFresh(buf, idx, pw, declared)
 		return rarRead{d, t}
 	})
@@ -1150,8 +1167,8 @@ func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, dead
 
 // readRarMemberFresh opens its own rardecode reader over buf, advances to the idx'th
 // regular-file member (matching emitRarMembers' own ordinal: dirs are not counted)
-// and reads it, bounded by maxBytesPerMember. Unconditional recover — every call here
-// is third-party code over hostile bytes. Returns nil on any miss.
+// and reads it, bounded by maxBytesPerMember. The worker pool recovers panics so
+// the caller can distinguish containment failure from an ordinary nil miss.
 //
 // Only ever call this from boundedRarMemberFresh, so the decode stays on a pooled
 // worker and an abandoned one cannot outlive its slot. Never call it for a SOLID
@@ -1162,11 +1179,6 @@ func boundedRarMemberFresh(buf []byte, idx int, pw string, declared uint64, dead
 // oversize precheck, and rardecode then does not bound the read. The flag is
 // returned, never applied to a Result here, because this runs on a pooled worker.
 func readRarMemberFresh(buf []byte, idx int, pw string, declared uint64) (out []byte, truncated bool) {
-	defer func() {
-		if recover() != nil {
-			out, truncated = nil, false
-		}
-	}()
 	var rr *rardecode.Reader
 	var err error
 	if pw != "" {
@@ -1280,7 +1292,7 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 					markEncryptedArchive(res)
 					continue
 				}
-				data, trunc, ran := boundedRarMemberFresh(buf, idx, pw, decl, deadline)
+				data, trunc, ran := boundedRarMemberFresh(buf, idx, pw, decl, res, deadline)
 				if ran && trunc {
 					res.stopHit("member-size") // AUD-04c3: UnKnownSize member exceeded the cap
 				}
@@ -1342,7 +1354,7 @@ func emitRarMembers(rr *rardecode.Reader, buf []byte, pw string, res *Result, b 
 			decl = uint64(h.UnPackedSize)
 		}
 		// A9: the body decodes on a pooled worker over its OWN reader, never off rr.
-		data, trunc, ran := boundedRarMemberFresh(buf, idx, "", decl, deadline)
+		data, trunc, ran := boundedRarMemberFresh(buf, idx, "", decl, res, deadline)
 		if !ran {
 			continue // stalled/refused: member dropped (counted), keep walking
 		}
