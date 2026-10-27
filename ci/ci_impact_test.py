@@ -26,6 +26,7 @@ class ImpactTests(unittest.TestCase):
     def test_release_verdict_contracts_select_their_own_lanes(self):
         for path, lane in [
             ("ci/ci_profile_token_test.py", "scope"),
+            ("ci/ci_rule_docs_test.py", "scope"),
             ("ci/ci_xlm_rule_locator_test.py", "scope"),
             ("ci/spamassassin_child_status.t", "spamassassin"),
             ("ci/verdict_envelope_test.go", "go"),

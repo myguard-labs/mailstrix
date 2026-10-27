@@ -139,6 +139,7 @@ RULES = {
         "ci/prepare_marker_runtime.py",
         "ci/ci_marker_runtime_fixture_test.py",
         "ci/ci_marker_closure_test.py",
+        "ci/ci_rule_docs_test.py",
         "ci/compiler-input/io-faults.c",
         "ci/compiler-input/seek.c",
         "ci/ci_go_checks_test.py",
