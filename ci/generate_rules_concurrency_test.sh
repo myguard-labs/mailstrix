@@ -289,7 +289,9 @@ if name == "docker":
             (destination / "libyara.version").write_text("4.5.2\n", encoding="ascii")
             if os.environ.get("PUBLISH_TEST_BLOCK_BUILD") == "1":
                 (release / f"{who}.building").touch()
-                deadline = time.monotonic() + 30
+                # Bounds a lost test release only; heartbeat-synchronized
+                # cases release this after the next renewal tick.
+                deadline = time.monotonic() + 90
                 while not (release / f"{who}.resume-build").exists():
                     if time.monotonic() > deadline:
                         raise SystemExit(97)
@@ -1034,10 +1036,18 @@ fi
     # ownership loss: the heartbeat has moved the remote ref but has not yet
     # replaced the foreground process's local OID. The foreground assertion
     # must wait for that atomic group to finish, then accept the renewed OID.
+    #
+    # Every step is synchronized on fixture events, never on wall-clock sleeps:
+    # the rules build blocks until the test releases it, the heartbeat pauses
+    # only once that build is underway (so no pre-build assertion can contend),
+    # and the foreground reports reaching the post-build lock wait or dying.
+    # A loaded runner therefore cannot move the foreground assertion outside
+    # the paused renewal window.
     renewal_write = '''        publisher_lease_write_state "$new" "$expires" "$now"
         return
 '''
-    renewal_pause = '''        if [ "${PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE:-0}" -eq 1 ]; then
+    renewal_pause = '''        if [ "${PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE:-0}" -eq 1 ] \\
+            && [ -e "${PUBLISH_TEST_RELEASE}/${PUBLISH_TEST_ID}.building" ]; then
             : >"${PUBLISH_TEST_RELEASE}/${PUBLISH_TEST_ID}.renewed-before-state"
             while [ ! -e "${PUBLISH_TEST_RELEASE}/${PUBLISH_TEST_ID}.resume-renewal-state" ]; do
                 publisher_lease_sleep
@@ -1049,22 +1059,57 @@ fi
     if publisher_source.count(renewal_write) != 1:
         fail("renewal interleaving hook did not identify one state transition")
     renewal_source = publisher_source.replace(renewal_write, renewal_pause)
+    foreground_wait = '''    if ! flock -w "$PUBLISH_LEASE_LOCAL_LOCK_WAIT_SECONDS" "$lock_fd"; then
+'''
+    foreground_wait_event = '''    if [ "${PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE:-0}" -eq 1 ] && [ "$foreground_lock" -eq 1 ] \\
+        && [ -e "${PUBLISH_TEST_RELEASE}/${PUBLISH_TEST_ID}.renewed-before-state" ]; then
+        : >"${PUBLISH_TEST_RELEASE}/${PUBLISH_TEST_ID}.foreground-lock-wait"
+    fi
+    if ! flock -w "$PUBLISH_LEASE_LOCAL_LOCK_WAIT_SECONDS" "$lock_fd"; then
+'''
+    die_definition = 'die()  { note "ERROR: $*"; _FAILURE_EXIT=1;'
+    die_event = ('die()  { [ "${PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE:-0}" -ne 1 ] '
+                 '|| : >"${PUBLISH_TEST_RELEASE}/${PUBLISH_TEST_ID}.died"; '
+                 'note "ERROR: $*"; _FAILURE_EXIT=1;')
+    for anchor in (foreground_wait, die_definition):
+        if renewal_source.count(anchor) != 1:
+            fail(f"renewal interleaving event hook did not identify one anchor: {anchor!r}")
+    renewal_source = renewal_source.replace(foreground_wait, foreground_wait_event)
+    renewal_source = renewal_source.replace(die_definition, die_event)
     renewal_publisher = root / "generate-rules-renewal-interleaving.sh"
     renewal_publisher.write_text(renewal_source, encoding="utf-8")
+    renewal_env = {
+        "PUBLISH_TEST_BLOCK_BUILD": "1",
+        "PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE": "1",
+    }
+
+    def await_event(identifier, suffix, started, what, timeout=60):
+        deadline = time.monotonic() + timeout
+        while not (release / f"{identifier}.{suffix}").exists():
+            if time.monotonic() > deadline or started[0].poll() is not None:
+                status = started[0].poll()
+                if status is None:
+                    os.killpg(started[0].pid, signal.SIGKILL)
+                _, _, stderr, rows = finish(started, timeout=10)
+                fail(f"{identifier}: {what} (status {status}): {stderr} {rows}")
+            time.sleep(0.02)
+
+    def pause_renewal_inside_build(identifier, started):
+        # The build is blocked, so the foreground cannot reach the post-build
+        # assertion until the heartbeat is paused between remote CAS and local
+        # state replacement; only then is the build released.
+        await_event(identifier, "building", started, "rules build never started")
+        await_event(identifier, "renewed-before-state", started,
+                    "heartbeat never paused between remote CAS and local state replacement")
+        (release / f"{identifier}.resume-build").touch()
 
     set_previous(8)
-    renewal = run_publisher("renewal-race", publisher=renewal_publisher, extra={
-        "PUBLISH_TEST_DELAY_BUILD": "1",
-        "PUBLISH_TEST_DELAY_SECONDS": "12",
-        "PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE": "1",
-    })
-    deadline = time.monotonic() + 20
-    while not (release / "renewal-race.renewed-before-state").exists():
-        if time.monotonic() > deadline:
-            fail("renewal race fixture never paused between remote CAS and local state replacement")
-        time.sleep(0.02)
-    time.sleep(3)
-    if renewal[0].poll() is not None or (release / "renewal-race.published.json").exists():
+    renewal = run_publisher("renewal-race", publisher=renewal_publisher, extra=renewal_env)
+    pause_renewal_inside_build("renewal-race", renewal)
+    await_event("renewal-race", "foreground-lock-wait", renewal,
+                "foreground assertion never reached the local lock during the paused renewal")
+    if (renewal[0].poll() is not None or (release / "renewal-race.published.json").exists()
+            or (release / "renewal-race.died").exists()):
         fail("foreground publisher did not wait for the renewal state transition")
     (release / "renewal-race.resume-renewal-state").touch()
     code, _, stderr, rows = finish(renewal)
@@ -1085,20 +1130,12 @@ fi
         encoding="utf-8",
     )
     set_previous(8)
-    mutant = run_publisher("renewal-unlocked", publisher=renewal_mutant, extra={
-        "PUBLISH_TEST_DELAY_BUILD": "1",
-        "PUBLISH_TEST_DELAY_SECONDS": "12",
-        "PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE": "1",
-    })
-    deadline = time.monotonic() + 20
-    while not (release / "renewal-unlocked.renewed-before-state").exists():
-        if time.monotonic() > deadline:
-            fail("renewal lock-removal fixture never reached the forced interleaving")
-        time.sleep(0.02)
-    # Reconciliation adds bounded pre-build work before the delayed build. Keep
-    # the transition paused long enough for the unlocked foreground assertion
-    # to reach and observe the deliberately incoherent state.
-    time.sleep(6)
+    mutant = run_publisher("renewal-unlocked", publisher=renewal_mutant, extra=renewal_env)
+    pause_renewal_inside_build("renewal-unlocked", mutant)
+    # The renewal stays paused until the unlocked foreground assertion has
+    # observed the deliberately incoherent state and the publisher has died.
+    await_event("renewal-unlocked", "died", mutant,
+                "unlocked foreground assertion never reached its verdict during the paused renewal")
     (release / "renewal-unlocked.resume-renewal-state").touch()
     code, _, stderr, rows = finish(mutant)
     if (code == 0 or (release / "renewal-unlocked.published.json").exists()
@@ -1108,7 +1145,8 @@ fi
 
     # A lock wait shorter than the bounded renewal critical section has the
     # same externally visible failure. Scale the production budget down to one
-    # second while retaining the forced three-second interleaving.
+    # second while the renewal stays paused until the foreground has entered
+    # the lock wait and died; the critical section therefore always outlasts it.
     if renewal_source.count(lock_wait_formula) != 1:
         fail("short-lock-wait mutation did not identify the derived wait budget")
     short_wait_mutant = root / "generate-rules-short-local-lock-wait.sh"
@@ -1120,26 +1158,21 @@ fi
         encoding="utf-8",
     )
     set_previous(8)
-    short_wait = run_publisher("renewal-short-wait", publisher=short_wait_mutant, extra={
-        "PUBLISH_TEST_DELAY_BUILD": "1",
-        "PUBLISH_TEST_DELAY_SECONDS": "12",
-        "PUBLISH_TEST_PAUSE_RENEWAL_BEFORE_STATE": "1",
-    })
-    deadline = time.monotonic() + 20
-    while not (release / "renewal-short-wait.renewed-before-state").exists():
-        if time.monotonic() > deadline:
-            fail("short-lock-wait fixture never reached the forced interleaving")
-        time.sleep(0.02)
-    time.sleep(5)
+    short_wait = run_publisher("renewal-short-wait", publisher=short_wait_mutant, extra=renewal_env)
+    pause_renewal_inside_build("renewal-short-wait", short_wait)
+    await_event("renewal-short-wait", "died", short_wait,
+                "short-lock-wait foreground never reached its verdict during the paused renewal")
+    entered_lock_wait = (release / "renewal-short-wait.foreground-lock-wait").exists()
     (release / "renewal-short-wait.resume-renewal-state").touch()
     code, _, stderr, rows = finish(short_wait)
     subprocess.run(
         ["git", f"--git-dir={lease_remote}", "update-ref", "-d", lease_ref_name],
         check=True,
     )
-    if (code == 0 or (release / "renewal-short-wait.published.json").exists()
+    if (code == 0 or not entered_lock_wait
+            or (release / "renewal-short-wait.published.json").exists()
             or "publisher lease was lost before version reservation" not in stderr):
-        fail(f"short lock wait did not reproduce false ownership loss: {code} {stderr} {rows}")
+        fail(f"short lock wait did not reproduce false ownership loss: {code} {entered_lock_wait} {stderr} {rows}")
     print("PASS: short_local_lock_wait observed RED before the bounded renewal critical section completed")
 
     # A single transport/API fault does not prove ownership loss. Retry each
