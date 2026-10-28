@@ -113,6 +113,8 @@ RULES = {
         ".github/*.yml",
         ".github/*.yaml",
         "ci/ci_rules_signing_secret_test.py",
+        "ci/ci_release_notes_test.py",
+        "scripts/release-notes.py",
     ],
     "shell": ["*.sh", "contrib/sieve/strix-scan-wrapper"],
     "dockerfiles": [
