@@ -29,6 +29,11 @@ Changes since v1.2.0.
 Severity wording follows the pull request. "Hardening" means no working exploit
 was demonstrated. Entries marked "v1.2.0" were verified against the v1.2.0 tag.
 
+- Release binaries are hardened ELF executables. strixd and yarac are PIE
+  with full RELRO, stack protector and `_FORTIFY_SOURCE=2`. strix-scan and
+  strix-milter stay static non-PIE (portable to any libc) and are guarded for
+  static linking and a non-executable stack. `scripts/elf-hardening.py` fails
+  the binary build on a regression. Hardening; affected: v1.2.0.
 - ICAP request parsing is bounded (#343, #345). In v1.2.0 the request line,
   headers and trailer lines had no length limit and the connection count was
   uncapped, so an unauthenticated client could exhaust memory with one endless

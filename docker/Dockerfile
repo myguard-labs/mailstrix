@@ -35,6 +35,8 @@ RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VER
     && rm /tmp/yara.tar.gz
 # The fixed random seed and build-dir prefix map keep libyara.a byte-reproducible,
 # so one published marker artifact binds across rebuilds of a release.
+# The stack protector, _FORTIFY_SOURCE and -z relro/-z now harden libyara and
+# the shipped yarac; ci/ci_elf_hardening_test.py keeps both Dockerfiles in step.
 WORKDIR /tmp/yara-${YARA_VERSION}
 # No --enable-magic / --enable-cuckoo: email-attachment scanning needs neither,
 # and dropping them removes the libmagic/libjansson runtime deps so the
@@ -48,8 +50,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     if [ -n "$CCACHE_DISABLE" ]; then export CCACHE_DISABLE CCACHE_LOGFILE=/tmp/ccache-repro.log; else unset CCACHE_DISABLE; fi \
     && ./bootstrap.sh \
     && CC="ccache gcc" \
-       CFLAGS="-O2 -flto -DNDEBUG -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
-       LDFLAGS="-flto -frandom-seed=mailstrix-yara" \
+       CFLAGS="-O2 -flto -DNDEBUG -fstack-protector-strong -D_FORTIFY_SOURCE=2 -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
+       LDFLAGS="-flto -frandom-seed=mailstrix-yara -Wl,-z,relro -Wl,-z,now" \
        ./configure --disable-shared --enable-static --with-crypto \
     && make -j"$(nproc)" && make install && ldconfig
 # Keep the untouched static compiler for local equivalence controls. Instrument
@@ -122,12 +124,23 @@ ARG YARA_VERSION
 # libyara.
 # Mount the Go module + build caches so an unchanged-source rebuild reuses
 # compiled packages instead of recompiling cold every CI run.
+# Hardening (checked on the built binaries by scripts/elf-hardening.py):
+#   strixd       PIE through the cgo external link, full RELRO (-z relro -z now),
+#                stack protector and _FORTIFY_SOURCE for the cgo C code (libyara
+#                gets the same flags in the yara stage).
+#   strix-scan,  deliberately static non-PIE (CGO_ENABLED=0, origin/main flags):
+#   strix-milter a dynamic PIE needs a libc loader and would break the "static
+#                binary you can drop on any mail host" contract on musl/Alpine
+#                hosts, and pure Go has no C memory-safety surface. The guard
+#                requires them to stay statically linked (no PT_INTERP, no
+#                DT_NEEDED) with a non-executable stack.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     marker_library=$(sha256sum /usr/local/lib/libyara.a | cut -d " " -f1) \
     && marker_compiler=$(sha256sum /opt/marker-compiler/yarac | cut -d " " -f1) \
-    && go build -trimpath -tags yara_static \
-        -ldflags "-s -w -X main.version=${VERSION} -X main.libyaraVersion=${YARA_VERSION} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeLibYaraSHA256=${marker_library} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeCompilerSHA256=${marker_compiler} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeVersion=${YARA_VERSION}" \
+    && CGO_CFLAGS="-O2 -g -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
+       go build -trimpath -buildmode=pie -tags yara_static \
+        -ldflags "-s -w -extldflags '-Wl,-z,relro -Wl,-z,now' -X main.version=${VERSION} -X main.libyaraVersion=${YARA_VERSION} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeLibYaraSHA256=${marker_library} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeCompilerSHA256=${marker_compiler} -X github.com/myguard-labs/mailstrix/internal/mailstrix.markerRuntimeVersion=${YARA_VERSION}" \
         -o /out/strixd ./cmd/strixd \
     && CGO_ENABLED=0 go build -trimpath \
         -ldflags "-s -w -X main.version=${VERSION}" \

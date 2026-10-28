@@ -140,6 +140,8 @@ RUN curl -fsSL "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VER
     && rm /tmp/yara.tar.gz
 # The fixed random seed and build-dir prefix map keep libyara.a byte-reproducible,
 # so one published marker artifact binds across rebuilds of a release.
+# The stack protector, _FORTIFY_SOURCE and -z relro/-z now harden libyara and
+# the shipped yarac; ci/ci_elf_hardening_test.py keeps both Dockerfiles in step.
 WORKDIR /tmp/yara-${YARA_VERSION}
 ENV CCACHE_DIR=/root/.cache/ccache
 # Proof builds bypass compiler objects; ordinary builds leave this unset.
@@ -148,8 +150,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     if [ -n "$CCACHE_DISABLE" ]; then export CCACHE_DISABLE CCACHE_LOGFILE=/tmp/ccache-repro.log; else unset CCACHE_DISABLE; fi \
     && ./bootstrap.sh \
     && CC="ccache gcc" \
-       CFLAGS="-O2 -flto -DNDEBUG -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
-       LDFLAGS="-flto -frandom-seed=mailstrix-yara" \
+       CFLAGS="-O2 -flto -DNDEBUG -fstack-protector-strong -D_FORTIFY_SOURCE=2 -frandom-seed=mailstrix-yara -ffile-prefix-map=/tmp/yara-${YARA_VERSION}=." \
+       LDFLAGS="-flto -frandom-seed=mailstrix-yara -Wl,-z,relro -Wl,-z,now" \
        ./configure --disable-shared --enable-static --with-crypto \
     && make -j"$(nproc)" && make install && ldconfig
 # compile-rules.sh retains compiler inputs through capture-compiler-inputs.py, which

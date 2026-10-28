@@ -271,6 +271,8 @@ RULES["release_image"] = [
     "ci/release_marker_image_test.sh",
     "ci/ci_release_tag_test.py",
     ".github/workflows/build-binaries.yml",
+    "scripts/elf-hardening.py",
+    "ci/ci_elf_hardening_test.py",
     ".github/workflows/nightly.yml",
     ".github/workflows/release.yml",
 ]
