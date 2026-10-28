@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,8 +28,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if c.Host != "0.0.0.0" || c.Port != 8079 {
 		t.Errorf("host/port = %s:%d, want 0.0.0.0:8079", c.Host, c.Port)
 	}
-	if c.MaxConcurrent != runtime.NumCPU() || c.MaxBody != 8*1024*1024 {
-		t.Errorf("concurrency/body = %d/%d (want concurrency=%d)", c.MaxConcurrent, c.MaxBody, runtime.NumCPU())
+	if c.MaxConcurrent != effectiveCPUs() || c.MaxBody != 8*1024*1024 {
+		t.Errorf("concurrency/body = %d/%d (want concurrency=%d)", c.MaxConcurrent, c.MaxBody, effectiveCPUs())
 	}
 	if c.BackendTimeout != time.Second || c.ScanTimeout != 8*time.Second {
 		t.Errorf("timeouts = %s/%s", c.BackendTimeout, c.ScanTimeout)
@@ -147,8 +146,8 @@ func TestMaxInflightDefault(t *testing.T) {
 func TestLoadConfigMaxConcurrentAuto(t *testing.T) {
 	for _, v := range []string{"auto", "AUTO", "Auto"} {
 		t.Setenv("MAILSTRIX_MAX_CONCURRENT", v)
-		if c := LoadConfig(); c.MaxConcurrent != runtime.NumCPU() {
-			t.Errorf("%q -> MaxConcurrent=%d, want %d", v, c.MaxConcurrent, runtime.NumCPU())
+		if c := LoadConfig(); c.MaxConcurrent != effectiveCPUs() {
+			t.Errorf("%q -> MaxConcurrent=%d, want %d", v, c.MaxConcurrent, effectiveCPUs())
 		}
 	}
 }
@@ -169,9 +168,9 @@ func TestEnvOrFile(t *testing.T) {
 func TestSanitizeClamps(t *testing.T) {
 	c := &Config{Host: "x", Port: 0, MaxConcurrent: -1, BackendTimeout: 0, ScanTimeout: -1, MaxBody: 0}
 	c.sanitize()
-	if c.Port != 8079 || c.MaxConcurrent != runtime.NumCPU() || c.BackendTimeout != time.Second ||
+	if c.Port != 8079 || c.MaxConcurrent != effectiveCPUs() || c.BackendTimeout != time.Second ||
 		c.ScanTimeout != 8*time.Second || c.MaxBody != 8*1024*1024 {
-		t.Errorf("sanitize did not clamp: %+v (want concurrency=%d)", c, runtime.NumCPU())
+		t.Errorf("sanitize did not clamp: %+v (want concurrency=%d)", c, effectiveCPUs())
 	}
 }
 

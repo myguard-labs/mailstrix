@@ -1,6 +1,7 @@
 package mailstrix
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,6 +114,9 @@ func TestCgroupCPUQuotaFrom(t *testing.T) {
 		{"negative quota", strptr("-100000 100000"), 0},
 		{"zero period", strptr("100000 0"), 0},
 		{"negative period", strptr("100000 -100000"), 0},
+		{"NaN quota", strptr("NaN 100000"), 0},
+		{"Inf quota", strptr("Inf 100000"), 0},
+		{"Inf period", strptr("100000 +Inf"), 0},
 	}
 
 	for _, tc := range tests {
@@ -130,4 +134,100 @@ func derefOrMissing(s *string) string {
 		return "<missing file>"
 	}
 	return *s
+}
+
+func TestCgroupCPUQuotaV1From(t *testing.T) {
+	tests := []struct {
+		name          string
+		quota, period *string
+		want          float64
+	}{
+		{"missing quota", nil, strptr("100000"), 0},
+		{"missing period", strptr("200000"), nil, 0},
+		{"unlimited -1", strptr("-1\n"), strptr("100000\n"), 0},
+		{"two CPUs", strptr("200000\n"), strptr("100000\n"), 2},
+		{"half CPU", strptr("50000"), strptr("100000"), 0.5},
+		{"garbage quota", strptr("abc"), strptr("100000"), 0},
+		{"garbage period", strptr("100000"), strptr("abc"), 0},
+		{"zero period", strptr("100000"), strptr("0"), 0},
+		{"negative period", strptr("100000"), strptr("-5"), 0},
+		{"zero quota", strptr("0"), strptr("100000"), 0},
+		{"too many fields", strptr("100000 1"), strptr("100000"), 0},
+		{"empty quota", strptr(""), strptr("100000"), 0},
+		{"NaN quota", strptr("NaN"), strptr("100000"), 0},
+		{"Inf quota", strptr("Inf"), strptr("100000"), 0},
+		{"Inf period", strptr("100000"), strptr("Inf"), 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			q := writeCgroupFile(t, "cpu.cfs_quota_us", tc.quota)
+			p := writeCgroupFile(t, "cpu.cfs_period_us", tc.period)
+			if got := cgroupCPUQuotaV1From(q, p); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCgroupCPUQuotaAnyPrefersV2ThenV1(t *testing.T) {
+	v2 := writeCgroupFile(t, "cpu.max", strptr("300000 100000"))
+	q := writeCgroupFile(t, "q", strptr("100000"))
+	p := writeCgroupFile(t, "p", strptr("100000"))
+	if got := cgroupCPUQuotaAny(v2, q, p); got != 3 {
+		t.Fatalf("v2 limited: got %v, want 3", got)
+	}
+	v2max := writeCgroupFile(t, "cpu.max", strptr("max 100000"))
+	if got := cgroupCPUQuotaAny(v2max, q, p); got != 1 {
+		t.Fatalf("v2 unlimited falls to v1: got %v, want 1", got)
+	}
+	missing := writeCgroupFile(t, "none", nil)
+	if got := cgroupCPUQuotaAny(missing, missing, missing); got != 0 {
+		t.Fatalf("nothing readable: got %v, want 0", got)
+	}
+}
+
+func TestEffectiveCPUsFrom(t *testing.T) {
+	tests := []struct {
+		name  string
+		host  int
+		quota float64
+		want  int
+	}{
+		{"unlimited uses host", 8, 0, 8},
+		{"two CPUs", 8, 2, 2},
+		{"fractional rounds up", 8, 1.5, 2},
+		{"150000/100000", 8, 150000.0 / 100000.0, 2},
+		{"half CPU floors at one", 8, 0.5, 1},
+		{"tiny quota floors at one", 8, 0.01, 1},
+		{"quota above host capped", 4, 16, 4},
+		{"exact host", 4, 4, 4},
+		{"negative treated as unlimited", 4, -1, 4},
+		{"zero host defends", 0, 0, 1},
+		{"NaN treated as unlimited", 4, math.NaN(), 4},
+		{"+Inf treated as unlimited", 4, math.Inf(1), 4},
+		{"huge quota capped without int overflow", 4, 1e20, 4},
+		{"just above host-1 rounds to host", 4, 3.01, 4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effectiveCPUsFrom(tc.host, tc.quota); got != tc.want {
+				t.Fatalf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAutoConcurrencyHonorsCgroupQuota(t *testing.T) {
+	old := cpuQuotaSource
+	t.Cleanup(func() { cpuQuotaSource = old })
+	cpuQuotaSource = func() float64 { return 0.25 } // far below any host CPU count
+	t.Setenv("MAILSTRIX_MAX_CONCURRENT", "auto")
+	if got := LoadConfig().MaxConcurrent; got != 1 {
+		t.Fatalf("auto with 0.25 CPU quota: MaxConcurrent = %d, want 1", got)
+	}
+	// Negative control: an explicit value is honored regardless of the quota.
+	t.Setenv("MAILSTRIX_MAX_CONCURRENT", "6")
+	if got := LoadConfig().MaxConcurrent; got != 6 {
+		t.Fatalf("explicit 6: MaxConcurrent = %d, want 6", got)
+	}
 }

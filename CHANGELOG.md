@@ -24,6 +24,12 @@ Changes since v1.2.0.
   an https-to-http redirect is always refused (#441, #482). See "Upgrading
   from v1.2.0" in the README.
 
+### Changed
+
+- `MAILSTRIX_MAX_CONCURRENT=auto` now respects the container's cgroup CPU limit
+  (v2 `cpu.max`, v1 `cfs_quota_us`/`cfs_period_us`), rounded up, minimum 1,
+  instead of always using the host CPU count.
+
 ### Security
 
 Severity wording follows the pull request. "Hardening" means no working exploit
