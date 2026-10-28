@@ -9,6 +9,20 @@ DOCKERFILE = ROOT / "docker/Dockerfile"
 VALUES = ROOT / "contrib/deploy/helm/mailstrix/values.yaml"
 README = ROOT / "README.md"
 COMPOSE = ROOT / "docker/docker-compose.yml"
+CONTRIB = ROOT / "contrib"
+
+DOCKER_COMMAND = re.compile(
+    r"^[ \t]*(?:\$ )?(?:sudo )?(?:timeout \S+ )?docker (?:run|build|buildx build)\b"
+    r"(?:.*\\\n)*.*$",
+    re.MULTILINE,
+)
+# Optional registry/owner path segments, so ghcr.io/x/mailstrix is reported, not skipped.
+# A ref starts with a word character and cannot follow $ or :, so bind-mount
+# paths such as ./x/mailstrix, $PWD/mailstrix or :/etc/mailstrix are not images.
+# A registry segment may carry a port (localhost:5000/...).
+IMAGE_REF = re.compile(
+    r"(?<![\w./$:-])((?:\w[\w.-]*(?::\d+)?/)+mailstrix)(?::[\w.-]+)?(?![\w/-])"
+)
 
 
 def build_stage(text: str) -> str:
@@ -41,6 +55,19 @@ def readme_run_images(readme: str) -> list[str]:
     if not commands:
         raise AssertionError("no docker run command in README")
     return [command.split()[-1] for command in commands]
+
+
+def doc_command_images(text: str) -> list[str]:
+    """Return every <owner>/mailstrix image named inside a docker run/build command."""
+    return [
+        ref
+        for command in DOCKER_COMMAND.findall(text)
+        for ref in IMAGE_REF.findall(command)
+    ]
+
+
+def doc_files() -> list[pathlib.Path]:
+    return [README, *sorted(CONTRIB.glob("**/README.md"))]
 
 
 def compose_repo(compose: str) -> str:
@@ -103,6 +130,69 @@ class ImageRepoTest(unittest.TestCase):
     def test_malformed_readme(self) -> None:
         with self.assertRaises(AssertionError):
             readme_run_images("no commands here\n")
+
+    def test_docs_docker_commands_use_chart_image(self) -> None:
+        repo = chart_repo(VALUES.read_text())
+        found = {
+            str(path.relative_to(ROOT)): doc_command_images(path.read_text())
+            for path in doc_files()
+        }
+        drift = {name: refs for name, refs in found.items() if set(refs) - {repo}}
+        self.assertEqual(drift, {})
+        # README: three runs and one build; contrib: clamd, postfix, sieve and
+        # spamassassin runs (the last two indented inside list items).
+        self.assertEqual(sum(len(refs) for refs in found.values()), 8)
+        for name in (
+            "contrib/clamd/README.md",
+            "contrib/postfix/README.md",
+            "contrib/sieve/README.md",
+            "contrib/spamassassin/README.md",
+        ):
+            self.assertEqual(found[name], [repo], name)
+
+    def test_negative_control_contrib_drift_detected(self) -> None:
+        text = (CONTRIB / "clamd/README.md").read_text()
+        mutated = text.replace("  eilandert/mailstrix\n", "  myguard-labs/mailstrix\n", 1)
+        self.assertNotEqual(mutated, text)
+        self.assertEqual(doc_command_images(mutated), ["myguard-labs/mailstrix"])
+
+    def test_negative_control_build_tag_drift_detected(self) -> None:
+        text = "docker build --target final -t myguard-labs/mailstrix:debian \\\n    .\n"
+        self.assertEqual(doc_command_images(text), ["myguard-labs/mailstrix"])
+
+    def test_negative_control_registry_prefixed_drift_detected(self) -> None:
+        text = "docker run --rm \\\n    ghcr.io/myguard-labs/mailstrix:latest\n"
+        self.assertEqual(doc_command_images(text), ["ghcr.io/myguard-labs/mailstrix"])
+
+    def test_negative_control_registry_port_drift_detected(self) -> None:
+        text = "docker run --rm localhost:5000/myguard-labs/mailstrix:latest\n"
+        self.assertEqual(
+            doc_command_images(text), ["localhost:5000/myguard-labs/mailstrix"]
+        )
+
+    def test_prefixed_command_forms_checked(self) -> None:
+        text = (
+            "$ docker run --rm myguard-labs/mailstrix\n"
+            "sudo docker run --rm myguard-labs/mailstrix\n"
+            "docker buildx build -t myguard-labs/mailstrix .\n"
+        )
+        self.assertEqual(doc_command_images(text), ["myguard-labs/mailstrix"] * 3)
+
+    def test_bind_mount_paths_ignored(self) -> None:
+        text = (
+            "docker run -v ./myguard-labs/mailstrix:/work \\\n"
+            '    -v "$PWD/mailstrix:/etc/mailstrix:ro" eilandert/mailstrix\n'
+        )
+        self.assertEqual(doc_command_images(text), ["eilandert/mailstrix"])
+
+    def test_non_image_mentions_ignored(self) -> None:
+        text = (
+            "See https://github.com/myguard-labs/mailstrix/releases and\n"
+            "an interim default of `myguard-labs/mailstrix` in prose.\n"
+            "docker run -v /run/secrets/mailstrix_token:/t:ro \\\n"
+            "    -t strixd-test eilandert/mailstrix\n"
+        )
+        self.assertEqual(doc_command_images(text), ["eilandert/mailstrix"])
 
     def test_malformed_values(self) -> None:
         with self.assertRaises(AssertionError):
