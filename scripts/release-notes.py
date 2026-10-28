@@ -14,9 +14,14 @@ import re
 import sys
 from pathlib import Path
 
+# SemVer 2.0.0: numeric prerelease identifiers have no leading zero; no
+# prerelease or build identifier is empty.
+PRE_ID = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+BUILD_ID = r"[0-9A-Za-z-]+"
 SEMVER = (
-    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
-    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-" + PRE_ID + r"(?:\." + PRE_ID + r")*)?"
+    r"(?:\+" + BUILD_ID + r"(?:\." + BUILD_ID + r")*)?"
 )
 TAG_RE = re.compile(r"v(" + SEMVER + r")")
 REF_RE = re.compile(r"^\[[^\]]+\]:\s*\S")
@@ -32,7 +37,7 @@ def extract(text, tag):
         raise NotesError(f"malformed tag {tag!r}: expected v<semver>")
     version = match.group(1)
     heading = re.compile(
-        r"^## \[v?" + re.escape(version) + r"\](?: - \d{4}-\d{2}-\d{2})?\s*$"
+        r"^## \[v?" + re.escape(version) + r"\](?: - [0-9]{4}-[0-9]{2}-[0-9]{2})?\s*$"
     )
     lines = text.splitlines()
     starts = [i for i, line in enumerate(lines) if heading.match(line)]

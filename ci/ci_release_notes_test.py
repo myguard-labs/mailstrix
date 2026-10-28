@@ -59,6 +59,19 @@ class ExtractTest(unittest.TestCase):
     def test_prerelease_tag(self):
         self.assertEqual(rn.extract(CHANGELOG, "v1.2.0-rc.1"), "RC body.\n")
 
+    def test_semver_identifiers_accepted(self):
+        for tag in (
+            "v1.3.0-0",
+            "v1.3.0-0a.1",
+            "v1.3.0-x-y.10",
+            "v1.3.0+001",
+            "v1.3.0-rc.1+b-2.007",
+        ):
+            with self.subTest(tag=tag):
+                version = tag[1:]
+                text = f"## [{version}]\n\nBody.\n"
+                self.assertEqual(rn.extract(text, tag), "Body.\n")
+
     def test_last_section_stops_at_link_reference_footer(self):
         text = "## [2.0.0]\n\nBody.\n\n[2.0.0]: https://example.invalid\n"
         self.assertEqual(rn.extract(text, "v2.0.0"), "Body.\n")
@@ -85,9 +98,28 @@ class ExtractTest(unittest.TestCase):
             rn.extract("## [1.3.01]\n\nx\n", "v1.3.0")
 
     def test_malformed_tags(self):
-        for tag in ("", "1.3.0", "v1.3", "v1.3.0.4", "vx.y.z", "v01.3.0", "v1.3.0 "):
-            with self.subTest(tag=tag), self.assertRaisesRegex(
-                rn.NotesError, "malformed tag"
+        for tag in (
+            "",
+            "1.3.0",
+            "v1.3",
+            "v1.3.0.4",
+            "vx.y.z",
+            "v01.3.0",
+            "v1.3.0 ",
+            "v1.3.0-01",
+            "v1.3.0-rc.01",
+            "v1.3.0-",
+            "v1.3.0-rc..1",
+            "v1.3.0-rc.",
+            "v1.3.0+",
+            "v1.3.0+b..1",
+            "v1.3.0-r_c",
+            "v1.3.0-1\u0661",
+            "v1.\u0663.0",
+        ):
+            with (
+                self.subTest(tag=tag),
+                self.assertRaisesRegex(rn.NotesError, "malformed tag"),
             ):
                 rn.extract(CHANGELOG, tag)
 
@@ -114,11 +146,19 @@ class CliTest(unittest.TestCase):
     def run_cli(self, tag, changelog=None):
         return subprocess.run(
             [
-                sys.executable, "-B", str(SCRIPT), "--tag", tag,
-                "--changelog", str(changelog or self.log),
-                "--notes-file", str(self.out),
+                sys.executable,
+                "-B",
+                str(SCRIPT),
+                "--tag",
+                tag,
+                "--changelog",
+                str(changelog or self.log),
+                "--notes-file",
+                str(self.out),
             ],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
     def test_success_writes_exact_notes(self):
@@ -153,14 +193,28 @@ class CliTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stderr(buf):
             code = rn.main(
-                ["--tag", "v0.0.1", "--changelog", str(self.log),
-                 "--notes-file", str(self.out)]
+                [
+                    "--tag",
+                    "v0.0.1",
+                    "--changelog",
+                    str(self.log),
+                    "--notes-file",
+                    str(self.out),
+                ]
             )
         self.assertEqual(code, 1)
         self.assertIn("no section", buf.getvalue())
         self.assertEqual(
-            rn.main(["--tag", "v1.2.1", "--changelog", str(self.log),
-                     "--notes-file", str(self.out)]),
+            rn.main(
+                [
+                    "--tag",
+                    "v1.2.1",
+                    "--changelog",
+                    str(self.log),
+                    "--notes-file",
+                    str(self.out),
+                ]
+            ),
             0,
         )
 
@@ -190,8 +244,12 @@ class WorkflowWiringTest(unittest.TestCase):
     def test_script_runs_before_any_gh_release_call(self):
         step = self.text.split("- name: create release", 1)[1]
         script = step.index("scripts/release-notes.py")
-        for call in ("gh release view", "gh release upload",
-                     "gh release edit", "gh release create"):
+        for call in (
+            "gh release view",
+            "gh release upload",
+            "gh release edit",
+            "gh release create",
+        ):
             self.assertLess(script, step.index(call), call)
         self.assertRegex(step, r"(?m)^\s*set -euo pipefail$")
 
