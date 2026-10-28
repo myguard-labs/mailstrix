@@ -291,6 +291,36 @@ func TestLogStartupFoldsRSS(t *testing.T) {
 
 }
 
+// TestLogStartupCPUOversubscriptionWarning drives the cgroup CPU quota warning
+// through the cpuQuotaSource seam: a quota below max_concurrent/1.5 must warn,
+// exactly 1.5x must not (strict greater-than), and no quota must not.
+func TestLogStartupCPUOversubscriptionWarning(t *testing.T) {
+	old := cpuQuotaSource
+	t.Cleanup(func() { cpuQuotaSource = old })
+	run := func(quota float64, maxConcurrent int) string {
+		cpuQuotaSource = func() float64 { return quota }
+		s := newTestServer(&fakeEngine{count: 1}, "tok")
+		s.cfg.MaxConcurrent = maxConcurrent
+		var info, warnings bytes.Buffer
+		s.info = log.New(&info, "", 0)
+		s.errl = log.New(&warnings, "", 0)
+		s.logStartup("127.0.0.1:0")
+		return warnings.String()
+	}
+	// Positive: 4 concurrent on a 0.5 CPU quota is 8x over-subscribed.
+	if w := run(0.5, 4); !strings.Contains(w, "max_concurrent=4") || !strings.Contains(w, "over-subscribing") {
+		t.Fatalf("quota 0.5, max_concurrent 4: expected over-subscription warning, got:\n%s", w)
+	}
+	// Boundary: 3 concurrent on a 2.0 quota is exactly 1.5x, which must not warn.
+	if w := run(2.0, 3); strings.Contains(w, "over-subscribing") {
+		t.Fatalf("quota 2.0, max_concurrent 3 (exactly 1.5x): unexpected warning:\n%s", w)
+	}
+	// Negative: no cgroup quota (0) must never warn, even at high concurrency.
+	if w := run(0, 64); strings.Contains(w, "over-subscribing") {
+		t.Fatalf("quota 0 (no quota), max_concurrent 64: unexpected warning:\n%s", w)
+	}
+}
+
 func TestShutdownSetsDraining(t *testing.T) {
 	s := newTestServer(&fakeEngine{count: 1}, "tok")
 	// Shutdown before ListenAndServe has stored a server: returns nil, still
