@@ -14,7 +14,7 @@ jobs:
   # Fail before any build or publication if the CHANGELOG has no usable section
   # for this tag; the release body is that section, never generated notes.
   notes:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 5
     permissions:
       contents: read
