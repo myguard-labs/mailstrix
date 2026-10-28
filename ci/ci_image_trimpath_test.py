@@ -19,7 +19,10 @@ DOCKER_COMMAND = re.compile(
 # Optional registry/owner path segments, so ghcr.io/x/mailstrix is reported, not skipped.
 # A ref starts with a word character and cannot follow $ or :, so bind-mount
 # paths such as ./x/mailstrix, $PWD/mailstrix or :/etc/mailstrix are not images.
-IMAGE_REF = re.compile(r"(?<![\w./$:-])((?:\w[\w.-]*/)+mailstrix)(?::[\w.-]+)?(?![\w/-])")
+# A registry segment may carry a port (localhost:5000/...).
+IMAGE_REF = re.compile(
+    r"(?<![\w./$:-])((?:\w[\w.-]*(?::\d+)?/)+mailstrix)(?::[\w.-]+)?(?![\w/-])"
+)
 
 
 def build_stage(text: str) -> str:
@@ -160,6 +163,12 @@ class ImageRepoTest(unittest.TestCase):
     def test_negative_control_registry_prefixed_drift_detected(self) -> None:
         text = "docker run --rm \\\n    ghcr.io/myguard-labs/mailstrix:latest\n"
         self.assertEqual(doc_command_images(text), ["ghcr.io/myguard-labs/mailstrix"])
+
+    def test_negative_control_registry_port_drift_detected(self) -> None:
+        text = "docker run --rm localhost:5000/myguard-labs/mailstrix:latest\n"
+        self.assertEqual(
+            doc_command_images(text), ["localhost:5000/myguard-labs/mailstrix"]
+        )
 
     def test_prefixed_command_forms_checked(self) -> None:
         text = (
