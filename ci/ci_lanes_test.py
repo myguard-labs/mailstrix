@@ -128,7 +128,7 @@ class FourLaneContract(unittest.TestCase):
         self.assertIs(lane_manifest["speed_claim"], False)
         self.assertEqual([lane["id"] for lane in lane_manifest["lanes"]], list(GROUPS))
         jobs = [job for lane in lane_manifest["lanes"] for job in lane["jobs"]]
-        self.assertEqual(len(jobs), 37)
+        self.assertEqual(len(jobs), 38)
         self.assertEqual(len(jobs), len(set(jobs)))
         self.assertTrue(all(lane["mode"] for lane in lane_manifest["lanes"]))
         self.assertEqual(

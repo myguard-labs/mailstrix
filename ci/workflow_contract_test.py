@@ -1207,9 +1207,9 @@ class RequiredCheck(unittest.TestCase):
         baseline_check_count = len(check_owners) + sum(
             len(alias["baseline"]) - 1 for alias in aliases
         )
-        self.assertEqual(len(job_owners), 37)
-        self.assertEqual(len(check_owners), 158)
-        self.assertEqual(baseline_check_count, 159)
+        self.assertEqual(len(job_owners), 38)
+        self.assertEqual(len(check_owners), 160)
+        self.assertEqual(baseline_check_count, 161)
         observed_overrides = {
             f"{identity.rsplit('#', 1)[0]}#{identity.rsplit(':', 1)[1]}"
             for identity in check_owners

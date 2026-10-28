@@ -483,6 +483,8 @@ class ImpactTests(unittest.TestCase):
             ("ci/parity_cache_test.py", ["qualification", "scope"], ["image", "go"]),
             ("ci/vet_wiring_test.py", ["scope"], ["image", "go"]),
             ("ci/ci_release_tag_test.py", ["dockerfiles"], ["image", "go", "scope"]),
+            ("ci/ci_release_notes_test.py", ["workflows"], ["image", "go", "scope"]),
+            ("scripts/release-notes.py", ["workflows"], ["image", "go", "scope"]),
             ("ci/decode_runs_test.go", ["go"], ["image", "parity", "postfix"]),
         ]:
             with self.subTest(path=path):
