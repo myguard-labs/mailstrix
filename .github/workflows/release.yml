@@ -157,7 +157,7 @@ jobs:
         run: ci/libyara-repro-check.sh docker/Dockerfile.release "mailstrix-repro-release-${RUN_ID}-${ARCH}" "linux/${ARCH}"
 
   release:
-    needs: [notes, binaries, debs, marker-image, libyara-repro]
+    needs: [binaries, debs, marker-image, libyara-repro]
     runs-on: [self-hosted, builder02, lxc]
     timeout-minutes: 60
     permissions:

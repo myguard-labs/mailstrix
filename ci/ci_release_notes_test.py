@@ -180,7 +180,9 @@ class WorkflowWiringTest(unittest.TestCase):
     def test_notes_job_gates_everything(self):
         self.assertRegex(self.text, r"(?m)^  notes:\n")
         self.assertRegex(self.text, r"(?m)^  gate:\n    needs: notes\n")
-        self.assertRegex(self.text, r"needs: \[notes, binaries,")
+        # release reaches notes transitively: release -> binaries -> gate -> notes.
+        self.assertRegex(self.text, r"(?m)^  binaries:\n    needs: gate\n")
+        self.assertRegex(self.text, r"(?m)^    needs: \[binaries, debs, ")
         job = self.text.split("\n  notes:\n", 1)[1].split("\n  # Re-run", 1)[0]
         self.assertIn("scripts/release-notes.py", job)
         self.assertNotIn("contents: write", job)
