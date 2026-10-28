@@ -1,10 +1,9 @@
 # Changelog
 
 All notable changes to Mailstrix are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). No version number or
-date is assigned to the unreleased section yet.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-Before pushing a `vX.Y.Z` tag, rename the `## [Unreleased]` heading to
+Before pushing the next `vX.Y.Z` tag, rename the `## [Unreleased]` heading to
 `## [X.Y.Z] - YYYY-MM-DD` (the date is optional) and start a new empty
 `## [Unreleased]` above it, so exactly one non-empty section matches the tag. The
 release workflow publishes that section as the GitHub release notes and stops
@@ -13,7 +12,16 @@ SemVer.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-29
+
 Changes since v1.2.0.
+
+### Known caveats
+
+- The live end-to-end proof that a deployed `strixd` loads published rule
+  marker artifacts has not been performed for this release; the marker path is
+  covered by CI and the release image test only.
+- A full independent Opus-class code audit of this release was not performed.
 
 ### Fixed
 
