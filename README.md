@@ -780,7 +780,7 @@ Settings use environment variables; `serve -help` lists available CLI overrides
 | `MAILSTRIX_RULES_EXTRA_SIGNING_KEYS` | — | comma-separated extra trusted rules-manifest signing public keys (raw 32-byte ed25519, base64). **Additive only:** the keys built into the binary stay trusted and cannot be removed. A malformed entry fails startup; a configured key is logged loudly. There is no way to disable signature verification |
 | `MAILSTRIX_SCAN_TIMEOUT` | `8` (s) | per-request libyara budget (raw + all extracted streams share it) |
 | `MAILSTRIX_BACKEND_TIMEOUT` | `1` (s) | how long to wait for an admission / scan slot |
-| `MAILSTRIX_MAX_CONCURRENT` | `auto` (CPU count) | max concurrent libyara scans (CPU gate) |
+| `MAILSTRIX_MAX_CONCURRENT` | `auto` (CPU count, capped by the cgroup CPU limit) | max concurrent libyara scans (CPU gate) |
 | `MAILSTRIX_MAX_INFLIGHT` | `auto` (2× concurrent) | max in-flight requests (admission gate); kept above the scan gate so a slow body/Redis can't starve scans |
 | `MAILSTRIX_ICAP_MAX_CONNS` | `auto` (8× in-flight) | max live ICAP connections, capped at `accept()` (pre-admission); over the cap the server answers `503` and hangs up, so a slow-loris pool cannot accumulate goroutines/fds |
 | `MAILSTRIX_MAX_BODY` | `8388608` (8 MiB) | max request body, in bytes (checked before reading) |
@@ -831,7 +831,7 @@ edit can't disarm a running scanner. On SIGTERM/SIGINT strixd drains (`/ready` �
 
 ## Sizing profiles
 
-`MAILSTRIX_MAX_CONCURRENT` defaults to the CPU count (`auto`). On a many-core host
+`MAILSTRIX_MAX_CONCURRENT` defaults to the CPU count (`auto`), reduced to the container's cgroup CPU limit (v2 `cpu.max` or v1 `cfs_quota_us`/`cfs_period_us`) rounded up, minimum 1. On a many-core host
 (32+ CPUs) that reserves significant memory. The request-buffer ceiling is set by
 the admission gate, not the scan gate: up to `MAX_INFLIGHT` requests can each hold
 a body plus its extracted streams, so the startup log reports a lower bound of

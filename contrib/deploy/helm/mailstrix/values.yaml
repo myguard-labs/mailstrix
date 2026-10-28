@@ -52,7 +52,7 @@ config:
   MAILSTRIX_VERBOSE: ""          # "1" for per-request access lines (default 0)
   MAILSTRIX_CACHE_TTL: ""        # seconds; 0 disables (default 3600)
   MAILSTRIX_CACHE_SIZE: ""       # in-memory LRU entries (default 65536)
-  MAILSTRIX_MAX_CONCURRENT: ""   # in-flight scan cap; "auto"=CPU count, or a number
+  MAILSTRIX_MAX_CONCURRENT: ""   # in-flight scan cap; "auto"=CPU count (cgroup-limited), or a number
   MAILSTRIX_BACKEND_TIMEOUT: ""  # queue/admission wait budget (s)
   MAILSTRIX_SCAN_TIMEOUT: ""     # per-scan libyara budget (s)
   MAILSTRIX_CANARY: ""           # "1" = log-only shadow mode; integrations observe but do not score/block

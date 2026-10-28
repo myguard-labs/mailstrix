@@ -46,7 +46,7 @@ services:
       # MAILSTRIX_REDIS_PREFIX: "yara:scan:"
 
       # --- Limits -----------------------------------------------------------
-      # MAILSTRIX_MAX_CONCURRENT: "auto"   # in-flight scan cap; "auto"=CPU count, or a number
+      # MAILSTRIX_MAX_CONCURRENT: "auto"   # in-flight scan cap; "auto"=CPU count (cgroup-limited), or a number
       # MAILSTRIX_BACKEND_TIMEOUT: "1"     # queue/admission wait budget (s)
       # MAILSTRIX_SCAN_TIMEOUT: "8"        # per-scan libyara budget (s)
 

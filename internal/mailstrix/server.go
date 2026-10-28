@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -352,7 +354,76 @@ func procRSSMiB() int64 {
 // there is no enforced quota or it can't be read. Format: "$quota $period" where
 // "max" means unlimited; quota/period gives the number of CPUs allotted.
 func cgroupCPUQuota() float64 {
-	return cgroupCPUQuotaFrom("/sys/fs/cgroup/cpu.max")
+	return cgroupCPUQuotaAny(
+		"/sys/fs/cgroup/cpu.max",
+		"/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+		"/sys/fs/cgroup/cpu/cpu.cfs_period_us",
+	)
+}
+
+// cgroupCPUQuotaAny returns the cgroup v2 quota from v2Path, falling back to the
+// cgroup v1 cfs quota/period pair when v2 reports no limit. 0 means unknown or
+// unlimited.
+func cgroupCPUQuotaAny(v2Path, v1QuotaPath, v1PeriodPath string) float64 {
+	if q := cgroupCPUQuotaFrom(v2Path); q > 0 {
+		return q
+	}
+	return cgroupCPUQuotaV1From(v1QuotaPath, v1PeriodPath)
+}
+
+// cgroupCPUQuotaV1From parses cgroup v1 cpu.cfs_quota_us / cpu.cfs_period_us
+// (each a single integer; quota -1 means unlimited). It returns quota/period in
+// CPUs, or 0 if unlimited, missing, or malformed.
+func cgroupCPUQuotaV1From(quotaPath, periodPath string) float64 {
+	readNum := func(path string) (float64, bool) {
+		b, err := os.ReadFile(path) // #nosec G304 -- fixed cgroup path
+		if err != nil {
+			return 0, false
+		}
+		f := strings.Fields(string(b))
+		if len(f) != 1 {
+			return 0, false
+		}
+		v, err := strconv.ParseFloat(f[0], 64)
+		return v, err == nil && !math.IsNaN(v) && !math.IsInf(v, 0)
+	}
+	quota, ok := readNum(quotaPath)
+	if !ok || quota <= 0 {
+		return 0
+	}
+	period, ok := readNum(periodPath)
+	if !ok || period <= 0 {
+		return 0
+	}
+	return quota / period
+}
+
+// effectiveCPUsFrom maps a cgroup CPU quota (fractional CPUs, 0 = no limit) onto
+// a scan-concurrency count: the quota rounded up (a 1.5-CPU container gets 2
+// slots, a 0.5-CPU one gets 1), never below 1 and never above hostCPUs.
+func effectiveCPUsFrom(hostCPUs int, quota float64) int {
+	if hostCPUs < 1 {
+		hostCPUs = 1
+	}
+	// NaN/Inf/negative mean "no usable limit". Compare in float before the int
+	// conversion: converting an out-of-range float to int is undefined in Go.
+	if !(quota > 0) || math.IsInf(quota, 0) || quota >= float64(hostCPUs) {
+		return hostCPUs
+	}
+	n := int(math.Ceil(quota))
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// cpuQuotaSource is swappable so tests can drive config derivation.
+var cpuQuotaSource = cgroupCPUQuota
+
+// effectiveCPUs is the CPU count MAILSTRIX_MAX_CONCURRENT=auto resolves to:
+// the host CPU count, reduced to the container's cgroup CPU limit if any.
+func effectiveCPUs() int {
+	return effectiveCPUsFrom(runtime.NumCPU(), cpuQuotaSource())
 }
 
 // cgroupCPUQuotaFrom is cgroupCPUQuota over a caller-supplied path, so the
@@ -367,11 +438,11 @@ func cgroupCPUQuotaFrom(path string) float64 {
 		return 0
 	}
 	quota, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil || quota <= 0 {
+	if err != nil || !(quota > 0) || math.IsInf(quota, 0) {
 		return 0
 	}
 	period, err := strconv.ParseFloat(parts[1], 64)
-	if err != nil || period <= 0 {
+	if err != nil || !(period > 0) || math.IsInf(period, 0) {
 		return 0
 	}
 	return quota / period

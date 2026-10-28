@@ -17,7 +17,6 @@ import (
 	"math"
 	"net"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -263,7 +262,7 @@ func LoadConfig() *Config {
 		Host:           envStr("MAILSTRIX_HOST", "0.0.0.0"),
 		Port:           envInt("MAILSTRIX_PORT", 8079),
 		BackendTimeout: envDur("MAILSTRIX_BACKEND_TIMEOUT", 1),
-		MaxConcurrent:  envIntAuto("MAILSTRIX_MAX_CONCURRENT", runtime.NumCPU()),
+		MaxConcurrent:  envIntAuto("MAILSTRIX_MAX_CONCURRENT", effectiveCPUs()),
 		MaxInflight:    envIntAuto("MAILSTRIX_MAX_INFLIGHT", 0),   // 0 -> sanitize sets 2×MaxConcurrent
 		ICAPMaxConns:   envIntAuto("MAILSTRIX_ICAP_MAX_CONNS", 0), // 0 -> sanitize sets 8×MaxInflight
 		MaxBody:        envInt64("MAILSTRIX_MAX_BODY", 8*1024*1024),
@@ -387,7 +386,7 @@ func (c *Config) sanitize() {
 		return def
 	}
 	if c.MaxConcurrent < 1 {
-		c.MaxConcurrent = clamp("MAILSTRIX_MAX_CONCURRENT", c.MaxConcurrent, runtime.NumCPU())
+		c.MaxConcurrent = clamp("MAILSTRIX_MAX_CONCURRENT", c.MaxConcurrent, effectiveCPUs())
 	}
 	// The admission gate bounds in-flight buffers and must be at least the scan
 	// concurrency (otherwise scan slots could never all be used). Default to 2×
