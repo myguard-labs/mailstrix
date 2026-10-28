@@ -283,7 +283,7 @@ func (s *Server) logStartup(addr string) {
 	} else if est.checkable && limitBytes == 0 && est.bytes > 512<<20 {
 		s.errf("WARNING: lower bound for peak memory (%s); %s; lower MAILSTRIX_MAX_INFLIGHT, MAILSTRIX_MAX_BODY or MAILSTRIX_EXTRACTION_RETAINED_BYTES or set a container mem_limit", est.detail, peakExclusions)
 	}
-	if quota := cgroupCPUQuota(); quota > 0 && float64(s.cfg.MaxConcurrent) > quota*1.5 {
+	if quota := cpuQuotaSource(); quota > 0 && float64(s.cfg.MaxConcurrent) > quota*1.5 {
 		s.errf("WARNING: max_concurrent=%d but cgroup cpu.max grants only %.1f CPUs; "+
 			"over-subscribing by %.1fx increases latency under load (lower MAILSTRIX_MAX_CONCURRENT or raise cpu quota)",
 			s.cfg.MaxConcurrent, quota, float64(s.cfg.MaxConcurrent)/quota)
