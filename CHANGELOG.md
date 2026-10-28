@@ -4,6 +4,13 @@ All notable changes to Mailstrix are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). No version number or
 date is assigned to the unreleased section yet.
 
+Before pushing a `vX.Y.Z` tag, rename the `## [Unreleased]` heading to
+`## [X.Y.Z] - YYYY-MM-DD` (the date is optional) and start a new empty
+`## [Unreleased]` above it, so exactly one non-empty section matches the tag. The
+release workflow publishes that section as the GitHub release notes and stops
+before building if it is missing, duplicated or empty, or if the tag is not
+SemVer.
+
 ## [Unreleased]
 
 Changes since v1.2.0.
