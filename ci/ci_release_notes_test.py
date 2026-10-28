@@ -15,6 +15,7 @@ SCRIPT = ROOT / "scripts/release-notes.py"
 WORKFLOW = ROOT / ".github/workflows/release.yml"
 
 spec = importlib.util.spec_from_file_location("release_notes", SCRIPT)
+assert spec is not None and spec.loader is not None
 rn = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rn)
 
@@ -103,9 +104,9 @@ class ExtractTest(unittest.TestCase):
 
 class CliTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.dir = Path(self.tmp.name)
+        tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
         self.log = self.dir / "CHANGELOG.md"
         self.log.write_text(CHANGELOG, encoding="utf-8")
         self.out = self.dir / "notes.md"
@@ -194,7 +195,10 @@ class WorkflowWiringTest(unittest.TestCase):
 
     def test_both_paths_use_notes_file(self):
         step = self.text.split("- name: create release", 1)[1]
-        self.assertRegex(step, r'gh release edit "\$\{GITHUB_REF_NAME\}" --notes-file "\$\{notes\}"')
+        self.assertRegex(
+            step,
+            r'gh release edit "\$\{GITHUB_REF_NAME\}" --notes-file "\$\{notes\}"',
+        )
         create = step.split("gh release create", 1)[1]
         self.assertIn('--notes-file "${notes}"', create)
         edit = step.index("gh release edit")
