@@ -497,15 +497,33 @@ class BuildFlagsTest(unittest.TestCase):
 
 
 class WorkflowWiringTest(unittest.TestCase):
-    def test_build_binaries_checks_every_shipped_binary_before_upload(self) -> None:
-        text = WORKFLOW.read_text()
-        check = text.index("python3 -B scripts/elf-hardening.py")
-        self.assertLess(text.index("docker buildx build"), check)
-        self.assertLess(check, text.index("upload-artifact"))
-        step = text[check : text.index("upload-artifact")]
+    def assert_guard_step(self, text: str) -> None:
+        """The hardening step runs on every binary, unconditionally, pre-upload."""
+        start = text.index("      - name: release binaries are hardened")
+        end = text.index("\n      - ", start + 1)  # next step at the same indent
+        step = text[start:end]
+        self.assertLess(text.index("docker buildx build"), start)
+        self.assertLess(end, text.index("upload-artifact"))
+        self.assertIn("python3 -B scripts/elf-hardening.py", step)
         for name in ("strixd", "strix-scan", "strix-milter", "yarac"):
             self.assertIn(f'"out/{name}-linux-${{ARCH}}"', step)
-        self.assertNotIn("continue-on-error", step)
+        # Any step-level key that can skip or soften the guard is forbidden,
+        # whether it appears before or after `run:`.
+        for key in ("continue-on-error:", "if:"):
+            self.assertNotIn(key, step)
+
+    def test_build_binaries_checks_every_shipped_binary_before_upload(self) -> None:
+        self.assert_guard_step(WORKFLOW.read_text())
+
+    def test_guard_step_check_rejects_bypass_keys(self) -> None:
+        text = WORKFLOW.read_text()
+        header = "      - name: release binaries are hardened (${{ matrix.arch }})\n"
+        for key in ("        if: false\n", "        continue-on-error: true\n"):
+            with self.subTest(key=key.strip()):
+                mutated = text.replace(header, header + key)
+                self.assertNotEqual(mutated, text)
+                with self.assertRaises(AssertionError):
+                    self.assert_guard_step(mutated)
 
     def test_every_policy_matches_a_shipped_asset(self) -> None:
         self.assertEqual(

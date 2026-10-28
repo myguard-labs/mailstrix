@@ -33,7 +33,11 @@ was demonstrated. Entries marked "v1.2.0" were verified against the v1.2.0 tag.
   with full RELRO, stack protector and `_FORTIFY_SOURCE=2`. strix-scan and
   strix-milter stay static non-PIE (portable to any libc) and are guarded for
   static linking and a non-executable stack. `scripts/elf-hardening.py` fails
-  the binary build on a regression. Hardening; affected: v1.2.0.
+  the binary build on a regression. The rebuilt libyara changes its archive
+  hash, so strixd skips marker trees built against an earlier libyara and
+  scans with the full main ruleset (same detection, slower); rebuild marker
+  trees against this release to keep marker-scan speed. Hardening; affected:
+  v1.2.0.
 - ICAP request parsing is bounded (#343, #345). In v1.2.0 the request line,
   headers and trailer lines had no length limit and the connection count was
   uncapped, so an unauthenticated client could exhaust memory with one endless
