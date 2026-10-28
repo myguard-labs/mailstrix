@@ -86,6 +86,17 @@ jobs:
           install -D -m 0644 "dist/${arch}/libyara.a" "out/libyara-linux-${arch}.a"
           ls -l out
 
+      # Fail before upload when strixd/yarac lose PIE, full RELRO, NX, the stack
+      # protector or _FORTIFY_SOURCE, or a static client gains a dynamic loader.
+      - name: release binaries are hardened (${{ matrix.arch }})
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/elf-hardening.py \
+            "out/strixd-linux-${ARCH}" "out/strix-scan-linux-${ARCH}" \
+            "out/strix-milter-linux-${ARCH}" "out/yarac-linux-${ARCH}"
+
       - name: upload arch binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
