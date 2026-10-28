@@ -15,6 +15,12 @@ SemVer.
 
 Changes since v1.2.0.
 
+### Fixed
+
+- `MAILSTRIX_MAX_CONCURRENT=auto` and the over-subscription warning now honor CPU
+  limits of nested/systemd cgroups (resolved from `/proc/self/cgroup` and
+  `mountinfo`, most restrictive level wins), not only the fixed container paths.
+
 ### Changed (breaking)
 
 - `strixd serve` refuses wildcard ICAP and clamd TCP binds unless

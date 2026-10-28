@@ -354,6 +354,11 @@ func procRSSMiB() int64 {
 // there is no enforced quota or it can't be read. Format: "$quota $period" where
 // "max" means unlimited; quota/period gives the number of CPUs allotted.
 func cgroupCPUQuota() float64 {
+	// Resolve the process's own cgroup first (nested/systemd cgroups), then fall
+	// back to the fixed namespaced-container paths.
+	if q := resolveCgroupCPUQuota("/proc/self/cgroup", "/proc/self/mountinfo", "/"); q > 0 {
+		return q
+	}
 	return cgroupCPUQuotaAny(
 		"/sys/fs/cgroup/cpu.max",
 		"/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
