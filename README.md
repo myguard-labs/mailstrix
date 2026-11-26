@@ -1015,6 +1015,60 @@ authors — strixd only packages their work.** Each set keeps its own license:
 Roughly 10,000+ rules total. Pin or toggle any source with a build arg
 (`YARAFORGE_SET`, `*_REF`, `DIDIER=0`/`BARTBLAZE=0`/`ANYRUN=0`/`INQUEST=0`/`CAPE=0`/`YARAIFY=0`).
 
+### Disabling a ruleset or a noisy rule
+
+`YARAIFY=0` is a **Docker build argument**, consumed by
+`docker/fetch-rules.sh` when creating a bundle. Setting it under a running
+container's `environment:` or passing `docker run -e YARAIFY=0` does not remove
+rules from an already compiled bundle. The published `rules-current` bundle
+contains the publisher's selected sources; clients cannot remove one source
+from that compiled download.
+
+For an individual false positive, use the runtime denylist. Add the exact rule
+name reported in the scan response's `matches` to `MAILSTRIX_RULE_DENYLIST` in
+your service's environment, then recreate the container (or restart the native
+service with the updated environment). For example, if the offending rule were
+named `NoisyRuleName`:
+
+```yaml
+environment:
+  MAILSTRIX_RULE_DENYLIST: "http,NoisyRuleName"
+```
+
+Names are case-insensitive, exact matches; source names and wildcards do not
+select a whole feed. Keep `http` and any existing entries when adding a rule.
+This suppresses that rule while keeping the other rules and automatic updates.
+Alternatively, put one rule name per line in a mounted file, set
+`MAILSTRIX_DENYLIST_FILE` to its container path, and send SIGHUP after editing
+that file; its entries merge with the environment list.
+
+To omit the entire YARAify source, build a custom image from the repository root:
+
+```sh
+docker build -f docker/Dockerfile -t mailstrix:no-yaraify \
+    --build-arg LOCAL_ONLY=0 --build-arg YARAIFY=0 .
+```
+
+Use that image in your existing deployment and set these runtime variables:
+
+```yaml
+image: mailstrix:no-yaraify
+environment:
+  MAILSTRIX_RULES: /usr/share/mailstrix/compiled.yac
+  MAILSTRIX_CACHE_DIR: ""
+  MAILSTRIX_RULES_POLL_INTERVAL: "0"
+```
+
+Merge these settings into the existing service, keeping its authentication,
+ports and other options, then recreate it. Loading the baked bundle directly
+bypasses any previously downloaded bundle in a persistent cache; disabling
+polling prevents the public bundle from replacing the custom selection.
+Rebuild and redeploy the custom image to refresh its rules. Excluding YARAify
+skips that download; rules also distributed by another enabled source can
+still be present.
+
+### Rule profile
+
 **Rule profile (PERF-25)** — `MAILSTRIX_PROFILE` selects how much of the fetched
 breadth is baked:
 
